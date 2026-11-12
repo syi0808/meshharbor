@@ -10,14 +10,14 @@
       "repository": "https://github.com/syi0808/pixal3d-cuda",
       "source_revision": "a4cb2b226cdb2bf3328eb280d4a02e510cc78e8c",
       "port_license": "MIT",
-      "runtime_status": "pending"
+      "runtime_status": "source_only_pending"
     },
     {
       "id": "mlx",
       "repository": "https://github.com/syi0808/pixal3d-mlx",
       "source_revision": "3a832ebf5f346a7eafb1ba40ca2926cfbd0bb2d6",
       "port_license": "MIT",
-      "runtime_status": "pending"
+      "runtime_status": "managed_setup_preview_unverified"
     }
   ],
   "license_gate": {
@@ -31,9 +31,12 @@
     ]
   },
   "source_policy": {
-    "source_only_vendor_paths": [
-      "runtimes/pixal3d/cuda",
-      "runtimes/pixal3d/mlx"
+    "vendored_source_snapshot_paths": [
+      "runtimes/pixal3d/cuda/upstream",
+      "runtimes/pixal3d/mlx/upstream"
+    ],
+    "source_only_backend_paths": [
+      "runtimes/pixal3d/cuda"
     ],
     "vendor_scope": "full pinned source snapshot except enumerated generated evidence/binary assets; see docs/pixal3d-source-inventory.json and subtree notices",
     "snapshot_counts": {
@@ -42,7 +45,7 @@
     },
     "runtime_enabled": false,
     "weights_bundled": false,
-    "downloads_enabled": false,
+    "downloads_enabled": true,
     "require_explicit_model_approval": true
   }
 }
