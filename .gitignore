@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.meshharbor/
+data/
+*.glb
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+native/mesh-refiner/glb_refine
+native/mesh-refiner/tests/test_envelope
+native/mesh-refiner/tests/__pycache__/
+native/mesh-refiner/tools/__pycache__/

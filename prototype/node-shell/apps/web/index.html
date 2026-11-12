@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MeshHarbor Studio</title>
+    <link rel="stylesheet" href="/studio.css" />
+    <script type="module" src="/studio.js"></script>
+  </head>
+  <body>
+    <div id="auth-screen" class="auth-screen">
+      <div class="auth-card">
+        <div class="brand-mark">MH</div>
+        <p class="eyebrow">LOCAL STUDIO</p>
+        <h1>Welcome to MeshHarbor</h1>
+        <p class="muted">Enter the one-time local API token printed in your terminal.</p>
+        <form id="auth-form">
+          <label for="token-input">Local token</label>
+          <input id="token-input" type="password" autocomplete="current-password" required />
+          <button class="primary full" type="submit">Open Studio</button>
+          <p id="auth-error" class="error"></p>
+        </form>
+      </div>
+    </div>
+    <div id="app" class="app hidden">
+      <header class="topbar">
+        <div class="brand-lockup"><div class="brand-mark small">MH</div><div><strong>MeshHarbor</strong><span>STUDIO</span></div></div>
+        <div class="project-label"><span class="status-dot"></span><span>Untitled project</span><span class="pill local-pill">LOCAL</span></div>
+        <div class="top-actions">
+          <button class="quiet" id="refresh-button" title="Refresh assets and jobs">↻</button>
+          <button class="quiet" id="token-reset" title="Lock Studio">Lock</button>
+          <div class="avatar">M</div>
+        </div>
+      </header>
+
+      <main class="studio-grid">
+        <aside class="left-panel panel">
+          <div class="panel-title-row"><div><p class="eyebrow">WORKSPACE</p><h2>New work</h2></div><span class="panel-count">01</span></div>
+          <section class="section-block">
+            <div class="section-heading"><h3>Generate</h3><span class="status-pill pending">PENDING REVIEW</span></div>
+            <p class="muted small-text">Image-to-3D is locked until the complete model and dependency path is approved for commercial use.</p>
+            <label class="field-label" for="model-select">Model</label>
+            <select id="model-select" disabled><option>Pixal3D · review in progress</option></select>
+            <label class="field-label" for="image-file">Reference image</label>
+            <input id="image-file" type="file" accept="image/png,image/jpeg" />
+            <button id="generate-button" class="primary full" disabled>Generate 3D asset</button>
+            <p class="license-note">No weights are installed or downloaded.</p>
+          </section>
+          <section class="section-block import-block">
+            <div class="section-heading"><h3>Import</h3><span class="section-icon">＋</span></div>
+            <p class="muted small-text">Bring in a GLB, PNG, or JPEG to start a local workflow.</p>
+            <input id="import-file" type="file" accept="model/gltf-binary,.glb,image/png,image/jpeg,.png,.jpg,.jpeg" />
+            <button id="import-button" class="secondary full">Choose a file</button>
+          </section>
+          <section class="section-block tools-block">
+            <div class="section-heading"><h3>Mesh tools</h3><span class="muted small-text">1 available</span></div>
+            <button class="tool-row active" id="simplify-tool"><span class="tool-icon">◉</span><span><strong>Simplification</strong><small>Reduce triangles · preserve source</small></span><span class="tool-arrow">›</span></button>
+            <button class="tool-row disabled" disabled><span class="tool-icon">✦</span><span><strong>Cleanup</strong><small>Not implemented</small></span><span class="status-pill quiet-pill">SOON</span></button>
+            <button class="tool-row disabled" disabled><span class="tool-icon">◇</span><span><strong>Part separation</strong><small>Structure-based · not implemented</small></span><span class="status-pill quiet-pill">SOON</span></button>
+          </section>
+          <div class="left-footer"><span class="footer-orb"></span><span>All files stay on this device</span><button id="doctor-button" class="text-button">Runtime status</button></div>
+        </aside>
+
+        <section class="viewer-column">
+          <div class="viewer-toolbar"><div class="breadcrumbs"><span>Project</span><span>›</span><strong id="viewer-title">No asset selected</strong></div><div class="viewer-tools"><button id="fit-view" class="viewer-tool" title="Fit view">⌖</button><button id="wireframe-toggle" class="viewer-tool" title="Toggle wireframe">▧</button><span class="toolbar-divider"></span><button id="export-button" class="export-button" disabled>Export <span>↓</span></button></div></div>
+          <div class="viewer-frame" id="viewer-frame">
+            <div class="viewer-grid"></div>
+            <canvas id="mesh-canvas" aria-label="3D asset preview"></canvas>
+            <div class="viewer-empty" id="viewer-empty">
+              <div class="empty-icon">◇</div>
+              <h2>Your workspace is ready</h2>
+              <p>Import a GLB to inspect geometry, preserve the original, and create a simplified result.</p>
+              <button id="empty-import-button" class="secondary">Import an asset <span>＋</span></button>
+            </div>
+            <div class="viewer-badges"><span id="view-mode">SOLID</span><span>WEBGL PREVIEW</span></div>
+            <div class="axis-widget"><span class="axis-y">Y</span><span class="axis-center"></span><span class="axis-x">X</span></div>
+            <div class="orbit-hint">Drag to orbit · Scroll to zoom</div>
+            <div class="viewer-stats" id="viewer-stats"><span>—</span></div>
+          </div>
+          <div class="action-dock">
+            <div class="dock-title"><span class="dock-mark">◉</span><div><strong>Simplification</strong><small>Reduce triangle count while preserving surface detail.</small></div></div>
+            <form id="simplify-form" class="dock-controls">
+              <label><span>Target triangles</span><input id="triangle-target" type="number" min="4" max="10000000" value="4000" /></label>
+              <span class="dock-separator"></span>
+              <span class="preserve-badge"><span>✓</span> Source stays untouched</span>
+              <button id="simplify-button" type="submit" class="primary" disabled>Simplify <span>→</span></button>
+            </form>
+          </div>
+          <div class="status-bar"><span><span class="green-dot"></span> Local engine ready</span><span id="status-message">Import a GLB to begin.</span><span>MeshHarbor 0.1.0 · local</span></div>
+        </section>
+
+        <aside class="right-panel panel">
+          <div class="tabs"><button class="tab active" data-tab="assets">Assets <span id="asset-count">0</span></button><button class="tab" data-tab="jobs">Jobs <span id="job-count">0</span></button></div>
+          <div id="assets-view" class="side-view">
+            <div class="panel-title-row asset-heading"><div><p class="eyebrow">PROJECT LIBRARY</p><h2>Assets</h2></div><button class="quiet add-button" id="right-import-button">＋</button></div>
+            <div id="asset-list" class="asset-list"><div class="empty-list">Your imported and generated assets will appear here.</div></div>
+            <div class="inspector" id="inspector">
+              <div class="inspector-header"><div><p class="eyebrow">INSPECTOR</p><h3>Asset details</h3></div><span class="inspector-icon">⌘</span></div>
+              <div class="inspector-empty">Select an asset to view its geometry and artifacts.</div>
+              <div class="inspector-body hidden" id="inspector-body"></div>
+            </div>
+          </div>
+          <div id="jobs-view" class="side-view hidden">
+            <div class="panel-title-row asset-heading"><div><p class="eyebrow">ACTIVITY</p><h2>Jobs</h2></div><span class="panel-count" id="jobs-count-side">0</span></div>
+            <div id="job-list" class="job-list"><div class="empty-list">No jobs yet.</div></div>
+          </div>
+          <div class="right-footer"><span class="footer-orb"></span><span id="device-space">Local asset store</span><button class="text-button" id="clear-selection">Clear</button></div>
+        </aside>
+      </main>
+    </div>
+    <div id="toast" class="toast hidden"></div>
+    <div id="modal-backdrop" class="modal-backdrop hidden"><section class="modal"><button class="modal-close" id="modal-close">×</button><p class="eyebrow">RUNTIME STATUS</p><h2>Local runtime check</h2><div id="runtime-report" class="runtime-report"></div></section></div>
+  </body>
+</html>

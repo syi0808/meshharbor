@@ -1,0 +1,38 @@
+{
+  "id": "pixal3d",
+  "title": "Pixal3D",
+  "status": "pending",
+  "installable": false,
+  "image_to_3d": false,
+  "backends": [
+    {
+      "id": "cuda",
+      "repository": "https://github.com/syi0808/pixal3d-cuda",
+      "source_revision": "a4cb2b226cdb2bf3328eb280d4a02e510cc78e8c",
+      "port_license": "MIT",
+      "runtime_status": "pending"
+    },
+    {
+      "id": "mlx",
+      "repository": "https://github.com/syi0808/pixal3d-mlx",
+      "source_revision": "3a832ebf5f346a7eafb1ba40ca2926cfbd0bb2d6",
+      "port_license": "MIT",
+      "runtime_status": "pending"
+    }
+  ],
+  "license_gate": {
+    "status": "pending",
+    "checks": [
+      "NAF release checkpoint commercial inference scope is unresolved upstream.",
+      "DINOv3 uses a separate gated agreement for source and weights.",
+      "MLX rembg model selection is unpinned and current releases may select BRIA RMBG-2.0 (CC BY-NC 4.0).",
+      "The MLX default hole filling uses CGAL components with GPL-3.0-or-later or separate commercial terms.",
+      "No end-to-end pinned dependency manifest and cross-platform execution matrix has been approved."
+    ]
+  },
+  "source_policy": {
+    "weights_bundled": false,
+    "downloads_enabled": false,
+    "require_explicit_model_approval": true
+  }
+}

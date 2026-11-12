@@ -1,0 +1,15 @@
+{
+  "name": "meshharbor-node-contract-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first 3D asset creation and processing studio",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node apps/server/main.mjs",
+    "test": "make -C ../../native/mesh-refiner glb_refine && node --test",
+    "test:native": "make -C ../../native/mesh-refiner test"
+  }
+}
