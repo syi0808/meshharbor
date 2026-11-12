@@ -26,7 +26,7 @@ The current code is a tested product-core slice, not the whole planned product:
 - Persistent job states exist, but queued jobs do not resume after restart; native C++ simplification cannot be cancelled mid-call.
 - No cross-platform build matrix, installer, release signing, validated image-to-output inference run, or real-asset visual QA has been completed.
 
-Only Linux/cloud compilation and synthetic fixture tests have been run in this task. Do not describe the current build as a complete M1 release or as Windows/macOS verified.
+The latest managed-runtime changes have not been compiled or tested in this executor; it has no `cargo`, `rustc`, or `rustfmt` on `PATH`. Do not describe the current build as a complete M1 release or as Windows/macOS verified.
 
 ## Simplification and UV/baking boundary
 
