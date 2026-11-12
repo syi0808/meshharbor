@@ -25,7 +25,7 @@ Known third-party conditions remain distinct from the port repositories' MIT not
 - TRELLIS.2-related code retains Microsoft's MIT notice. Other credited MIT port licenses are also preserved, without claiming all source lineage has been legally adjudicated.
 - The MLX tree includes source for a CGAL bridge, but not CGAL headers, library, or binary. Building/distributing an executable that uses CGAL needs a separate GPL-3.0-or-later or commercial licensing decision.
 
-The source trees are **dormant archives only**. They are not built, installed, called by MeshHarbor, or registered as installable; included scripts are not run and no model is downloaded. No weights/checkpoints, user assets, generated images/meshes, credentials, or Python wheels were copied. No CUDA/MLX runtime compatibility or inference quality is claimed.
+The CUDA source tree remains a dormant archive. The MLX source snapshot and first-party managed adapters are embedded into the Rust executable and extracted under the app data directory when runtime setup is explicitly run; setup provisions Python/dependencies with user-installed `uv`, and the separate model-install action can download checkpoints after gated access is arranged. These flows are implemented but were not exercised on Apple Silicon in this environment. No weights/checkpoints, user assets, generated images/meshes, credentials, or Python wheels are bundled. No CUDA compatibility, successful MLX setup, or inference quality is claimed.
 
 Before enabling inference, resolve at least:
 
@@ -41,4 +41,4 @@ The old experimental atlas baker is not copied or used in the product path. Its 
 
 ## Scope of use today
 
-The tested Rust processing slice imports and inspects supported local assets and simplifies a constrained set of GLBs with meshoptimizer. It performs no model inference, external network access, model installation, or atlas texture rebake. This limited validation does not establish commercial clearance for the whole application or an inference backend.
+The validated Rust processing slice imports and inspects supported local assets and simplifies a constrained set of GLBs with meshoptimizer. That path performs no model inference, external network access, or atlas texture rebake. The separate MLX runtime actions can download dependencies and model files only when explicitly requested, but were not run here. This limited validation does not establish commercial clearance for the whole application or an inference backend.
