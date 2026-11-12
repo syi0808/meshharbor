@@ -1,8 +1,7 @@
-//! Optional, manually provisioned Pixal3D MLX process integration.
+//! Optional Pixal3D MLX process integration and local readiness checks.
 //!
-//! This module deliberately never installs dependencies, downloads weights, or
-//! performs Hugging Face authentication. The user provisions the pinned
-//! upstream source, its Python environment, and model checkpoints themselves.
+//! Runtime setup and model downloads are explicit user-triggered actions in
+//! `runtime.rs`; inference itself remains offline and never authenticates.
 
 use std::{
     path::{Path, PathBuf},
@@ -15,6 +14,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{Asset, AssetKind, CoreError, CoreResult, OperationCore, inspect_asset};
+use crate::runtime::Pixal3dRuntimeManager;
 
 const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
@@ -65,15 +65,22 @@ pub struct RuntimeReadiness {
     pub runtime_root: Option<PathBuf>,
     pub python: Option<PathBuf>,
     pub missing: Vec<String>,
+    pub environment_ready: bool,
+    pub model_files_ready: bool,
+    pub models_downloaded: bool,
+    pub naf_conversion_required: bool,
+    pub conversion_enabled: bool,
     pub downloads_enabled: bool,
     pub gated_model_access_required: bool,
 }
 
-/// User-provisioned MLX runtime profile.
+/// Isolated MLX runtime profile managed under MeshHarbor's data directory.
 #[derive(Debug, Clone)]
 pub struct Pixal3dMlxRuntime {
     pub root: PathBuf,
     pub python: PathBuf,
+    pub home: PathBuf,
+    pub weights: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,28 +96,35 @@ pub struct GenerationResult {
 
 impl Pixal3dMlxRuntime {
     /// Reads only non-secret path configuration. No tokens are inspected.
-    pub fn discover() -> Option<Self> {
-        let root = std::env::var_os("MESHHARBOR_PIXAL3D_MLX_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../runtimes/pixal3d/mlx/upstream")
-            });
+    pub fn discover(data_root: impl AsRef<Path>) -> Self {
+        let runtime_manager = Pixal3dRuntimeManager::new(data_root);
+        let root = runtime_manager.source_root().to_path_buf();
+        let runtime_home = runtime_manager.runtime_root().to_path_buf();
         let python = std::env::var_os("MESHHARBOR_PIXAL3D_MLX_PYTHON")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 if cfg!(windows) {
-                    root.join(".venv/Scripts/python.exe")
+                    runtime_home.join(".venv/Scripts/python.exe")
                 } else {
-                    root.join(".venv/bin/python")
+                    runtime_home.join(".venv/bin/python")
                 }
             });
-        Some(Self { root, python })
+        let home = runtime_home.join("home");
+        let weights = std::env::var_os("MESHHARBOR_PIXAL3D_WEIGHTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| runtime_home.join("weights"));
+        Self {
+            root,
+            python,
+            home,
+            weights,
+        }
     }
 
     pub fn readiness(&self) -> RuntimeReadiness {
         let mut missing = Vec::new();
-        if !self.python.is_file() {
+        let environment_ready = self.python.is_file();
+        if !environment_ready {
             missing.push(format!(
                 "Python environment is missing: {}",
                 self.python.display()
@@ -124,17 +138,20 @@ impl Pixal3dMlxRuntime {
             ));
         }
 
-        let home = user_home();
-        if let Some(home) = home {
+        let mut model_files_ready = self.home.is_dir();
+        let mut models_downloaded = self.home.is_dir();
+        if self.home.is_dir() {
             // The pinned MLX entry point hard-codes expanduser("~/.cache/huggingface/hub"),
-            // so readiness must check this exact location rather than HF_HOME overrides.
-            let hub = home.join(".cache/huggingface/hub");
+            // so provision an isolated HOME rather than mutating the user's existing HF cache.
+            let hub = self.home.join(".cache/huggingface/hub");
             let pixal_snapshot = hub
                 .join(PIXAL_REPOSITORY)
                 .join("snapshots")
                 .join(PIXAL_REVISION);
             for filename in PIXAL_CHECKPOINTS {
                 if !pixal_snapshot.join("ckpts").join(filename).is_file() {
+                    model_files_ready = false;
+                    models_downloaded = false;
                     missing.push(format!("Missing Pixal3D checkpoint: {filename}"));
                 }
             }
@@ -147,29 +164,57 @@ impl Pixal3dMlxRuntime {
             if !has_only_pinned_snapshot(&dino_snapshot_root, DINO_REVISION)
                 || !has_safetensors(&dino_snapshot)
             {
+                model_files_ready = false;
+                models_downloaded = false;
                 missing.push(format!(
                     "Missing the sole pinned gated DINOv3 checkpoint at {} (the user must request access, authenticate, and keep only this revision in the selected HOME cache because the pinned entrypoint chooses an arbitrary snapshot).",
                     dino_snapshot.display(),
                 ));
             }
         } else {
-            missing.push("HOME is unset; the upstream MLX runtime expects Hugging Face files under ~/.cache/huggingface/hub.".into());
+            model_files_ready = false;
+            models_downloaded = false;
+            missing.push(format!(
+                "The isolated runtime home is missing: {}. Run `meshharbor runtime setup` first.",
+                self.home.display()
+            ));
         }
 
-        if !self.root.join("weights/naf_release.safetensors").is_file() {
+        let naf_source = self.weights.join("naf_release.pth");
+        let naf_target = self.weights.join("naf_release.safetensors");
+        let naf_conversion_required = naf_source.is_file() && !naf_target.is_file();
+        if !naf_target.is_file() {
+            model_files_ready = false;
+            if !naf_source.is_file() {
+                models_downloaded = false;
+            }
             missing.push(
-                "Missing converted NAF checkpoint at weights/naf_release.safetensors.".into(),
+                format!("Missing converted NAF checkpoint at {}. Run the documented NAF conversion step after model download.", naf_target.display()),
             );
         }
 
         RuntimeReadiness {
             backend_id: "pixal3d-mlx".into(),
-            ready: missing.is_empty(),
+            ready: environment_ready && model_files_ready && missing.is_empty(),
             validation_level: "required_paths_only_environment_unverified".into(),
-            runtime_root: Some(self.root.clone()),
+            runtime_root: Some(
+                self.home
+                    .parent()
+                    .unwrap_or(self.home.as_path())
+                    .to_path_buf(),
+            ),
             python: Some(self.python.clone()),
             missing,
-            downloads_enabled: false,
+            environment_ready,
+            model_files_ready,
+            models_downloaded,
+            naf_conversion_required,
+            conversion_enabled: models_downloaded
+                && naf_conversion_required
+                && cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            downloads_enabled: environment_ready
+                && !models_downloaded
+                && cfg!(all(target_os = "macos", target_arch = "aarch64")),
             gated_model_access_required: true,
         }
     }
@@ -204,6 +249,18 @@ impl Pixal3dMlxRuntime {
             ));
         }
 
+        let entrypoint = self.prepare_entrypoint()?;
+        let python_bin = self.python.parent().ok_or_else(|| {
+            CoreError::OperationUnavailable(
+                "Configured Python path has no parent directory.".into(),
+            )
+        })?;
+        let virtual_env = python_bin.parent().unwrap_or(python_bin);
+        let mut path_entries = vec![python_bin.to_path_buf()];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let path = std::env::join_paths(path_entries).unwrap_or_default();
         let started = Instant::now();
         let mut command = Command::new(&self.python);
         command
@@ -211,10 +268,11 @@ impl Pixal3dMlxRuntime {
             // Do not leak account tokens or arbitrary Python package paths to
             // the model worker. The cached checkpoints suffice in offline mode.
             .env_clear()
-            .env("HOME", user_home().unwrap_or_else(|| self.root.clone()))
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &self.home)
+            .env("PATH", path)
             .env("PYTHONPATH", &self.root)
-            .env("VIRTUAL_ENV", self.root.join(".venv"))
+            .env("MESHHARBOR_PIXAL3D_WEIGHTS_DIR", &self.weights)
+            .env("VIRTUAL_ENV", virtual_env)
             .env("PYTHONNOUSERSITE", "1")
             // The vendored CLI loads pinned local checkpoints directly. Force
             // offline hub behavior so an inference request cannot surprise-
@@ -228,7 +286,7 @@ impl Pixal3dMlxRuntime {
             }
         }
         let status = command
-            .arg(self.root.join("generate_pixal3d.py"))
+            .arg(entrypoint)
             .arg("--image")
             .arg(input)
             .arg("--output")
@@ -282,6 +340,31 @@ impl Pixal3dMlxRuntime {
             elapsed_ms: started.elapsed().as_millis(),
         })
     }
+
+    fn prepare_entrypoint(&self) -> CoreResult<PathBuf> {
+        const UPSTREAM_NAF_PATH: &str = "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")";
+        const MANAGED_NAF_PATH: &str = concat!(
+            "    naf_weights_dir = os.environ.get(\"MESHHARBOR_PIXAL3D_WEIGHTS_DIR\", ",
+            "os.path.join(os.path.dirname(__file__), \"weights\"))\n",
+            "    naf_path = os.path.join(naf_weights_dir, \"naf_release.safetensors\")"
+        );
+        let upstream = self.root.join("generate_pixal3d.py");
+        let source = std::fs::read_to_string(&upstream)?;
+        if source.matches(UPSTREAM_NAF_PATH).count() != 1 {
+            return Err(CoreError::OperationUnavailable(
+                "Pinned Pixal3D entrypoint does not match the reviewed NAF path contract; refusing to patch it at runtime.".into(),
+            ));
+        }
+        let managed = source.replace(UPSTREAM_NAF_PATH, MANAGED_NAF_PATH);
+        let runtime_root = self.home.parent().unwrap_or(self.home.as_path());
+        let directory = runtime_root.join("entrypoint");
+        std::fs::create_dir_all(&directory)?;
+        let target = directory.join("generate_pixal3d.py");
+        let temporary = directory.join("generate_pixal3d.py.tmp");
+        std::fs::write(&temporary, managed)?;
+        std::fs::rename(&temporary, &target)?;
+        Ok(target)
+    }
 }
 
 fn has_safetensors(directory: &Path) -> bool {
@@ -317,12 +400,6 @@ fn has_only_pinned_snapshot(directory: &Path, revision: &str) -> bool {
         && snapshots.next().is_none()
 }
 
-fn user_home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-}
-
 struct GenerationCommandReport {
     elapsed_ms: u128,
 }
@@ -350,9 +427,7 @@ pub(crate) fn generate_pixal3d_image(
         .ok_or_else(|| CoreError::NotFound("Image source artifact is missing.".into()))?;
     let input_bytes = core.store().read_artifact(&source_artifact.id)?.bytes;
 
-    let runtime = Pixal3dMlxRuntime::discover().ok_or_else(|| {
-        CoreError::OperationUnavailable("No Pixal3D MLX runtime profile is configured.".into())
-    })?;
+    let runtime = Pixal3dMlxRuntime::discover(core.store().root());
     if !runtime.readiness().ready {
         return Err(CoreError::OperationUnavailable(format!(
             "Pixal3D MLX runtime is not ready: {}",
@@ -439,12 +514,37 @@ mod tests {
         let runtime = Pixal3dMlxRuntime {
             python: root.join(".venv/bin/python"),
             root: root.clone(),
+            home: root.join("home"),
+            weights: root.join("weights"),
         };
         let status = runtime.readiness();
         assert_eq!(status.backend_id, "pixal3d-mlx");
         assert!(!status.ready);
         assert!(!status.downloads_enabled);
         assert!(status.gated_model_access_required);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_entrypoint_uses_app_data_weights_without_mutating_pinned_source() {
+        let root = std::env::temp_dir().join(format!("meshharbor-mlx-overlay-{}", Uuid::new_v4()));
+        let source_root = root.join("source");
+        let runtime_root = root.join("runtime");
+        std::fs::create_dir_all(source_root.join("pixalmlx")).unwrap();
+        let upstream = source_root.join("generate_pixal3d.py");
+        let source = "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")";
+        std::fs::write(&upstream, source).unwrap();
+        let runtime = Pixal3dMlxRuntime {
+            python: runtime_root.join(".venv/bin/python"),
+            root: source_root,
+            home: runtime_root.join("home"),
+            weights: runtime_root.join("weights"),
+        };
+
+        let entrypoint = runtime.prepare_entrypoint().unwrap();
+        let patched = std::fs::read_to_string(entrypoint).unwrap();
+        assert!(patched.contains("MESHHARBOR_PIXAL3D_WEIGHTS_DIR"));
+        assert_eq!(std::fs::read_to_string(upstream).unwrap(), source);
         std::fs::remove_dir_all(root).unwrap();
     }
 
