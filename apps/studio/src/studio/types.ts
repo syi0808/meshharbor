@@ -40,6 +40,15 @@ export interface RuntimeInfo {
     missing?: string[];
     installable: boolean;
     weights_included: boolean;
+    downloads_enabled?: boolean;
+    environment_ready?: boolean;
+    model_files_ready?: boolean;
+    models_downloaded?: boolean;
+    naf_conversion_required?: boolean;
+    conversion_enabled?: boolean;
+    runtime_root?: string;
+    python?: string;
+    gated_model_access_required?: boolean;
   }>;
   notes: string[];
 }
