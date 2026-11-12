@@ -16,6 +16,7 @@ export function App() {
   const [maxError, setMaxError] = useState(0.02);
   const [textureSize, setTextureSize] = useState(1024);
   const [targetFaces, setTargetFaces] = useState(100000);
+  const [modelDownloadAcknowledged, setModelDownloadAcknowledged] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [report, setReport] = useState<SimplificationReport | null>(null);
   const [busy, setBusy] = useState(false);
@@ -29,6 +30,7 @@ export function App() {
   const selectedAsset = assets.find((asset) => asset.id === selectedId) ?? null;
   const isRunning = !!job && ['queued', 'running', 'validating', 'cancelling'].includes(job.state);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
+  const mlxBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-mlx');
 
   const refreshAssets = useCallback(async (client: MeshHarborApi) => {
     const items = await client.assets();
@@ -69,16 +71,43 @@ export function App() {
       try {
         const latest = await api.job(job.id);
         if (stopped) return;
-        setJob(latest);
         if (latest.state === 'succeeded') {
-          setReport(latest.result?.report ?? null);
-          if (latest.result?.asset_id) {
-            const derived = await api.derivedAsset(latest.result.asset_id);
-            if (!stopped) {
-              setAssets((current) => [derived, ...current.filter((item) => item.id !== derived.id)]);
-              setSelectedId(derived.id);
-              setActiveView('result');
+          if (latest.operation.startsWith('runtime.')) {
+            let refreshed: [RuntimeInfo, Operation[]] | null = null;
+            try {
+              refreshed = await Promise.all([api.runtime(), api.operations()]);
+            } catch (cause) {
+              if (!stopped) {
+                setJob(latest);
+                setError(cause instanceof Error ? cause.message : 'Runtime setup finished, but status could not be refreshed.');
+              }
+              return;
             }
+            if (stopped || !refreshed) return;
+            const [runtimeInfo, operationList] = refreshed;
+            setJob(latest);
+            setRuntime(runtimeInfo);
+            setOperations(operationList);
+            setModelDownloadAcknowledged(false);
+            setNotice(latest.operation === 'runtime.pixal3d.setup'
+              ? 'The isolated Python environment is ready. Sign into Hugging Face from a local terminal before downloading gated model files.'
+              : latest.operation === 'runtime.pixal3d.install_models'
+                ? 'Pinned model files are ready. MeshHarbor completed the one-time NAF conversion in an isolated tool environment.'
+                : 'The NAF checkpoint is converted and the Pixal3D runtime is ready.');
+            return;
+          }
+          setReport(latest.result?.report ?? null);
+          let derived: Asset | null = null;
+          if (latest.result?.asset_id) {
+            derived = await api.derivedAsset(latest.result.asset_id);
+          }
+          if (stopped) return;
+          setJob(latest);
+          if (derived) {
+            const completedAsset = derived;
+            setAssets((current) => [completedAsset, ...current.filter((item) => item.id !== completedAsset.id)]);
+            setSelectedId(completedAsset.id);
+            setActiveView('result');
           }
           setNotice(latest.operation === 'image.generate'
             ? 'Image-to-3D generation complete. Your source image is unchanged.'
@@ -86,13 +115,29 @@ export function App() {
           return;
         }
         if (latest.state === 'failed') {
+          let refreshed: [RuntimeInfo, Operation[]] | null = null;
+          if (latest.operation.startsWith('runtime.')) {
+            try {
+              refreshed = await Promise.all([api.runtime(), api.operations()]);
+            } catch {
+              // The job failure remains the primary actionable result.
+            }
+          }
+          if (stopped) return;
+          setJob(latest);
+          if (refreshed) {
+            setRuntime(refreshed[0]);
+            setOperations(refreshed[1]);
+          }
           setError(latest.error?.message ?? (latest.operation === 'image.generate' ? 'This image generation job failed.' : 'This simplification job failed.'));
           return;
         }
         if (latest.state === 'cancelled') {
+          setJob(latest);
           setNotice('The queued job was cancelled.');
           return;
         }
+        setJob(latest);
         timer = window.setTimeout(poll, 700);
       } catch (cause) {
         if (!stopped) setError(cause instanceof Error ? cause.message : 'Could not check job status.');
@@ -187,6 +232,50 @@ export function App() {
       setActiveView('result');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not start image generation.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setupPixal3dRuntime() {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const nextJob = await api.setupPixal3dRuntime();
+      setJob(nextJob);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not set up the Pixal3D runtime.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function installPixal3dModels() {
+    if (!modelDownloadAcknowledged) return;
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const nextJob = await api.installPixal3dModels();
+      setJob(nextJob);
+      setModelDownloadAcknowledged(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not start the model download.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function convertPixal3dNaf() {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const nextJob = await api.convertPixal3dNaf();
+      setJob(nextJob);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not prepare the NAF converter.');
     } finally {
       setBusy(false);
     }
@@ -316,7 +405,7 @@ export function App() {
                 {isRunning && job.operation === 'mesh.simplify' ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating output' : 'Simplifying mesh'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{job.state === 'queued' && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Native simplification can’t be interrupted once it starts.</small></div> : <button className="button button-primary simplify-button" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><span className="spinner small" /> Working…</> : <><SimplifyIcon /> Simplify mesh <span className="button-arrow">→</span></>}</button>}
                 <section className="generation-card" id="image-generation">
                   <div className="generation-heading"><span className="capability-spark">✳</span><strong>Generate from image</strong></div>
-                  <p>Run the manually prepared local Pixal3D MLX 512 profile. Checkpoints are not downloaded by MeshHarbor.</p>
+                  <p>Set up the isolated local Pixal3D MLX 512 runtime. Dependencies and model files are separate opt-in steps.</p>
                   <div className="field-label-row"><label htmlFor="texture-size">Texture size</label><span className="field-hint">Higher uses more memory</span></div>
                   <select id="texture-size" value={textureSize} onChange={(event) => setTextureSize(Number(event.target.value))} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning}>
                     <option value={512}>512</option><option value={1024}>1024</option><option value={2048}>2048</option>
@@ -324,15 +413,26 @@ export function App() {
                   <div className="field-label-row generation-face-label"><label htmlFor="target-faces">Soft face target</label><span className="field-hint">Not a hard cap</span></div>
                   <div className="number-input-wrap"><input id="target-faces" type="number" min="4" max="1000000" step="1000" value={targetFaces} onChange={(event) => setTargetFaces(Number(event.target.value))} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning} /><span>faces</span></div>
                   {isRunning && job.operation === 'image.generate' ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating GLB' : 'Generating 3D'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{job.state === 'queued' && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Running inference cannot be interrupted safely.</small></div> : <button className="button button-primary simplify-button" disabled={!canGenerate || busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><span className="spinner small" /> Working…</> : <>Generate 3D <span className="button-arrow">→</span></>}</button>}
+                  <div className="runtime-setup-panel">
+                    <div className="runtime-panel-heading">Pixal3D MLX setup <span>{mlxBackend?.status.replaceAll('_', ' ') ?? 'engine disconnected'}</span></div>
+                    {isRunning && job.operation === 'runtime.pixal3d.setup' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Preparing isolated Python environment'}</span></div><div className="progress-track"><span /></div><small>Package downloads may take several minutes. Detailed output appears in the engine terminal.</small></div>}
+                    {isRunning && job.operation === 'runtime.pixal3d.install_models' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Downloading pinned model files'}</span></div><div className="progress-track"><span /></div><small>This is a large download (about 24 GB) and may take a while. Per-file transfer output appears in the engine terminal.</small></div>}
+                    {isRunning && job.operation === 'runtime.pixal3d.convert_naf' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Preparing isolated NAF converter'}</span></div><div className="progress-track"><span /></div><small>Downloads pinned CPU-only conversion packages into a separate environment, then verifies the converted file.</small></div>}
+                    {!isRunning && mlxBackend?.installable && !mlxBackend.environment_ready && <><p>MeshHarbor will create a private Python 3.12 environment and install the pinned backend dependencies. Install <a href="https://docs.astral.sh/uv/getting-started/installation/" target="_blank" rel="noreferrer">uv</a> first if it is not already on PATH.</p><button className="button button-secondary runtime-action" disabled={busy || isRunning || connection !== 'connected'} onClick={() => void setupPixal3dRuntime()}>{busy ? 'Starting…' : 'Set up Python environment'} <span className="button-arrow">→</span></button></>}
+                    {!isRunning && mlxBackend?.environment_ready && !mlxBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime hf-login</code>. The token is entered through Hugging Face's masked prompt and stored only in MeshHarbor's isolated cache.</p><p className="runtime-terms">Model checkpoints have separate terms from MeshHarbor's MIT license. Review the DINOv3 and NAF checkpoint terms and obtain gated access before continuing. This download uses about 24 GB of disk space, then installs an isolated CPU-only NAF conversion environment.</p><label className="runtime-consent"><input type="checkbox" checked={modelDownloadAcknowledged} onChange={(event) => setModelDownloadAcknowledged(event.target.checked)} disabled={busy || isRunning || connection !== 'connected'} /><span>I have reviewed the model terms, have access to gated DINOv3, and am ready to download the files to this computer.</span></label><button className="button button-secondary runtime-action" disabled={!mlxBackend.downloads_enabled || !modelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dModels()}>{busy ? 'Starting…' : 'Download model files'} <span className="button-arrow">↓</span></button></>}
+                    {!isRunning && mlxBackend?.models_downloaded && mlxBackend.naf_conversion_required && <div className="runtime-conversion"><strong>One setup step remains</strong><span>The verified NAF checkpoint needs one-time conversion. MeshHarbor installs the pinned CPU-only converter into a separate environment.</span><button className="button button-secondary runtime-action" disabled={!mlxBackend.conversion_enabled || busy || isRunning || connection !== 'connected'} onClick={() => void convertPixal3dNaf()}>{busy ? 'Starting…' : 'Finish NAF conversion'} <span className="button-arrow">→</span></button></div>}
+                    {!isRunning && mlxBackend?.installable === false && <p>Pixal3D MLX setup is supported on Apple Silicon macOS only. The CUDA backend remains source-only in this build.</p>}
+                    {isRunning && job.operation.startsWith('runtime.') && <small className="runtime-serial-note">Runtime installation and generation share one local worker.</small>}
+                  </div>
                   {selectedAsset?.kind !== 'image' && <div className="engine-nudge">Import or select a PNG/JPEG image to generate a mesh.</div>}
-                  {selectedAsset?.kind === 'image' && !canGenerate && <div className="engine-nudge">{backendStatus('pixal3d-mlx')}. Follow the manual runtime setup before starting inference.</div>}
+                  {selectedAsset?.kind === 'image' && !canGenerate && <div className="engine-nudge">{backendStatus('pixal3d-mlx')}. Complete the runtime and model steps above before starting inference.</div>}
                   {connection !== 'connected' && <div className="engine-nudge">Start the local engine to generate.</div>}
                 </section>
                 {connection !== 'connected' && <div className="engine-nudge"><span>●</span> Start the local engine to process models.</div>}
                 {selectedAsset && selectedAsset.kind !== 'mesh' && <div className="engine-nudge">Simplification requires a GLB mesh file.</div>}
               </div>
 
-              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>More is on the way</strong></div><p>UV unwrapping and texture baking are not available in this build yet. The image-to-3D profile requires a manually prepared local runtime.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
+              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>More is on the way</strong></div><p>UV unwrapping and texture baking are not available in this build yet. The optional MLX runtime can be prepared locally; CUDA setup is still under development.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
             </aside>
           </div>
         </main>
