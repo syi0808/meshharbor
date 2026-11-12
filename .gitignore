@@ -1,5 +1,6 @@
 node_modules/
 dist/
+target/
 .env
 .meshharbor/
 data/
@@ -7,7 +8,5 @@ data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
-native/mesh-refiner/glb_refine
-native/mesh-refiner/tests/test_envelope
-native/mesh-refiner/tests/__pycache__/
-native/mesh-refiner/tools/__pycache__/
+__pycache__/
+*.py[cod]

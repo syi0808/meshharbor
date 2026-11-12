@@ -1,34 +1,44 @@
-# Licensing and runtime gate
+# Licensing and dependency status
 
-This file records the checks made for the initial implementation. It is not a legal opinion or a completed transitive SBOM. Do not present the full MeshHarbor runtime as commercially cleared until every installed package, native library, model, and weight revision is reviewed.
+This is an implementation audit record, not legal advice or a final commercial-use approval. MeshHarbor's own project license has not been selected; there is no root `LICENSE`. The upstream MIT licenses do not grant a project-wide open-source license. Do not describe the full repository, model runtime, or future release as commercially cleared.
 
-## Project license
+## Rust application dependencies
 
-- The destination repository was empty and had no license. No root `LICENSE` is present; the owner has not selected the project license.
-- The user explicitly authorized copying relevant code from `syi0808/glb-mesh-refiner` into the named public repository. That transfer does not select a MeshHarbor project license or grant the public an open-source reuse license. The source repository has no root `LICENSE`; preserve this provenance and do not claim commercial or third-party redistribution clearance.
+The current `Cargo.lock` resolves the Rust workspace dependency graph. A `cargo metadata --locked` inventory found no missing license expressions among third-party packages in the resolved metadata. Most packages state MIT, Apache-2.0, or both. Some require selection/preservation of their terms: `foldhash` is Zlib; `matchit` is MIT AND BSD-3-Clause; `ryu` allows Apache-2.0 OR BSL-1.0; `r-efi` offers MIT/Apache-2.0 OR LGPL-2.1-or-later. MeshHarbor application crates have no selected project license. A complete release SBOM, target-specific binary notices, and legal review are pending.
 
-## Native mesh worker
+The mesh simplifier uses `meshopt` 0.7.0 (`MIT OR Apache-2.0`), which wraps/builds upstream meshoptimizer (`MIT`). The dependency graph is in `Cargo.lock`; it includes no model weights.
 
-- The initial worker includes only `src/refine.cpp` and its core tests from `syi0808/glb-mesh-refiner` at commit `35383ddab8bbe491b98264b42892c42684c7d514`.
-- The core worker has no third-party build inputs. It compiles with C++17 and uses only the standard library.
-- The optional atlas baker is not included. It brings xatlas, meshoptimizer, TinyBVH, and stb notices, has narrower texture/material support, and is experimental. If it is integrated later, preserve all embedded and standalone notices, including xatlas's BSD-style notice and TinyBVH's current header copyright.
+## Vendored Pixal3D source snapshots
 
-## Pixal3D candidates
+The two source repositories were copied as pinned, file-by-file snapshots, not reduced to helper-only subsets:
 
-- `syi0808/pixal3d-cuda` and `syi0808/pixal3d-mlx` porting code carry MIT licenses with copyright notice for Noah Lyons. Their licenses explicitly do not cover upstream model weights. Keep those notices when porting code is included.
-- Pixal3D's public code and its single-view checkpoint are marked MIT in the reviewed upstream notice/card, but the multi-view snapshot was not independently verified.
-- NAF is Apache-2.0 at repository level, but its RoPE code contains the DINOv3 license header. The exact NAF release checkpoint's commercial inference scope is still unresolved in upstream issue 13.
-- DINOv3 uses a separate gated/custom agreement for code and weights. It is not an NC-only license, but it is not MIT/Apache and its access terms must be honored.
-- The MLX generation path defaults to CGAL-based hole filling; the relevant CGAL components are GPL-3.0-or-later or separately commercially licensed. This helper is not bundled here.
-- MLX's unpinned `rembg` call can select BRIA RMBG-2.0 in current releases, whose model card is CC BY-NC 4.0 absent a separate commercial grant. The CUDA port explicitly selects U²-Net, but the full model/dependency chain has not passed an SBOM review.
-- The original upstream Pixal3D pipeline configuration also selects BRIA RMBG-2.0. Do not wholesale execute that configuration.
+- CUDA `syi0808/pixal3d-cuda` at `a4cb2b226cdb2bf3328eb280d4a02e510cc78e8c`: 56 of 59 Git blobs preserved; 3 generated historical evidence files omitted.
+- MLX `syi0808/pixal3d-mlx` at `3a832ebf5f346a7eafb1ba40ca2926cfbd0bb2d6`: 150 of 189 Git blobs preserved; 37 image/GLB assets and 2 generated witness records omitted because asset rights/provenance are unverified.
 
-Both Pixal3D backends therefore remain `pending`; this prototype exposes them as non-installable candidates and does not fetch code, weights, or dependencies. Only a reviewed, pinned runtime manifest with approved licenses can enable installation.
+Every preserved local file was compared against its pinned upstream Git blob hash. Paths, hashes, sizes, and reasons for all exclusions are recorded in [`pixal3d-source-inventory.json`](pixal3d-source-inventory.json). Each source root retains the full upstream MIT `LICENSE` naming Noah Lyons. That license does not automatically clear every credited or derived component. The referenced projects' license copies and source-attribution notes are in [`runtimes/pixal3d/THIRD-PARTY-NOTICES.md`](../runtimes/pixal3d/THIRD-PARTY-NOTICES.md) and `runtimes/pixal3d/THIRD-PARTY-LICENSES/`.
 
-## Sources
+Known third-party conditions remain distinct from the port repositories' MIT notices:
 
-- [CUDA port license](https://github.com/syi0808/pixal3d-cuda/blob/main/LICENSE) · [CUDA dependencies](https://github.com/syi0808/pixal3d-cuda/blob/main/pyproject.toml)
-- [MLX port license](https://github.com/syi0808/pixal3d-mlx/blob/main/LICENSE) · [MLX dependencies](https://github.com/syi0808/pixal3d-mlx/blob/main/pyproject.toml)
-- [NAF unresolved checkpoint question](https://github.com/valeoai/NAF/issues/13) · [DINOv3 license](https://github.com/facebookresearch/dinov3/blob/main/LICENSE.md)
-- [CGAL licensing](https://www.cgal.org/license.html) · [BRIA RMBG-2.0 terms](https://huggingface.co/briaai/RMBG-2.0)
-- [Refiner source at pinned revision](https://github.com/syi0808/glb-mesh-refiner/tree/35383ddab8bbe491b98264b42892c42684c7d514)
+- DINOv3-related source is accompanied by Meta's custom DINO Materials Agreement. It is not a standard MIT license; its use/distribution conditions and gated weight access require separate review.
+- NAF-related code is accompanied by Apache-2.0 terms; the commercial inference scope for the exact NAF release checkpoint remains unresolved upstream.
+- MoGe code is accompanied by the upstream MIT/Apache-2.0 license file. The CUDA source pins a MoGe model revision separately.
+- TRELLIS.2-related code retains Microsoft's MIT notice. Other credited MIT port licenses are also preserved, without claiming all source lineage has been legally adjudicated.
+- The MLX tree includes source for a CGAL bridge, but not CGAL headers, library, or binary. Building/distributing an executable that uses CGAL needs a separate GPL-3.0-or-later or commercial licensing decision.
+
+The source trees are **dormant archives only**. They are not built, installed, called by MeshHarbor, or registered as installable; included scripts are not run and no model is downloaded. No weights/checkpoints, user assets, generated images/meshes, credentials, or Python wheels were copied. No CUDA/MLX runtime compatibility or inference quality is claimed.
+
+Before enabling inference, resolve at least:
+
+- DINOv3 license and gated weight access, and the applicable Tencent Pixal3D model/checkpoint terms.
+- NAF checkpoint commercial-use scope (upstream issue #13 remains open).
+- MLX `rembg` selection: the lock uses `rembg` 2.0.76/U²-Net, while an unpinned install may choose 2.0.87 with BRIA RMBG-2.0 default (CC BY-NC absent a commercial agreement); pin the package and select an allowed model explicitly.
+- CGAL linked-binary obligations, the complete native/Python package dependency license closure, and the exact OS/accelerator support matrix.
+- Any generated web bundle: `web/vendor.mjs` is source only; if run, its generated `@google/model-viewer` bundle is Apache-2.0 and needs corresponding notices. No bundle is present here.
+
+## Atlas UV baking research
+
+The old experimental atlas baker is not copied or used in the product path. Its reviewed dependency closure includes meshoptimizer v1.3 (MIT), xatlas (MIT plus an embedded BSD-style notice and other attribution), TinyBVH v1.9.1 (MIT with its 2024–2026 Jacco Bikker/Breda University attribution), and stb (MIT/public-domain notices). Any future integration must preserve all applicable notices and pass broader texture and target-renderer QA. The current simplifier retains UVs and textures, so rebaking is not needed. See [`source-provenance.md`](source-provenance.md).
+
+## Scope of use today
+
+The tested Rust processing slice imports and inspects supported local assets and simplifies a constrained set of GLBs with meshoptimizer. It performs no model inference, external network access, model installation, or atlas texture rebake. This limited validation does not establish commercial clearance for the whole application or an inference backend.

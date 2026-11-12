@@ -1,0 +1,39 @@
+[project]
+name = "pixal3d-mlx"
+version = "0.1.0"
+description = "MLX-native Pixal3D (SIGGRAPH 2026) image-to-3D inference for Apple Silicon"
+requires-python = ">=3.11"
+dependencies = [
+    "mlx>=0.30",
+    "numpy",
+    "huggingface-hub",
+    "safetensors",
+    "pillow",
+    "trimesh",
+    "scipy",
+    "scikit-image",
+    "tqdm",
+    "fast-simplification",
+    "xatlas",
+    "opencv-python",
+    "rembg[cpu]",
+    "moge-mlx @ git+https://github.com/lyonsno/moge-mlx.git",
+]
+
+[project.urls]
+Repository = "https://github.com/syi0808/pixal3d-mlx"
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx>=0.27"]
+server = ["fastapi>=0.115", "uvicorn>=0.30", "python-multipart>=0.0.20"]
+# NAF weight conversion (one-time): pip install torch safetensors
+
+[tool.setuptools.packages.find]
+include = ["pixalmlx*"]
+
+[tool.setuptools.package-data]
+"pixalmlx.server" = ["static/*", "static/vendor/*"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"

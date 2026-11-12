@@ -1,15 +1,17 @@
 # Source provenance
 
-## Mesh simplification worker
+## MeshHarbor core
 
-Source: [`syi0808/glb-mesh-refiner`](https://github.com/syi0808/glb-mesh-refiner/tree/35383ddab8bbe491b98264b42892c42684c7d514), commit `35383ddab8bbe491b98264b42892c42684c7d514`.
+`crates/core` and `crates/meshharbor` are the Rust product-core implementation created for this project. GLB simplification uses `meshopt` 0.7.0, pinned in `Cargo.lock`, and the upstream meshoptimizer library. MeshHarbor's own license remains undecided; no root `LICENSE` has been added.
 
-Copied into `native/mesh-refiner/`:
+## Pixal3D backend snapshots
 
-- `src/refine.cpp`
-- `tests/test_envelope.cpp`
-- `tests/test_glb_pipeline.py`
-- `tools/validate_glb.py`
-- `Makefile` adapted to the core-only scope
+The full source trees of `syi0808/pixal3d-cuda` and `syi0808/pixal3d-mlx` are kept in `runtimes/pixal3d/{cuda,mlx}/upstream/` at pinned revisions. Each retained file is byte-checked against its Git blob SHA. The JSON inventory [`pixal3d-source-inventory.json`](pixal3d-source-inventory.json) records both pinned trees, all copied file hashes, and every omission. The complete upstream MIT license files remain alongside each tree. Since upstream READMEs credit multiple other projects and some portions are based on third-party work, their exact license notices are preserved separately in [`../runtimes/pixal3d/THIRD-PARTY-NOTICES.md`](../runtimes/pixal3d/THIRD-PARTY-NOTICES.md) and `../runtimes/pixal3d/THIRD-PARTY-LICENSES/`. This source preservation is not a blanket commercial-use or project-license determination.
 
-The original repository has no root license. The user explicitly authorized transferring the relevant code into the named MeshHarbor repository, so this copy preserves the source and exact revision. That authorization does not select a MeshHarbor project license or grant the public an open-source reuse license. No third-party atlas-baker code is included.
+The omitted files are limited to generated test/witness records and binary images/3D assets for which individual rights/provenance were not established. The source code, tests, lockfiles, scripts, documentation, notebooks, deployment source, and nested workflow source are preserved. No model weights, CGAL dependencies, generated bundle, or credentials are included. All such code remains source-only and inactive in MeshHarbor.
+
+## Experimental atlas UV baker research
+
+Reviewed `syi0808/glb-mesh-refiner` at `35383ddab8bbe491b98264b42892c42684c7d514`, including `docs/standalone-baker.md` and its texture-baking tests. No `glb-mesh-refiner` implementation is included in MeshHarbor. The atlas baker is not copied or built. Its dependency closure includes meshoptimizer v1.3, xatlas, TinyBVH v1.9.1, and stb; no source from those copies has been brought over. Any future integration must preserve their exact upstream notices, including xatlas's embedded BSD-style notice and TinyBVH's 2024–2026 Jacco Bikker/Breda University notice. Its material and validation limits are documented in [`architecture.md`](architecture.md) and [`licensing-status.md`](licensing-status.md).
+
+The current simplifier uses meshoptimizer and retains the source vertex streams, UVs, material references, and embedded textures. Since it does not generate a new UV atlas, no texture rebake is part of the current path. If a future operation changes UV layout, atlas unwrap/baking should remain a separate explicit capability until seam, material, visual-quality and license validation are complete.

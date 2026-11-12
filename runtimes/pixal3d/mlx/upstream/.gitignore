@@ -1,0 +1,17 @@
+*.egg-info/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+build/
+dist/
+
+# Large output artifacts
+outputs/*.glb
+outputs/ckpt_*/
+outputs/*/
+weights/
+outputs/runtime/
+outputs/.pixal3d-server.lock
+web/node_modules/
+**/server/static/vendor/

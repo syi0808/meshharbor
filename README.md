@@ -1,32 +1,67 @@
 # MeshHarbor
 
-MeshHarbor is an early local-first 3D asset studio. This repository contains the first native C++ mesh-refinement component and an explicitly separate Node.js contract prototype. The intended product architecture remains Rust/C++ as described in [docs/architecture.md](docs/architecture.md).
+MeshHarbor is an early Rust-first, local 3D asset processing application. Its first implemented path is a shared Rust operation core exposed through a CLI, a loopback REST API, and the official Rust MCP SDK. The current build supports importing PNG/JPEG/GLB files and simplifying a limited class of static GLB meshes with meshoptimizer.
 
-## What is implemented
+This is **not yet a complete M1 product or release build**. A React/TypeScript/Three.js Studio client exists under `apps/studio`, and the Rust server can embed a built client bundle, but its npm dependencies are not installed and a production bundle/browser QA have not been verified here. There is no image-to-3D generation runtime, managed Python/model installer, Windows/macOS release validation, or production packaging. MeshHarbor's project license has not been selected; this repository deliberately has no root `LICENSE`.
 
-- `native/mesh-refiner/`: the user's GLB refiner source at a pinned revision, built as a C++17 worker. It simplifies supported static GLB assets and writes a new result while retaining the original.
-- `prototype/node-shell/`: a temporary local shell for exercising the planned REST, CLI, MCP, storage, job, and UI contracts while Rust/Cargo are unavailable in the current Cloud environment. It is not the product's permanent application architecture.
-- `registry/models/pixal3d.json`: model candidates remain pending and non-installable until their complete runtime, dependency, and weight-license paths are cleared.
+## Implemented now
 
-No model downloads or image generation are enabled. This repository is public at the owner's request, but no root project license or third-party redistribution grant has been added. Do not treat the code as commercially cleared or open-source licensed.
+- `crates/core`: GLB v2 parsing and inspection, source-immutable content-addressed artifact storage, SQLite asset/job records, operation catalog, and meshoptimizer-based GLB simplification.
+- `crates/meshharbor`: one executable with CLI commands, a local Axum REST API, and stdio MCP tools, all using the same `OperationCore`.
+- `apps/studio`: a source-only local Studio client for GLB import, preview, simplify jobs, and result download. The Rust build embeds `apps/studio/dist` when present; without it, the server root serves a local “assets are not built” notice.
+- `runtimes/pixal3d/{cuda,mlx}/upstream/`: byte-preserved source snapshots from the two pinned Pixal3D repositories, with per-file inventory and third-party notices; they are dormant archives, not active MeshHarbor workers.
+- `registry/models/pixal3d.json`: both backends stay non-installable; no model weights or automatic model downloads are included.
 
-## Run the isolated prototype
+The GLB simplifier is deliberately narrower than general-purpose glTF: one embedded GLB buffer, indexed triangle primitives, static meshes, FLOAT `POSITION`, and non-sparse accessors. It rejects animations, skins, morph targets, extension-bearing primitives, compressed mesh extensions, external buffers, and unsupported data layouts. Original vertex and binary streams, primitive/material references, and embedded texture payloads are left unchanged; only new index accessors are appended. `NORMAL` and `TEXCOORD_0` are included in the simplification attribute metric when supported. This does not re-unwrap UVs or rebake textures. External image URIs are not fetched or copied. The triangle target is aspirational: the report gives the actual count, measured meshoptimizer error, and a warning when constraints prevent reaching the target.
 
-Requirements: Node.js 22+, a C++17 compiler, GNU Make, and Python 3 with NumPy and Pillow for the native test suite.
+See [architecture status](docs/architecture.md), [license/dependency status](docs/licensing-status.md), and [source provenance](docs/source-provenance.md) before using or redistributing this code.
+
+## Build and test
+
+Requirements: Rust/Cargo 1.88 or later and a C++ toolchain for the meshoptimizer crate's native build.
 
 ```sh
-cd prototype/node-shell
-npm test
-npm run test:native
-npm start
+cargo fmt --all -- --check
+cargo test --workspace
+cargo run --bin meshharbor -- --help
+cargo run --bin meshharbor -- doctor
 ```
 
-The prototype server binds to `127.0.0.1` by default and prints a local bearer token. It never binds to a public interface by default. See the prototype directory for the current commands and limitations.
+Test coverage is focused on synthetic GLB fixtures and the Rust API/core contracts; it is not a cross-platform, real-asset, visual-quality, or model-inference acceptance suite.
 
-## Scope and limitations
+The Studio client source is not part of the Rust test suite. Its npm dependencies must be installed before `npm run build` can create the bundle embedded by the Rust build. The client build and browser workflow were not verified in this environment because the required npm packages were not available in the offline cache.
 
-The native refiner supports one static indexed triangle primitive with float POSITION, NORMAL, and TEXCOORD_0 attributes. Unsupported attributes, animation, skinning, morph targets, sparse accessors, extensions, extra meshes, and extra primitives fail explicitly. The requested triangle target is aspirational; its UV correspondence threshold is a sampled heuristic, and it does not apply node transforms. Image generation, retopology, semantic separation, texture baking, compression, and model install/repair remain out of scope until their dependencies and preservation contracts are validated.
+## CLI
 
-## Licensing
+```sh
+# Import and inspect
+meshharbor import ./scene.glb
+meshharbor assets --limit 20
 
-No root `LICENSE` is included because the product license has not been selected. See [docs/licensing-status.md](docs/licensing-status.md) before further distribution. The copied refiner source came from the user's repository at a pinned revision under the user's explicit instruction; the source repo had no root license. Do not infer a public license for MeshHarbor from the MIT notices on the Pixal3D porting repositories.
+# Simplify an imported asset; the source stays intact
+meshharbor simplify asset_<id> --triangles 4000 --max-error 0.02 --output ./scene-simplified.glb
+```
+
+The app stores source and derived artifacts under its local data directory. Use `--data-dir` or `MESHHARBOR_HOME` to choose it. `meshharbor inspect` only inspects a supported local file; it does not upload it.
+
+## REST API
+
+Start only on loopback (non-loopback binds are rejected):
+
+```sh
+meshharbor serve --listen 127.0.0.1:7432
+```
+
+A temporary bearer token is printed to stderr. Requests other than `/api/v1/health` require `Authorization: Bearer <token>`. The server accepts only loopback Host/Origin values. Current endpoints:
+
+- `GET /api/v1/health`, `/api/v1/runtime`, `/api/v1/operations`
+- `GET /api/v1/assets?limit=50`; `POST /api/v1/assets?filename=scene.glb` with raw file bytes
+- `GET /api/v1/assets/{asset_id}`; `POST /api/v1/assets/{asset_id}/simplify`
+- `POST /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`, `POST /api/v1/jobs/{job_id}/cancel`
+- `GET /api/v1/artifacts/{artifact_id}`
+
+Job requests currently support `mesh.simplify` and return `202 Accepted`. A single CPU simplification slot is used. Queued jobs can be cancelled; native simplification cannot currently be interrupted safely after it starts. Job state is persisted, but automatic recovery of queued/running work after a process restart is not implemented.
+
+## MCP
+
+Run `meshharbor mcp` to start the stdio MCP server. Its output is the MCP protocol stream; diagnostics go to stderr. Available tools include `list_operations`, `list_assets`, `import_asset`, `start_simplification`, `get_job`, `cancel_job`, and `runtime_doctor`. MCP asset import accepts base64-encoded local file bytes and does not fetch files or weights from the network.

@@ -31,6 +31,16 @@
     ]
   },
   "source_policy": {
+    "source_only_vendor_paths": [
+      "runtimes/pixal3d/cuda",
+      "runtimes/pixal3d/mlx"
+    ],
+    "vendor_scope": "full pinned source snapshot except enumerated generated evidence/binary assets; see docs/pixal3d-source-inventory.json and subtree notices",
+    "snapshot_counts": {
+      "cuda": {"upstream_blobs": 59, "preserved": 56, "excluded": 3},
+      "mlx": {"upstream_blobs": 189, "preserved": 150, "excluded": 39}
+    },
+    "runtime_enabled": false,
     "weights_bundled": false,
     "downloads_enabled": false,
     "require_explicit_model_approval": true

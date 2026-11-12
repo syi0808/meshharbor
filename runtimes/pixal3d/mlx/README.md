@@ -1,0 +1,11 @@
+# Pixal3D MLX source snapshot
+
+This directory preserves source from [`syi0808/pixal3d-mlx`](https://github.com/syi0808/pixal3d-mlx), pinned to commit `3a832ebf5f346a7eafb1ba40ca2926cfbd0bb2d6`. The upstream tree has 189 Git blobs; **150 source, test, documentation, build-metadata, notebook and workflow files** are preserved byte-for-byte under `upstream/`. See [`docs/pixal3d-source-inventory.json`](../../../docs/pixal3d-source-inventory.json) for every blob ID, local path, size, and exclusion rationale.
+
+The 39 excluded blobs are 37 image/GLB input, preview, screenshot, or generated-output assets whose individual rights/provenance have not been established, plus two generated witness JSON records. No model weights/checkpoints, CGAL headers or binaries, credentials, or dependency-installed artifacts are present. The inventory names every omitted file. Original source and docs may refer to those omitted images.
+
+## Distribution and runtime boundary
+
+The upstream MIT license naming Noah Lyons is preserved verbatim. The source includes DINOv3- and NAF-related implementations, MoGe-derived code, Microsoft TRELLIS.2-related code, and source for an optional CGAL helper. Their upstream license texts and attribution references are preserved under [`../THIRD-PARTY-LICENSES/`](../THIRD-PARTY-LICENSES/) and [`../THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md). Those notices apply to the relevant third-party portions and do **not** grant a project-wide MeshHarbor license. DINOv3's custom agreement and gated weights, NAF checkpoint-use scope, and other model terms must be assessed separately. See the [licensing status](../../../docs/licensing-status.md).
+
+This is a source archive, not an enabled or installable MeshHarbor runtime. The Python entry points, package manifests, lockfile, tests, web build metadata, and optional CGAL C++ source are retained for review; they are not run, installed, built, or wired into MeshHarbor. No weights are downloaded. In particular, merely retaining `native/cgal_holes/` source does not provide CGAL or authorize building/distributing a CGAL-linked binary; the runtime remains disabled pending separate license and dependency review. The registry keeps this backend non-installable.

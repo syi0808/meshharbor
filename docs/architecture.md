@@ -1,28 +1,48 @@
-# Architecture status
+# Architecture and implementation status
 
-## Intended product shape
+## Intended architecture
 
-The approved design is a Rust application core with Axum/Tokio, Clap, the official `rmcp` SDK, a shared operation registry, SQLite metadata, an artifact file store, and a React/TypeScript/Three.js Studio. Python is managed behind isolated CUDA or MLX workers. REST, CLI, MCP, and the UI must call the same operations and preserve the same input/output contracts.
+The approved product direction is a Rust application with Axum/Tokio, Clap, the official `rmcp` Rust SDK, one operation core, SQLite metadata, a file-based artifact store, and a React/TypeScript/Three.js Studio. Model-specific CUDA and MLX workers remain separable backends and may also be vendored in this monorepo. One user entry binary should own REST, CLI, MCP, and the Studio entry point. The system must not imply that an unavailable model runtime is installable or commercially cleared.
 
-## Prototype implementation in this checkout
+## Implemented Rust slice
 
-The available Cloud computer has Node.js, Python 3, and g++, but no Rust/Cargo or native UI package dependencies. This prototype uses Node's built-in HTTP, SQLite, test, and child-process modules to provide a runnable operation/API/UI shell without downloading packages. The simplifier itself is the C++17 worker from the user's `glb-mesh-refiner` repository. The static canvas viewer is a deliberately small fallback, not a replacement for the planned Three.js viewer.
+- `crates/core/src/store.rs` owns SQLite assets, artifacts and job state plus immutable SHA-256-addressed files. Source import creates a new asset; simplification creates a derived asset linked back to its source.
+- `crates/core/src/glb.rs` parses GLB v2 chunks, inspects basic metadata, reads a conservative subset of static indexed triangle primitives, calls meshoptimizer simplification, then appends a new index accessor and writes a distinct GLB. Vertex attributes and the original GLB payload are not rewritten.
+- `crates/core/src/operation.rs` is the shared operation catalog and `OperationCore` used by every current interface.
+- `crates/meshharbor/src/main.rs` provides CLI, localhost-authenticated REST, one-slot async mesh jobs, and stdio MCP in a single Rust binary.
+- `crates/meshharbor/build.rs` embeds `apps/studio/dist` into that binary when a client build exists; otherwise the root route returns a local not-built notice.
+- `apps/studio/` contains a React/TypeScript/Three.js source client for importing and previewing GLBs, starting/polling simplification jobs, and downloading results. Its bearer token is held in app memory only. The source is present, but npm dependencies were unavailable offline, so the bundle and browser workflow have not been validated.
+- `meshopt` 0.7.0 supplies the Rust wrapper and builds meshoptimizer's C++ implementation as a normal dependency. There is no bespoke C++ worker and no copied `glb-mesh-refiner` core in the active product tree.
 
-The Node contract prototype keeps the architectural boundaries that matter for the first flow, but its files are not the final product implementation:
+## Scope boundaries and incomplete work
 
-- `prototype/node-shell/apps/server/operations.mjs` is the single operation and model-capability registry.
-- `prototype/node-shell/apps/server/store.mjs` owns SQLite metadata and content-addressed local artifacts.
-- `prototype/node-shell/apps/server/jobs.mjs` owns the job state machine and isolated native-worker lifecycle.
-- `prototype/node-shell/apps/server/api.mjs` exposes the REST contract and SSE job events.
-- `prototype/node-shell/apps/cli.mjs` and `prototype/node-shell/apps/mcp.mjs` exercise shared core operations through the prototype's CLI and MCP surface.
-- `prototype/node-shell/apps/web/` is the prototype Studio UI, not the planned React/TypeScript/Three.js client.
+The current code is a tested product-core slice, not the whole planned product:
 
-## Implemented flow
+- Studio source and a loopback static-serving/embed path exist, but the npm build, embedded production bundle, and browser workflow have not been validated. There is no desktop shell.
+- No image-to-3D inference, approved runtime profile, managed Python/uv setup, or weight download/installation. Full pinned CUDA/MLX source snapshots are preserved under `runtimes/pixal3d/` with per-file hashes and notices, but neither is built, installed, executed, or registered as installable.
+- No cleanup, part separation, retopology, renderer-order optimization, mesh/texture compression, UV unwrap, or texture bake operation is implemented. The operation catalog marks those unavailable.
+- Persistent job states exist, but queued jobs do not resume after restart; native C++ simplification cannot be cancelled mid-call.
+- No cross-platform build matrix, installer, release signing, end-to-end image-to-output path, or real-asset visual QA has been completed.
 
-`GLB import → input validation → mesh.simplify job → isolated C++ worker → output validation → new derived asset and report artifacts`
+Only Linux/cloud compilation and synthetic fixture tests have been run in this task. Do not describe the current build as a complete M1 release or as Windows/macOS verified.
 
-The original artifact is immutable. Results record requested and actual triangle counts, worker version, and report artifacts. Textures and supported material JSON are retained by the refiner; unsupported inputs fail rather than being silently rewritten.
+## Simplification and UV/baking boundary
 
-## Not yet implemented
+The product simplification path uses meshoptimizer with border locking and weighted `NORMAL` / `TEXCOORD_0` metrics when those accessors are compatible. It keeps original UVs rather than automatically generating a new atlas. Because the current operation does not change vertex buffers, UVs, material definitions, or embedded texture bytes, it does not need xatlas or texture rebaking. The target triangle count is a goal, not a guarantee; material/primitive boundaries and error limits can leave the output above the requested target.
 
-The prototype does not meet the first public release bar: no generation runtime is approved, the Rust application and official MCP SDK are not yet implemented, and the three-OS packaging and full PBR viewer are still pending. Rust/Cargo installation was attempted in the available Cloud environment but blocked because the environment lacks root package-manager access; this did not change the intended architecture.
+The older `glb-mesh-refiner` atlas baker was reviewed but is not part of the product path. It is an experimental one-primitive/one-material implementation with a narrow base-color plus metallic-roughness texture contract, no general normal/AO/emissive transfer, and no independent PBR render-equivalence test. xatlas UV generation alone does not establish a correct texture rebake. If future work adopts it, it needs a separate explicit opt-in, its own licensing notices, input/output validation, and broader visual tests.
+
+## Planned structure
+
+```text
+apps/studio/               # React / TypeScript / Three.js source; npm build/browser QA pending
+crates/meshharbor/          # one CLI/API/MCP/Studio-serving binary
+crates/core/                # operation core, assets, jobs, storage
+native/                     # only independently validated C/C++ dependencies
+runtimes/pixal3d/cuda/       # source-only backend port, not installable yet
+runtimes/pixal3d/mlx/        # source-only backend port, not installable yet
+registry/models/             # explicit installability and license status
+docs/pixal3d-source-inventory.json # pinned upstream file hashes and exact exclusions
+```
+
+Optional future integrations must preserve build/runtime boundaries and licensing; adding a source tree does not make its dependency and model path installable.
