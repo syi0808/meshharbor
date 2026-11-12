@@ -48,13 +48,13 @@ Generation uses the fixed reviewed 512 profile, the local pinned Pixal3D/DINOv3/
 
 - The source-port MIT notice is preserved.
 - DINOv3 has a separate agreement and gated checkpoint access. NAF and all other checkpoint/dependency terms remain separate from MeshHarbor's own license.
-- This feature does not clear redistribution of weights/runtime bundles or commercial usage.
+- This feature does not clear redistribution of model weights, third-party wheels, or commercial usage.
 - No model weights or user images are shipped in this repository.
 - The embedded code snapshot is not a self-contained Python distribution: users still need `uv`, and setup fetches dependencies and model files when explicitly requested.
 - `runtime doctor` checks local file paths only; it does not guarantee memory capacity, dependency health after setup, or successful end-to-end inference.
 
 ## Validation status
 
-- The Rust code was formatted, but this workspace has no `meshopt` crate cached and its network allowlist does not include crates.io. Cargo compilation/tests therefore cannot run here.
+- The current executor has no `cargo`, `rustc`, or `rustfmt` on `PATH`; after the latest managed-runtime and source-bundling changes, Rust formatting, compilation, and tests remain unverified.
 - This environment is not Apple Silicon macOS. Managed MLX installation, HF gated access, model download, and inference have not been exercised.
 - Studio security tests can run independently. The npm package cache is absent here, so the TypeScript bundle/browser workflow may remain unverified.
