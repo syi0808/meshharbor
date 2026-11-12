@@ -36,6 +36,18 @@ export class MeshHarborApi {
     return this.request('/api/v1/runtime');
   }
 
+  setupPixal3dRuntime(): Promise<Job> {
+    return this.request('/api/v1/runtime/pixal3d-mlx/setup', { method: 'POST' });
+  }
+
+  installPixal3dModels(): Promise<Job> {
+    return this.request('/api/v1/runtime/pixal3d-mlx/models', { method: 'POST' });
+  }
+
+  convertPixal3dNaf(): Promise<Job> {
+    return this.request('/api/v1/runtime/pixal3d-mlx/convert-naf', { method: 'POST' });
+  }
+
   operations(): Promise<Operation[]> {
     return this.request('/api/v1/operations');
   }
