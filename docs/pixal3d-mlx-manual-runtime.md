@@ -1,137 +1,60 @@
-# Pixal3D MLX: manually provisioned runtime
+# Pixal3D MLX: managed local setup
 
-This is the first image-generation integration profile for Apple Silicon. It
-reuses the pinned MLX backend source at
-`runtimes/pixal3d/mlx/upstream`; it does not install Python packages, log in
-to Hugging Face, accept model terms, or download checkpoints on the user's
-behalf. MeshHarbor's own project license and the source-port MIT notice do not
-replace model, checkpoint, and dependency terms.
+This is the first image-generation integration profile for Apple Silicon. MeshHarbor can provision an isolated Python 3.12 environment and, after a separate explicit action, download pinned model checkpoints. It never accepts model terms, requests account access, or handles a Hugging Face token through the Studio or API. The user's HF credential is entered only through the official interactive CLI and stored in a dedicated local cache. MeshHarbor's project license and Pixal3D source-port MIT notice do not replace model, checkpoint, and dependency terms.
 
 ## Prerequisites
 
-- Apple Silicon macOS with a working Metal/MLX environment. The upstream
-  reference reports the 512 profile on 16 GB unified memory, but this is not
-  a hard memory guarantee or an independent MeshHarbor benchmark.
-- Rust/Cargo 1.88+ and the native build tools already required by MeshHarbor.
-- uv and Python 3.12.
-- Approximately 25 GB or more free disk space for Pixal3D, DINOv3, MoGe, NAF,
-  and the isolated Python environment.
-- Hugging Face access to the DINOv3 repository. The account owner must obtain
-  access and manage their own Hugging Face authentication locally. Do not put
-  an HF token in chat, source, logs, or MeshHarbor configuration.
+- Apple Silicon macOS. CUDA installation is not implemented.
+- Rust/Cargo 1.88+ and native build tools required to build MeshHarbor.
+- `uv` installed from its official instructions and available on `PATH`. MeshHarbor does not bootstrap an unpinned package manager executable.
+- Build the MeshHarbor executable from the repository with the MLX source tree present. The pinned source snapshot and adapter scripts are embedded into the executable and extracted under `<data-dir>/runtimes/pixal3d-mlx/source`; the original checkout is not needed when running that built binary.
+- Around 25 GB of free disk space for the seven Pixal3D checkpoints, gated DINOv3, NAF and the isolated environment. MoGe is skipped for the fixed-camera generation profile.
+- Hugging Face account access to the gated DINOv3 repository. The owner must review and accept any required terms and obtain access in Hugging Face before downloading. Do not paste the token into chat, Studio, or source code.
 
-## Prepare the pinned backend
+## Setup and model download
 
-From the MeshHarbor checkout:
+Use the same data directory for the server and the following CLI commands. The default on macOS is `~/Library/Application Support/MeshHarbor`; `--data-dir` / `MESHHARBOR_HOME` overrides it.
 
 ~~~sh
-cd runtimes/pixal3d/mlx/upstream
-uv venv .venv --python 3.12
-uv sync --frozen
+# Create managed Python 3.12 and install the exact locked MLX dependencies
+meshharbor runtime setup
+
+# In a terminal on this computer, enter the HF token only in the official masked prompt.
+# This writes it to MeshHarbor's private HF cache, not your ordinary HF cache.
+meshharbor runtime hf-login
+
+# First review/accept DINOv3 terms and request access in your own HF account.
+# This then preflights access and explicitly downloads about 24 GB of model files.
+meshharbor runtime install-models
+
+meshharbor doctor
 ~~~
 
-Review and accept any required upstream model access terms in the model host's
-own account flow. When you are ready, run the pinned upstream downloader
-yourself. It retrieves large checkpoints, uses the local HF credential for
-gated DINOv3, and verifies Pixal3D checkpoint hashes:
+`runtime install-models` checks access to the pinned gated DINOv3 repository before downloading Pixal3D's large checkpoints, so an unapproved request fails early. It pins the known source revisions, verifies Pixal3D and NAF checkpoint hashes, uses a dedicated Hugging Face cache under `<data-dir>/runtimes/pixal3d-mlx/home`, and saves NAF under `<data-dir>/runtimes/pixal3d-mlx/weights`. The isolated token is used only for the Hugging Face model request; MeshHarbor does not expose it to generation jobs. The downloader deliberately skips MoGe because the supported generation profile uses a fixed camera and passes `--no-moge`. After download, MeshHarbor creates a separate CPU-only converter environment with pinned PyTorch, safetensors, and NumPy versions, converts and verifies NAF, and leaves the MLX inference environment unchanged. If conversion fails after the model files arrive, retry with `meshharbor runtime convert-naf` or the Studio's retry button.
+
+## Generate
+
+Import a PNG/JPEG using Studio or `meshharbor import`, then run:
 
 ~~~sh
-.venv/bin/python scripts/download_models.py --verify
+meshharbor generate asset_<image-id> --output ./generated.glb
 ~~~
 
-The upstream pipeline needs the converted NAF weights. Its documented
-one-time conversion requires PyTorch and safetensors:
+Studio also exposes explicit environment setup, model-download progress, and image-generation jobs. The download action requires an acknowledgment that the user has completed the gated access process. `meshharbor runtime hf-login` remains a separate terminal command so the UI never receives a token. Setup/download progress is shown as an activity indicator; detailed package and per-file transfer output appears in the engine terminal.
 
-~~~sh
-.venv/bin/python -m pip install torch safetensors
-.venv/bin/python -c "import torch; from safetensors.torch import save_file; save_file(torch.load('weights/naf_release.pth', map_location='cpu', weights_only=True), 'weights/naf_release.safetensors')"
-~~~
+Generation uses the fixed reviewed 512 profile, the local pinned Pixal3D/DINOv3/NAF files, Hugging Face offline mode, no background-removal model, and the fan hole filler. The first DINOv3 cache revision must be the pinned revision `ea8dc2863c51be0a264bab82070e3e8836b02d51`. The managed HF cache is dedicated to MeshHarbor and avoids changing/deleting the user's existing HF cache.
 
-This installs an additional package into the isolated runtime and is not done
-by MeshHarbor automatically.
+## Runtime source and licensing boundary
 
-## Run the upstream smoke generation
-
-Use a local input image. This test explicitly skips MoGe and background
-removal, uses the backend's fixed-FOV and fan-hole-fill paths, and performs no
-model or dependency downloads during inference:
-
-~~~sh
-.venv/bin/python generate_pixal3d.py \
-  --image /absolute/path/to/input.png \
-  --output /absolute/path/to/output.glb \
-  --resolution 512 \
-  --texture-size 1024 \
-  --target-faces 100000 \
-  --no-moge \
-  --no-rembg \
-  --hole-fill-backend fan
-~~~
-
-Without rembg, use a foreground-prepared image for best results. The face
-count is a soft target, not a hard cap.
-
-## MeshHarbor integration status
-
-The Rust core contains an opt-in process wrapper that requires these optional
-environment variables when the source is outside the checkout's default
-location:
-
-~~~sh
-export MESHHARBOR_PIXAL3D_MLX_ROOT="/absolute/path/to/meshharbor/runtimes/pixal3d/mlx/upstream"
-export MESHHARBOR_PIXAL3D_MLX_PYTHON="/absolute/path/to/meshharbor/runtimes/pixal3d/mlx/upstream/.venv/bin/python"
-~~~
-
-It probes only local paths and never downloads or authenticates. Its supported
-profile uses local pinned Pixal3D/DINOv3/NAF checkpoints, offline Hugging Face
-mode, fixed camera, no background-removal model, and the fan hole filler. If
-any required local checkpoint is absent, runtime_doctor reports it as
-not-ready. The pinned MLX entrypoint selects the first non-hidden DINOv3 cache
-snapshot it finds, so MeshHarbor enables generation only when the selected
-`HOME` cache contains exactly the pinned revision
-`ea8dc2863c51be0a264bab82070e3e8836b02d51`. If the account cache has other
-DINOv3 revisions, use a dedicated local `HOME` cache for this manually prepared
-runtime; the application does not delete or rearrange the user's existing HF
-cache.
-
-MeshHarbor now exposes this profile through `meshharbor generate`, the
-`image.generate` REST job (`POST /api/v1/jobs`), and the MCP tool
-`start_image_generation`. The REST/MCP calls return a persistent job; poll
-`GET /api/v1/jobs/{job_id}` and use `result.asset_id` to retrieve the derived
-GLB artifact. The CLI accepts an imported image `asset_id` and optional
-`--seed`, `--resolution`, `--texture-size`, `--target-faces`, and `--output`.
-Only resolution 512 is enabled in this integration. MeshHarbor reports
-checkpoint/path readiness, but does not validate the full Python dependency
-environment or guarantee an inference run will fit available memory. The
-upstream smoke command above remains useful for checking that runtime outside
-MeshHarbor before submitting a long job.
-
-The Studio exposes PNG/JPEG import, texture-size and soft face-target controls,
-and persistent job polling. It enables the Generate action only when the local
-path/checkpoint readiness probe passes; that probe does not verify installed
-Python packages or model execution. The REST job API, MCP tool, and CLI remain
-available as alternate interfaces.
-
-## Conditions retained
-
-- Pixal3D's source-port MIT notice is preserved.
-- DINOv3 remains governed by its separate agreement and gated checkpoint
-  access. NAF and all model/dependency terms remain separate from the
-  repository's own license.
-- This manual setup is intended for the user's local installation. It does not
-  clear redistribution of weights, runtime bundles, or commercial usage.
+- The source-port MIT notice is preserved.
+- DINOv3 has a separate agreement and gated checkpoint access. NAF and all other checkpoint/dependency terms remain separate from MeshHarbor's own license.
+- This feature does not clear redistribution of weights/runtime bundles or commercial usage.
 - No model weights or user images are shipped in this repository.
+- The embedded code snapshot is not a self-contained Python distribution: users still need `uv`, and setup fetches dependencies and model files when explicitly requested.
+- `runtime doctor` checks local file paths only; it does not guarantee memory capacity, dependency health after setup, or successful end-to-end inference.
 
-## Validation status for this integration
+## Validation status
 
-- `cargo fmt --all -- --check` and offline Cargo metadata validation pass.
-- `cargo test --workspace --locked --offline` could not reach compilation:
-  this environment has no cached `meshopt` crate, and its allowed network path
-  does not include crates.io. The Rust integration and Rust auth changes are
-  therefore not compile- or test-verified here.
-- Studio `npm run test:security` passes 4/4 tests. npm dependencies are not
-  available in the local offline cache, so the TypeScript bundle and browser
-  workflow were not built or exercised.
-- No Pixal3D checkpoints were provisioned, so no model inference was run.
-  Path readiness is not evidence that Python dependencies, memory capacity, or
-  an end-to-end generation run will succeed.
+- The Rust code was formatted, but this workspace has no `meshopt` crate cached and its network allowlist does not include crates.io. Cargo compilation/tests therefore cannot run here.
+- This environment is not Apple Silicon macOS. Managed MLX installation, HF gated access, model download, and inference have not been exercised.
+- Studio security tests can run independently. The npm package cache is absent here, so the TypeScript bundle/browser workflow may remain unverified.
