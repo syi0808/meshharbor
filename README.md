@@ -1,17 +1,17 @@
 # MeshHarbor
 
-MeshHarbor is an early Rust-first, local 3D asset processing application. Its shared Rust operation core is exposed through a CLI, a loopback REST API, and the official Rust MCP SDK. It supports importing PNG/JPEG/GLB files and simplifying a limited class of static GLB meshes with meshoptimizer. An opt-in Pixal3D MLX image-to-3D path is wired through the core, CLI, REST jobs, and MCP when the user has manually prepared the local Python runtime and checkpoints.
+MeshHarbor is an early Rust-first, local 3D asset processing application. Its shared Rust operation core is exposed through a CLI, a loopback REST API, and the official Rust MCP SDK. It supports importing PNG/JPEG/GLB files and simplifying a limited class of static GLB meshes with meshoptimizer. An opt-in Pixal3D MLX image-to-3D path has explicit local environment and model-download steps; gated model approval and login remain user-controlled.
 
-This is **not yet a complete M1 product or release build**. A React/TypeScript/Three.js Studio client exists under `apps/studio`, and the Rust server can embed a built client bundle, but its npm dependencies are not installed and a production bundle/browser QA have not been verified here. The image-to-3D path has not been run end-to-end in this environment; managed Python/model installation, Windows/macOS release validation, and production packaging are not implemented. MeshHarbor's project license has not been selected; this repository deliberately has no root `LICENSE`.
+This is **not yet a complete M1 product or release build**. A React/TypeScript/Three.js Studio client exists under `apps/studio`, and the Rust server can embed a built client bundle, but its npm dependencies are not installed and a production bundle/browser QA have not been verified here. The image-to-3D path has not been run end-to-end in this environment; the MLX setup requires `uv` and large user-triggered model downloads. Windows/macOS release validation and production packaging are not implemented. MeshHarbor's project license has not been selected; this repository deliberately has no root `LICENSE`.
 
 ## Implemented now
 
 - `crates/core`: GLB v2 parsing and inspection, source-immutable content-addressed artifact storage, SQLite asset/job records, operation catalog, and meshoptimizer-based GLB simplification.
 - `crates/meshharbor`: one executable with CLI commands, a local Axum REST API, and stdio MCP tools, all using the same `OperationCore`.
-- `apps/studio`: a source-only local Studio client for GLB and PNG/JPEG import, mesh preview, simplify jobs, MLX image-generation jobs, and result download. Generation controls are enabled only when the runtime path/checkpoint probe passes. The Rust build embeds `apps/studio/dist` when present; without it, the server root serves a local “assets are not built” notice.
-- `crates/core/src/generation.rs`: an opt-in subprocess wrapper for the reviewed 512 Pixal3D MLX profile. It checks locally provisioned checkpoints, forces Hugging Face offline mode, and never installs packages, accepts gated terms, or downloads weights.
-- `runtimes/pixal3d/{cuda,mlx}/upstream/`: byte-preserved source snapshots from the two pinned Pixal3D repositories, with per-file inventory and third-party notices. CUDA is source-only; MLX has a manual local-runtime integration, not a managed installer.
-- `registry/models/pixal3d.json`: both backends remain non-installable; no model weights or automatic model downloads are included.
+- `apps/studio`: a source-only local Studio client for GLB and PNG/JPEG import, mesh preview, simplify jobs, MLX runtime setup/download jobs, image-generation jobs, and result download. The Python environment and checkpoint downloads are separate explicit actions. The Rust build embeds `apps/studio/dist` when present; without it, the server root serves a local “assets are not built” notice.
+- `crates/core/src/runtime.rs` and `generation.rs`: an opt-in installer for an isolated uv-managed Python 3.12 environment, isolated Hugging Face login/cache, gated-access preflight, checksum-checked Pixal3D files, isolated NAF checkpoint conversion, and the offline 512 inference wrapper. The MLX upstream snapshot and MeshHarbor adapters are embedded in the Rust executable and extracted into the application data directory during runtime setup; no checkout-relative source path is required at runtime. The user must install `uv` and request/accept gated DINOv3 access before download.
+- `runtimes/pixal3d/{cuda,mlx}/upstream/`: byte-preserved source snapshots from the two pinned Pixal3D repositories, with per-file inventory and third-party notices. CUDA is source-only; MLX has a managed but incomplete local setup flow.
+- `registry/models/pixal3d.json`: model inference remains a preview and neither backend is marked release-installable; no model weights are bundled and model downloads require an explicit action.
 
 The GLB simplifier is deliberately narrower than general-purpose glTF: one embedded GLB buffer, indexed triangle primitives, static meshes, FLOAT `POSITION`, and non-sparse accessors. It rejects animations, skins, morph targets, extension-bearing primitives, compressed mesh extensions, external buffers, and unsupported data layouts. Original vertex and binary streams, primitive/material references, and embedded texture payloads are left unchanged; only new index accessors are appended. `NORMAL` and `TEXCOORD_0` are included in the simplification attribute metric when supported. This does not re-unwrap UVs or rebake textures. External image URIs are not fetched or copied. The triangle target is aspirational: the report gives the actual count, measured meshoptimizer error, and a warning when constraints prevent reaching the target.
 
@@ -42,11 +42,15 @@ meshharbor assets --limit 20
 # Simplify an imported asset; the source stays intact
 meshharbor simplify asset_<id> --triangles 4000 --max-error 0.02 --output ./scene-simplified.glb
 
-# Generate a GLB from an imported image; see the manual runtime setup first
+# Optional Apple Silicon MLX runtime setup (uv must already be installed)
+meshharbor runtime setup
+meshharbor runtime hf-login
+meshharbor runtime install-models
+# Generate after the setup, gated access, and download steps complete
 meshharbor generate asset_<image-id> --output ./generated.glb
 ```
 
-The app stores source and derived artifacts under its local data directory. Use `--data-dir` or `MESHHARBOR_HOME` to choose it. Before `generate`, follow [the manual Pixal3D MLX runtime setup](docs/pixal3d-mlx-manual-runtime.md). MeshHarbor does not install dependencies or fetch gated or public model weights.
+The app stores source assets, the managed Python environment, and the isolated Hugging Face cache under its local data directory. Use the same `--data-dir` or `MESHHARBOR_HOME` value for `serve` and `runtime hf-login`. Before model download, review and accept any required model-host terms in your own account. The model-download action is explicit, checks gated DINOv3 access first, and retrieves about 24 GB of pinned files; it does not download MoGe for the fixed-camera profile. NAF is converted automatically in a separate isolated environment. See [the Pixal3D MLX setup guide](docs/pixal3d-mlx-manual-runtime.md).
 
 ## REST API
 
@@ -59,12 +63,13 @@ meshharbor serve --listen 127.0.0.1:7432
 A temporary bearer token is printed to stderr for non-dashboard API clients. The built-in Studio connects automatically without a token. Dashboard calls require a non-simple marker and exact same-origin browser provenance; tokenless writes require an exact same-origin `Origin`. Safe dashboard reads may use browser `Sec-Fetch-Site: same-origin` only when browsers omit `Origin`. Non-browser clients with a valid bearer token may omit `Origin` on writes for REST compatibility; if supplied, `Origin` must still match the loopback `Host`. Cross-origin requests are rejected even if they carry a bearer token. The marker is not a secret or per-process credential: local processes running as the same OS user can forge request headers and are inside this single-user local trust boundary. This browser-origin check is intended to block hostile websites, cross-origin forms, and other local web origins, not malicious software running as the user. The server binds only to loopback and rejects untrusted Host or mismatched Origin values. The Studio page sends `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY` to prevent clickjacking. Current endpoints:
 
 - `GET /api/v1/health`, `/api/v1/runtime`, `/api/v1/operations`
+- `POST /api/v1/runtime/pixal3d-mlx/setup`, `/models`, `/convert-naf` for explicit asynchronous local setup actions
 - `GET /api/v1/assets?limit=50`; `POST /api/v1/assets?filename=scene.glb` with raw file bytes
 - `GET /api/v1/assets/{asset_id}`; `POST /api/v1/assets/{asset_id}/simplify`
 - `POST /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`, `POST /api/v1/jobs/{job_id}/cancel`
 - `GET /api/v1/artifacts/{artifact_id}`
 
-Job requests support `mesh.simplify` and `image.generate` and return `202 Accepted`. The single operation slot serializes local work. Queued jobs can be cancelled; native simplification and model inference cannot currently be interrupted safely after starting. Job state is persisted, but automatic recovery of queued/running work after a process restart is not implemented. Image generation is only available when the manually provisioned MLX paths/checkpoints are present; the readiness check does not verify the full Python dependency environment or guarantee available memory.
+Job requests support `mesh.simplify`, `image.generate`, and the two explicit runtime setup actions and return `202 Accepted`. The single operation slot serializes local work. Queued jobs can be cancelled; native simplification, runtime installation, downloads, and model inference cannot currently be interrupted safely after starting. Job state is persisted, but automatic recovery of queued/running work after a process restart is not implemented. Image generation is only available when managed Python and pinned checkpoints are present; readiness checks required paths but do not guarantee available memory or successful inference.
 
 ## MCP
 
