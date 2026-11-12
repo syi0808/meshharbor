@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 
 use crate::{
     Asset, CoreError, CoreResult, GenerationOptions, GenerationResult, Pixal3dMlxRuntime,
-    SimplificationReport, Store, inspect_asset, simplify_glb,
+    Pixal3dRuntimeManager, RuntimeSetupReport, SimplificationReport, Store, inspect_asset,
+    simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,13 +111,30 @@ impl OperationCore {
         crate::generation::generate_pixal3d_image(self, input_asset_id, options)
     }
 
+    pub fn setup_pixal3d_mlx_environment(&self) -> CoreResult<RuntimeSetupReport> {
+        Pixal3dRuntimeManager::new(self.store.root()).setup_environment()
+    }
+
+    pub fn install_pixal3d_mlx_models(&self) -> CoreResult<RuntimeSetupReport> {
+        Pixal3dRuntimeManager::new(self.store.root()).install_models()
+    }
+
+    pub fn convert_pixal3d_mlx_naf(&self) -> CoreResult<RuntimeSetupReport> {
+        Pixal3dRuntimeManager::new(self.store.root()).convert_naf()
+    }
+
+    pub fn login_pixal3d_mlx_huggingface(&self) -> CoreResult<()> {
+        Pixal3dRuntimeManager::new(self.store.root()).login_huggingface()
+    }
+
     pub fn list_operations(&self) -> Vec<OperationDescriptor> {
-        let generation_ready =
-            Pixal3dMlxRuntime::discover().is_some_and(|runtime| runtime.readiness().ready);
+        let generation_ready = Pixal3dMlxRuntime::discover(self.store.root())
+            .readiness()
+            .ready;
         vec![
             OperationDescriptor { id: "asset.import".into(), title: "Import asset".into(), category: "asset".into(), summary: "Import PNG, JPEG, or GLB files while retaining an immutable content-addressed source artifact.".into(), implemented: true },
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
-            OperationDescriptor { id: "image.generate".into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Run a manually provisioned Pixal3D MLX 512 profile using already-cached local checkpoints; MeshHarbor does not install packages, accept gated terms, or download weights in this operation.".into(), implemented: generation_ready },
+            OperationDescriptor { id: "image.generate".into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Run the local Pixal3D MLX 512 profile when the managed Python environment and pinned checkpoints are ready. Setup and model downloads are explicit runtime commands; gated terms remain user-controlled.".into(), implemented: generation_ready },
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangle primitives with meshoptimizer while retaining original vertex streams, materials, and textures.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Conservative cleanup with seam-, material-, and boundary-preservation checks.".into(), implemented: false },
             OperationDescriptor { id: "mesh.retopology".into(), title: "Retopology".into(), category: "mesh".into(), summary: "Reconstruct mesh topology; no implementation has passed dependency and quality gates.".into(), implemented: false },
@@ -134,18 +152,37 @@ impl OperationCore {
             .filter(|item| item.implemented)
             .map(|item| item.id)
             .collect();
-        let mlx = Pixal3dMlxRuntime::discover().map(|runtime| runtime.readiness());
+        let mlx = Some(Pixal3dMlxRuntime::discover(self.store.root()).readiness());
         let mut model_backends = vec![
             json!({"id":"pixal3d-cuda", "status":"source_only_vendored", "path":"runtimes/pixal3d/cuda", "installable":false, "weights_included":false}),
         ];
         if let Some(readiness) = &mlx {
             model_backends.push(json!({
                 "id": readiness.backend_id,
-                "status": if readiness.ready { "manual_inputs_present_unverified" } else { "manual_setup_required" },
+                "status": if readiness.ready {
+                    "ready_paths_unverified"
+                } else if readiness.environment_ready {
+                    if readiness.naf_conversion_required {
+                        "naf_conversion_required"
+                    } else if readiness.models_downloaded {
+                        "model_files_present_environment_unverified"
+                    } else {
+                        "model_download_required"
+                    }
+                } else {
+                    "environment_setup_required"
+                },
                 "validation_level": readiness.validation_level,
-                "installable": false,
+                "installable": cfg!(all(target_os = "macos", target_arch = "aarch64")),
                 "weights_included": false,
                 "downloads_enabled": readiness.downloads_enabled,
+                "environment_ready": readiness.environment_ready,
+                "model_files_ready": readiness.model_files_ready,
+                "models_downloaded": readiness.models_downloaded,
+                "naf_conversion_required": readiness.naf_conversion_required,
+                "conversion_enabled": readiness.conversion_enabled,
+                "runtime_root": readiness.runtime_root,
+                "python": readiness.python,
                 "gated_model_access_required": readiness.gated_model_access_required,
                 "missing": readiness.missing,
             }));
@@ -158,7 +195,7 @@ impl OperationCore {
             notes: vec![
                 "The Rust core and CPU mesh simplification are implemented; this does not yet constitute the full cross-platform Studio or one-file distribution.".into(),
                 "Atlas UV rebaking remains experimental and is not part of the product simplification path; mesh vertex data, material references, and embedded texture payloads are not rewritten, while external image URIs are not fetched.".into(),
-                "The CUDA backend remains a source-only archive. Pixal3D MLX readiness checks local paths only, not Python imports or memory; the user must manually provision its environment and all pinned checkpoints, and this build installs or downloads neither dependencies nor weights.".into(),
+                "CUDA remains source-only. Pixal3D MLX has explicit uv/Python setup, isolated Hugging Face login, and model-download actions; uv itself remains a prerequisite. The gated DINOv3 access terms remain user-controlled, and readiness does not verify available memory or successful inference.".into(),
             ],
         }
     }
