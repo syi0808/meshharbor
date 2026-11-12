@@ -10,7 +10,45 @@ interface Props {
   onError: (message: string) => void;
 }
 
-export function ModelPreview({ asset, loadModel, onError }: Props) {
+export function ModelPreview(props: Props) {
+  if (props.asset?.kind === 'image') return <ImagePreview {...props} asset={props.asset} />;
+  return <MeshPreview {...props} />;
+}
+
+function ImagePreview({ asset, loadModel, onError }: Props & { asset: Asset }) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let disposed = false;
+    let objectUrl: string | null = null;
+    setLoading(true);
+    void loadModel(asset)
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        if (disposed) URL.revokeObjectURL(objectUrl);
+        else setImageUrl(objectUrl);
+      })
+      .catch((error: unknown) => onError(error instanceof Error ? error.message : 'Could not load the image.'))
+      .finally(() => { if (!disposed) setLoading(false); });
+    return () => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [asset.id, loadModel, onError]);
+
+  return (
+    <div className="preview-stage image-preview-stage">
+      <div className="image-preview-body">
+        {imageUrl ? <img src={imageUrl} alt={`Preview of ${asset.name}`} /> : <div className="image-preview-empty">Local source image</div>}
+      </div>
+      {loading && <div className="preview-loading"><span className="spinner" /> Loading image…</div>}
+      <div className="preview-hint">Source image · stays on this device</div>
+    </div>
+  );
+}
+
+function MeshPreview({ asset, loadModel, onError }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(false);
 
@@ -119,7 +157,7 @@ export function ModelPreview({ asset, loadModel, onError }: Props) {
           <div className="empty-orbit orbit-one" />
           <div className="empty-orbit orbit-two" />
           <div className="empty-cube"><span /><span /><span /><span /></div>
-          <p>Drop in a GLB to get started</p>
+          <p>Import a GLB or source image to get started</p>
           <span>Your model stays on this device</span>
         </div>
       )}

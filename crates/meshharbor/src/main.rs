@@ -12,7 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use clap::{Parser, Subcommand};
-use meshharbor_core::{CoreError, OperationCore};
+use meshharbor_core::{CoreError, GenerationOptions, OperationCore};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -67,6 +67,20 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Generate a textured GLB from a previously imported image using the manually prepared local Pixal3D MLX runtime.
+    Generate {
+        asset_id: String,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 512)]
+        resolution: u16,
+        #[arg(long, default_value_t = 1024)]
+        texture_size: u16,
+        #[arg(long, default_value_t = 100_000)]
+        target_faces: u32,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Show implemented operations and detected runtime capabilities.
     Doctor,
 }
@@ -91,6 +105,19 @@ struct SimplifyArgs {
     target_triangles: u64,
     #[serde(default = "default_max_error")]
     max_error: f32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GenerateArgs {
+    asset_id: String,
+    #[serde(default = "default_generation_seed")]
+    seed: u64,
+    #[serde(default = "default_generation_resolution")]
+    resolution: u16,
+    #[serde(default = "default_generation_texture_size")]
+    texture_size: u16,
+    #[serde(default = "default_generation_target_faces")]
+    target_faces: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -219,6 +246,31 @@ impl McpServer {
     }
 
     #[tool(
+        description = "Start an asynchronous image.generate job using a user-provisioned local Pixal3D MLX runtime. This tool never downloads models or installs packages; gated model access must be arranged by the user outside MeshHarbor."
+    )]
+    async fn start_image_generation(&self, params: Parameters<GenerateArgs>) -> String {
+        let args = params.0;
+        let options = GenerationOptions {
+            seed: args.seed,
+            resolution: args.resolution,
+            texture_size: args.texture_size,
+            target_faces: args.target_faces,
+        };
+        match start_generation_job(
+            self.core.clone(),
+            self.scheduler.clone(),
+            &args.asset_id,
+            options,
+        )
+        .await
+        {
+            Ok(job) => serde_json::to_string_pretty(&job)
+                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+            Err(error) => json!({"error": error.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
         description = "Get the latest state, progress, result, and failure details for a MeshHarbor job."
     )]
     async fn get_job(&self, params: Parameters<JobIdArgs>) -> String {
@@ -331,6 +383,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        Command::Generate {
+            asset_id,
+            seed,
+            resolution,
+            texture_size,
+            target_faces,
+            output,
+        } => {
+            let core = OperationCore::open(&root)?;
+            let result = core.generate_pixal3d_image(
+                &asset_id,
+                GenerationOptions {
+                    seed,
+                    resolution,
+                    texture_size,
+                    target_faces,
+                },
+            )?;
+            if let Some(path) = output {
+                let artifact = result
+                    .asset
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.kind == "derived")
+                    .ok_or("Generation output artifact was not found.")?;
+                let bytes = core.store().read_artifact(&artifact.id)?.bytes;
+                fs::write(path, bytes).await?;
+            }
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         Command::Doctor => println!(
             "{}",
             serde_json::to_string_pretty(&OperationCore::open(&root)?.runtime_doctor())?
@@ -361,20 +443,38 @@ fn api_router(state: AppState, token: String) -> Router {
 }
 
 async fn authenticate(State(token): State<String>, request: Request, next: Next) -> Response {
-    let host_ok = request
+    const DASHBOARD_MARKER: &str = "local-ui-v1";
+    let host = request
         .headers()
         .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_loopback_authority);
+        .and_then(|value| value.to_str().ok());
+    let host_ok = host.is_some_and(is_loopback_authority);
     let origin_ok = request
         .headers()
         .get(header::ORIGIN)
-        .map(|value| value.to_str().ok().is_some_and(is_loopback_origin))
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .zip(host)
+                .is_some_and(|(origin, authority)| is_same_http_origin(origin, authority))
+        })
         .unwrap_or(true);
-    if !host_ok || !origin_ok {
+    let bearer_authorized = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|provided| constant_time_equal(provided.as_bytes(), token.as_bytes()));
+    let origin_required = is_api_path(request.uri().path())
+        && request.method() != Method::GET
+        && request.method() != Method::HEAD
+        && !bearer_authorized;
+    let origin_present = request.headers().contains_key(header::ORIGIN);
+    if !host_ok || !origin_ok || (origin_required && !origin_present) {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error":"Only loopback Host and Origin values are accepted."})),
+            Json(json!({"error":"API requests require a loopback Host; tokenless state-changing requests require an exact same-origin Origin."})),
         )
             .into_response();
     }
@@ -382,18 +482,41 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
     if !is_api_path(path) || path == "/api/v1/health" {
         return next.run(request).await;
     }
-    let authorized = request
+    let authorized = bearer_authorized;
+    // The built-in Studio is same-origin with this loopback server. Its
+    // non-simple marker header prevents HTML forms and cross-origin simple
+    // requests from using the tokenless dashboard path. Exact Origin matching
+    // above also rejects local services on another port and DNS-rebinding hosts.
+    let origin_matches_host = request
         .headers()
-        .get(header::AUTHORIZATION)
+        .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|provided| constant_time_equal(provided.as_bytes(), token.as_bytes()));
-    if authorized {
+        .zip(host)
+        .is_some_and(|(origin, authority)| is_same_http_origin(origin, authority));
+    // Browsers omit Origin on some same-origin GETs. Fetch Metadata supplies
+    // the browser-enforced provenance in that case; never use this exception
+    // for state-changing requests.
+    let same_origin_fetch = request
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        == Some("same-origin");
+    let safe_read = request.method() == Method::GET || request.method() == Method::HEAD;
+    let dashboard_authorized = request
+        .headers()
+        .get("x-meshharbor-dashboard")
+        .and_then(|value| value.to_str().ok())
+        == Some(DASHBOARD_MARKER)
+        && (origin_matches_host
+            || (safe_read && request.headers().get(header::ORIGIN).is_none() && same_origin_fetch));
+    if authorized || dashboard_authorized {
         next.run(request).await
     } else {
         (
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"A valid bearer token is required."})),
+            Json(
+                json!({"error":"A valid bearer token or same-origin Studio request is required."}),
+            ),
         )
             .into_response()
     }
@@ -442,7 +565,7 @@ async fn api_studio_fallback(request: Request) -> Response {
                 [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
                 "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>MeshHarbor Studio</title><body><main><h1>Studio assets are not built</h1><p>Build the client in <code>apps/studio</code>, then rebuild MeshHarbor to embed it.</p></main></body></html>",
             );
-            return response.into_response();
+            return with_studio_frame_guards(response.into_response());
         }
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -473,7 +596,19 @@ async fn api_studio_fallback(request: Request) -> Response {
     } else {
         axum::body::Body::from(asset.body)
     };
-    (headers, body).into_response()
+    with_studio_frame_guards((headers, body).into_response())
+}
+
+fn with_studio_frame_guards(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::HeaderName::from_static("content-security-policy"),
+        header::HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-frame-options"),
+        header::HeaderValue::from_static("DENY"),
+    );
+    response
 }
 
 async fn api_health() -> Json<Value> {
@@ -557,7 +692,8 @@ struct SimplifyBody {
 struct JobStartBody {
     operation: String,
     input: JobStartInput,
-    parameters: SimplifyBody,
+    #[serde(default)]
+    parameters: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -569,20 +705,44 @@ async fn api_create_job(
     State(state): State<AppState>,
     Json(body): Json<JobStartBody>,
 ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
-    if body.operation != "mesh.simplify" {
-        return Err(ApiError(CoreError::OperationUnavailable(format!(
-            "Operation '{}' is not implemented by this build.",
-            body.operation
-        ))));
-    }
-    let job = start_simplify_job(
-        state.core,
-        state.scheduler,
-        &body.input.asset_id,
-        body.parameters.target_triangles,
-        body.parameters.max_error,
-    )
-    .await?;
+    let parameters = body.parameters.unwrap_or_else(|| json!({}));
+    let job = match body.operation.as_str() {
+        "mesh.simplify" => {
+            let parameters: SimplifyBody = serde_json::from_value(parameters).map_err(|error| {
+                ApiError(CoreError::InvalidInput(format!(
+                    "Invalid mesh.simplify parameters: {error}"
+                )))
+            })?;
+            start_simplify_job(
+                state.core,
+                state.scheduler,
+                &body.input.asset_id,
+                parameters.target_triangles,
+                parameters.max_error,
+            )
+            .await?
+        }
+        "image.generate" => {
+            let parameters: GenerationOptions =
+                serde_json::from_value(parameters).map_err(|error| {
+                    ApiError(CoreError::InvalidInput(format!(
+                        "Invalid image.generate parameters: {error}"
+                    )))
+                })?;
+            start_generation_job(
+                state.core,
+                state.scheduler,
+                &body.input.asset_id,
+                parameters,
+            )
+            .await?
+        }
+        operation => {
+            return Err(ApiError(CoreError::OperationUnavailable(format!(
+                "Operation '{operation}' is not implemented by this build."
+            ))));
+        }
+    };
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
@@ -701,6 +861,120 @@ async fn start_simplify_job(
     Ok(job)
 }
 
+async fn start_generation_job(
+    core: OperationCore,
+    scheduler: Arc<Semaphore>,
+    asset_id: &str,
+    options: GenerationOptions,
+) -> Result<meshharbor_core::Job, CoreError> {
+    let source = core
+        .store()
+        .get_asset(asset_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' was not found.")))?;
+    if source.kind != meshharbor_core::AssetKind::Image {
+        return Err(CoreError::InvalidInput(
+            "image.generate requires a previously imported PNG or JPEG image asset.".into(),
+        ));
+    }
+    if options.resolution != 512 {
+        return Err(CoreError::InvalidInput(
+            "The current MLX integration exposes only the reviewed 512 generation profile.".into(),
+        ));
+    }
+    if !matches!(options.texture_size, 512 | 1024 | 2048) {
+        return Err(CoreError::InvalidInput(
+            "texture_size must be 512, 1024, or 2048.".into(),
+        ));
+    }
+    if options.target_faces < 4 {
+        return Err(CoreError::InvalidInput(
+            "target_faces must be at least 4.".into(),
+        ));
+    }
+
+    let parameters = serde_json::to_value(&options)?;
+    let job = core
+        .store()
+        .create_job("image.generate", Some(asset_id), &parameters)?;
+    let job_id = job.id.clone();
+    tokio::spawn(async move {
+        let permit = match scheduler.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return,
+        };
+        let current = match core.store().get_job(&job_id) {
+            Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued => job,
+            _ => return,
+        };
+        if core
+            .store()
+            .update_job(&job_id, meshharbor_core::JobState::Running, 5, None, None)
+            .is_err()
+        {
+            return;
+        }
+
+        let worker_core = core.clone();
+        let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
+        let result = task::spawn_blocking(move || {
+            worker_core.generate_pixal3d_image(&worker_asset_id, options)
+        })
+        .await;
+        match result {
+            Ok(Ok(result)) => {
+                if core
+                    .store()
+                    .update_job(
+                        &job_id,
+                        meshharbor_core::JobState::Validating,
+                        90,
+                        None,
+                        None,
+                    )
+                    .is_ok()
+                {
+                    let value = json!({
+                        "asset_id": result.asset.id,
+                        "backend_id": result.backend_id,
+                        "seed": result.seed,
+                        "resolution": result.resolution,
+                        "texture_size": result.texture_size,
+                        "target_faces": result.target_faces,
+                        "elapsed_ms": result.elapsed_ms,
+                    });
+                    let _ = core.store().update_job(
+                        &job_id,
+                        meshharbor_core::JobState::Succeeded,
+                        100,
+                        Some(value),
+                        None,
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = core.store().update_job(
+                    &job_id,
+                    meshharbor_core::JobState::Failed,
+                    100,
+                    None,
+                    Some(json!({"message":error.to_string()})),
+                );
+            }
+            Err(error) => {
+                let _ = core.store().update_job(
+                    &job_id,
+                    meshharbor_core::JobState::Failed,
+                    100,
+                    None,
+                    Some(json!({"message":format!("Image generation worker failed: {error}")})),
+                );
+            }
+        }
+        drop(permit);
+    });
+    Ok(job)
+}
+
 async fn api_read_artifact(
     State(state): State<AppState>,
     Path(artifact_id): Path<String>,
@@ -752,6 +1026,18 @@ fn default_data_dir() -> PathBuf {
 fn default_max_error() -> f32 {
     0.02
 }
+fn default_generation_seed() -> u64 {
+    GenerationOptions::default().seed
+}
+fn default_generation_resolution() -> u16 {
+    GenerationOptions::default().resolution
+}
+fn default_generation_texture_size() -> u16 {
+    GenerationOptions::default().texture_size
+}
+fn default_generation_target_faces() -> u32 {
+    GenerationOptions::default().target_faces
+}
 fn default_limit() -> usize {
     50
 }
@@ -767,7 +1053,8 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn is_loopback_authority(authority: &str) -> bool {
-    let authority = authority.trim();
+    // Do not trim or loosely normalize Host: accepting whitespace or a suffix
+    // here makes DNS-rebinding and proxy ambiguity harder to reason about.
     if matches!(
         authority,
         "localhost" | "localhost." | "127.0.0.1" | "[::1]" | "::1"
@@ -785,12 +1072,8 @@ fn is_loopback_authority(authority: &str) -> bool {
     })
 }
 
-fn is_loopback_origin(origin: &str) -> bool {
-    let authority = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-        .map(|rest| rest.split('/').next().unwrap_or_default());
-    authority.is_some_and(is_loopback_authority)
+fn is_same_http_origin(origin: &str, authority: &str) -> bool {
+    origin.strip_prefix("http://") == Some(authority)
 }
 
 fn is_api_path(path: &str) -> bool {
@@ -864,8 +1147,61 @@ mod tests {
         assert!(!constant_time_equal(b"a", b"aa"));
     }
 
+    #[test]
+    fn studio_origin_must_match_the_exact_loopback_authority() {
+        assert!(is_same_http_origin(
+            "http://127.0.0.1:7432",
+            "127.0.0.1:7432"
+        ));
+        assert!(is_same_http_origin(
+            "http://localhost:7432",
+            "localhost:7432"
+        ));
+        assert!(!is_same_http_origin(
+            "http://localhost:5173",
+            "localhost:7432"
+        ));
+        assert!(!is_same_http_origin(
+            "https://localhost:7432",
+            "localhost:7432"
+        ));
+        assert!(!is_same_http_origin(
+            "http://localhost:7432.evil.test",
+            "localhost:7432"
+        ));
+    }
+
+    #[test]
+    fn host_authority_accepts_only_loopback_names_and_numeric_ports() {
+        for authority in [
+            "localhost",
+            "localhost:7432",
+            "localhost.:7432",
+            "127.0.0.1",
+            "127.0.0.1:7432",
+            "[::1]:7432",
+        ] {
+            assert!(is_loopback_authority(authority), "expected {authority:?}");
+        }
+        for authority in [
+            "localhost.evil.test:7432",
+            "notlocalhost:7432",
+            "127.0.0.1.evil.test:7432",
+            "localhost:7432.evil.test",
+            "localhost:7432@evil.test",
+            " localhost:7432",
+            "localhost:7432 ",
+            "localhost:bad",
+        ] {
+            assert!(
+                !is_loopback_authority(authority),
+                "unexpectedly accepted {authority:?}"
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn rest_api_allows_health_and_requires_token_for_asset_routes() {
+    async fn rest_api_allows_health_and_same_origin_dashboard_but_rejects_unproven_requests() {
         let root = std::env::temp_dir().join(format!("meshharbor-api-{}", uuid::Uuid::new_v4()));
         let core = OperationCore::open(&root).unwrap();
         let app = api_router(
@@ -902,6 +1238,177 @@ mod tests {
             .unwrap();
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
 
+        let dashboard = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/runtime")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:7432")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dashboard.status(), StatusCode::OK);
+
+        let missing_marker = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/runtime")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:7432")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_marker.status(), StatusCode::UNAUTHORIZED);
+
+        let missing_origin = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/runtime")
+                    .header(header::HOST, "localhost:7432")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_origin.status(), StatusCode::UNAUTHORIZED);
+
+        let originless_dashboard_post = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/assets?filename=originless.png")
+                    .header(header::HOST, "localhost:7432")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::from(b"not an image".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(originless_dashboard_post.status(), StatusCode::FORBIDDEN);
+
+        let originless_bearer_post = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/assets?filename=originless.png")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::AUTHORIZATION, "Bearer correct horse")
+                    .body(Body::from(b"\x89PNG\r\n\x1a\ndashboard".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(originless_bearer_post.status(), StatusCode::OK);
+
+        let cross_origin_options = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/v1/jobs")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "x-meshharbor-dashboard",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross_origin_options.status(), StatusCode::FORBIDDEN);
+
+        let cross_origin_post = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/jobs")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::AUTHORIZATION, "Bearer correct horse")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross_origin_post.status(), StatusCode::FORBIDDEN);
+
+        let untrusted_host = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/runtime")
+                    .header(header::HOST, "localhost.evil.test:7432")
+                    .header(header::ORIGIN, "http://localhost.evil.test:7432")
+                    .header(header::AUTHORIZATION, "Bearer correct horse")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(untrusted_host.status(), StatusCode::FORBIDDEN);
+
+        let same_origin_fetch = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/runtime")
+                    .header(header::HOST, "localhost:7432")
+                    .header("sec-fetch-site", "same-origin")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(same_origin_fetch.status(), StatusCode::OK);
+
+        let dashboard_upload = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/assets?filename=dashboard.png")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:7432")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::from(b"\x89PNG\r\n\x1a\ndashboard".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dashboard_upload.status(), StatusCode::OK);
+
+        let different_loopback_origin = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/runtime")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(different_loopback_origin.status(), StatusCode::FORBIDDEN);
+
         let upload = app
             .clone()
             .oneshot(
@@ -909,6 +1416,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/assets?filename=sample.png")
                     .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:7432")
                     .header(header::AUTHORIZATION, "Bearer correct horse")
                     .body(Body::from(b"\x89PNG\r\n\x1a\nexample".to_vec()))
                     .unwrap(),
@@ -987,6 +1495,11 @@ mod tests {
                 "text/html; charset=utf-8"
             );
         }
+        assert_eq!(
+            studio.headers().get("content-security-policy").unwrap(),
+            "frame-ancestors 'none'"
+        );
+        assert_eq!(studio.headers().get("x-frame-options").unwrap(), "DENY");
 
         let denied_api = app
             .clone()
@@ -1139,6 +1652,52 @@ mod tests {
         );
         assert_eq!(core.store().list_assets(10).unwrap().len(), 2);
         drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn image_generation_job_route_validates_the_reviewed_profile_without_starting_inference()
+    {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-generate-api-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let source = core
+            .import_asset("source.png", b"\x89PNG\r\n\x1a\nlocal-test")
+            .unwrap();
+        let app = api_router(
+            AppState {
+                core,
+                scheduler: Arc::new(Semaphore::new(1)),
+            },
+            "token".into(),
+        );
+        let body = json!({
+            "operation":"image.generate",
+            "input":{"asset_id":source.id},
+            "parameters":{"resolution":1024}
+        })
+        .to_string();
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/jobs")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::AUTHORIZATION, "Bearer token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &response.into_body().collect().await.unwrap().to_bytes()
+            )
+            .unwrap()["error"],
+            "The current MLX integration exposes only the reviewed 512 generation profile."
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

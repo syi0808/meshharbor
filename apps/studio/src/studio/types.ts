@@ -36,6 +36,8 @@ export interface RuntimeInfo {
   model_backends: Array<{
     id: string;
     status: string;
+    validation_level?: string;
+    missing?: string[];
     installable: boolean;
     weights_included: boolean;
   }>;
@@ -48,7 +50,7 @@ export interface Job {
   state: 'queued' | 'running' | 'validating' | 'succeeded' | 'failed' | 'cancelling' | 'cancelled';
   input_asset_id?: string | null;
   progress: number;
-  result?: { asset_id?: string; report?: SimplificationReport } | null;
+  result?: { asset_id?: string; report?: SimplificationReport; backend_id?: string } | null;
   error?: { message?: string } | null;
   created_at: string;
   updated_at: string;

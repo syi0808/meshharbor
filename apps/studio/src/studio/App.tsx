@@ -6,16 +6,16 @@ import type { Asset, Job, Operation, RuntimeInfo, SimplificationReport } from '.
 type Connection = 'disconnected' | 'connecting' | 'connected';
 
 export function App() {
-  const [token, setToken] = useState('');
-  const [tokenDraft, setTokenDraft] = useState('');
   const [connection, setConnection] = useState<Connection>('disconnected');
-  const [showConnect, setShowConnect] = useState(true);
+  const [showConnect, setShowConnect] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [operations, setOperations] = useState<Operation[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [targetTriangles, setTargetTriangles] = useState(4000);
   const [maxError, setMaxError] = useState(0.02);
+  const [textureSize, setTextureSize] = useState(1024);
+  const [targetFaces, setTargetFaces] = useState(100000);
   const [job, setJob] = useState<Job | null>(null);
   const [report, setReport] = useState<SimplificationReport | null>(null);
   const [busy, setBusy] = useState(false);
@@ -24,8 +24,8 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<'source' | 'result'>('source');
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const tokenInputRef = useRef<HTMLInputElement>(null);
-  const api = useMemo(() => (token ? new MeshHarborApi(token) : null), [token]);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const api = useMemo(() => new MeshHarborApi(), []);
   const selectedAsset = assets.find((asset) => asset.id === selectedId) ?? null;
   const isRunning = !!job && ['queued', 'running', 'validating', 'cancelling'].includes(job.state);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
@@ -36,22 +36,15 @@ export function App() {
     setSelectedId((current) => current && items.some((item) => item.id === current) ? current : items.find((item) => item.kind === 'mesh')?.id ?? null);
   }, []);
 
-  const connect = useCallback(async (candidate: string) => {
-    const normalized = candidate.trim();
-    if (!normalized) {
-      setError('Paste the bearer token printed by `meshharbor serve` in the terminal.');
-      return;
-    }
+  const connect = useCallback(async () => {
     setError(null);
     setConnection('connecting');
-    const client = new MeshHarborApi(normalized);
     try {
-      const health = await client.health();
+      const health = await api.health();
       if (health.service !== 'meshharbor' || health.status !== 'ok') throw new Error('This does not look like a MeshHarbor server.');
       const [runtimeInfo, operationList, assetList] = await Promise.all([
-        client.runtime(), client.operations(), client.assets(),
+        api.runtime(), api.operations(), api.assets(),
       ]);
-      setToken(normalized);
       setRuntime(runtimeInfo);
       setOperations(operationList);
       setAssets(assetList);
@@ -59,18 +52,17 @@ export function App() {
       setConnection('connected');
       setShowConnect(false);
       setNotice('Connected to your local MeshHarbor engine.');
-      setTokenDraft('');
     } catch (cause) {
       setConnection('disconnected');
       const message = cause instanceof Error ? cause.message : 'Could not connect to MeshHarbor.';
-      setError(message.includes('401') || message.toLowerCase().includes('bearer')
-        ? 'That token was not accepted. Copy the latest token from the server terminal and try again.'
-        : message);
+      setError(`Could not reach the local MeshHarbor engine. Start "meshharbor serve", then retry. ${message}`);
     }
-  }, []);
+  }, [api]);
+
+  useEffect(() => { void connect(); }, [connect]);
 
   useEffect(() => {
-    if (!api || !job || !['queued', 'running', 'validating', 'cancelling'].includes(job.state)) return;
+    if (!job || !['queued', 'running', 'validating', 'cancelling'].includes(job.state)) return;
     let stopped = false;
     let timer = 0;
     const poll = async () => {
@@ -88,11 +80,13 @@ export function App() {
               setActiveView('result');
             }
           }
-          setNotice('Mesh simplification complete. Your original file is unchanged.');
+          setNotice(latest.operation === 'image.generate'
+            ? 'Image-to-3D generation complete. Your source image is unchanged.'
+            : 'Mesh simplification complete. Your original file is unchanged.');
           return;
         }
         if (latest.state === 'failed') {
-          setError(latest.error?.message ?? 'This simplification job failed.');
+          setError(latest.error?.message ?? (latest.operation === 'image.generate' ? 'This image generation job failed.' : 'This simplification job failed.'));
           return;
         }
         if (latest.state === 'cancelled') {
@@ -113,7 +107,6 @@ export function App() {
 
   useEffect(() => {
     if (!showConnect) return;
-    tokenInputRef.current?.focus();
     const dismiss = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setShowConnect(false);
     };
@@ -124,20 +117,23 @@ export function App() {
   const previewAsset = selectedAsset;
 
   const loadPreview = useCallback((asset: Asset) => {
-    if (!api) return Promise.reject(new Error('Connect to MeshHarbor first.'));
+    if (connection !== 'connected') return Promise.reject(new Error('The local MeshHarbor engine is offline.'));
     return api.artifact(asset);
-  }, [api]);
+  }, [api, connection]);
   const reportPreviewError = useCallback((message: string) => setError(`Preview: ${message}`), []);
 
   async function importFiles(files: FileList | File[]) {
-    if (!api) {
+    if (connection !== 'connected') {
       setShowConnect(true);
-      setError('Connect to your local MeshHarbor engine before importing.');
+      setError('Start the local MeshHarbor engine, then retry the import.');
       return;
     }
-    const file = Array.from(files).find((candidate) => candidate.name.toLowerCase().endsWith('.glb'));
+    const file = Array.from(files).find((candidate) => {
+      const name = candidate.name.toLowerCase();
+      return name.endsWith('.glb') || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg');
+    });
     if (!file) {
-      setError('Choose a .glb file. This Studio build currently processes static GLB meshes.');
+      setError('Choose a .glb, .png, or .jpg image file.');
       return;
     }
     if (file.size > 512 * 1024 * 1024) {
@@ -148,12 +144,13 @@ export function App() {
     setNotice(null);
     setBusy(true);
     try {
-      const imported = await api.importGlb(file);
+      const isImage = /\.(png|jpe?g)$/i.test(file.name);
+      const imported = isImage ? await api.importImage(file) : await api.importGlb(file);
       await refreshAssets(api);
       setSelectedId(imported.id);
       setActiveView('source');
       setReport(null);
-      setNotice(`${file.name} imported locally.`);
+      setNotice(`${file.name} imported locally${isImage ? '. Generate a 3D asset from it when the MLX runtime is ready.' : '.'}`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not import this file.');
     } finally {
@@ -162,7 +159,7 @@ export function App() {
   }
 
   async function simplify() {
-    if (!api || !selectedAsset) return;
+    if (!selectedAsset) return;
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -178,8 +175,25 @@ export function App() {
     }
   }
 
+  async function generate() {
+    if (!selectedAsset || selectedAsset.kind !== 'image') return;
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    setReport(null);
+    try {
+      const nextJob = await api.createImageGenerationJob(selectedAsset.id, textureSize, Math.max(4, Math.floor(targetFaces)));
+      setJob(nextJob);
+      setActiveView('result');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not start image generation.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function downloadResult() {
-    if (!api || !selectedAsset) return;
+    if (!selectedAsset) return;
     try {
       const blob = await api.artifact(selectedAsset);
       const url = URL.createObjectURL(blob);
@@ -194,7 +208,7 @@ export function App() {
   }
 
   async function cancelJob() {
-    if (!api || !job || job.state !== 'queued') return;
+    if (!job || job.state !== 'queued') return;
     try {
       const updated = await api.cancelJob(job.id);
       setJob(updated);
@@ -208,6 +222,7 @@ export function App() {
 
   const triangleCount = Number(selectedAsset?.metadata.triangles ?? 0);
   const canSimplify = !!selectedAsset && selectedAsset.kind === 'mesh' && !!operations.find((operation) => operation.id === 'mesh.simplify')?.implemented;
+  const canGenerate = !!selectedAsset && selectedAsset.kind === 'image' && !!operations.find((operation) => operation.id === 'image.generate')?.implemented;
   const formatSize = (size: number) => size < 1024 * 1024 ? `${(size / 1024).toFixed(0)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`;
 
   return (
@@ -233,7 +248,7 @@ export function App() {
           <button className="nav-item" onClick={() => document.getElementById('asset-library')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon cube-icon" /> Asset library <span className="nav-count">{assets.length}</span></button>
           <div className="sidebar-section-label operations-label">OPERATIONS</div>
           <div className="nav-item selected"><span className="nav-icon simplify-icon">◒</span> Simplify mesh <span className="selected-dot" /></div>
-          <div className="nav-item unavailable" title="Not implemented in this build"><span className="nav-icon sparkle-icon">✳</span> Generate <span className="soon-label">SOON</span></div>
+          <button className="nav-item" title="Image-to-3D generation" onClick={() => document.getElementById('image-generation')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon sparkle-icon">✳</span> Generate</button>
           <div className="nav-item unavailable" title="Not implemented in this build"><span className="nav-icon">⌘</span> Retopology <span className="soon-label">SOON</span></div>
           <div className="sidebar-bottom">
             <div className="local-card">
@@ -246,9 +261,13 @@ export function App() {
 
         <main className="main-content">
           <div className="page-heading">
-            <div><div className="eyebrow">YOUR WORKSPACE</div><h1>Studio <span className="heading-dot">.</span></h1><p>Refine a mesh, keep the original safe.</p></div>
-            <button className="button button-secondary import-button" onClick={() => fileInputRef.current?.click()} disabled={busy}><span className="button-plus">＋</span> Import GLB</button>
+            <div><div className="eyebrow">YOUR WORKSPACE</div><h1>Studio <span className="heading-dot">.</span></h1><p>Generate from an image or refine a mesh, all locally.</p></div>
+            <div className="import-actions">
+              <button className="button button-secondary import-button" onClick={() => fileInputRef.current?.click()} disabled={busy}><span className="button-plus">＋</span> Import GLB</button>
+              <button className="button button-secondary import-button" onClick={() => imageInputRef.current?.click()} disabled={busy}><span className="button-plus">＋</span> Import image</button>
+            </div>
             <input ref={fileInputRef} className="sr-only" type="file" accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
+            <input ref={imageInputRef} className="sr-only" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           </div>
 
           {(error || notice) && <div className={`toast ${error ? 'toast-error' : 'toast-success'}`} role={error ? 'alert' : 'status'}><span className="toast-icon">{error ? '!' : '✓'}</span><span>{error ?? notice}</span><button onClick={() => { setError(null); closeNotice(); }} aria-label="Dismiss">×</button></div>}
@@ -257,7 +276,7 @@ export function App() {
             <section className="viewer-column">
               <div className="viewer-card">
                 <div className="viewer-toolbar">
-                  <div className="viewer-title"><span className="tiny-cube" /> 3D Preview {selectedAsset && <span className="viewer-filename">/ {selectedAsset.name}</span>}</div>
+                  <div className="viewer-title"><span className="tiny-cube" /> {selectedAsset?.kind === 'image' ? 'Image preview' : '3D Preview'} {selectedAsset && <span className="viewer-filename">/ {selectedAsset.name}</span>}</div>
                   <div className="view-toggle" role="tablist" aria-label="Preview version">
                     <button className={activeView === 'source' ? 'active' : ''} onClick={() => { setActiveView('source'); if (selectedAsset?.source_asset_id) setSelectedId(selectedAsset.source_asset_id); }}>Original</button>
                     <button className={activeView === 'result' ? 'active' : ''} onClick={() => { setActiveView('result'); const derivedId = job?.result?.asset_id ?? assets.find((asset) => asset.source_asset_id === selectedAsset?.id)?.id; if (derivedId) setSelectedId(derivedId); }} disabled={!job?.result?.asset_id && !selectedAsset?.source_asset_id && !assets.some((asset) => asset.source_asset_id === selectedAsset?.id)}>Result</button>
@@ -267,10 +286,9 @@ export function App() {
                 <ModelPreview asset={previewAsset} loadModel={loadPreview} onError={reportPreviewError} />
                 {selectedAsset && (
                   <div className="asset-meta-strip">
-                    <div className="asset-meta-main"><span className="file-badge">GLB</span><div><strong>{selectedAsset.name}</strong><span>{formatSize(selectedAsset.byte_size)} · {selectedAsset.kind === 'mesh' ? `${Number(selectedAsset.metadata.mesh_count ?? 0)} mesh${Number(selectedAsset.metadata.mesh_count ?? 0) === 1 ? '' : 'es'}` : 'Image asset'}</span></div></div>
+                    <div className="asset-meta-main"><span className="file-badge">{selectedAsset.kind === 'mesh' ? 'GLB' : selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPG'}</span><div><strong>{selectedAsset.name}</strong><span>{formatSize(selectedAsset.byte_size)} · {selectedAsset.kind === 'mesh' ? `${Number(selectedAsset.metadata.mesh_count ?? 0)} mesh${Number(selectedAsset.metadata.mesh_count ?? 0) === 1 ? '' : 'es'}` : 'Image asset'}</span></div></div>
                     <div className="meta-divider" />
-                    <div className="meta-stat"><span>TRIANGLES</span><strong>{triangleCount.toLocaleString()}</strong></div>
-                    <div className="meta-stat"><span>MATERIALS</span><strong>{Number(selectedAsset.metadata.material_count ?? 0)}</strong></div>
+                    {selectedAsset.kind === 'mesh' ? <><div className="meta-stat"><span>TRIANGLES</span><strong>{triangleCount.toLocaleString()}</strong></div><div className="meta-stat"><span>MATERIALS</span><strong>{Number(selectedAsset.metadata.material_count ?? 0)}</strong></div></> : <div className="meta-stat"><span>INPUT</span><strong>{selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPEG'}</strong></div>}
                     <div className="meta-stat"><span>STATUS</span><strong className="status-ready"><i /> Ready</strong></div>
                   </div>
                 )}
@@ -279,7 +297,7 @@ export function App() {
               {report && <div className="result-card"><div className="result-heading"><div><span className="result-icon">✓</span><strong>Simplification complete</strong></div><span className="result-delta">−{triangleReduction(report)}%</span></div><div className="result-stats"><div><span>Before</span><strong>{report.triangles_before.toLocaleString()}</strong></div><div className="result-arrow">→</div><div><span>After</span><strong>{report.triangles_after.toLocaleString()}</strong></div><div><span>Target</span><strong>{report.target_triangles.toLocaleString()}</strong></div><div><span>Error</span><strong>{report.geometric_error.toFixed(4)}</strong></div></div>{report.warnings.length > 0 && <p className="result-warning">{report.warnings[0]}</p>}</div>}
 
               <div className="library-section" id="asset-library">
-                <div className="section-heading"><div><h2>Recent assets</h2><span>Files stored locally in your workspace</span></div><button className="text-button" onClick={() => api && void refreshAssets(api)} disabled={!api}>Refresh <span>↻</span></button></div>
+                <div className="section-heading"><div><h2>Recent assets</h2><span>Files stored locally in your workspace</span></div><button className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <span>↻</span></button></div>
                 {assets.length === 0 ? <div className="library-empty">Your imported models will appear here.</div> : <div className="asset-list">{assets.slice(0, 5).map((asset) => <button key={asset.id} className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`} onClick={() => { setSelectedId(asset.id); setActiveView('source'); setReport(null); }}><span className="asset-row-icon"><MiniCube /></span><span className="asset-row-name"><strong>{asset.name}</strong><small>{asset.source_asset_id ? 'Simplified result' : 'Original'} · {formatSize(asset.byte_size)}</small></span><span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>{asset.id === selectedId && <span className="asset-current-dot" />}</button>)}</div>}
               </div>
             </section>
@@ -295,20 +313,34 @@ export function App() {
                 <input id="error-budget" className="tolerance-range" aria-label="Maximum geometric error" type="range" min="0.001" max="0.08" step="0.001" value={maxError} onChange={(event) => setMaxError(Number(event.target.value))} disabled={!selectedAsset || isRunning || busy} />
                 <div className="control-footnote">A lower tolerance may stop above your target to protect shape.</div>
                 <div className="preserve-note"><span className="preserve-check">✓</span><span>Original kept unchanged</span><span className="preserve-check">✓</span><span>UVs &amp; materials preserved</span></div>
-                {isRunning ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating output' : 'Simplifying mesh'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{job.state === 'queued' && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Native simplification can’t be interrupted once it starts.</small></div> : <button className="button button-primary simplify-button" disabled={!canSimplify || busy || !api} onClick={() => void simplify()}>{busy ? <><span className="spinner small" /> Working…</> : <><SimplifyIcon /> Simplify mesh <span className="button-arrow">→</span></>}</button>}
-                {!api && <div className="engine-nudge"><span>●</span> Connect your local engine to start processing.</div>}
+                {isRunning && job.operation === 'mesh.simplify' ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating output' : 'Simplifying mesh'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{job.state === 'queued' && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Native simplification can’t be interrupted once it starts.</small></div> : <button className="button button-primary simplify-button" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><span className="spinner small" /> Working…</> : <><SimplifyIcon /> Simplify mesh <span className="button-arrow">→</span></>}</button>}
+                <section className="generation-card" id="image-generation">
+                  <div className="generation-heading"><span className="capability-spark">✳</span><strong>Generate from image</strong></div>
+                  <p>Run the manually prepared local Pixal3D MLX 512 profile. Checkpoints are not downloaded by MeshHarbor.</p>
+                  <div className="field-label-row"><label htmlFor="texture-size">Texture size</label><span className="field-hint">Higher uses more memory</span></div>
+                  <select id="texture-size" value={textureSize} onChange={(event) => setTextureSize(Number(event.target.value))} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning}>
+                    <option value={512}>512</option><option value={1024}>1024</option><option value={2048}>2048</option>
+                  </select>
+                  <div className="field-label-row generation-face-label"><label htmlFor="target-faces">Soft face target</label><span className="field-hint">Not a hard cap</span></div>
+                  <div className="number-input-wrap"><input id="target-faces" type="number" min="4" max="1000000" step="1000" value={targetFaces} onChange={(event) => setTargetFaces(Number(event.target.value))} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning} /><span>faces</span></div>
+                  {isRunning && job.operation === 'image.generate' ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating GLB' : 'Generating 3D'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{job.state === 'queued' && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Running inference cannot be interrupted safely.</small></div> : <button className="button button-primary simplify-button" disabled={!canGenerate || busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><span className="spinner small" /> Working…</> : <>Generate 3D <span className="button-arrow">→</span></>}</button>}
+                  {selectedAsset?.kind !== 'image' && <div className="engine-nudge">Import or select a PNG/JPEG image to generate a mesh.</div>}
+                  {selectedAsset?.kind === 'image' && !canGenerate && <div className="engine-nudge">{backendStatus('pixal3d-mlx')}. Follow the manual runtime setup before starting inference.</div>}
+                  {connection !== 'connected' && <div className="engine-nudge">Start the local engine to generate.</div>}
+                </section>
+                {connection !== 'connected' && <div className="engine-nudge"><span>●</span> Start the local engine to process models.</div>}
                 {selectedAsset && selectedAsset.kind !== 'mesh' && <div className="engine-nudge">Simplification requires a GLB mesh file.</div>}
               </div>
 
-              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>More is on the way</strong></div><p>Image-to-3D generation, UV unwrapping, and texture baking are not available in this build yet.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
+              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>More is on the way</strong></div><p>UV unwrapping and texture baking are not available in this build yet. The image-to-3D profile requires a manually prepared local runtime.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
             </aside>
           </div>
         </main>
       </div>
 
-      {dragging && <div className="drop-overlay"><div className="drop-overlay-card"><span className="drop-icon">↓</span><strong>Drop your GLB here</strong><span>Import starts locally on your computer</span></div></div>}
+      {dragging && <div className="drop-overlay"><div className="drop-overlay-card"><span className="drop-icon">↓</span><strong>Drop a GLB or source image here</strong><span>Import starts locally on your computer</span></div></div>}
 
-      {showConnect && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowConnect(false); }}><section className="connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title"><button className="dialog-close" onClick={() => setShowConnect(false)} aria-label="Close">×</button><div className="connect-brand"><div className="brand-mark"><span /><span /><span /></div></div><div className="dialog-eyebrow">LOCAL ENGINE</div><h2 id="connect-title">Connect to MeshHarbor</h2><p>Start the local server, then paste its temporary access token from your terminal. Your token stays in memory for this browser tab only.</p><div className="connect-steps"><code>meshharbor serve</code><span>→</span><span>Copy the bearer token from the terminal</span></div><label className="token-label" htmlFor="api-token">Bearer token</label><input ref={tokenInputRef} id="api-token" className="token-input" type="password" autoComplete="off" placeholder="Paste token…" value={tokenDraft} onChange={(event) => setTokenDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void connect(tokenDraft); }} />{error && <div className="dialog-error" role="alert">{error}</div>}<button className="button button-primary connect-button" onClick={() => void connect(tokenDraft)} disabled={connection === 'connecting'}>{connection === 'connecting' ? <><span className="spinner small" /> Connecting…</> : 'Connect engine'} <span className="button-arrow">→</span></button><div className="dialog-security"><span>⌑</span> Requests only go to localhost. The engine rejects non-loopback connections.</div></section></div>}
+      {showConnect && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowConnect(false); }}><section className="connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title"><button className="dialog-close" onClick={() => setShowConnect(false)} aria-label="Close">×</button><div className="connect-brand"><div className="brand-mark"><span /><span /><span /></div></div><div className="dialog-eyebrow">LOCAL ENGINE</div><h2 id="connect-title">Connect to MeshHarbor</h2><p>The Studio connects directly to the local engine. No access token is needed in this dashboard.</p><div className="connect-steps"><code>meshharbor serve</code><span>→</span><span>Keep the engine running on this computer</span></div>{error && <div className="dialog-error" role="alert">{error}</div>}<button className="button button-primary connect-button" onClick={() => void connect()} disabled={connection === 'connecting'}>{connection === 'connecting' ? <><span className="spinner small" /> Connecting…</> : 'Retry connection'} <span className="button-arrow">→</span></button><div className="dialog-security"><span>⌑</span> The engine accepts dashboard requests only from its local origin.</div></section></div>}
     </div>
   );
 }
