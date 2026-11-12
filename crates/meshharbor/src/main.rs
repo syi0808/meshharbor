@@ -67,7 +67,7 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Generate a textured GLB from a previously imported image using the manually prepared local Pixal3D MLX runtime.
+    /// Generate a textured GLB from a previously imported image using the local Pixal3D MLX runtime.
     Generate {
         asset_id: String,
         #[arg(long, default_value_t = 42)]
@@ -83,6 +83,23 @@ enum Command {
     },
     /// Show implemented operations and detected runtime capabilities.
     Doctor,
+    /// Manage the optional local Pixal3D MLX runtime.
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RuntimeCommand {
+    /// Install isolated Python 3.12 and pinned backend dependencies. Requires uv on PATH.
+    Setup,
+    /// Sign into Hugging Face inside MeshHarbor's isolated model cache using an interactive terminal prompt.
+    HfLogin,
+    /// Download pinned Pixal3D and gated DINOv3 model files (~24 GB). Requires DINOv3 access first.
+    InstallModels,
+    /// Retry the isolated one-time NAF checkpoint conversion after model files are downloaded.
+    ConvertNaf,
 }
 
 #[derive(Clone)]
@@ -417,6 +434,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             serde_json::to_string_pretty(&OperationCore::open(&root)?.runtime_doctor())?
         ),
+        Command::Runtime { command } => {
+            let core = OperationCore::open(&root)?;
+            match command {
+                RuntimeCommand::Setup => {
+                    let report = core.setup_pixal3d_mlx_environment()?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                RuntimeCommand::HfLogin => {
+                    core.login_pixal3d_mlx_huggingface()?;
+                    println!(
+                        "Hugging Face authentication is configured in the isolated MeshHarbor cache."
+                    );
+                }
+                RuntimeCommand::InstallModels => {
+                    let report = core.install_pixal3d_mlx_models()?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                RuntimeCommand::ConvertNaf => {
+                    let report = core.convert_pixal3d_mlx_naf()?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -425,6 +465,18 @@ fn api_router(state: AppState, token: String) -> Router {
     Router::new()
         .route("/api/v1/health", get(api_health))
         .route("/api/v1/runtime", get(api_runtime))
+        .route(
+            "/api/v1/runtime/pixal3d-mlx/setup",
+            post(api_start_runtime_setup),
+        )
+        .route(
+            "/api/v1/runtime/pixal3d-mlx/models",
+            post(api_start_runtime_models),
+        )
+        .route(
+            "/api/v1/runtime/pixal3d-mlx/convert-naf",
+            post(api_start_runtime_naf_conversion),
+        )
         .route("/api/v1/operations", get(api_operations))
         .route(
             "/api/v1/assets",
@@ -616,6 +668,27 @@ async fn api_health() -> Json<Value> {
 }
 async fn api_runtime(State(state): State<AppState>) -> Json<meshharbor_core::RuntimeDoctor> {
     Json(state.core.runtime_doctor())
+}
+
+async fn api_start_runtime_setup(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::Setup).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn api_start_runtime_models(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::InstallModels).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn api_start_runtime_naf_conversion(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::ConvertNaf).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
 }
 async fn api_operations(
     State(state): State<AppState>,
@@ -967,6 +1040,109 @@ async fn start_generation_job(
                     100,
                     None,
                     Some(json!({"message":format!("Image generation worker failed: {error}")})),
+                );
+            }
+        }
+        drop(permit);
+    });
+    Ok(job)
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeJobKind {
+    Setup,
+    InstallModels,
+    ConvertNaf,
+}
+
+impl RuntimeJobKind {
+    fn operation(self) -> &'static str {
+        match self {
+            Self::Setup => "runtime.pixal3d.setup",
+            Self::InstallModels => "runtime.pixal3d.install_models",
+            Self::ConvertNaf => "runtime.pixal3d.convert_naf",
+        }
+    }
+}
+
+async fn start_runtime_job(
+    core: OperationCore,
+    scheduler: Arc<Semaphore>,
+    kind: RuntimeJobKind,
+) -> Result<meshharbor_core::Job, CoreError> {
+    let job =
+        core.store()
+            .create_job(kind.operation(), None, &json!({"backend_id":"pixal3d-mlx"}))?;
+    let job_id = job.id.clone();
+    tokio::spawn(async move {
+        let permit = match scheduler.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return,
+        };
+        if !matches!(core.store().get_job(&job_id), Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued)
+        {
+            return;
+        }
+        if core
+            .store()
+            .update_job(&job_id, meshharbor_core::JobState::Running, 5, None, None)
+            .is_err()
+        {
+            return;
+        }
+
+        let worker_core = core.clone();
+        let result = task::spawn_blocking(move || match kind {
+            RuntimeJobKind::Setup => worker_core
+                .setup_pixal3d_mlx_environment()
+                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+            RuntimeJobKind::InstallModels => worker_core
+                .install_pixal3d_mlx_models()
+                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+            RuntimeJobKind::ConvertNaf => worker_core
+                .convert_pixal3d_mlx_naf()
+                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+        })
+        .await;
+
+        match result {
+            Ok(Ok(value)) => {
+                if core
+                    .store()
+                    .update_job(
+                        &job_id,
+                        meshharbor_core::JobState::Validating,
+                        90,
+                        None,
+                        None,
+                    )
+                    .is_ok()
+                {
+                    let _ = core.store().update_job(
+                        &job_id,
+                        meshharbor_core::JobState::Succeeded,
+                        100,
+                        Some(value),
+                        None,
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = core.store().update_job(
+                    &job_id,
+                    meshharbor_core::JobState::Failed,
+                    100,
+                    None,
+                    Some(json!({"message":error.to_string()})),
+                );
+            }
+            Err(error) => {
+                let _ = core.store().update_job(
+                    &job_id,
+                    meshharbor_core::JobState::Failed,
+                    100,
+                    None,
+                    Some(json!({"message":format!("Runtime setup worker failed: {error}")})),
                 );
             }
         }
