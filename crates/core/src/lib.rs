@@ -25,7 +25,7 @@ pub use operation::{
 };
 pub use parts::{PartSeparationReport, separate_components};
 pub use retopology::{
-    RetopologyOptions, RetopologyReport, RemeshResponse, remesh_triangles_in_worker,
+    RemeshResponse, RetopologyOptions, RetopologyReport, remesh_triangles_in_worker,
 };
 pub use runtime::{Pixal3dRuntimeManager, RuntimeSetupReport};
 pub use store::{Artifact, Asset, AssetKind, CoreError, CoreResult, Job, JobState, Store};
