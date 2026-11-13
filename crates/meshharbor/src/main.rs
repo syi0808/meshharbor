@@ -92,7 +92,7 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum RuntimeCommand {
-    /// Install isolated Python 3.12 and pinned backend dependencies. Requires uv on PATH.
+    /// Install isolated Python 3.12 and pinned backend dependencies, bootstrapping pinned uv if needed.
     Setup,
     /// Sign into Hugging Face inside MeshHarbor's isolated model cache using an interactive terminal prompt.
     HfLogin,
@@ -153,6 +153,22 @@ struct ImportArgs {
     filename: String,
     /// Base64-encoded PNG, JPEG, or GLB bytes.
     bytes_base64: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExportGlbArgs {
+    asset_id: String,
+    /// Absolute destination path on the computer running the local MCP server.
+    /// The file must not already exist; MeshHarbor never overwrites exports.
+    output_path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ModelInstallConfirmation {
+    /// Must be true to queue the approximately 24 GB model download.
+    confirm_large_download: bool,
+    /// Must be true only after the owner has obtained/accepted the gated DINOv3 access terms.
+    confirm_gated_access: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,6 +299,81 @@ impl McpServer {
         {
             Ok(job) => serde_json::to_string_pretty(&job)
                 .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+            Err(error) => json!({"error": error.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Export a completed mesh asset as a GLB to an absolute path inside MESHHARBOR_EXPORT_DIR (defaults to the MeshHarbor data directory's exports folder) on the local MCP host. The destination must not exist; existing files are never overwritten. Maximum export size is 512 MiB."
+    )]
+    async fn export_glb(&self, params: Parameters<ExportGlbArgs>) -> String {
+        let core = self.core.clone();
+        let asset_id = params.0.asset_id;
+        let output_path = PathBuf::from(params.0.output_path);
+        match task::spawn_blocking(move || export_glb_file(&core, &asset_id, &output_path)).await {
+            Ok(Ok(result)) => serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
+            Err(error) => json!({"error": format!("GLB export worker failed: {error}")}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Queue the isolated Pixal3D MLX Python 3.12 environment setup. This bootstraps the pinned uv tool when needed, then installs the pinned dependencies. Poll get_job for status."
+    )]
+    async fn setup_pixal3d_mlx_runtime(&self) -> String {
+        match start_runtime_job(
+            self.core.clone(),
+            self.scheduler.clone(),
+            RuntimeJobKind::Setup,
+        )
+        .await
+        {
+            Ok(job) => serde_json::to_string_pretty(&job)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Err(error) => json!({"error": error.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Queue the explicit approximately 24 GB Pixal3D/DINOv3 model download. Invoke only when the owner has explicitly confirmed this large download and already obtained the required gated DINOv3 access. No credentials are accepted by this tool; authenticate separately with `meshharbor runtime hf-login`. Poll get_job for status."
+    )]
+    async fn install_pixal3d_mlx_models(
+        &self,
+        params: Parameters<ModelInstallConfirmation>,
+    ) -> String {
+        if !params.0.confirm_large_download || !params.0.confirm_gated_access {
+            return json!({
+                "error": "Model installation requires explicit confirmation of the approximately 24 GB download and prior owner-approved DINOv3 gated access."
+            })
+            .to_string();
+        }
+        match start_runtime_job(
+            self.core.clone(),
+            self.scheduler.clone(),
+            RuntimeJobKind::InstallModels,
+        )
+        .await
+        {
+            Ok(job) => serde_json::to_string_pretty(&job)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Err(error) => json!({"error": error.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Queue the isolated one-time NAF checkpoint conversion after the model download succeeds. Poll get_job for status."
+    )]
+    async fn convert_pixal3d_mlx_naf(&self) -> String {
+        match start_runtime_job(
+            self.core.clone(),
+            self.scheduler.clone(),
+            RuntimeJobKind::ConvertNaf,
+        )
+        .await
+        {
+            Ok(job) => serde_json::to_string_pretty(&job)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
             Err(error) => json!({"error": error.to_string()}).to_string(),
         }
     }
@@ -1177,6 +1268,113 @@ async fn api_read_artifact(
     Ok((headers, content.bytes).into_response())
 }
 
+const MAX_MCP_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Write a stored mesh GLB to a caller-selected local path without clobbering
+/// existing data. This is used only by the explicit MCP export tool.
+fn export_glb_file(
+    core: &OperationCore,
+    asset_id: &str,
+    output_path: &std::path::Path,
+) -> Result<Value, CoreError> {
+    if !output_path.is_absolute() {
+        return Err(CoreError::InvalidInput(
+            "Export path must be absolute on the local MCP host.".into(),
+        ));
+    }
+    if !output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+    {
+        return Err(CoreError::InvalidInput(
+            "GLB exports must use a .glb filename.".into(),
+        ));
+    }
+    let asset = core
+        .store()
+        .get_asset(asset_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' was not found.")))?;
+    if asset.kind != meshharbor_core::AssetKind::Mesh {
+        return Err(CoreError::InvalidInput(
+            "Only mesh assets can be exported as GLB.".into(),
+        ));
+    }
+    let artifact = asset
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "source" || artifact.kind == "derived")
+        .ok_or_else(|| CoreError::NotFound("Mesh asset has no GLB artifact.".into()))?;
+    if artifact.mime_type != "model/gltf-binary" || artifact.byte_size > MAX_MCP_EXPORT_BYTES {
+        return Err(CoreError::InvalidInput(
+            "Artifact is not a supported GLB or exceeds the 512 MiB MCP export limit.".into(),
+        ));
+    }
+
+    let file_name = output_path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CoreError::InvalidInput("Export path must name a file.".into()))?;
+    let requested_parent = output_path
+        .parent()
+        .ok_or_else(|| CoreError::InvalidInput("Export path must include a parent directory.".into()))?;
+    let configured_export_root = std::env::var_os("MESHHARBOR_EXPORT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| core.store().root().join("exports"));
+    std::fs::create_dir_all(&configured_export_root)?;
+    let canonical_export_root = std::fs::canonicalize(&configured_export_root)?;
+    let canonical_parent = std::fs::canonicalize(requested_parent)?;
+    if !canonical_parent.is_dir() {
+        return Err(CoreError::InvalidInput(
+            "Export destination parent must be an existing directory.".into(),
+        ));
+    }
+    if !canonical_parent.starts_with(&canonical_export_root) {
+        return Err(CoreError::InvalidInput(format!(
+            "MCP exports must stay inside the configured export directory: {}",
+            canonical_export_root.display()
+        )));
+    }
+    let destination = canonical_parent.join(file_name);
+    let content = core.store().read_artifact(&artifact.id)?;
+    if content.bytes.len() as u64 > MAX_MCP_EXPORT_BYTES || !content.bytes.starts_with(b"glTF") {
+        return Err(CoreError::InvalidInput(
+            "Stored artifact is not a valid-size binary GLB.".into(),
+        ));
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                CoreError::Conflict(format!(
+                    "Export destination already exists and was not overwritten: {}",
+                    destination.display()
+                ))
+            } else {
+                CoreError::Io(error)
+            }
+        })?;
+    let write_result = std::io::Write::write_all(&mut file, &content.bytes)
+        .and_then(|()| file.sync_all());
+    if let Err(error) = write_result {
+        drop(file);
+        let _ = std::fs::remove_file(&destination);
+        return Err(CoreError::Io(error));
+    }
+
+    Ok(json!({
+        "asset_id": asset.id,
+        "artifact_id": artifact.id,
+        "output_path": destination,
+        "byte_size": content.bytes.len(),
+        "sha256": artifact.sha256,
+        "overwritten": false
+    }))
+}
+
 fn default_data_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("MESHHARBOR_HOME") {
         return PathBuf::from(path);
@@ -1876,4 +2074,83 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn mcp_glb_export_writes_only_to_new_absolute_glb_paths() {
+        let root = std::env::temp_dir().join(format!("meshharbor-export-{}", uuid::Uuid::new_v4()));
+        let output_dir = root.join("store/exports");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let core = OperationCore::open(root.join("store")).unwrap();
+        let source_bytes = minimal_triangle_glb();
+        let asset = core.import_asset("result.glb", &source_bytes).unwrap();
+
+        let destination = output_dir.join("result.glb");
+        let exported = export_glb_file(&core, &asset.id, &destination).unwrap();
+        assert_eq!(exported["overwritten"], false);
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            source_bytes,
+            "export must be byte-identical to the stored GLB"
+        );
+
+        let conflict = export_glb_file(&core, &asset.id, &destination).unwrap_err();
+        assert!(matches!(conflict, CoreError::Conflict(_)));
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            source_bytes,
+            "a repeated export must leave the existing file untouched"
+        );
+
+        let relative = export_glb_file(&core, &asset.id, std::path::Path::new("result.glb"))
+            .unwrap_err();
+        assert!(matches!(relative, CoreError::InvalidInput(_)));
+
+        let wrong_extension = export_glb_file(&core, &asset.id, &output_dir.join("result.obj"))
+            .unwrap_err();
+        assert!(matches!(wrong_extension, CoreError::InvalidInput(_)));
+
+        let outside_dir = root.join("outside");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let escaped = export_glb_file(&core, &asset.id, &outside_dir.join("escape.glb"))
+            .unwrap_err();
+        assert!(matches!(escaped, CoreError::InvalidInput(_)));
+        assert!(!outside_dir.join("escape.glb").exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let symlinked_dir = output_dir.join("outside-link");
+            symlink(&outside_dir, &symlinked_dir).unwrap();
+            let through_symlink = export_glb_file(
+                &core,
+                &asset.id,
+                &symlinked_dir.join("symlink-escape.glb"),
+            )
+            .unwrap_err();
+            assert!(matches!(through_symlink, CoreError::InvalidInput(_)));
+            assert!(!outside_dir.join("symlink-escape.glb").exists());
+        }
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_glb_export_rejects_images_without_creating_files() {
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-export-image-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let core = OperationCore::open(root.join("store")).unwrap();
+        let image = core
+            .import_asset("source.png", b"\x89PNG\r\n\x1a\nexport-test")
+            .unwrap();
+        let destination = root.join("store/exports/not-a-mesh.glb");
+        let error = export_glb_file(&core, &image.id, &destination).unwrap_err();
+        assert!(matches!(error, CoreError::InvalidInput(_)));
+        assert!(!destination.exists());
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
+

@@ -6,7 +6,7 @@ This is the first image-generation integration profile for Apple Silicon. MeshHa
 
 - Apple Silicon macOS. CUDA installation is not implemented.
 - Rust/Cargo 1.88+ and native build tools required to build MeshHarbor.
-- `uv` installed from its official instructions and available on `PATH`. MeshHarbor does not bootstrap an unpinned package manager executable.
+- `curl` for the official uv release download if uv is not already installed. The runtime setup installs pinned uv 0.13.8 into MeshHarbor application data and verifies its SHA-256 before using it. macOS and Linux also need the system `tar` utility; Windows uses PowerShell `Expand-Archive`.
 - Build the MeshHarbor executable from the repository with the MLX source tree present. The pinned source snapshot and adapter scripts are embedded into the executable and extracted under `<data-dir>/runtimes/pixal3d-mlx/source`; the original checkout is not needed when running that built binary.
 - Around 25 GB of free disk space for the seven Pixal3D checkpoints, gated DINOv3, NAF and the isolated environment. MoGe is skipped for the fixed-camera generation profile.
 - Hugging Face account access to the gated DINOv3 repository. The owner must review and accept any required terms and obtain access in Hugging Face before downloading. Do not paste the token into chat, Studio, or source code.
@@ -16,7 +16,7 @@ This is the first image-generation integration profile for Apple Silicon. MeshHa
 Use the same data directory for the server and the following CLI commands. The default on macOS is `~/Library/Application Support/MeshHarbor`; `--data-dir` / `MESHHARBOR_HOME` overrides it.
 
 ~~~sh
-# Create managed Python 3.12 and install the exact locked MLX dependencies
+# Install pinned uv if missing, create managed Python 3.12, and install exact locked MLX dependencies
 meshharbor runtime setup
 
 # In a terminal on this computer, enter the HF token only in the official masked prompt.
@@ -50,7 +50,7 @@ Generation uses the fixed reviewed 512 profile, the local pinned Pixal3D/DINOv3/
 - DINOv3 has a separate agreement and gated checkpoint access. NAF and all other checkpoint/dependency terms remain separate from MeshHarbor's own license.
 - This feature does not clear redistribution of model weights, third-party wheels, or commercial usage.
 - No model weights or user images are shipped in this repository.
-- The embedded code snapshot is not a self-contained Python distribution: users still need `uv`, and setup fetches dependencies and model files when explicitly requested.
+- The embedded code snapshot is not a self-contained Python distribution: setup downloads the pinned uv binary only if needed and fetches dependencies and model files when explicitly requested.
 - `runtime doctor` checks local file paths only; it does not guarantee memory capacity, dependency health after setup, or successful end-to-end inference.
 
 ## Validation status

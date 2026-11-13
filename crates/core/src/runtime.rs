@@ -13,7 +13,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{CoreError, CoreResult};
+use crate::{uv_bootstrap::ensure_uv, CoreError, CoreResult};
 
 mod bundle {
     include!(concat!(env!("OUT_DIR"), "/pixal3d_runtime_bundle.rs"));
@@ -88,13 +88,13 @@ impl Pixal3dRuntimeManager {
     }
 
     /// Provision a managed Python 3.12 and the source-pinned, locked MLX
-    /// dependencies. `uv` is a prerequisite in this first iteration; the
-    /// command never downloads a bootstrap executable from an unpinned URL.
+    /// dependencies. If needed, `uv` is bootstrapped from a pinned official
+    /// release after the user explicitly starts runtime setup.
     pub fn setup_environment(&self) -> CoreResult<RuntimeSetupReport> {
         self.ensure_apple_silicon()?;
         self.ensure_source()?;
         self.validate_source()?;
-        let uv = find_uv()?;
+        let uv = ensure_uv(&self.runtime_root)?;
 
         let python_dir = self.runtime_root.join("python");
         let cache_dir = self.runtime_root.join("uv-cache");
@@ -189,7 +189,7 @@ impl Pixal3dRuntimeManager {
         std::fs::create_dir_all(&home)?;
         let weights = self.runtime_root.join("weights");
         std::fs::create_dir_all(&weights)?;
-        let uv = find_uv()?;
+        let uv = ensure_uv(&self.runtime_root)?;
         let scripts = self.managed_scripts_root();
         eprintln!(
             "[1/3] Checking access to the gated DINOv3 model before downloading large checkpoints…"
@@ -266,7 +266,7 @@ impl Pixal3dRuntimeManager {
                 python.display()
             )));
         }
-        let uv = find_uv()?;
+        let uv = ensure_uv(&self.runtime_root)?;
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
         let cache = self.runtime_root.join("uv-cache");
@@ -461,31 +461,6 @@ impl Pixal3dRuntimeManager {
         }
         Ok(PathBuf::from(path))
     }
-}
-
-fn find_uv() -> CoreResult<PathBuf> {
-    if let Some(path) = env::var_os("MESHHARBOR_UV") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(CoreError::OperationUnavailable(format!(
-            "MESHHARBOR_UV points to a missing file: {}",
-            path.display()
-        )));
-    }
-    let executable = if cfg!(windows) { "uv.exe" } else { "uv" };
-    if let Some(path) = env::var_os("PATH") {
-        for directory in env::split_paths(&path) {
-            let candidate = directory.join(executable);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-    Err(CoreError::OperationUnavailable(
-        "The uv package manager is required but is not installed. Install uv from https://docs.astral.sh/uv/getting-started/installation/ and retry. MeshHarbor does not bootstrap an unverified uv executable in this build.".into(),
-    ))
 }
 
 /// Populate a data-directory copy from the source snapshot linked into the

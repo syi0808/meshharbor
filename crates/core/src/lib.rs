@@ -2,6 +2,7 @@ mod generation;
 mod glb;
 mod operation;
 mod runtime;
+mod uv_bootstrap;
 mod store;
 
 pub use generation::{GenerationOptions, GenerationResult, Pixal3dMlxRuntime, RuntimeReadiness};
