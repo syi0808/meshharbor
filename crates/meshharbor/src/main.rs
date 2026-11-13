@@ -67,14 +67,21 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Run a supported local mesh operation and optionally write its derived GLB.
+    /// Run a supported local mesh operation. For retopology, --output writes the triangle GLB preview and --quad-output preserves the editable OBJ quads.
     /// Part separation limits: 64 MiB GLB, 4 MiB JSON, 1,000,000 vertices, 3,000,000 indices, and 256 output parts.
     ProcessMesh {
         asset_id: String,
-        #[arg(long, value_parser = ["mesh.cleanup", "mesh.separate_parts", "uv.unwrap", "render.optimize", "mesh.compress"])]
+        #[arg(long, value_parser = ["mesh.cleanup", "mesh.separate_parts", "uv.unwrap", "render.optimize", "mesh.compress", "mesh.retopology"])]
         operation: String,
+        /// Requested approximate quad count for mesh.retopology (4 to 50,000).
+        #[arg(long)]
+        target_quads: Option<u32>,
+        /// Optional path for a derived GLB or the triangulated retopology preview.
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Optional path for the original editable quad OBJ from mesh.retopology.
+        #[arg(long)]
+        quad_output: Option<PathBuf>,
     },
     /// Generate a textured GLB from a previously imported image using a ready local Pixal3D backend.
     Generate {
@@ -154,7 +161,7 @@ struct SimplifyArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct MeshProcessArgs {
     asset_id: String,
-    /// One of mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, or mesh.compress.
+    /// One of mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology.
     operation: String,
     /// Optional operation parameters, such as resolution/padding for uv.unwrap.
     #[serde(default)]
@@ -199,6 +206,13 @@ struct ExportGlbArgs {
     asset_id: String,
     /// Absolute destination path on the computer running the local MCP server.
     /// The file must not already exist; MeshHarbor never overwrites exports.
+    output_path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExportQuadObjArgs {
+    asset_id: String,
+    /// Absolute .obj destination path inside the MeshHarbor export directory; must not already exist.
     output_path: String,
 }
 
@@ -318,7 +332,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, or mesh.compress. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits connected-component primitives in one mesh. uv.unwrap uses xatlas and only rebakes supported embedded same-mesh base-color and metallic/roughness maps; it is not high-to-low projection. Compression emits a GLB requiring KHR_meshopt_compression support."
+        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits connected-component primitives in one mesh. uv.unwrap is same-mesh rebaking, not high-to-low projection. Quad retopology requires the packaged QuadriFlow sidecar and a closed untextured static GLB; it preserves actual quads in an OBJ artifact and returns a triangulated GLB preview. It does not transfer appearance or certify self-intersection/geometric error."
     )]
     async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
         let args = params.0;
@@ -376,6 +390,23 @@ impl McpServer {
             Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
             Err(error) => {
                 json!({"error": format!("GLB export worker failed: {error}")}).to_string()
+            }
+        }
+    }
+
+    #[tool(
+        description = "Export a completed QuadriFlow retopology result's editable quad OBJ artifact to an absolute path inside MESHHARBOR_EXPORT_DIR (defaults to the MeshHarbor data directory's exports folder) on the local MCP host. The destination must not exist; existing files are never overwritten. Maximum export size is 64 MiB."
+    )]
+    async fn export_quad_obj(&self, params: Parameters<ExportQuadObjArgs>) -> String {
+        let core = self.core.clone();
+        let asset_id = params.0.asset_id;
+        let output_path = PathBuf::from(params.0.output_path);
+        match task::spawn_blocking(move || export_quad_obj_file(&core, &asset_id, &output_path)).await {
+            Ok(Ok(result)) => serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
+            Err(error) => {
+                json!({"error": format!("OBJ export worker failed: {error}")}).to_string()
             }
         }
     }
@@ -599,10 +630,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::ProcessMesh {
             asset_id,
             operation,
+            target_quads,
             output,
+            quad_output,
         } => {
             let core = OperationCore::open(&root)?;
-            let result = core.process_mesh_asset(&asset_id, &operation, json!({}))?;
+            if operation != "mesh.retopology" && (target_quads.is_some() || quad_output.is_some()) {
+                return Err("--target-quads and --quad-output require mesh.retopology.".into());
+            }
+            let parameters = if operation == "mesh.retopology" {
+                json!({ "target_quads": target_quads.unwrap_or(10_000) })
+            } else {
+                json!({})
+            };
+            let result = core.process_mesh_asset(&asset_id, &operation, parameters)?;
             if let Some(path) = output {
                 let artifact = result
                     .asset
@@ -610,6 +651,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .iter()
                     .find(|artifact| artifact.kind == "derived")
                     .ok_or("Mesh processing output artifact was not found.")?;
+                let bytes = core.store().read_artifact(&artifact.id)?.bytes;
+                fs::write(path, bytes).await?;
+            }
+            if let Some(path) = quad_output {
+                let artifact = result
+                    .asset
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.kind == "quad_topology")
+                    .ok_or("Quad retopology OBJ artifact was not found.")?;
                 let bytes = core.store().read_artifact(&artifact.id)?.bytes;
                 fs::write(path, bytes).await?;
             }
@@ -1079,7 +1130,8 @@ async fn api_create_job(
         | "mesh.separate_parts"
         | "uv.unwrap"
         | "render.optimize"
-        | "mesh.compress" => {
+        | "mesh.compress"
+        | "mesh.retopology" => {
             start_mesh_operation_job(
                 state.core,
                 state.scheduler,
