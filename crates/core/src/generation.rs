@@ -14,7 +14,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{Asset, AssetKind, CoreError, CoreResult, OperationCore, inspect_asset};
-use crate::runtime::Pixal3dRuntimeManager;
+use crate::{
+    cuda_runtime::Pixal3dCudaRuntimeManager,
+    runtime::Pixal3dRuntimeManager,
+};
 
 const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
@@ -35,9 +38,12 @@ const MAX_GENERATED_GLB_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GenerationOptions {
+    /// Backend selector: `auto`, `pixal3d-mlx`, or `pixal3d-cuda`.
+    #[serde(default = "default_generation_backend")]
+    pub backend_id: String,
     /// Reproducible sampler seed.
     pub seed: u64,
-    /// The vendored MLX backend currently supports the validated 512 cascade.
+    /// Both vendored backends currently expose only the 512 geometry cascade.
     pub resolution: u16,
     /// Output PBR texture resolution.
     pub texture_size: u16,
@@ -48,12 +54,17 @@ pub struct GenerationOptions {
 impl Default for GenerationOptions {
     fn default() -> Self {
         Self {
+            backend_id: default_generation_backend(),
             seed: 42,
             resolution: 512,
             texture_size: 1024,
             target_faces: 100_000,
         }
     }
+}
+
+fn default_generation_backend() -> String {
+    "auto".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,8 +415,8 @@ struct GenerationCommandReport {
     elapsed_ms: u128,
 }
 
-/// Generates a textured GLB from a previously imported local image using
-/// an explicitly prepared Pixal3D MLX runtime.
+/// Generates a textured GLB from a previously imported local image using the
+/// explicitly selected, already prepared Pixal3D backend.
 pub(crate) fn generate_pixal3d_image(
     core: &OperationCore,
     input_asset_id: &str,
@@ -427,13 +438,21 @@ pub(crate) fn generate_pixal3d_image(
         .ok_or_else(|| CoreError::NotFound("Image source artifact is missing.".into()))?;
     let input_bytes = core.store().read_artifact(&source_artifact.id)?.bytes;
 
-    let runtime = Pixal3dMlxRuntime::discover(core.store().root());
-    if !runtime.readiness().ready {
-        return Err(CoreError::OperationUnavailable(format!(
-            "Pixal3D MLX runtime is not ready: {}",
-            runtime.readiness().missing.join("; ")
-        )));
-    }
+    let selected_backend_id = match options.backend_id.as_str() {
+        "auto" => {
+            if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+                "pixal3d-cuda"
+            } else {
+                "pixal3d-mlx"
+            }
+        }
+        "pixal3d-mlx" | "pixal3d-cuda" => options.backend_id.as_str(),
+        other => {
+            return Err(CoreError::InvalidInput(format!(
+                "Unknown generation backend '{other}'. Choose auto, pixal3d-mlx, or pixal3d-cuda."
+            )));
+        }
+    };
 
     let work_dir = core
         .store()
@@ -454,7 +473,23 @@ pub(crate) fn generate_pixal3d_image(
     let output_path = work_dir.join("result.glb");
     std::fs::write(&input_path, input_bytes)?;
 
-    let report = runtime.generate(&input_path, &output_path, &options)?;
+    let elapsed_ms = match selected_backend_id {
+        "pixal3d-mlx" => {
+            let runtime = Pixal3dMlxRuntime::discover(core.store().root());
+            if !runtime.readiness().ready {
+                return Err(CoreError::OperationUnavailable(format!(
+                    "Pixal3D MLX runtime is not ready: {}",
+                    runtime.readiness().missing.join("; ")
+                )));
+            }
+            runtime.generate(&input_path, &output_path, &options)?.elapsed_ms
+        }
+        "pixal3d-cuda" => {
+            let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());
+            runtime.generate(&input_path, &work_dir, &options)?
+        }
+        _ => unreachable!("backend selector was validated above"),
+    };
     let output = std::fs::read(&output_path)?;
     let descriptor = inspect_asset("result.glb", &output)?;
     if descriptor.kind != AssetKind::Mesh {
@@ -473,24 +508,24 @@ pub(crate) fn generate_pixal3d_image(
         input_asset_id,
         json!({
             "operation": "image.generate",
-            "backend": "pixal3d-mlx",
+            "backend": selected_backend_id,
             "seed": options.seed,
             "resolution": options.resolution,
             "texture_size": options.texture_size,
             "target_faces": options.target_faces,
-            "elapsed_ms": report.elapsed_ms,
+            "elapsed_ms": elapsed_ms,
             "validation": descriptor.metadata,
         }),
     )?;
     drop(cleanup);
     Ok(GenerationResult {
         asset,
-        backend_id: "pixal3d-mlx".into(),
+        backend_id: selected_backend_id.into(),
         seed: options.seed,
         resolution: options.resolution,
         texture_size: options.texture_size,
         target_faces: options.target_faces,
-        elapsed_ms: report.elapsed_ms,
+        elapsed_ms,
     })
 }
 
