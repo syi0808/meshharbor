@@ -4,7 +4,7 @@
 //! deliberately separate from the REST/MCP process because remesh 0.0.5 is
 //! experimental, may panic, and writes progress to stdout.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
@@ -97,28 +97,22 @@ fn run() -> Result<(), String> {
 fn remesh(request: Request) -> Result<Response, String> {
     validate_request(&request)?;
     let (normalized, center, scale_factor, diagonal) = normalize(&request)?;
-    let indices = request
-        .indices
-        .iter()
-        .map(|index| *index as usize)
-        .collect::<Vec<_>>();
-
-    // remesh uses usize indices and returns Vec<usize>. Its builder and run
-    // calls return Results; any panic remains contained in this child process.
-    let remesher = IsotropicRemesh::<f32, [f32; 3]>::new(&normalized, &indices)
+    // remesh uses u32 indices for this API version. Keep the GLB index width
+    // throughout instead of round-tripping through usize.
+    let remesher = IsotropicRemesh::<f32, [f32; 3]>::new(&normalized, &request.indices)
         .map_err(|error| format!("remesh input rejected: {error}"))?
         .with_target_edge_length(1.0)
         .map_err(|error| format!("invalid remesh target edge length: {error}"))?
         .with_split_edges(SplitStrategy::DihedralAngle)
         .map_err(|error| format!("cannot configure edge splitting: {error}"))?
-        .with_default_collapse_edges()
+        .with_collapse_edges(CollapseStrategy::DihedralAngle)
         .map_err(|error| format!("cannot configure edge collapsing: {error}"))?
-        .with_default_flip_edges()
+        .with_flip_edges(FlipStrategy::Valence)
         .map_err(|error| format!("cannot configure edge flipping: {error}"))?
         .with_default_smooth_weight()
         .map_err(|error| format!("cannot configure smoothing: {error}"))?;
 
-    let (output_positions, output_indices) = remesher
+    let (output_positions, output_indices): (Vec<[f32; 3]>, Vec<u32>) = remesher
         .run(request.options.iterations as usize)
         .map_err(|error| format!("isotropic remeshing failed: {error}"))?;
 
@@ -132,14 +126,10 @@ fn remesh(request: Request) -> Result<Response, String> {
             ]
         })
         .collect::<Vec<_>>();
-    let indices = output_indices
-        .into_iter()
-        .map(|index| {
-            u32::try_from(index).map_err(|_| "output index exceeds the GLB u32 range".to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let response = Response { positions, indices };
+    let response = Response {
+        positions,
+        indices: output_indices,
+    };
     validate_response(&response, center, diagonal)?;
     Ok(response)
 }
@@ -186,10 +176,26 @@ fn validate_request(request: &Request) -> Result<(), String> {
     }
 
     let mut edge_faces = HashMap::<(u32, u32), u8>::new();
+    let mut unique_faces = HashSet::<[u32; 3]>::new();
+    let (center, diagonal) = bounds(&request.positions)?;
     for triangle in request.indices.chunks_exact(3) {
         let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
         if a == b || b == c || c == a {
             return Err("input contains a degenerate triangle".into());
+        }
+        let mut face_key = [a, b, c];
+        face_key.sort_unstable();
+        if !unique_faces.insert(face_key) {
+            return Err("input contains duplicate triangles".into());
+        }
+        let inverse_diagonal = 1.0 / diagonal;
+        let pa = request.positions[a as usize];
+        let pb = request.positions[b as usize];
+        let pc = request.positions[c as usize];
+        let edge_a = scaled(sub(pb, pa), inverse_diagonal);
+        let edge_b = scaled(sub(pc, pa), inverse_diagonal);
+        if length_squared(cross(edge_a, edge_b)) <= 1.0e-16 {
+            return Err("input contains a zero-area or near-degenerate triangle".into());
         }
         for (u, v) in [(a, b), (b, c), (c, a)] {
             let edge = if u < v { (u, v) } else { (v, u) };
@@ -204,24 +210,7 @@ fn validate_request(request: &Request) -> Result<(), String> {
 }
 
 fn normalize(request: &Request) -> Result<(Vec<[f32; 3]>, [f32; 3], f32, f32), String> {
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
-    for point in &request.positions {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(point[axis]);
-            max[axis] = max[axis].max(point[axis]);
-        }
-    }
-    let span = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
-    let diagonal = (span[0] * span[0] + span[1] * span[1] + span[2] * span[2]).sqrt();
-    if !diagonal.is_finite() || diagonal <= 1.0e-12 {
-        return Err("input bounds are degenerate".into());
-    }
-    let center = [
-        min[0] + span[0] * 0.5,
-        min[1] + span[1] * 0.5,
-        min[2] + span[2] * 0.5,
-    ];
+    let (center, diagonal) = bounds(&request.positions)?;
     // remesh has an area/projection threshold expressed in default-edge units.
     // Scale uniformly so the requested edge length is exactly 1 in worker space.
     let scale_factor = 1.0 / (diagonal * request.options.target_edge_ratio);
@@ -273,7 +262,83 @@ fn validate_response(response: &Response, center: [f32; 3], diagonal: f32) -> Re
     {
         return Err("remesher returned an out-of-range index".into());
     }
+
+    let mut edge_faces = HashMap::<(u32, u32), u8>::new();
+    let mut unique_faces = HashSet::<[u32; 3]>::new();
+    let inverse_diagonal = 1.0 / diagonal;
+    for triangle in response.indices.chunks_exact(3) {
+        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+        if a == b || b == c || c == a {
+            return Err("remesher returned a degenerate triangle".into());
+        }
+        let mut face_key = [a, b, c];
+        face_key.sort_unstable();
+        if !unique_faces.insert(face_key) {
+            return Err("remesher returned duplicate triangles".into());
+        }
+        let pa = response.positions[a as usize];
+        let pb = response.positions[b as usize];
+        let pc = response.positions[c as usize];
+        let edge_a = scaled(sub(pb, pa), inverse_diagonal);
+        let edge_b = scaled(sub(pc, pa), inverse_diagonal);
+        if length_squared(cross(edge_a, edge_b)) <= 1.0e-16 {
+            return Err("remesher returned a zero-area or near-degenerate triangle".into());
+        }
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            let edge = if u < v { (u, v) } else { (v, u) };
+            let count = edge_faces.entry(edge).or_default();
+            *count = count.saturating_add(1);
+            if *count > 2 {
+                return Err("remesher returned a non-manifold edge".into());
+            }
+        }
+    }
     Ok(())
+}
+
+fn bounds(positions: &[[f32; 3]]) -> Result<([f32; 3], f32), String> {
+    if positions.is_empty() {
+        return Err("input bounds are empty".into());
+    }
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for point in positions {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(point[axis]);
+            max[axis] = max[axis].max(point[axis]);
+        }
+    }
+    let span = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+    let diagonal = (span[0] * span[0] + span[1] * span[1] + span[2] * span[2]).sqrt();
+    if !diagonal.is_finite() || diagonal <= 1.0e-12 {
+        return Err("input bounds are degenerate".into());
+    }
+    let center = [
+        min[0] + span[0] * 0.5,
+        min[1] + span[1] * 0.5,
+        min[2] + span[2] * 0.5,
+    ];
+    Ok((center, diagonal))
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn scaled(a: [f32; 3], value: f32) -> [f32; 3] {
+    [a[0] * value, a[1] * value, a[2] * value]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn length_squared(a: [f32; 3]) -> f32 {
+    a[0] * a[0] + a[1] * a[1] + a[2] * a[2]
 }
 
 fn squared_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
