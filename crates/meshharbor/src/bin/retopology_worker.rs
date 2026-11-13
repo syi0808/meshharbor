@@ -19,12 +19,8 @@ use meshharbor_core::{
 use remesh::prelude::*;
 
 const PROTOCOL_VERSION: u32 = 1;
-const MAX_REQUEST_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
-const MAX_VERTICES: usize = 200_000;
-const MAX_TRIANGLES: usize = 400_000;
-const MAX_OUTPUT_VERTICES: usize = 1_000_000;
-const MAX_OUTPUT_TRIANGLES: usize = 2_000_000;
+const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(about = "MeshHarbor experimental triangle-remeshing worker")]
