@@ -138,7 +138,7 @@ impl Pixal3dCudaRuntimeManager {
         run_visible(install, "uv could not install managed Python 3.12")?;
 
         let managed_python = self.find_managed_python(&uv)?;
-        let version = run_capture(&mut Command::new(&managed_python).arg("--version"), "Could not verify managed Python")?;
+        let version = run_capture(Command::new(&managed_python).arg("--version"), "Could not verify managed Python")?;
         if !version.starts_with("Python 3.12.") {
             return Err(CoreError::OperationUnavailable(format!(
                 "uv returned unexpected interpreter {version}; the CUDA profile requires Python 3.12."
