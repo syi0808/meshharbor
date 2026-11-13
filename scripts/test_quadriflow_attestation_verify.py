@@ -43,6 +43,8 @@ class CandidateVerifierTests(unittest.TestCase):
         *,
         source_repository_id=q.REPOSITORY_ID,
         owner_id=q.OWNER_ID,
+        workflow_san=q.WORKFLOW_SAN,
+        issuer=q.OIDC_ISSUER,
         source_ref=q.SOURCE_REF,
         source_commit=None,
         workflow_commit=None,
@@ -53,9 +55,9 @@ class CandidateVerifierTests(unittest.TestCase):
     ):
         artifact_digest = hashlib.sha256(self.binary.read_bytes()).hexdigest()
         certificate = {
-            "issuer": q.OIDC_ISSUER,
-            "subjectAlternativeName": q.WORKFLOW_SAN,
-            "buildSignerURI": q.WORKFLOW_SAN,
+            "issuer": issuer,
+            "subjectAlternativeName": workflow_san,
+            "buildSignerURI": workflow_san,
             "buildSignerDigest": workflow_commit or self.workflow_commit,
             "sourceRepositoryURI": q.REPOSITORY_URI,
             "sourceRepositoryOwnerURI": q.OWNER_URI,
@@ -96,7 +98,7 @@ class CandidateVerifierTests(unittest.TestCase):
                     stdout='{"mediaType":"application/vnd.dev.sigstore.trustedroot+json;version=0.1"}\n',
                     stderr="",
                 )
-            if len(argv) > 2 and argv[1:3] == ["attestation", "verify"]:
+            if "attestation" in argv and argv.index("attestation") + 1 < len(argv) and argv[argv.index("attestation") + 1] == "verify":
                 return SimpleNamespace(
                     returncode=verify_returncode,
                     stdout=output or self.cli_result(),
@@ -118,11 +120,14 @@ class CandidateVerifierTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 3)
         command = calls[2]
-        self.assertEqual(command[0:4], ["gh", "attestation", "verify", str(self.binary.resolve())])
+        self.assertEqual(command[0:3], ["gh", "attestation", "verify"])
+        self.assertEqual(command[command.index("--hostname") + 1], "github.com")
         self.assertIn("--repo", command)
         self.assertIn(q.REPOSITORY, command)
-        self.assertIn("--signer-workflow", command)
-        self.assertIn(f"{q.REPOSITORY}/{q.WORKFLOW_PATH}", command)
+        self.assertIn("--cert-identity", command)
+        self.assertEqual(command[command.index("--cert-identity") + 1], q.WORKFLOW_SAN)
+        self.assertNotIn("--signer-repo", command)
+        self.assertNotIn("--signer-workflow", command)
         self.assertIn("--source-ref", command)
         self.assertIn(q.SOURCE_REF, command)
         self.assertIn("--custom-trusted-root", command)
@@ -142,6 +147,24 @@ class CandidateVerifierTests(unittest.TestCase):
         self.assertTrue(any("provenance.sigstore.json" in line for line in checksum_lines))
         self.assertTrue(any("verification.json" in line for line in checksum_lines))
 
+
+    def test_accepts_verified_bundle_staged_inside_candidate_directory(self):
+        staged_bundle = self.candidate / "provenance.sigstore.json"
+        staged_bundle.write_bytes(self.bundle.read_bytes())
+        calls, fake = self.fake_run()
+        with patch.object(q, "_run", side_effect=fake):
+            report = q.verify_attestation(
+                self.binary,
+                staged_bundle,
+                self.source_commit,
+                self.workflow_commit,
+                self.output,
+            )
+
+        self.assertEqual(report["bundle"]["name"], staged_bundle.name)
+        self.assertEqual(staged_bundle.read_bytes(), self.bundle.read_bytes())
+        self.assertTrue(self.output.is_file())
+
     def test_rejects_wrong_repository_id_after_cli_verification(self):
         calls, fake = self.fake_run(output=self.cli_result(source_repository_id="999"))
         with patch.object(q, "_run", side_effect=fake):
@@ -154,6 +177,24 @@ class CandidateVerifierTests(unittest.TestCase):
                     self.output,
                 )
         self.assertFalse((self.candidate / "provenance.sigstore.json").exists())
+
+    def test_rejects_wrong_workflow_identity_and_oidc_issuer(self):
+        for output in (
+            self.cli_result(workflow_san="https://attacker.invalid/workflow"),
+            self.cli_result(issuer="https://issuer.invalid"),
+        ):
+            with self.subTest(output=output):
+                calls, fake = self.fake_run(output=output)
+                with patch.object(q, "_run", side_effect=fake):
+                    with self.assertRaises(q.VerificationError):
+                        q.verify_attestation(
+                            self.binary,
+                            self.bundle,
+                            self.source_commit,
+                            self.workflow_commit,
+                            self.output,
+                        )
+                self.assertFalse((self.candidate / "provenance.sigstore.json").exists())
 
     def test_rejects_non_main_ref_wrong_source_commit_and_owner_id(self):
         for output in (

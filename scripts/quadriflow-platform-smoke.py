@@ -252,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
             "code path; this is not a complete dependency-license clearance or a redistribution approval."
         ),
         "artifact_note": (
-            "Temporary candidate only; the later GitHub CLI attestation step verifies binary identity, "
+            "Temporary candidate only; a separate clean GitHub-hosted verifier job checks binary identity, "
             "not release approval or license clearance."
             if args.build_only
             else "Unsigned temporary CI evidence; do not treat as a trusted installer or product binary."

@@ -149,11 +149,12 @@ def _verify_command(
     source_commit: str,
     workflow_commit: str,
 ) -> list[str]:
-    signer = f"{REPOSITORY}/{WORKFLOW_PATH}"
     return [
         "gh",
         "attestation",
         "verify",
+        "--hostname",
+        "github.com",
         str(artifact),
         "--bundle",
         str(bundle),
@@ -161,10 +162,8 @@ def _verify_command(
         str(root_path),
         "--repo",
         REPOSITORY,
-        "--signer-repo",
-        REPOSITORY,
-        "--signer-workflow",
-        signer,
+        "--cert-identity",
+        WORKFLOW_SAN,
         "--signer-digest",
         workflow_commit,
         "--source-ref",
@@ -356,16 +355,18 @@ def verify_attestation(
         raise VerificationError("Sigstore bundle changed during verification")
 
     bundle_copy = candidate_dir / "provenance.sigstore.json"
-    if bundle_copy.exists() or bundle_copy.is_symlink():
-        raise VerificationError("candidate already contains a Sigstore bundle")
-    _write_new(bundle_copy, bundle_bytes)
+    if bundle_copy != bundle:
+        if bundle_copy.exists() or bundle_copy.is_symlink():
+            raise VerificationError("candidate already contains a Sigstore bundle")
+        _write_new(bundle_copy, bundle_bytes)
     if _sha256(bundle_copy.read_bytes()) != _sha256(bundle_bytes):
         raise VerificationError("copied Sigstore bundle did not match verified bytes")
 
     report: dict[str, Any] = {
         "schema_version": 1,
-        "verifier": "GitHub CLI gh attestation verify",
+        "verifier": "GitHub CLI gh attestation verify on a clean GitHub-hosted runner",
         "verifier_version": gh_version,
+        "github_host": "github.com",
         "trusted_root": "obtained by gh attestation trusted-root and passed through TUF verification",
         "artifact": {"name": artifact.name, "sha256": _sha256(artifact_bytes)},
         "bundle": {"name": bundle_copy.name, "sha256": _sha256(bundle_bytes)},
