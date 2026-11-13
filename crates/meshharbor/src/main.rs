@@ -2227,7 +2227,7 @@ mod tests {
                 &response.into_body().collect().await.unwrap().to_bytes()
             )
             .unwrap()["error"],
-            "Both current Pixal3D backends expose only the reviewed 512 geometry profile."
+            "invalid request: Both current Pixal3D backends expose only the reviewed 512 geometry profile."
         );
         std::fs::remove_dir_all(root).unwrap();
     }
