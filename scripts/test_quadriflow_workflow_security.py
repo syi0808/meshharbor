@@ -54,6 +54,23 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         self.assertIn("--workflow-run-attempt", self.verify)
         self.assertIn("--platform", self.verify)
 
+    def test_run_block_scalars_have_indented_command_bodies(self):
+        lines = self.workflow.splitlines()
+        for index, line in enumerate(lines):
+            match = re.match(r"^( *)run:\s*[|>][+-]?\s*$", line)
+            if match is None:
+                continue
+            body = next(
+                (candidate for candidate in lines[index + 1:] if candidate.strip()),
+                "",
+            )
+            body_indent = len(body) - len(body.lstrip())
+            self.assertGreater(
+                body_indent,
+                len(match.group(1)),
+                f"block scalar at line {index + 1} has no indented body",
+            )
+
     def test_candidate_workflow_is_manual_and_all_actions_are_commit_pinned(self):
         self.assertIn("workflow_dispatch:", self.workflow)
         self.assertNotIn("pull_request:", self.workflow)

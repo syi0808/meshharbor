@@ -136,7 +136,6 @@ jobs:
           MESHHARBOR_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
           MESHHARBOR_WORKFLOW_RUN_ID: ${{ github.run_id }}
           MESHHARBOR_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
         run: >-
           python scripts/quadriflow_candidate_provenance.py prepare
           --repository-root "$GITHUB_WORKSPACE"
@@ -225,7 +224,6 @@ jobs:
           MESHHARBOR_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
           MESHHARBOR_WORKFLOW_RUN_ID: ${{ github.run_id }}
           MESHHARBOR_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
         run: >-
           python scripts/quadriflow_attestation_verify.py verify
           --artifact "$CANDIDATE_DIR/$CANDIDATE_EXECUTABLE"
