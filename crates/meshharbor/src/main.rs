@@ -2100,18 +2100,18 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_backend_tools_report_unavailable_without_side_effects() {
-        let root = std::env::temp_dir().join(format!(
-            "meshharbor-mcp-backend-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-mcp-backend-{}", uuid::Uuid::new_v4()));
         let server = McpServer::new(
             OperationCore::open(&root).unwrap(),
             Arc::new(Semaphore::new(1)),
         );
-        let status: Value = serde_json::from_str(&server.quadriflow_backend_status().await).unwrap();
+        let status: Value =
+            serde_json::from_str(&server.quadriflow_backend_status().await).unwrap();
         assert_eq!(status["backend_id"], "quadriflow");
         assert_eq!(status["install_available"], false);
-        let install: Value = serde_json::from_str(&server.install_quadriflow_backend().await).unwrap();
+        let install: Value =
+            serde_json::from_str(&server.install_quadriflow_backend().await).unwrap();
         assert!(install["error"].as_str().unwrap().contains("QuadriFlow"));
         assert!(!root.join("backends").exists());
         std::fs::remove_dir_all(root).unwrap();
