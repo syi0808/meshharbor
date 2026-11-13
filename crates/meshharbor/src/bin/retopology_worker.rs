@@ -270,7 +270,7 @@ fn validate_response(response: &Response, center: [f32; 3], diagonal: f32) -> Re
         return Err("remesher returned an out-of-range index".into());
     }
 
-    let mut edge_faces = HashMap::<(u32, u32), u8>::new();
+    let mut edge_faces = HashMap::<(u32, u32), (u8, i8)>::new();
     let mut unique_faces = HashSet::<[u32; 3]>::new();
     let inverse_diagonal = 1.0 / diagonal;
     for triangle in response.indices.chunks_exact(3) {
