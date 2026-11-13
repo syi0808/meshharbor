@@ -11,9 +11,8 @@ use std::{
 
 use clap::Parser;
 use meshharbor_core::{
-    RemeshRequest as Request, RemeshResponse as Response, REMESH_PROTOCOL_VERSION,
-    normalize_remesh_positions,
-    restore_remesh_positions, validate_remesh_response,
+    REMESH_PROTOCOL_VERSION, RemeshRequest as Request, RemeshResponse as Response,
+    normalize_remesh_positions, restore_remesh_positions, validate_remesh_response,
 };
 use remesh::prelude::*;
 
