@@ -72,8 +72,8 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("invalid request JSON: {error}"))?;
 
     let response = remesh(request)?;
-    let output_bytes =
-        serde_json::to_vec(&response).map_err(|error| format!("cannot encode response: {error}"))?;
+    let output_bytes = serde_json::to_vec(&response)
+        .map_err(|error| format!("cannot encode response: {error}"))?;
     if output_bytes.len() > MAX_RESPONSE_BYTES {
         return Err("response exceeds the 256 MiB limit".into());
     }
@@ -372,9 +372,11 @@ mod tests {
         assert!(!output.positions.is_empty());
         assert!(!output.indices.is_empty());
         assert_eq!(output.indices.len() % 3, 0);
-        assert!(output
-            .indices
-            .iter()
-            .all(|index| (*index as usize) < output.positions.len()));
+        assert!(
+            output
+                .indices
+                .iter()
+                .all(|index| (*index as usize) < output.positions.len())
+        );
     }
 }
