@@ -76,6 +76,12 @@ pub struct QuadriFlowBackendStatus {
     pub next_step: String,
 }
 
+/// Capability token required to resolve or execute a managed sidecar.
+/// The current build has no in-process attestation verifier and never issues it.
+struct VerifiedQuadriFlowManifest<'a> {
+    manifest: &'a QuadriFlowReleaseManifest,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActiveMarker {
@@ -144,16 +150,16 @@ impl Drop for PrivateTempDir {
     }
 }
 
-/// Installs the native platform's pinned release into MeshHarbor's user data
-/// directory. An empty bundled manifest returns before any filesystem or network
-/// side effect. It never requests administrator privileges.
+/// Fail-closed entrypoint for installing a native QuadriFlow sidecar.
+/// A release must pass an in-process signature/provenance verifier before any
+/// filesystem or network side effect; this build has no such verifier.
 pub fn install_bundled_quadriflow_sidecar(
     data_root: &Path,
 ) -> Result<QuadriFlowInstallResult, QuadriFlowInstallError> {
     let platform = host_platform().ok_or(QuadriFlowInstallError::UnsupportedPlatform)?;
     let manifest = bundled_quadriflow_release_manifest()?;
-    ensure_release_installable(&manifest)?;
-    install_manifest_with_fetcher(data_root, &manifest, platform, download_archive)
+    let verified = verified_release_manifest(&manifest)?;
+    install_manifest_with_fetcher(data_root, &verified, platform, download_archive)
 }
 
 /// Finds the current user's verified, managed executable for the requested host.
@@ -162,7 +168,11 @@ pub fn installed_quadriflow_sidecar(
     data_root: &Path,
     platform: QuadriFlowPlatform,
 ) -> Option<PathBuf> {
-    resolve_installed(data_root, platform).ok().flatten()
+    let manifest = bundled_quadriflow_release_manifest().ok()?;
+    let verified = verified_release_manifest(&manifest).ok()?;
+    resolve_installed(data_root, platform, &verified)
+        .ok()
+        .flatten()
 }
 
 /// Roll back activation to the previous verified version while preserving both
@@ -170,6 +180,16 @@ pub fn installed_quadriflow_sidecar(
 pub fn rollback_quadriflow_sidecar(
     data_root: &Path,
     platform: QuadriFlowPlatform,
+) -> Result<PathBuf, QuadriFlowInstallError> {
+    let manifest = bundled_quadriflow_release_manifest()?;
+    let verified = verified_release_manifest(&manifest)?;
+    rollback_with_verified_manifest(data_root, platform, &verified)
+}
+
+fn rollback_with_verified_manifest(
+    data_root: &Path,
+    platform: QuadriFlowPlatform,
+    verified: &VerifiedQuadriFlowManifest<'_>,
 ) -> Result<PathBuf, QuadriFlowInstallError> {
     let base = prepare_install_base(data_root)?;
     let _lock = acquire_lock(&base)?;
@@ -180,7 +200,7 @@ pub fn rollback_quadriflow_sidecar(
     }
 
     let previous_marker_path = &markers[markers.len() - 2];
-    let previous = resolve_marker(&base, previous_marker_path, platform)?
+    let previous = resolve_marker(&base, previous_marker_path, platform, verified)?
         .ok_or(QuadriFlowInstallError::NoRollback)?;
     let previous_marker: ActiveMarker = serde_json::from_slice(&fs::read(previous_marker_path)?)
         .map_err(|_| QuadriFlowInstallError::ActivationMetadata)?;
@@ -230,35 +250,32 @@ fn host_platform() -> Option<QuadriFlowPlatform> {
     }
 }
 
-fn ensure_release_installable(
-    manifest: &QuadriFlowReleaseManifest,
-) -> Result<(), QuadriFlowInstallError> {
+fn verified_release_manifest<'a>(
+    manifest: &'a QuadriFlowReleaseManifest,
+) -> Result<VerifiedQuadriFlowManifest<'a>, QuadriFlowInstallError> {
     validate_quadriflow_release_manifest(manifest)?;
     if manifest.artifacts.is_empty() {
         return Err(QuadriFlowInstallError::NoReleaseArtifact);
     }
-    // A digest listed in the bundled manifest proves byte identity only. Until
-    // this build verifies release signatures and provenance, a non-empty record
-    // must not enable a download or installation.
+    // A structurally valid manifest and self-declared SHA-256 values are not
+    // trust evidence. This build has no in-process Sigstore verifier, so it must
+    // not issue the capability token needed by install, readiness, or rollback.
     Err(QuadriFlowInstallError::ReleaseVerificationUnavailable)
 }
 
-pub fn quadriflow_backend_status(
-    data_root: &Path,
-    sidecar_available: bool,
-) -> QuadriFlowBackendStatus {
+pub fn quadriflow_backend_status(data_root: &Path) -> QuadriFlowBackendStatus {
     let managed = host_platform()
         .and_then(|platform| installed_quadriflow_sidecar(data_root, platform))
         .is_some();
-    if sidecar_available {
+    if managed {
         return QuadriFlowBackendStatus {
             backend_id: "quadriflow".into(),
             status: "ready".into(),
             available: true,
-            managed,
-            sidecar_source: Some(if managed { "managed" } else { "adjacent" }.into()),
+            managed: true,
+            sidecar_source: Some("managed_verified".into()),
             install_available: false,
-            message: "A compatible QuadriFlow sidecar is detected.".into(),
+            message: "A verified, manifest-matched managed QuadriFlow sidecar is available.".into(),
             next_step: "No installation is needed.".into(),
         };
     }
@@ -298,13 +315,14 @@ pub fn quadriflow_backend_status(
 
 fn install_manifest_with_fetcher<F>(
     data_root: &Path,
-    manifest: &QuadriFlowReleaseManifest,
+    verified: &VerifiedQuadriFlowManifest<'_>,
     platform: QuadriFlowPlatform,
     fetcher: F,
 ) -> Result<QuadriFlowInstallResult, QuadriFlowInstallError>
 where
     F: FnOnce(&str, u64, &Path) -> Result<(), QuadriFlowInstallError>,
 {
+    let manifest = verified.manifest;
     validate_quadriflow_release_manifest(manifest)?;
     let artifact = manifest
         .artifacts
@@ -837,6 +855,7 @@ fn verify_installed_payloads(
 fn resolve_installed(
     data_root: &Path,
     platform: QuadriFlowPlatform,
+    verified: &VerifiedQuadriFlowManifest<'_>,
 ) -> Result<Option<PathBuf>, QuadriFlowInstallError> {
     let base = install_base_if_present(data_root)?;
     let Some(base) = base else {
@@ -847,13 +866,14 @@ fn resolve_installed(
     let Some(marker) = markers.last() else {
         return Ok(None);
     };
-    resolve_marker(&base, marker, platform)
+    resolve_marker(&base, marker, platform, verified)
 }
 
 fn resolve_marker(
     base: &Path,
     path: &Path,
     platform: QuadriFlowPlatform,
+    verified: &VerifiedQuadriFlowManifest<'_>,
 ) -> Result<Option<PathBuf>, QuadriFlowInstallError> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 4096 {
@@ -867,8 +887,22 @@ fn resolve_marker(
     }
     let marker: ActiveMarker =
         serde_json::from_slice(&bytes).map_err(|_| QuadriFlowInstallError::ActivationMetadata)?;
+    validate_quadriflow_release_manifest(verified.manifest)?;
+    let Some(expected_release_tag) = verified.manifest.release_tag.as_deref() else {
+        return Ok(None);
+    };
+    let Some(artifact) = verified
+        .manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.platform == platform)
+    else {
+        return Ok(None);
+    };
     if marker.schema_version != ACTIVE_MARKER_SCHEMA
         || marker.platform != platform
+        || marker.release_tag != expected_release_tag
+        || marker.executable_sha256 != artifact.payload.executable.sha256
         || marker.executable_sha256.len() != 64
         || !marker
             .executable_sha256
@@ -888,7 +922,7 @@ fn resolve_marker(
         Some(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {}
         _ => return Ok(None),
     }
-    let executable_relative = platform_executable(platform);
+    let executable_relative = artifact.payload.executable.path.as_str();
     if executable_relative.starts_with("bin/") {
         let bin_dir = version_dir.join("bin");
         match symlink_metadata_optional(&bin_dir)? {
@@ -904,8 +938,8 @@ fn resolve_marker(
         || !executable_metadata.is_file()
         || !verify_file(
             &executable,
-            executable_metadata.len(),
-            &marker.executable_sha256,
+            artifact.payload.executable.size_bytes,
+            &artifact.payload.executable.sha256,
             128 * 1024 * 1024,
         )?
     {
@@ -1273,6 +1307,27 @@ mod tests {
         }
     }
 
+    fn test_verified_manifest<'a>(
+        manifest: &'a QuadriFlowReleaseManifest,
+    ) -> VerifiedQuadriFlowManifest<'a> {
+        validate_quadriflow_release_manifest(manifest).unwrap();
+        // Test-only capability: production code cannot construct this token.
+        VerifiedQuadriFlowManifest { manifest }
+    }
+
+    fn install_test_manifest_with_fetcher<F>(
+        data_root: &Path,
+        manifest: &QuadriFlowReleaseManifest,
+        platform: QuadriFlowPlatform,
+        fetcher: F,
+    ) -> Result<QuadriFlowInstallResult, QuadriFlowInstallError>
+    where
+        F: FnOnce(&str, u64, &Path) -> Result<(), QuadriFlowInstallError>,
+    {
+        let verified = test_verified_manifest(manifest);
+        install_manifest_with_fetcher(data_root, &verified, platform, fetcher)
+    }
+
     fn make_tar(entries: &[(&str, &[u8], u8)]) -> Vec<u8> {
         let mut archive = Vec::new();
         for (name, contents, kind) in entries {
@@ -1349,6 +1404,11 @@ mod tests {
             install_bundled_quadriflow_sidecar(&root),
             Err(QuadriFlowInstallError::NoReleaseArtifact)
         ));
+        assert!(matches!(
+            rollback_quadriflow_sidecar(&root, QuadriFlowPlatform::LinuxX86_64),
+            Err(QuadriFlowInstallError::NoReleaseArtifact)
+        ));
+        assert!(installed_quadriflow_sidecar(&root, QuadriFlowPlatform::LinuxX86_64).is_none());
         assert!(!root.exists());
     }
 
@@ -1357,7 +1417,7 @@ mod tests {
         let platform = QuadriFlowPlatform::LinuxX86_64;
         let (manifest, _) = test_package(platform, "quadriflow-v1.0.0", b"binary");
         assert!(matches!(
-            ensure_release_installable(&manifest),
+            verified_release_manifest(&manifest),
             Err(QuadriFlowInstallError::ReleaseVerificationUnavailable)
         ));
     }
@@ -1368,14 +1428,18 @@ mod tests {
         let platform = QuadriFlowPlatform::LinuxX86_64;
         let (first, first_archive) = test_package(platform, "quadriflow-v1.0.0", b"binary-one");
         let result =
-            install_manifest_with_fetcher(&root.0, &first, platform, |_, _, destination| {
+            install_test_manifest_with_fetcher(&root.0, &first, platform, |_, _, destination| {
                 fs::write(destination, &first_archive)?;
                 Ok(())
             })
             .unwrap();
         assert!(!result.already_installed);
         assert_eq!(fs::read(&result.executable).unwrap(), b"binary-one");
-        assert!(installed_quadriflow_sidecar(&root.0, platform).is_some());
+        assert!(
+            resolve_installed(&root.0, platform, &test_verified_manifest(&first))
+                .unwrap()
+                .is_some()
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1389,13 +1453,13 @@ mod tests {
 
         let (second, second_archive) = test_package(platform, "quadriflow-v1.1.0", b"binary-two");
         let updated =
-            install_manifest_with_fetcher(&root.0, &second, platform, |_, _, destination| {
+            install_test_manifest_with_fetcher(&root.0, &second, platform, |_, _, destination| {
                 fs::write(destination, &second_archive)?;
                 Ok(())
             })
             .unwrap();
         assert_eq!(fs::read(&updated.executable).unwrap(), b"binary-two");
-        let rolled_back = rollback_quadriflow_sidecar(&root.0, platform).unwrap();
+        let rolled_back = rollback_with_verified_manifest(&root.0, platform, &test_verified_manifest(&first)).unwrap();
         assert_eq!(fs::read(rolled_back).unwrap(), b"binary-one");
 
         let active = root.0.join("backends/quadriflow/active");
@@ -1407,7 +1471,7 @@ mod tests {
             .and_then(marker_sequence)
             .unwrap();
 
-        let reactivated = install_manifest_with_fetcher(&root.0, &second, platform, |_, _, _| {
+        let reactivated = install_test_manifest_with_fetcher(&root.0, &second, platform, |_, _, _| {
             panic!("an existing verified version must not be downloaded again")
         })
         .unwrap();
@@ -1420,7 +1484,7 @@ mod tests {
             .unwrap();
         assert!(reactivation_generation > rollback_generation);
 
-        let rolled_back_again = rollback_quadriflow_sidecar(&root.0, platform).unwrap();
+        let rolled_back_again = rollback_with_verified_manifest(&root.0, platform, &test_verified_manifest(&first)).unwrap();
         assert_eq!(fs::read(rolled_back_again).unwrap(), b"binary-one");
     }
 
@@ -1481,12 +1545,16 @@ mod tests {
         let mut fetched_bytes = archive;
         fetched_bytes[0] ^= 1;
         let result =
-            install_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
+            install_test_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
                 fs::write(destination, &fetched_bytes)?;
                 Ok(())
             });
         assert!(result.is_err());
-        assert!(installed_quadriflow_sidecar(&root.0, platform).is_none());
+        assert!(
+            resolve_installed(&root.0, platform, &test_verified_manifest(&manifest))
+                .unwrap()
+                .is_none()
+        );
         let base = root.0.join("backends/quadriflow");
         assert!(active_markers(&base.join("active")).unwrap().is_empty());
     }
@@ -1530,7 +1598,7 @@ mod tests {
             b"binary",
         );
         let mut fetched = false;
-        let result = install_manifest_with_fetcher(
+        let result = install_test_manifest_with_fetcher(
             &root.0,
             &manifest,
             QuadriFlowPlatform::LinuxX86_64,
@@ -1550,13 +1618,49 @@ mod tests {
         let platform = QuadriFlowPlatform::LinuxX86_64;
         let (manifest, archive) = test_package(platform, "quadriflow-v1.0.0", b"binary");
         let result =
-            install_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
+            install_test_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
                 fs::write(destination, &archive)?;
                 Ok(())
             })
             .unwrap();
-        fs::write(result.executable, b"changed").unwrap();
-        assert!(installed_quadriflow_sidecar(&root.0, platform).is_none());
+        fs::write(&result.executable, b"changed").unwrap();
+        assert!(
+            resolve_installed(&root.0, platform, &test_verified_manifest(&manifest))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn activation_marker_cannot_self_authorize_a_payload_outside_the_manifest() {
+        let root = TestRoot::new();
+        let platform = QuadriFlowPlatform::LinuxX86_64;
+        let (manifest, archive) = test_package(platform, "quadriflow-v1.0.0", b"approved");
+        let result =
+            install_test_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
+                fs::write(destination, &archive)?;
+                Ok(())
+            })
+            .unwrap();
+
+        fs::write(&result.executable, b"unapproved").unwrap();
+        let forged_marker = ActiveMarker {
+            schema_version: ACTIVE_MARKER_SCHEMA,
+            release_tag: "quadriflow-v1.0.0".into(),
+            platform,
+            executable_sha256: format!("{:x}", Sha256::digest(b"unapproved")),
+        };
+        append_active_marker(
+            &root.0.join("backends/quadriflow/active"),
+            &forged_marker,
+        )
+        .unwrap();
+
+        assert!(
+            resolve_installed(&root.0, platform, &test_verified_manifest(&manifest))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

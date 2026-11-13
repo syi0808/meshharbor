@@ -4,7 +4,7 @@
 
 MeshHarbor's `mesh.retopology` path is now a real QuadriFlow quad-remeshing candidate, not the separate isotropic triangle-remesher prototype.
 
-The operation is wired through the Rust core, REST job API, MCP tool, CLI, and Studio. It is reported as available only when an executable `quadriflow` sidecar is present beside the running MeshHarbor executable (on Windows, `quadriflow.exe`) or in the managed MeshHarbor data directory. Availability detection validates the managed activation marker and executable hash without executing it. CLI (`meshharbor backend status` / `meshharbor backend install quadriflow`), REST (`GET /api/v1/backends/quadriflow`, `POST /api/v1/backends/quadriflow/install`), MCP tools, and Studio expose backend status and an install request. The release manifest is empty, and this build has no release-signature/provenance verifier, so installation stays unavailable and fails before network downloads or QuadriFlow backend-directory writes.
+The operation is wired through the Rust core, REST job API, MCP tool, CLI, and Studio, but it is unavailable in the current product build. Runtime code never auto-discovers or executes an adjacent `quadriflow` executable. A managed sidecar can be resolved only when an in-process verifier accepts its release attestation and the executable digest matches the trusted bundled manifest. This build has no such verifier and the manifest is empty, so no sidecar qualifies; readiness, install, and rollback remain fail-closed. CLI (`meshharbor backend status` / `meshharbor backend install quadriflow`), REST (`GET /api/v1/backends/quadriflow`, `POST /api/v1/backends/quadriflow/install`), MCP tools, and Studio expose backend status and an install request, but the install action remains disabled/rejected.
 
 A completed job stores two outputs together:
 - A triangle-only GLB preview for viewing.
@@ -44,7 +44,7 @@ Other reviewed components declare Boost Software License 1.0 (Lemon), Apache-2.0
 
 ## Packaging work still required
 
-A distributable build must place a pinned, tested `quadriflow` executable beside the MeshHarbor executable and retain all applicable upstream/dependency notices. The current branch detects that sidecar and routes jobs through it, but does not build or download the executable automatically, does not yet ship it for any platform, and has not passed a full per-crate license/SBOM audit. Do not mark the feature available in a package that omits the sidecar. No model data leaves the local MeshHarbor process.
+A future distributable build must package a managed QuadriFlow sidecar only after a supported verifier accepts its release attestation and the executable digest matches the trusted manifest; adjacent executables must remain ignored. The current branch does not ship or install an approved binary for any platform, and has not passed a full per-crate license/SBOM audit. Do not mark the feature available until that verification and release review are implemented. No model data leaves the local MeshHarbor process.
 
 ## Separate triangle-remesher prototype
 

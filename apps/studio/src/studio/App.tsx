@@ -511,11 +511,11 @@ export function App() {
           <button
             className="nav-item"
             title={retopologyAvailable
-              ? 'Experimental QuadriFlow; the pinned sidecar is present.'
-              : 'Retopology requires the pinned QuadriFlow sidecar beside the MeshHarbor executable.'}
+              ? 'Experimental QuadriFlow; a verified, manifest-matched managed sidecar is available.'
+              : 'Retopology is unavailable until a trusted managed QuadriFlow release is verified; adjacent binaries are ignored.'}
             onClick={() => document.getElementById('mesh-tools')?.scrollIntoView({ behavior: 'smooth' })}
           >
-            <span className="nav-icon">⌘</span> Retopology <span className="soon-label">{retopologyAvailable ? 'READY' : 'SIDECAR'}</span>
+            <span className="nav-icon">⌘</span> Retopology <span className="soon-label">{retopologyAvailable ? 'READY' : 'UNAVAILABLE'}</span>
           </button>
           <div className="sidebar-bottom">
             <div className="local-card">
@@ -664,7 +664,7 @@ export function App() {
                 <div className="control-footnote">Compression exports a GLB that requires KHR_meshopt_compression support. The Studio preview includes its decoder. Part separation creates connected-component primitives inside the same mesh; it does not split scene nodes.</div>
               </div>
 
-              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology requires a compatible local sidecar; editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p><div className="capability-foot"><span>QuadriFlow backend</span><span className="capability-status">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>{quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}<button className="button button-primary" onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</button><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
+              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is unavailable until a signature-verified, manifest-matched managed sidecar is supported; adjacent binaries are intentionally ignored. Editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p><div className="capability-foot"><span>QuadriFlow backend</span><span className="capability-status">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>{quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}<button className="button button-primary" onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</button><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
             </aside>
           </div>
         </main>

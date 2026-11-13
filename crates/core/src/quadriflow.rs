@@ -696,7 +696,7 @@ fn build_quad_preview(
     Ok((preview, Some(report)))
 }
 
-/// Checks for a packaged or managed QuadriFlow sidecar without executing it.
+/// Checks for a signature-verified, manifest-matched managed sidecar without executing it.
 pub fn quadriflow_sidecar_available() -> bool {
     quadriflow_sidecar_available_at(&crate::quadriflow_installer::default_data_root())
 }
@@ -705,7 +705,7 @@ pub(crate) fn quadriflow_sidecar_available_at(data_root: &Path) -> bool {
     quadriflow_sidecar_path(data_root).is_some()
 }
 
-/// Run the packaged sidecar on a generated geometry-only OBJ. The original OBJ
+/// Run a verified managed sidecar on a generated geometry-only OBJ. The original OBJ
 /// bytes are returned separately so callers can persist the actual editable quads;
 /// the GLB is only a triangle preview.
 fn validate_quad_target(target_quads: u32) -> CoreResult<()> {
@@ -760,7 +760,7 @@ pub(crate) fn quadriflow_retopology_glb_at(
     let input_obj = triangle_geometry_obj(&positions, &indices)?;
     let worker = quadriflow_sidecar_path(data_root).ok_or_else(|| {
         CoreError::OperationUnavailable(
-            "No compatible QuadriFlow sidecar is available for this MeshHarbor data directory."
+            "No signature-verified, manifest-matched managed QuadriFlow sidecar is available."
                 .into(),
         )
     })?;
@@ -785,7 +785,7 @@ pub(crate) fn quadriflow_retopology_glb_at(
         .spawn()
         .map_err(|error| {
             CoreError::OperationUnavailable(format!(
-                "Could not start the packaged QuadriFlow sidecar: {error}"
+                "Could not start the verified managed QuadriFlow sidecar: {error}"
             ))
         })?;
 
@@ -864,24 +864,9 @@ pub(crate) fn quadriflow_retopology_glb_at(
 }
 
 fn quadriflow_sidecar_path(data_root: &Path) -> Option<PathBuf> {
-    if let Some(sidecar) = crate::quadriflow_installer::native_installed_sidecar(data_root) {
-        return Some(sidecar);
-    }
-    let executable = std::env::current_exe().ok()?;
-    let name = format!("quadriflow{}", std::env::consts::EXE_SUFFIX);
-    let sidecar = executable.with_file_name(name);
-    let metadata = fs::metadata(&sidecar).ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return None;
-        }
-    }
-    Some(sidecar)
+    // Never auto-discover or execute an adjacent binary. Managed resolution
+    // requires a private verifier-issued token and a manifest-matched digest.
+    crate::quadriflow_installer::native_installed_sidecar(data_root)
 }
 
 struct QuadriflowTempDir(PathBuf);
@@ -1103,6 +1088,25 @@ f 4 1 5 8\n";
         assert_eq!(&bytes[..4], b"glTF");
         let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
         serde_json::from_slice(&bytes[20..20 + length]).unwrap()
+    }
+
+    #[test]
+    fn unmanaged_sidecar_file_is_not_auto_discovered() {
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-qf-unmanaged-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let sidecar = root.join(format!("quadriflow{}", std::env::consts::EXE_SUFFIX));
+        fs::write(&sidecar, b"not a trusted executable").unwrap();
+
+        assert!(!quadriflow_sidecar_available_at(&root));
+        let status = crate::quadriflow_installer::quadriflow_backend_status(&root);
+        assert!(!status.available);
+        assert!(!status.install_available);
+        assert!(status.sidecar_source.is_none());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
