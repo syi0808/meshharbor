@@ -24,7 +24,6 @@ const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
 const DINO_REVISION: &str = "ea8dc2863c51be0a264bab82070e3e8836b02d51";
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
 const PIXAL_REPOSITORY: &str = "models--TencentARC--Pixal3D";
-const NAF_SHA256: &str = "c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f";
 const PIXAL_CHECKPOINTS: &[&str] = &[
     "ss_flow_img_dit_1_3B_64_bf16.safetensors",
     "ss_dec_conv3d_16l8_fp16.safetensors",
