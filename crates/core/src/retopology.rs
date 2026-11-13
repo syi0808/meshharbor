@@ -416,6 +416,46 @@ pub fn validate_remesh_response(
             ));
         }
     }
+
+    let mut edge_faces = std::collections::HashMap::<(u32, u32), u8>::new();
+    let mut unique_faces = std::collections::HashSet::<[u32; 3]>::new();
+    let inverse_diagonal = 1.0 / bounds.diagonal;
+    for triangle in response.indices.chunks_exact(3) {
+        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+        if a == b || b == c || c == a {
+            return Err(CoreError::OperationUnavailable(
+                "Remesh worker returned a degenerate triangle.".into(),
+            ));
+        }
+        let mut face_key = [a, b, c];
+        face_key.sort_unstable();
+        if !unique_faces.insert(face_key) {
+            return Err(CoreError::OperationUnavailable(
+                "Remesh worker returned duplicate triangles.".into(),
+            ));
+        }
+        let pa = response.positions[a as usize];
+        let pb = response.positions[b as usize];
+        let pc = response.positions[c as usize];
+        let edge_a = scale(sub(pb, pa), inverse_diagonal);
+        let edge_b = scale(sub(pc, pa), inverse_diagonal);
+        let cross_product = cross(edge_a, edge_b);
+        if !dot(cross_product, cross_product).is_finite() || dot(cross_product, cross_product) <= 1.0e-16 {
+            return Err(CoreError::OperationUnavailable(
+                "Remesh worker returned a zero-area or near-degenerate triangle.".into(),
+            ));
+        }
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            let key = if u < v { (u, v) } else { (v, u) };
+            let count = edge_faces.entry(key).or_default();
+            *count = count.saturating_add(1);
+            if *count > 2 {
+                return Err(CoreError::OperationUnavailable(
+                    "Remesh worker returned a non-manifold edge.".into(),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
