@@ -32,8 +32,9 @@ pub use quadriflow::{
     quad_mesh_preview_glb, quadriflow_retopology_glb, quadriflow_sidecar_available,
 };
 pub use quadriflow_installer::{
-    QuadriFlowInstallError, QuadriFlowInstallResult, install_bundled_quadriflow_sidecar,
-    installed_quadriflow_sidecar, rollback_quadriflow_sidecar,
+    QuadriFlowBackendStatus, QuadriFlowInstallError, QuadriFlowInstallResult,
+    install_bundled_quadriflow_sidecar, installed_quadriflow_sidecar, quadriflow_backend_status,
+    rollback_quadriflow_sidecar,
 };
 pub use quadriflow_manifest::{
     QuadriFlowArchive, QuadriFlowArchiveFormat, QuadriFlowManifestError, QuadriFlowPayload,

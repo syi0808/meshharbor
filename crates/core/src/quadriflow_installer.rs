@@ -37,6 +37,8 @@ pub enum QuadriFlowInstallError {
     Io(#[from] io::Error),
     #[error("No approved QuadriFlow release artifacts are available in this build.")]
     NoReleaseArtifact,
+    #[error("QuadriFlow release signatures and provenance are not verified by this build.")]
+    ReleaseVerificationUnavailable,
     #[error("QuadriFlow does not publish a package for this host platform.")]
     UnsupportedPlatform,
     #[error("The QuadriFlow installer is already running for this data directory.")]
@@ -55,11 +57,23 @@ pub enum QuadriFlowInstallError {
     ActivationMetadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuadriFlowInstallResult {
     pub release_tag: String,
     pub executable: PathBuf,
     pub already_installed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuadriFlowBackendStatus {
+    pub backend_id: String,
+    pub status: String,
+    pub available: bool,
+    pub managed: bool,
+    pub sidecar_source: Option<String>,
+    pub install_available: bool,
+    pub message: String,
+    pub next_step: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -138,6 +152,7 @@ pub fn install_bundled_quadriflow_sidecar(
 ) -> Result<QuadriFlowInstallResult, QuadriFlowInstallError> {
     let platform = host_platform().ok_or(QuadriFlowInstallError::UnsupportedPlatform)?;
     let manifest = bundled_quadriflow_release_manifest()?;
+    ensure_release_installable(&manifest)?;
     install_manifest_with_fetcher(data_root, &manifest, platform, download_archive)
 }
 
@@ -212,6 +227,72 @@ fn host_platform() -> Option<QuadriFlowPlatform> {
         Some(QuadriFlowPlatform::WindowsX86_64)
     } else {
         None
+    }
+}
+
+fn ensure_release_installable(
+    manifest: &QuadriFlowReleaseManifest,
+) -> Result<(), QuadriFlowInstallError> {
+    validate_quadriflow_release_manifest(manifest)?;
+    if manifest.artifacts.is_empty() {
+        return Err(QuadriFlowInstallError::NoReleaseArtifact);
+    }
+    // A digest listed in the bundled manifest proves byte identity only. Until
+    // this build verifies release signatures and provenance, a non-empty record
+    // must not enable a download or installation.
+    Err(QuadriFlowInstallError::ReleaseVerificationUnavailable)
+}
+
+pub fn quadriflow_backend_status(
+    data_root: &Path,
+    sidecar_available: bool,
+) -> QuadriFlowBackendStatus {
+    let managed = host_platform()
+        .and_then(|platform| installed_quadriflow_sidecar(data_root, platform))
+        .is_some();
+    if sidecar_available {
+        return QuadriFlowBackendStatus {
+            backend_id: "quadriflow".into(),
+            status: "ready".into(),
+            available: true,
+            managed,
+            sidecar_source: Some(if managed { "managed" } else { "adjacent" }.into()),
+            install_available: false,
+            message: "A compatible QuadriFlow sidecar is detected.".into(),
+            next_step: "No installation is needed.".into(),
+        };
+    }
+
+    let (status, message, next_step) = match bundled_quadriflow_release_manifest() {
+        Ok(manifest) if manifest.artifacts.is_empty() => (
+            if host_platform().is_some() {
+                "release_unavailable"
+            } else {
+                "unsupported_platform"
+            },
+            "This build does not include an approved QuadriFlow release artifact.",
+            "Wait for a reviewed, signed release with verified provenance. This build does not download or install unsigned or temporary CI artifacts.",
+        ),
+        Ok(_) => (
+            "release_verification_unavailable",
+            "A release record exists, but this build cannot verify its signature and provenance.",
+            "Do not install it yet. Add a supported signature/provenance verifier and complete release and license review first.",
+        ),
+        Err(_) => (
+            "manifest_invalid",
+            "The bundled QuadriFlow release manifest is invalid; installation is disabled.",
+            "Use a build with a valid, reviewed release manifest.",
+        ),
+    };
+    QuadriFlowBackendStatus {
+        backend_id: "quadriflow".into(),
+        status: status.into(),
+        available: false,
+        managed: false,
+        sidecar_source: None,
+        install_available: false,
+        message: message.into(),
+        next_step: next_step.into(),
     }
 }
 
@@ -1269,6 +1350,16 @@ mod tests {
             Err(QuadriFlowInstallError::NoReleaseArtifact)
         ));
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn nonempty_release_manifest_stays_blocked_without_signature_verification() {
+        let platform = QuadriFlowPlatform::LinuxX86_64;
+        let (manifest, _) = test_package(platform, "quadriflow-v1.0.0", b"binary");
+        assert!(matches!(
+            ensure_release_installable(&manifest),
+            Err(QuadriFlowInstallError::ReleaseVerificationUnavailable)
+        ));
     }
 
     #[test]

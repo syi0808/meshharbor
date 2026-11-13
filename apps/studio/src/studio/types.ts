@@ -34,6 +34,16 @@ export interface RuntimeInfo {
   status: string;
   platform: string;
   operations: string[];
+  quadriflow_backend: {
+    backend_id: string;
+    status: string;
+    available: boolean;
+    managed: boolean;
+    sidecar_source: string | null;
+    install_available: boolean;
+    message: string;
+    next_step: string;
+  };
   model_backends: Array<{
     id: string;
     ready?: boolean;

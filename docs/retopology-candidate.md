@@ -4,7 +4,7 @@
 
 MeshHarbor's `mesh.retopology` path is now a real QuadriFlow quad-remeshing candidate, not the separate isotropic triangle-remesher prototype.
 
-The operation is wired through the Rust core, REST job API, MCP tool, CLI, and Studio. It is reported as available only when an executable `quadriflow` sidecar is present beside the running MeshHarbor executable (on Windows, `quadriflow.exe`) or in the managed MeshHarbor data directory. Availability detection validates the managed activation marker and executable hash without executing it. A dormant core installer API accepts only the bundled release manifest; that manifest is currently empty and Studio/CLI do not expose a download command, so ordinary packages still cannot install a released sidecar.
+The operation is wired through the Rust core, REST job API, MCP tool, CLI, and Studio. It is reported as available only when an executable `quadriflow` sidecar is present beside the running MeshHarbor executable (on Windows, `quadriflow.exe`) or in the managed MeshHarbor data directory. Availability detection validates the managed activation marker and executable hash without executing it. CLI (`meshharbor backend status` / `meshharbor backend install quadriflow`), REST (`GET /api/v1/backends/quadriflow`, `POST /api/v1/backends/quadriflow/install`), MCP tools, and Studio expose backend status and an install request. The release manifest is empty, and this build has no release-signature/provenance verifier, so installation stays unavailable and fails before network downloads or QuadriFlow backend-directory writes.
 
 A completed job stores two outputs together:
 - A triangle-only GLB preview for viewing.

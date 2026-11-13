@@ -17,6 +17,27 @@ try {
   ({ MeshHarborApi, quadTopologyArtifact } = await import('./api.ts'));
 }
 
+test('QuadriFlow installer surface stays guarded when no reviewed release is available', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (path, init = {}) => {
+    calls.push({ path, init });
+    if (path === '/api/v1/backends/quadriflow/install') {
+      return Response.json({ error: 'This build does not include an approved QuadriFlow release artifact.' }, { status: 422 });
+    }
+    throw new Error('Unexpected request: ' + path);
+  };
+  try {
+    const api = new MeshHarborApi();
+    await assert.rejects(api.installQuadriflowBackend(), /does not include an approved QuadriFlow release artifact/);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal(new Headers(calls[0].init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Studio backend setup and image-generation flow downloads the generated GLB', async () => {
   const sourceAsset = { id: 'image-1', artifacts: [{ id: 'source-1', kind: 'source' }] };
   const generatedAsset = { id: 'mesh-1', artifacts: [{ id: 'generated-1', kind: 'derived' }] };

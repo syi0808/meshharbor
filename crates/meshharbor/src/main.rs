@@ -101,10 +101,26 @@ enum Command {
     },
     /// Show implemented operations and detected runtime capabilities.
     Doctor,
+    /// Inspect or request installation of a local mesh backend.
+    Backend {
+        #[command(subcommand)]
+        command: BackendCommand,
+    },
     /// Manage the optional local Pixal3D MLX runtime.
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackendCommand {
+    /// Show QuadriFlow availability and the next supported action.
+    Status,
+    /// Request the guarded installation for the named backend.
+    Install {
+        #[arg(value_parser = ["quadriflow"])]
+        backend_id: String,
     },
 }
 
@@ -283,6 +299,29 @@ impl McpServer {
             .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
 
+    #[tool(
+        description = "Report QuadriFlow sidecar availability and the next step. A managed sidecar is verified using its activation marker and binary digest without being executed."
+    )]
+    async fn quadriflow_backend_status(&self) -> String {
+        serde_json::to_string_pretty(&self.core.quadriflow_backend_status())
+            .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}"))
+    }
+
+    #[tool(
+        description = "Request a guarded installation of the pinned QuadriFlow backend. The current build has an empty release manifest and does not verify release signatures/provenance, so it fails closed without downloading or writing a QuadriFlow installation. Unsigned temporary Actions artifacts are never installed."
+    )]
+    async fn install_quadriflow_backend(&self) -> String {
+        let core = self.core.clone();
+        match task::spawn_blocking(move || core.install_quadriflow_backend()).await {
+            Ok(Ok(installed)) => serde_json::to_string_pretty(&installed)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
+            Err(error) => {
+                json!({"error": format!("QuadriFlow installer worker failed: {error}")}).to_string()
+            }
+        }
+    }
+
     #[tool(description = "List local assets in the MeshHarbor asset store.")]
     async fn list_assets(&self, params: Parameters<AssetListArgs>) -> String {
         let limit = params.0.limit.clamp(1, 200);
@@ -332,7 +371,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits connected-component primitives in one mesh. uv.unwrap is same-mesh rebaking, not high-to-low projection. Quad retopology requires the packaged QuadriFlow sidecar and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
+        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits connected-component primitives in one mesh. uv.unwrap is same-mesh rebaking, not high-to-low projection. Quad retopology requires a compatible managed or adjacent QuadriFlow sidecar and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
     )]
     async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
         let args = params.0;
@@ -704,6 +743,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             serde_json::to_string_pretty(&OperationCore::open(&root)?.runtime_doctor())?
         ),
+        Command::Backend { command } => {
+            let core = OperationCore::open(&root)?;
+            match command {
+                BackendCommand::Status => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&core.quadriflow_backend_status())?
+                    );
+                }
+                BackendCommand::Install { backend_id: _ } => {
+                    let installed = core.install_quadriflow_backend()?;
+                    println!("{}", serde_json::to_string_pretty(&installed)?);
+                }
+            }
+        }
         Command::Runtime { command } => {
             let core = OperationCore::open(&root)?;
             match command {
@@ -759,6 +813,14 @@ fn api_router(state: AppState, token: String) -> Router {
     Router::new()
         .route("/api/v1/health", get(api_health))
         .route("/api/v1/runtime", get(api_runtime))
+        .route(
+            "/api/v1/backends/quadriflow",
+            get(api_quadriflow_backend_status),
+        )
+        .route(
+            "/api/v1/backends/quadriflow/install",
+            post(api_install_quadriflow_backend),
+        )
         .route(
             "/api/v1/runtime/pixal3d-mlx/setup",
             post(api_start_runtime_setup),
@@ -970,6 +1032,26 @@ async fn api_health() -> Json<Value> {
 }
 async fn api_runtime(State(state): State<AppState>) -> Json<meshharbor_core::RuntimeDoctor> {
     Json(state.core.runtime_doctor())
+}
+
+async fn api_quadriflow_backend_status(
+    State(state): State<AppState>,
+) -> Json<meshharbor_core::QuadriFlowBackendStatus> {
+    Json(state.core.quadriflow_backend_status())
+}
+
+async fn api_install_quadriflow_backend(
+    State(state): State<AppState>,
+) -> Result<Json<meshharbor_core::QuadriFlowInstallResult>, ApiError> {
+    let core = state.core;
+    let installed = task::spawn_blocking(move || core.install_quadriflow_backend())
+        .await
+        .map_err(|error| {
+            ApiError(CoreError::OperationUnavailable(format!(
+                "QuadriFlow installer worker failed: {error}"
+            )))
+        })??;
+    Ok(Json(installed))
 }
 
 async fn api_start_runtime_setup(
@@ -2016,6 +2098,44 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    #[tokio::test]
+    async fn mcp_backend_tools_report_unavailable_without_side_effects() {
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-mcp-backend-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let server = McpServer::new(
+            OperationCore::open(&root).unwrap(),
+            Arc::new(Semaphore::new(1)),
+        );
+        let status: Value = serde_json::from_str(&server.quadriflow_backend_status().await).unwrap();
+        assert_eq!(status["backend_id"], "quadriflow");
+        assert_eq!(status["install_available"], false);
+        let install: Value = serde_json::from_str(&server.install_quadriflow_backend().await).unwrap();
+        assert!(install["error"].as_str().unwrap().contains("QuadriFlow"));
+        assert!(!root.join("backends").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backend_cli_exposes_status_and_guarded_install_commands() {
+        let status = Cli::try_parse_from(["meshharbor", "backend", "status"]).unwrap();
+        assert!(matches!(
+            status.command,
+            Command::Backend {
+                command: BackendCommand::Status
+            }
+        ));
+        let install =
+            Cli::try_parse_from(["meshharbor", "backend", "install", "quadriflow"]).unwrap();
+        assert!(matches!(
+            install.command,
+            Command::Backend {
+                command: BackendCommand::Install { backend_id }
+            } if backend_id == "quadriflow"
+        ));
+    }
+
     #[test]
     fn validates_base64_padding() {
         assert_eq!(decode_base64("dGVzdA==").unwrap(), b"test");
@@ -2135,6 +2255,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dashboard.status(), StatusCode::OK);
+
+        let backend_status = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/backends/quadriflow")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:7432")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(backend_status.status(), StatusCode::OK);
+        let backend_body = backend_status
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let backend_json: Value = serde_json::from_slice(&backend_body).unwrap();
+        assert_eq!(backend_json["backend_id"], "quadriflow");
+        assert_eq!(backend_json["install_available"], false);
+
+        let backend_install = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/backends/quadriflow/install")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:7432")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(backend_install.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let error_body = backend_install
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let error_json: Value = serde_json::from_slice(&error_body).unwrap();
+        assert!(error_json["error"].as_str().unwrap().contains("QuadriFlow"));
+        assert!(!root.join("backends").exists());
 
         let missing_marker = app
             .clone()

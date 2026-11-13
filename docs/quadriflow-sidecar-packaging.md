@@ -1,10 +1,10 @@
 # QuadriFlow package preparation
 
-This is preparatory evidence tooling plus a dormant core installer API, not a released package or a user-facing download workflow.
+This is preparatory evidence tooling, not a released package. CLI, REST, MCP, and Studio expose backend status and a guarded installation request, but the request currently fails closed; it is not a usable download/install workflow.
 
 The pinned upstream source is `hjwdzh/QuadriFlow` at `810b7a0967c35b0dc85b4464e3835e26a756c967`. Three platform-specific synthetic-cube builds have passed in isolated GitHub Actions jobs. The resulting Actions artifacts are unsigned, temporary evidence with short retention. They are not trusted distribution packages and must not be downloaded or installed by the application.
 
-The release manifest currently contains no artifacts. The core has a dormant installer for future uncompressed POSIX USTAR packages, with bounded system-curl downloads, strict member/path checks, SHA-256 verification, owner-private staging, immutable versions, atomic activation markers, and explicit rollback. Its fake-downloader tests do not access the network or execute QuadriFlow. Since the manifest is empty, the installer performs no downloads, creates no directories, and installs nothing.
+The release manifest currently contains no artifacts. The public CLI/REST/MCP/Studio install route checks a release-verification gate before calling the lower-level transactional installer. With the current empty manifest, install requests do not download, create a QuadriFlow backend directory, or install anything. The lower-level installer supports future uncompressed POSIX USTAR packages with bounded system-curl downloads, strict member/path checks, SHA-256 verification, owner-private staging, immutable versions, atomic activation markers, and explicit rollback; fake-downloader tests do not access the network or execute QuadriFlow.
 
 A future package needs an exact source and workflow commit, per-platform archive and payload checksums, complete third-party notices, an independently validated SBOM, and verifiable provenance/signature material. The code verifies hashes against the application-bundled manifest, but does not verify Sigstore provenance signatures or claims. A hash-pinned artifact is not a legal clearance or a release approval. The current smoke workflow still produces unsigned CI evidence without the complete package payload, so it cannot populate the release manifest.
 

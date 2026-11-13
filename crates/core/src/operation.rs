@@ -6,8 +6,9 @@ use serde_json::{Value, json};
 use crate::{
     Asset, AtlasBakeError, AtlasBakeOptions, CoreError, CoreResult, GenerationOptions,
     GenerationResult, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dRuntimeManager,
-    RuntimeSetupReport, SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb,
-    inspect_asset, optimize_render_glb, separate_components, simplify_glb,
+    QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport, SimplificationReport,
+    Store, bake_glb, cleanup_glb, compress_mesh_glb, inspect_asset,
+    install_bundled_quadriflow_sidecar, optimize_render_glb, separate_components, simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,7 @@ pub struct RuntimeDoctor {
     pub platform: String,
     pub operations: Vec<String>,
     pub model_backends: Vec<Value>,
+    pub quadriflow_backend: QuadriFlowBackendStatus,
     pub notes: Vec<String>,
 }
 
@@ -58,6 +60,27 @@ impl OperationCore {
 
     pub fn store(&self) -> &Arc<Store> {
         &self.store
+    }
+
+    pub fn quadriflow_backend_status(&self) -> QuadriFlowBackendStatus {
+        let sidecar_available =
+            crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root());
+        crate::quadriflow_installer::quadriflow_backend_status(
+            self.store.data_root(),
+            sidecar_available,
+        )
+    }
+
+    pub fn install_quadriflow_backend(&self) -> CoreResult<QuadriFlowInstallResult> {
+        let status = self.quadriflow_backend_status();
+        if !status.install_available {
+            return Err(CoreError::OperationUnavailable(format!(
+                "{} {}",
+                status.message, status.next_step
+            )));
+        }
+        install_bundled_quadriflow_sidecar(self.store.data_root())
+            .map_err(|error| CoreError::OperationUnavailable(error.to_string()))
     }
 
     pub fn import_asset(&self, name: &str, bytes: &[u8]) -> CoreResult<Asset> {
@@ -139,10 +162,12 @@ impl OperationCore {
             crate::parts::validate_part_glb_size(source_artifact.byte_size)?;
         }
         if operation == "mesh.retopology" {
-            if !crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root()) {
-                return Err(CoreError::OperationUnavailable(
-                    "No compatible QuadriFlow sidecar is available for this MeshHarbor data directory.".into(),
-                ));
+            let backend = self.quadriflow_backend_status();
+            if !backend.available {
+                return Err(CoreError::OperationUnavailable(format!(
+                    "{} {}",
+                    backend.message, backend.next_step
+                )));
             }
             if source_artifact.byte_size > 64 * 1024 * 1024 {
                 return Err(CoreError::OperationUnavailable(
@@ -333,7 +358,7 @@ impl OperationCore {
                 "runtime_root": readiness.runtime_root,
                 "python": readiness.python,
                 "missing": readiness.missing,
-                "license_notice": "MeshHarbor is MIT; upstream model/checkpoint terms are separate and remain pending review. User confirmation and gated access are required before model downloads.",
+                "license_notice": "The MeshHarbor project license has not been selected in this repository; upstream model/checkpoint terms are separate and remain pending review. User confirmation and gated access are required before model downloads.",
             }));
         }
         if let Some(readiness) = &mlx {
@@ -373,13 +398,14 @@ impl OperationCore {
             platform: std::env::consts::OS.to_string(),
             operations: supported,
             model_backends,
+            quadriflow_backend: self.quadriflow_backend_status(),
             notes: vec![
                 "The Rust core includes CPU mesh simplification, conservative cleanup, shared-index connected-part splitting, xatlas UV atlas rebaking, render cache/overdraw optimization, and required KHR_meshopt_compression output; this does not yet constitute a full cross-platform Studio or one-file distribution.".into(),
                 "Connected-part splitting handles one indexed static TRIANGLES primitive, groups by shared vertex indices, and emits primitives within the same GLB mesh; it does not split scene nodes, weld duplicate positions, or retopologize.".into(),
-                "Quad retopology is available only when the pinned QuadriFlow sidecar is managed in the MeshHarbor data directory or placed beside the executable. It accepts one closed static triangle mesh; textured input needs POSITION, TEXCOORD_0, optional NORMAL, and the supported embedded base-color/metallic-roughness PNG maps. Supported maps are projected with distance, facing-normal, coverage, and opposing-shell ambiguity gates into the triangulated GLB preview only; the separate OBJ retains quad topology without UVs or appearance. Other maps/attributes are rejected, and self-intersection freedom or measured surface-error tolerance is not certified.".into(),
+                "Quad retopology is available only when a compatible QuadriFlow sidecar is managed in the MeshHarbor data directory or placed beside the executable; backend status and a guarded install request are exposed, but installation stays unavailable until a reviewed signed release and signature/provenance verifier are present. It accepts one closed static triangle mesh; textured input needs POSITION, TEXCOORD_0, optional NORMAL, and the supported embedded base-color/metallic-roughness PNG maps. Supported maps are projected with distance, facing-normal, coverage, and opposing-shell ambiguity gates into the triangulated GLB preview only; the separate OBJ retains quad topology without UVs or appearance. Other maps/attributes are rejected, and self-intersection freedom or measured surface-error tolerance is not certified.".into(),
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
-                "The MIT license covers MeshHarbor code, not upstream model weights or separate DINOv3/NAF terms. Gated access is user-controlled, and generated user inputs stay local to the worker.".into(),
+                "The MeshHarbor project license has not been selected in this repository. Upstream model weights and separate DINOv3/NAF terms remain independent; gated access is user-controlled, and generated user inputs stay local to the worker.".into(),
             ],
         }
     }
@@ -470,6 +496,18 @@ mod tests {
                 .implemented,
             crate::quadriflow::quadriflow_sidecar_available_at(core.store.data_root())
         );
+        assert_eq!(
+            doctor.quadriflow_backend.available,
+            crate::quadriflow::quadriflow_sidecar_available_at(core.store.data_root())
+        );
+        assert!(!doctor.quadriflow_backend.install_available);
+        if !doctor.quadriflow_backend.available {
+            assert!(matches!(
+                core.install_quadriflow_backend(),
+                Err(CoreError::OperationUnavailable(_))
+            ));
+            assert!(!root.join("backends").exists());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }

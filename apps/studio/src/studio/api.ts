@@ -40,6 +40,10 @@ export class MeshHarborApi {
     return this.request('/api/v1/runtime');
   }
 
+  installQuadriflowBackend(): Promise<{ release_tag: string; executable: string; already_installed: boolean }> {
+    return this.request('/api/v1/backends/quadriflow/install', { method: 'POST' });
+  }
+
   setupPixal3dRuntime(): Promise<Job> {
     return this.request('/api/v1/runtime/pixal3d-mlx/setup', { method: 'POST' });
   }
