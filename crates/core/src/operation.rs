@@ -138,7 +138,54 @@ impl OperationCore {
         if operation == "mesh.separate_parts" {
             crate::parts::validate_part_glb_size(source_artifact.byte_size)?;
         }
+        if operation == "mesh.retopology" {
+            if !crate::quadriflow_sidecar_available() {
+                return Err(CoreError::OperationUnavailable(
+                    "QuadriFlow is not packaged. Install the pinned geometry-only sidecar beside the MeshHarbor executable.".into(),
+                ));
+            }
+            if source_artifact.byte_size > 64 * 1024 * 1024 {
+                return Err(CoreError::OperationUnavailable(
+                    "Retopology accepts GLB files up to 64 MiB.".into(),
+                ));
+            }
+        }
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
+        if operation == "mesh.retopology" {
+            let options: crate::QuadRetopologyOptions =
+                serde_json::from_value(parameters).map_err(|error| {
+                    CoreError::InvalidInput(format!(
+                        "Invalid mesh.retopology parameters: {error}"
+                    ))
+                })?;
+            let (preview, quad_obj, report) =
+                crate::quadriflow_retopology_glb(&bytes, options)?;
+            let report_value = serde_json::to_value(&report)?;
+            let name = derived_mesh_name(&source.name, "quad-retopologized");
+            let mut asset = self.store.import_derived_asset(
+                &name,
+                &preview,
+                asset_id,
+                json!({
+                    "operation": operation,
+                    "report": report_value.clone(),
+                    "quad_topology_artifact": true,
+                }),
+            )?;
+            self.store.add_artifact(
+                &asset.id,
+                "quad_topology",
+                "model/obj",
+                &quad_obj,
+            )?;
+            asset = self.store.get_asset(&asset.id)?.ok_or_else(|| {
+                CoreError::Conflict("Retopology output asset was not visible after artifact creation.".into())
+            })?;
+            return Ok(MeshOperationResult {
+                asset,
+                report: report_value,
+            });
+        }
         let (suffix, output, report) = match operation {
             "mesh.cleanup" => {
                 reject_unused_parameters(&parameters, operation)?;
@@ -245,6 +292,7 @@ impl OperationCore {
             || Pixal3dCudaRuntimeManager::new(self.store.root())
                 .readiness()
                 .ready;
+        let quadriflow_ready = crate::quadriflow_sidecar_available();
         vec![
             OperationDescriptor { id: "asset.import".into(), title: "Import asset".into(), category: "asset".into(), summary: "Import PNG, JPEG, or GLB files while retaining an immutable content-addressed source artifact.".into(), implemented: true },
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
@@ -252,7 +300,7 @@ impl OperationCore {
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangle primitives with meshoptimizer while retaining original vertex streams, materials, and textures.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces while preserving seams, vertex streams, materials, and the source asset.".into(), implemented: true },
             OperationDescriptor { id: "mesh.separate_parts".into(), title: "Separate connected parts".into(), category: "mesh".into(), summary: "Split one embedded static indexed TRIANGLES GLB (max 64 MiB total, 4 MiB JSON, 1,000,000 POSITION vertices, 3,000,000 indices, 256 parts) into connected primitives in the same mesh; shared-index connectivity, not scene nodes.".into(), implemented: true },
-            OperationDescriptor { id: "mesh.retopology".into(), title: "Retopology".into(), category: "mesh".into(), summary: "Experimental isotropic triangle remeshing (not quad remeshing) has a geometry-only worker and strict untextured-GLB candidate; it stays disabled pending self-intersection/geometric-quality acceptance and sidecar packaging.".into(), implemented: false },
+            OperationDescriptor { id: "mesh.retopology".into(), title: "Quad retopology".into(), category: "mesh".into(), summary: "Experimental QuadriFlow quad remeshing through a packaged sidecar. Geometry-only; requires one closed, untextured static GLB and preserves the original quads as a downloadable OBJ artifact. The GLB is a triangulated preview; self-intersection and measured surface-error checks are not certified.".into(), implemented: quadriflow_ready },
             OperationDescriptor { id: "uv.unwrap".into(), title: "Atlas UV unwrap".into(), category: "uv".into(), summary: "Use xatlas to unwrap one supported static textured mesh and rebake its embedded base-color and metallic/roughness PNG maps from the same mesh's existing UVs; this is not high-to-low projection.".into(), implemented: true },
             OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Generic high-to-low and arbitrary texture baking is not implemented; uv.unwrap only rebakes supported same-mesh embedded base-color and metallic/roughness PNG maps.".into(), implemented: false },
             OperationDescriptor { id: "render.optimize".into(), title: "Render optimization".into(), category: "mesh".into(), summary: "Use meshoptimizer vertex-cache and overdraw reordering on opaque/masked indexed triangles; translucent order is preserved.".into(), implemented: true },
@@ -334,6 +382,7 @@ impl OperationCore {
             notes: vec![
                 "The Rust core includes CPU mesh simplification, conservative cleanup, shared-index connected-part splitting, xatlas UV atlas rebaking, render cache/overdraw optimization, and required KHR_meshopt_compression output; this does not yet constitute a full cross-platform Studio or one-file distribution.".into(),
                 "Connected-part splitting handles one indexed static TRIANGLES primitive, groups by shared vertex indices, and emits primitives within the same GLB mesh; it does not split scene nodes, weld duplicate positions, or retopologize.".into(),
+                "Quad retopology is available only when the pinned QuadriFlow sidecar is packaged beside MeshHarbor. It accepts one closed, untextured static triangle mesh, writes actual quad topology to a separate OBJ artifact, and creates a triangulated GLB preview. It does not transfer UVs/textures/material appearance, does not certify self-intersection or a measured surface-error tolerance, and the sidecar build/license notices must accompany distribution.".into(),
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
                 "The MIT license covers MeshHarbor code, not upstream model weights or separate DINOv3/NAF terms. Gated access is user-controlled, and generated user inputs stay local to the worker.".into(),
