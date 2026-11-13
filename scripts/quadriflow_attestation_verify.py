@@ -34,6 +34,10 @@ WORKFLOW_SAN = (
 )
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
+GITHUB_WORKFLOW_BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
+UPSTREAM_REPOSITORY = "https://github.com/hjwdzh/QuadriFlow.git"
+UPSTREAM_COMMIT = "810b7a0967c35b0dc85b4464e3835e26a756c967"
+PLATFORMS = {"linux-x86_64": "quadriflow", "macos-aarch64": "quadriflow", "windows-x86_64": "quadriflow.exe"}
 BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
 MIN_GH_CLI = (2, 96, 0)
 MAX_ARTIFACT_BYTES = 128 * 1024 * 1024
@@ -93,6 +97,108 @@ def _parse_sha(value: str, label: str) -> str:
     if not isinstance(value, str) or not SHA1.fullmatch(value):
         raise VerificationError(f"{label} must be a 40-character lowercase Git SHA")
     return value
+
+
+def _parse_positive_int(value: int, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise VerificationError(f"{label} must be a positive integer")
+    return value
+
+
+def _build_recipe_sha256() -> str:
+    repository_root = Path(__file__).resolve().parents[1]
+    _, recipe = _regular_file(
+        repository_root / "scripts" / "quadriflow-platform-smoke.py",
+        "pinned build recipe",
+        4 * 1024 * 1024,
+    )
+    return _sha256(recipe)
+
+
+def _validate_predicate(
+    predicate: Any,
+    source_commit: str,
+    workflow_commit: str,
+    workflow_run_id: int,
+    workflow_run_attempt: int,
+    platform: str,
+) -> None:
+    if workflow_commit != source_commit:
+        raise VerificationError("workflow and source commits must match for main-branch builds")
+    if platform not in PLATFORMS:
+        raise VerificationError("platform is not supported by the fixed candidate policy")
+    if not isinstance(predicate, dict):
+        raise VerificationError("SLSA provenance predicate is missing")
+
+    build_definition = predicate.get("buildDefinition")
+    if not isinstance(build_definition, dict):
+        raise VerificationError("SLSA build definition is missing")
+    if build_definition.get("buildType") != GITHUB_WORKFLOW_BUILD_TYPE:
+        raise VerificationError("SLSA build type did not match the pinned policy")
+
+    expected_workflow = {
+        "repository": REPOSITORY_URI,
+        "ref": SOURCE_REF,
+        "path": WORKFLOW_PATH,
+    }
+    expected_external = {
+        "workflow": expected_workflow,
+        "inputs": {"confirm_candidate": "true"},
+    }
+    external_parameters = build_definition.get("externalParameters")
+    if external_parameters != expected_external:
+        raise VerificationError("SLSA external parameters did not match the pinned policy")
+
+    expected_internal = {
+        "github": {
+            "repository_id": REPOSITORY_ID,
+            "repository_owner_id": OWNER_ID,
+            "event_name": "workflow_dispatch",
+        },
+        "meshharbor_platform": platform,
+    }
+    if build_definition.get("internalParameters") != expected_internal:
+        raise VerificationError("SLSA GitHub context did not match the pinned policy")
+
+    recipe_uri = (
+        f"{REPOSITORY_URI}/blob/{source_commit}/scripts/quadriflow-platform-smoke.py"
+    )
+    expected_dependencies = [
+        {
+            "uri": f"git+{REPOSITORY_URI}@{SOURCE_REF}",
+            "digest": {"gitCommit": source_commit},
+        },
+        {
+            "uri": f"git+{UPSTREAM_REPOSITORY}@{UPSTREAM_COMMIT}",
+            "digest": {"gitCommit": UPSTREAM_COMMIT},
+        },
+        {
+            "uri": recipe_uri,
+            "digest": {"sha256": _build_recipe_sha256()},
+        },
+    ]
+    dependencies = build_definition.get("resolvedDependencies")
+    if not isinstance(dependencies, list) or len(dependencies) != len(expected_dependencies):
+        raise VerificationError("SLSA materials do not match the pinned source set")
+    actual_dependencies = sorted(
+        dependencies,
+        key=lambda item: str(item.get("uri")) if isinstance(item, dict) else "",
+    )
+    expected_dependencies = sorted(expected_dependencies, key=lambda item: item["uri"])
+    if actual_dependencies != expected_dependencies:
+        raise VerificationError("SLSA materials do not match the pinned source set")
+
+    run_details = predicate.get("runDetails")
+    if not isinstance(run_details, dict):
+        raise VerificationError("SLSA run details are missing")
+    if run_details.get("builder") != {"id": WORKFLOW_SAN}:
+        raise VerificationError("SLSA builder identity did not match the pinned workflow")
+    metadata = run_details.get("metadata")
+    expected_invocation = (
+        f"{REPOSITORY_URI}/actions/runs/{workflow_run_id}/attempts/{workflow_run_attempt}"
+    )
+    if not isinstance(metadata, dict) or metadata.get("invocationId") != expected_invocation:
+        raise VerificationError("SLSA invocation did not match the current workflow run")
 
 
 def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -188,8 +294,12 @@ def _require_equal(actual: Any, expected: str, label: str) -> None:
 def _validate_cli_result(
     output: str,
     artifact_digest: str,
+    artifact_name: str,
     source_commit: str,
     workflow_commit: str,
+    workflow_run_id: int,
+    workflow_run_attempt: int,
+    platform: str,
 ) -> int:
     result = _json_bytes(output.encode("utf-8"), "GitHub CLI verification output")
     if not isinstance(result, list) or len(result) != 1 or not isinstance(result[0], dict):
@@ -226,10 +336,19 @@ def _validate_cli_result(
     subjects = statement.get("subject")
     if not isinstance(subjects, list) or len(subjects) != 1 or not isinstance(subjects[0], dict):
         raise VerificationError("attestation must contain exactly one subject")
+    _require_equal(subjects[0].get("name"), artifact_name, "subject name")
     digest_map = subjects[0].get("digest")
     if not isinstance(digest_map, dict):
         raise VerificationError("attestation subject digest is missing")
     _require_equal(digest_map.get("sha256"), artifact_digest, "subject SHA-256")
+    _validate_predicate(
+        statement.get("predicate"),
+        source_commit,
+        workflow_commit,
+        workflow_run_id,
+        workflow_run_attempt,
+        platform,
+    )
 
     timestamps = verified.get("verifiedTimestamps")
     if not isinstance(timestamps, list) or not timestamps:
@@ -307,10 +426,21 @@ def verify_attestation(
     source_commit_value: str,
     workflow_commit_value: str,
     output_value: str | Path,
+    workflow_run_id_value: int,
+    workflow_run_attempt_value: int,
+    platform_value: str,
 ) -> dict[str, Any]:
     source_commit = _parse_sha(source_commit_value, "source commit")
     workflow_commit = _parse_sha(workflow_commit_value, "workflow commit")
+    workflow_run_id = _parse_positive_int(workflow_run_id_value, "workflow run id")
+    workflow_run_attempt = _parse_positive_int(
+        workflow_run_attempt_value, "workflow run attempt"
+    )
+    if platform_value not in PLATFORMS:
+        raise VerificationError("platform is not supported by the fixed candidate policy")
     artifact, artifact_bytes = _regular_file(artifact_value, "candidate executable", MAX_ARTIFACT_BYTES)
+    if artifact.name != PLATFORMS[platform_value]:
+        raise VerificationError("candidate executable does not match the platform")
     bundle, bundle_bytes = _regular_file(bundle_value, "Sigstore bundle", MAX_BUNDLE_BYTES)
     if artifact == bundle:
         raise VerificationError("candidate executable and bundle must be distinct files")
@@ -339,8 +469,12 @@ def verify_attestation(
         timestamp_count = _validate_cli_result(
             verified_output,
             _sha256(artifact_bytes),
+            artifact.name,
             source_commit,
             workflow_commit,
+            workflow_run_id,
+            workflow_run_attempt,
+            platform_value,
         )
     finally:
         try:
@@ -370,6 +504,15 @@ def verify_attestation(
         "trusted_root": "obtained by gh attestation trusted-root and passed through TUF verification",
         "artifact": {"name": artifact.name, "sha256": _sha256(artifact_bytes)},
         "bundle": {"name": bundle_copy.name, "sha256": _sha256(bundle_bytes)},
+        "platform": platform_value,
+        "workflow_run_id": workflow_run_id,
+        "workflow_run_attempt": workflow_run_attempt,
+        "materials": {
+            "meshharbor_source_commit": source_commit,
+            "quadriflow_repository": UPSTREAM_REPOSITORY,
+            "quadriflow_commit": UPSTREAM_COMMIT,
+            "build_recipe_sha256": _build_recipe_sha256(),
+        },
         "policy": {
             "repository": REPOSITORY,
             "repository_id": REPOSITORY_ID,
@@ -399,6 +542,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bundle", required=True, help="local Sigstore bundle from actions/attest")
     parser.add_argument("--source-commit", required=True, help="GitHub source commit SHA")
     parser.add_argument("--workflow-commit", required=True, help="GitHub workflow revision SHA")
+    parser.add_argument("--workflow-run-id", required=True, type=int)
+    parser.add_argument("--workflow-run-attempt", required=True, type=int)
+    parser.add_argument("--platform", required=True, choices=tuple(PLATFORMS))
     parser.add_argument("--output", required=True, help="candidate-directory verification.json path")
     return parser
 
@@ -412,6 +558,9 @@ def main(argv: list[str] | None = None) -> int:
             args.source_commit,
             args.workflow_commit,
             args.output,
+            args.workflow_run_id,
+            args.workflow_run_attempt,
+            args.platform,
         )
     except VerificationError as error:
         print(f"ERROR: {error}", file=sys.stderr)

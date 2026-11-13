@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 import quadriflow_attestation_verify as q
+import quadriflow_candidate_provenance as candidate_provenance
 
 
 class CandidateVerifierTests(unittest.TestCase):
@@ -33,7 +35,29 @@ class CandidateVerifierTests(unittest.TestCase):
         )
         self.output = self.candidate / "verification.json"
         self.source_commit = "a" * 40
-        self.workflow_commit = "b" * 40
+        self.workflow_commit = self.source_commit
+        self.workflow_run_id = 12345
+        self.workflow_run_attempt = 2
+        self.platform = "linux-x86_64"
+
+    def verify_attestation(
+        self,
+        artifact_value,
+        bundle_value,
+        source_commit_value,
+        workflow_commit_value,
+        output_value,
+    ):
+        return q.verify_attestation(
+            artifact_value,
+            bundle_value,
+            source_commit_value,
+            workflow_commit_value,
+            output_value,
+            self.workflow_run_id,
+            self.workflow_run_attempt,
+            self.platform,
+        )
 
     def tearDown(self):
         self.temp.cleanup()
@@ -52,6 +76,8 @@ class CandidateVerifierTests(unittest.TestCase):
         trigger="workflow_dispatch",
         subject_digest=None,
         predicate_type=q.PREDICATE_TYPE,
+        predicate=None,
+        subject_name=None,
     ):
         artifact_digest = hashlib.sha256(self.binary.read_bytes()).hexdigest()
         certificate = {
@@ -68,6 +94,15 @@ class CandidateVerifierTests(unittest.TestCase):
             "runnerEnvironment": runner,
             "buildTrigger": trigger,
         }
+        if predicate is None:
+            predicate = candidate_provenance.create_predicate(
+                Path(__file__).resolve().parents[1],
+                self.source_commit,
+                self.workflow_commit,
+                self.workflow_run_id,
+                self.workflow_run_attempt,
+                self.platform,
+            )
         return json.dumps([
             {
                 "verificationResult": {
@@ -75,11 +110,11 @@ class CandidateVerifierTests(unittest.TestCase):
                     "verifiedTimestamps": [{"source": "transparency-log"}],
                     "statement": {
                         "subject": [{
-                            "name": "quadriflow",
+                            "name": subject_name or self.binary.name,
                             "digest": {"sha256": subject_digest or artifact_digest},
                         }],
                         "predicateType": predicate_type,
-                        "predicate": {},
+                        "predicate": predicate,
                     },
                 }
             }
@@ -110,7 +145,7 @@ class CandidateVerifierTests(unittest.TestCase):
     def test_fixed_policy_is_passed_and_verified_bundle_is_copied(self):
         calls, fake = self.fake_run()
         with patch.object(q, "_run", side_effect=fake):
-            report = q.verify_attestation(
+            report = self.verify_attestation(
                 self.binary,
                 self.bundle,
                 self.source_commit,
@@ -153,7 +188,7 @@ class CandidateVerifierTests(unittest.TestCase):
         staged_bundle.write_bytes(self.bundle.read_bytes())
         calls, fake = self.fake_run()
         with patch.object(q, "_run", side_effect=fake):
-            report = q.verify_attestation(
+            report = self.verify_attestation(
                 self.binary,
                 staged_bundle,
                 self.source_commit,
@@ -169,7 +204,7 @@ class CandidateVerifierTests(unittest.TestCase):
         calls, fake = self.fake_run(output=self.cli_result(source_repository_id="999"))
         with patch.object(q, "_run", side_effect=fake):
             with self.assertRaisesRegex(q.VerificationError, "repository id"):
-                q.verify_attestation(
+                self.verify_attestation(
                     self.binary,
                     self.bundle,
                     self.source_commit,
@@ -187,7 +222,7 @@ class CandidateVerifierTests(unittest.TestCase):
                 calls, fake = self.fake_run(output=output)
                 with patch.object(q, "_run", side_effect=fake):
                     with self.assertRaises(q.VerificationError):
-                        q.verify_attestation(
+                        self.verify_attestation(
                             self.binary,
                             self.bundle,
                             self.source_commit,
@@ -206,7 +241,7 @@ class CandidateVerifierTests(unittest.TestCase):
                 calls, fake = self.fake_run(output=output)
                 with patch.object(q, "_run", side_effect=fake):
                     with self.assertRaises(q.VerificationError):
-                        q.verify_attestation(
+                        self.verify_attestation(
                             self.binary,
                             self.bundle,
                             self.source_commit,
@@ -225,7 +260,7 @@ class CandidateVerifierTests(unittest.TestCase):
                 calls, fake = self.fake_run(output=output)
                 with patch.object(q, "_run", side_effect=fake):
                     with self.assertRaises(q.VerificationError):
-                        q.verify_attestation(
+                        self.verify_attestation(
                             self.binary,
                             self.bundle,
                             self.source_commit,
@@ -237,13 +272,67 @@ class CandidateVerifierTests(unittest.TestCase):
     def test_rejects_wrong_subject_and_predicate(self):
         for output in (
             self.cli_result(subject_digest="0" * 64),
+            self.cli_result(subject_name="different-artifact"),
             self.cli_result(predicate_type="https://example.invalid/predicate"),
         ):
             with self.subTest(output=output):
                 calls, fake = self.fake_run(output=output)
                 with patch.object(q, "_run", side_effect=fake):
                     with self.assertRaises(q.VerificationError):
-                        q.verify_attestation(
+                        self.verify_attestation(
+                            self.binary,
+                            self.bundle,
+                            self.source_commit,
+                            self.workflow_commit,
+                            self.output,
+                        )
+                self.assertFalse((self.candidate / "provenance.sigstore.json").exists())
+
+    def test_rejects_unpinned_slsa_materials_context_and_invocation(self):
+        valid = candidate_provenance.create_predicate(
+            Path(__file__).resolve().parents[1],
+            self.source_commit,
+            self.workflow_commit,
+            self.workflow_run_id,
+            self.workflow_run_attempt,
+            self.platform,
+        )
+        mutations = []
+        wrong_workflow = copy.deepcopy(valid)
+        wrong_workflow["buildDefinition"]["externalParameters"]["workflow"]["path"] = (
+            ".github/workflows/other.yml"
+        )
+        mutations.append(wrong_workflow)
+        wrong_platform = copy.deepcopy(valid)
+        wrong_platform["buildDefinition"]["internalParameters"]["meshharbor_platform"] = (
+            "windows-x86_64"
+        )
+        mutations.append(wrong_platform)
+        missing_material = copy.deepcopy(valid)
+        missing_material["buildDefinition"]["resolvedDependencies"].pop()
+        mutations.append(missing_material)
+        wrong_upstream = copy.deepcopy(valid)
+        wrong_upstream["buildDefinition"]["resolvedDependencies"][1]["digest"][
+            "gitCommit"
+        ] = "c" * 40
+        mutations.append(wrong_upstream)
+        wrong_recipe = copy.deepcopy(valid)
+        wrong_recipe["buildDefinition"]["resolvedDependencies"][2]["digest"][
+            "sha256"
+        ] = "0" * 64
+        mutations.append(wrong_recipe)
+        wrong_invocation = copy.deepcopy(valid)
+        wrong_invocation["runDetails"]["metadata"]["invocationId"] = (
+            "https://github.com/attacker/repo/actions/runs/1/attempts/1"
+        )
+        mutations.append(wrong_invocation)
+
+        for predicate in mutations:
+            with self.subTest(predicate=predicate):
+                calls, fake = self.fake_run(output=self.cli_result(predicate=predicate))
+                with patch.object(q, "_run", side_effect=fake):
+                    with self.assertRaisesRegex(q.VerificationError, "SLSA"):
+                        self.verify_attestation(
                             self.binary,
                             self.bundle,
                             self.source_commit,
@@ -256,7 +345,7 @@ class CandidateVerifierTests(unittest.TestCase):
         calls, fake = self.fake_run(verify_returncode=1)
         with patch.object(q, "_run", side_effect=fake):
             with self.assertRaisesRegex(q.VerificationError, "verification failed"):
-                q.verify_attestation(
+                self.verify_attestation(
                     self.binary,
                     self.bundle,
                     self.source_commit,
@@ -279,7 +368,7 @@ class CandidateVerifierTests(unittest.TestCase):
         calls, fake = self.fake_run()
         with patch.object(q, "_run", side_effect=fake):
             with self.assertRaisesRegex(q.VerificationError, "non-release gates"):
-                q.verify_attestation(
+                self.verify_attestation(
                     self.binary,
                     self.bundle,
                     self.source_commit,
@@ -292,7 +381,7 @@ class CandidateVerifierTests(unittest.TestCase):
         calls, fake = self.fake_run()
         with patch.object(q, "_run", side_effect=fake):
             with self.assertRaises(q.VerificationError):
-                q.verify_attestation(
+                self.verify_attestation(
                     self.binary,
                     self.bundle,
                     "A" * 40,
@@ -310,7 +399,7 @@ class CandidateVerifierTests(unittest.TestCase):
 
         with patch.object(q, "_run", side_effect=fake):
             with self.assertRaisesRegex(q.VerificationError, "2.96.0"):
-                q.verify_attestation(
+                self.verify_attestation(
                     self.binary,
                     self.bundle,
                     self.source_commit,

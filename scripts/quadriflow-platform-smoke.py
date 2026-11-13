@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     output_obj = output_dir / "cube-quad.obj"
     log_path = artifact_dir / "build-and-smoke.log"
     platform_name = os.environ.get("RUNNER_OS", platform.system())
+    candidate_platform = os.environ.get("MESHHARBOR_PLATFORM", platform_name)
     executable_name = "quadriflow.exe" if os.name == "nt" else "quadriflow"
 
     if work_root.exists():
@@ -232,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         "build_trigger": os.environ.get("MESHHARBOR_BUILD_TRIGGER"),
         "upstream_repository": QUADRIFLOW_REPOSITORY,
         "upstream_commit": QUADRIFLOW_COMMIT,
-        "platform": platform_name,
+        "platform": candidate_platform,
         "machine": platform.machine(),
         "platform_release": platform.release(),
         "tool_versions": tool_versions,
