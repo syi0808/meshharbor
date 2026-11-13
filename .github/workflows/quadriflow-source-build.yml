@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build-and-smoke:
-    if: "${{ startsWith(github.event.head_commit.message, 'test(retopology): approved QuadriFlow three-platform build smoke') }}"
+    if: "${{ startsWith(github.event.head_commit.message, 'test(retopology): approved QuadriFlow three-platform build smoke') || (startsWith(github.event.head_commit.message, 'test(retopology): approved QuadriFlow Windows retry') && matrix.platform == 'windows') }}"
     name: ${{ matrix.platform }} build and synthetic-cube smoke
     strategy:
       fail-fast: false

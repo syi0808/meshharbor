@@ -126,16 +126,20 @@ def main() -> int:
                     shutil.copy2(candidate, destination)
 
             cmake_command = ["cmake", "-S", str(source_dir), "-B", str(build_dir), *BUILD_OPTIONS]
+            platform_build_options: list[str] = []
             if os.name == "nt":
                 vcpkg_root = os.environ.get("VCPKG_INSTALLATION_ROOT") or os.environ.get("VCPKG_ROOT")
                 if not vcpkg_root:
                     raise RuntimeError("Windows runner did not provide VCPKG_INSTALLATION_ROOT")
-                cmake_command.extend(
+                platform_build_options.extend(
                     [
                         f"-DCMAKE_TOOLCHAIN_FILE={Path(vcpkg_root) / 'scripts' / 'buildsystems' / 'vcpkg.cmake'}",
                         "-DVCPKG_TARGET_TRIPLET=x64-windows-static",
+                        "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW",
+                        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>",
                     ]
                 )
+                cmake_command.extend(platform_build_options)
             run(cmake_command, timeout=600)
             run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", "2"], timeout=2400)
 
@@ -211,7 +215,7 @@ def main() -> int:
         "platform_release": platform.release(),
         "tool_versions": tool_versions,
         "build_dependency_versions": dependency_versions,
-        "build_options": BUILD_OPTIONS,
+        "build_options": [*BUILD_OPTIONS, *(option for option in platform_build_options if not option.startswith("-DCMAKE_TOOLCHAIN_FILE="))],
         "build_mode": "Release",
         "fixture": "crates/core/tests/fixtures/quadriflow_cube_triangles.obj (synthetic cube; no user model)",
         "synthetic_fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
