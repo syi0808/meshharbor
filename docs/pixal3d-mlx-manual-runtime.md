@@ -4,7 +4,7 @@ This is the first image-generation integration profile for Apple Silicon. MeshHa
 
 ## Prerequisites
 
-- Apple Silicon macOS. CUDA installation is not implemented.
+- Apple Silicon macOS. This guide covers MLX only; the separate CUDA profile requires Linux x86_64 with NVIDIA.
 - Rust/Cargo 1.88+ and native build tools required to build MeshHarbor.
 - `curl` for the official uv release download if uv is not already installed. The runtime setup installs pinned uv 0.13.8 into MeshHarbor application data and verifies its SHA-256 before using it. macOS and Linux also need the system `tar` utility; Windows uses PowerShell `Expand-Archive`.
 - Build the MeshHarbor executable from the repository with the MLX source tree present. The pinned source snapshot and adapter scripts are embedded into the executable and extracted under `<data-dir>/runtimes/pixal3d-mlx/source`; the original checkout is not needed when running that built binary.
@@ -25,7 +25,7 @@ meshharbor runtime hf-login
 
 # First review/accept DINOv3 terms and request access in your own HF account.
 # This then preflights access and explicitly downloads about 24 GB of model files.
-meshharbor runtime install-models
+meshharbor runtime install-models --confirm-large-download --confirm-gated-access
 
 meshharbor doctor
 ~~~
