@@ -288,7 +288,7 @@ pub fn validate_remesh_request(request: &RemeshRequest) -> CoreResult<()> {
 
     let bounds = geometry_bounds(&request.positions)?;
     let inverse_diagonal = 1.0 / bounds.diagonal;
-    let mut edge_faces = std::collections::HashMap::<(u32, u32), u8>::new();
+    let mut edge_faces = std::collections::HashMap::<(u32, u32), (u8, i8)>::new();
     let mut unique_faces = std::collections::HashSet::<[u32; 3]>::new();
     for triangle in request.indices.chunks_exact(3) {
         let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
@@ -317,14 +317,25 @@ pub fn validate_remesh_request(request: &RemeshRequest) -> CoreResult<()> {
         }
         for (u, v) in [(a, b), (b, c), (c, a)] {
             let key = if u < v { (u, v) } else { (v, u) };
-            let count = edge_faces.entry(key).or_default();
+            let (count, winding) = edge_faces.entry(key).or_default();
             *count = count.saturating_add(1);
+            *winding += if u < v { 1 } else { -1 };
             if *count > 2 {
                 return Err(CoreError::OperationUnavailable(
                     "The experimental remesher only accepts edge-manifold triangle meshes.".into(),
                 ));
             }
         }
+    }
+    if edge_faces.values().any(|(count, _)| *count != 2) {
+        return Err(CoreError::OperationUnavailable(
+            "The experimental remesher only accepts closed, watertight triangle meshes.".into(),
+        ));
+    }
+    if edge_faces.values().any(|(_, winding)| *winding != 0) {
+        return Err(CoreError::OperationUnavailable(
+            "The experimental remesher requires consistently oriented triangle faces.".into(),
+        ));
     }
     Ok(())
 }
@@ -417,7 +428,7 @@ pub fn validate_remesh_response(
         }
     }
 
-    let mut edge_faces = std::collections::HashMap::<(u32, u32), u8>::new();
+    let mut edge_faces = std::collections::HashMap::<(u32, u32), (u8, i8)>::new();
     let mut unique_faces = std::collections::HashSet::<[u32; 3]>::new();
     let inverse_diagonal = 1.0 / bounds.diagonal;
     for triangle in response.indices.chunks_exact(3) {
@@ -447,14 +458,25 @@ pub fn validate_remesh_response(
         }
         for (u, v) in [(a, b), (b, c), (c, a)] {
             let key = if u < v { (u, v) } else { (v, u) };
-            let count = edge_faces.entry(key).or_default();
+            let (count, winding) = edge_faces.entry(key).or_default();
             *count = count.saturating_add(1);
+            *winding += if u < v { 1 } else { -1 };
             if *count > 2 {
                 return Err(CoreError::OperationUnavailable(
                     "Remesh worker returned a non-manifold edge.".into(),
                 ));
             }
         }
+    }
+    if edge_faces.values().any(|(count, _)| *count != 2) {
+        return Err(CoreError::OperationUnavailable(
+            "Remesh worker returned an open or non-watertight mesh.".into(),
+        ));
+    }
+    if edge_faces.values().any(|(_, winding)| *winding != 0) {
+        return Err(CoreError::OperationUnavailable(
+            "Remesh worker returned inconsistently oriented faces.".into(),
+        ));
     }
     Ok(())
 }
