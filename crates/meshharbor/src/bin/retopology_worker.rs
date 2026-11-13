@@ -12,7 +12,7 @@ use std::{
 use clap::Parser;
 use meshharbor_core::{
     RemeshRequest as Request, RemeshResponse as Response, normalize_remesh_positions,
-    restore_remesh_positions, validate_remesh_request, validate_remesh_response,
+    restore_remesh_positions, validate_remesh_response,
 };
 use remesh::prelude::*;
 
@@ -41,7 +41,7 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("cannot stat request file: {error}"))?
         .len();
     if request_size > MAX_REQUEST_BYTES {
-        return Err("request file exceeds the 128 MiB limit".into());
+        return Err("request file exceeds the 64 MiB limit".into());
     }
     let request_bytes =
         fs::read(&args.input).map_err(|error| format!("cannot read request file: {error}"))?;
@@ -52,7 +52,7 @@ fn run() -> Result<(), String> {
     let output_bytes = serde_json::to_vec(&response)
         .map_err(|error| format!("cannot encode response: {error}"))?;
     if output_bytes.len() > MAX_RESPONSE_BYTES {
-        return Err("response exceeds the 256 MiB limit".into());
+        return Err("response exceeds the 64 MiB limit".into());
     }
 
     // Never overwrite a caller-selected existing file. The host supplies a fresh
@@ -106,7 +106,7 @@ fn remesh(request: Request) -> Result<Response, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meshharbor_core::RetopologyOptions as Options;
+    use meshharbor_core::{RetopologyOptions as Options, validate_remesh_request};
 
     #[test]
     fn rejects_open_untextured_triangle_patch() {
