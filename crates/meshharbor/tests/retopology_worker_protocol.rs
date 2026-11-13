@@ -108,7 +108,10 @@ fn glb_adapter_runs_the_real_worker_and_emits_validated_mesh() {
     assert_eq!(report.input_triangles, 4);
     assert!(report.output_triangles > 0);
     assert!(
-        report.warnings.iter().any(|warning| warning.contains("untextured")),
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("untextured")),
         "report should disclose the GLB support limit"
     );
 }
