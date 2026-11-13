@@ -3,12 +3,24 @@
 //! GLB can only store triangle primitives. Keep the QuadriFlow OBJ as the editable
 //! quad-topology artifact and use the GLB produced here only as a viewer preview.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as FmtWrite,
+    fs,
+    path::PathBuf,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use uuid::Uuid;
 
-use crate::{CoreError, CoreResult};
+use crate::{
+    CoreError, CoreResult, RemeshRequest, RetopologyOptions, validate_remesh_request,
+    glb::extract_retopology_geometry,
+};
 
 const MAX_OBJ_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OBJ_LINE_BYTES: usize = 4 * 1024;
@@ -592,6 +604,258 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 fn output_error(message: impl Into<String>) -> CoreError {
     CoreError::OperationUnavailable(message.into())
+}
+
+const MAX_INPUT_OBJ_BYTES: usize = 64 * 1024 * 1024;
+const MAX_QUAD_TARGET: u32 = 50_000;
+const QUADRIFLOW_TIMEOUT: Duration = Duration::from_secs(180);
+const QUADRIFLOW_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuadRetopologyOptions {
+    /// Approximate requested number of output quads; the upstream solver may miss it.
+    pub target_quads: u32,
+}
+
+impl Default for QuadRetopologyOptions {
+    fn default() -> Self {
+        Self { target_quads: 10_000 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuadRetopologyReport {
+    pub algorithm: String,
+    pub input_vertices: u64,
+    pub input_triangles: u64,
+    pub requested_quads: u32,
+    pub output_vertices: u64,
+    pub output_quads: u64,
+    pub preview_triangles: u64,
+    pub warnings: Vec<String>,
+}
+
+/// Checks for a packaged, same-directory QuadriFlow sidecar without executing it.
+pub fn quadriflow_sidecar_available() -> bool {
+    quadriflow_sidecar_path().is_some()
+}
+
+/// Run the packaged sidecar on a generated geometry-only OBJ. The original OBJ
+/// bytes are returned separately so callers can persist the actual editable quads;
+/// the GLB is only a triangle preview.
+pub fn quadriflow_retopology_glb(
+    bytes: &[u8],
+    options: QuadRetopologyOptions,
+) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
+    if !(4..=MAX_QUAD_TARGET).contains(&options.target_quads) {
+        return Err(CoreError::InvalidInput(format!(
+            "target_quads must be between 4 and {MAX_QUAD_TARGET}."
+        )));
+    }
+
+    let (positions, indices) = extract_retopology_geometry(bytes)?;
+    let validation = RemeshRequest {
+        protocol_version: crate::REMESH_PROTOCOL_VERSION,
+        positions: positions.clone(),
+        indices: indices.clone(),
+        // This conservative validation budget is independent of the QuadriFlow face target.
+        // It rejects pathological input surface density before starting a native process.
+        options: RetopologyOptions {
+            target_edge_ratio: 0.25,
+            iterations: 1,
+        },
+    };
+    validate_remesh_request(&validation)?;
+
+    let input_obj = triangle_geometry_obj(&positions, &indices)?;
+    let worker = quadriflow_sidecar_path().ok_or_else(|| {
+        CoreError::OperationUnavailable(
+            "QuadriFlow is not packaged. Install the pinned geometry-only sidecar beside the MeshHarbor executable.".into(),
+        )
+    })?;
+    let temp = QuadriflowTempDir::create()?;
+    let input_path = temp.0.join("input.obj");
+    let output_path = temp.0.join("output.obj");
+    fs::write(&input_path, input_obj)?;
+
+    let mut child = Command::new(&worker)
+        .arg("-i")
+        .arg(&input_path)
+        .arg("-o")
+        .arg(&output_path)
+        .arg("-f")
+        .arg(options.target_quads.to_string())
+        .arg("-seed")
+        .arg("0")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            CoreError::OperationUnavailable(format!(
+                "Could not start the packaged QuadriFlow sidecar: {error}"
+            ))
+        })?;
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+        }
+        if started.elapsed() >= QUADRIFLOW_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CoreError::OperationUnavailable(
+                "QuadriFlow exceeded its 180-second process limit.".into(),
+            ));
+        }
+        thread::sleep(QUADRIFLOW_POLL_INTERVAL);
+    };
+    if !status.success() {
+        return Err(CoreError::OperationUnavailable(format!(
+            "Packaged QuadriFlow exited with {status}."
+        )));
+    }
+
+    let output_size = fs::metadata(&output_path)?.len();
+    if output_size == 0 || output_size > MAX_OBJ_BYTES as u64 {
+        return Err(CoreError::OperationUnavailable(
+            "QuadriFlow output is empty or exceeds 64 MiB.".into(),
+        ));
+    }
+    let quad_obj = fs::read(&output_path)?;
+    let (mesh, parsed_report) = parse_quad_obj_output(&quad_obj, &positions)?;
+    let preview_glb = quad_mesh_preview_glb(&mesh)?;
+
+    let mut warnings = parsed_report.warnings;
+    warnings.extend([
+        "QuadriFlow processes geometry only. UVs, textures, vertex colors, and source material appearance are not transferred.".into(),
+        "The OBJ preserves editable quad topology; GLB is only a triangulated viewer preview.".into(),
+        "This candidate does not certify self-intersection freedom or a measured surface-error tolerance; inspect the result before production use.".into(),
+        "The only native end-to-end smoke test used a synthetic cube; broad model quality and platform packaging remain unverified.".into(),
+    ]);
+    if parsed_report.output_quads != u64::from(options.target_quads) {
+        warnings.push(format!(
+            "The solver returned {} quads for a target of {}; the target is approximate.",
+            parsed_report.output_quads, options.target_quads
+        ));
+    }
+    let report = QuadRetopologyReport {
+        algorithm: "quadriflow_quad_retopology".into(),
+        input_vertices: positions.len() as u64,
+        input_triangles: (indices.len() / 3) as u64,
+        requested_quads: options.target_quads,
+        output_vertices: parsed_report.output_vertices,
+        output_quads: parsed_report.output_quads,
+        preview_triangles: parsed_report.preview_triangles,
+        warnings,
+    };
+    Ok((preview_glb, quad_obj, report))
+}
+
+fn quadriflow_sidecar_path() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let name = format!("quadriflow{}", std::env::consts::EXE_SUFFIX);
+    let sidecar = executable.with_file_name(name);
+    let metadata = fs::metadata(&sidecar).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return None;
+        }
+    }
+    Some(sidecar)
+}
+
+struct QuadriflowTempDir(PathBuf);
+
+impl QuadriflowTempDir {
+    fn create() -> CoreResult<Self> {
+        for _ in 0..4 {
+            let path = std::env::temp_dir().join(format!("meshharbor-quadriflow-{}", Uuid::new_v4()));
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(CoreError::OperationUnavailable(
+            "Could not allocate a private QuadriFlow working directory.".into(),
+        ))
+    }
+}
+
+impl Drop for QuadriflowTempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn triangle_geometry_obj(positions: &[[f32; 3]], indices: &[u32]) -> CoreResult<String> {
+    if positions.is_empty()
+        || positions.len() > MAX_VERTICES
+        || indices.is_empty()
+        || !indices.len().is_multiple_of(3)
+        || indices.len() / 3 > 200_000
+    {
+        return Err(CoreError::OperationUnavailable(
+            "QuadriFlow input exceeds the static geometry limits.".into(),
+        ));
+    }
+    let mut text = String::new();
+    for position in positions {
+        if position.iter().any(|component| !component.is_finite()) {
+            return Err(CoreError::InvalidInput(
+                "QuadriFlow input positions must be finite.".into(),
+            ));
+        }
+        writeln!(&mut text, "v {} {} {}", position[0], position[1], position[2])
+            .expect("writing to a String cannot fail");
+        if text.len() > MAX_INPUT_OBJ_BYTES {
+            return Err(CoreError::OperationUnavailable(
+                "Generated QuadriFlow OBJ input exceeds 64 MiB.".into(),
+            ));
+        }
+    }
+    for triangle in indices.chunks_exact(3) {
+        if triangle.iter().any(|index| *index as usize >= positions.len()) {
+            return Err(CoreError::InvalidInput(
+                "QuadriFlow input index references a missing position.".into(),
+            ));
+        }
+        writeln!(
+            &mut text,
+            "f {} {} {}",
+            triangle[0] + 1,
+            triangle[1] + 1,
+            triangle[2] + 1
+        )
+        .expect("writing to a String cannot fail");
+        if text.len() > MAX_INPUT_OBJ_BYTES {
+            return Err(CoreError::OperationUnavailable(
+                "Generated QuadriFlow OBJ input exceeds 64 MiB.".into(),
+            ));
+        }
+    }
+    Ok(text)
 }
 
 #[cfg(test)]
