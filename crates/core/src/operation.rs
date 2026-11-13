@@ -152,14 +152,11 @@ impl OperationCore {
         }
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
         if operation == "mesh.retopology" {
-            let options: crate::QuadRetopologyOptions =
-                serde_json::from_value(parameters).map_err(|error| {
-                    CoreError::InvalidInput(format!(
-                        "Invalid mesh.retopology parameters: {error}"
-                    ))
+            let options: crate::QuadRetopologyOptions = serde_json::from_value(parameters)
+                .map_err(|error| {
+                    CoreError::InvalidInput(format!("Invalid mesh.retopology parameters: {error}"))
                 })?;
-            let (preview, quad_obj, report) =
-                crate::quadriflow_retopology_glb(&bytes, options)?;
+            let (preview, quad_obj, report) = crate::quadriflow_retopology_glb(&bytes, options)?;
             let report_value = serde_json::to_value(&report)?;
             let name = derived_mesh_name(&source.name, "quad-retopologized");
             let asset = self.store.import_derived_asset_with_artifacts(

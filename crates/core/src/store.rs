@@ -816,10 +816,7 @@ mod tests {
             .iter()
             .find(|artifact| artifact.kind == "quad_topology")
             .unwrap();
-        assert_eq!(
-            store.read_artifact(&obj.id).unwrap().bytes,
-            quad_obj
-        );
+        assert_eq!(store.read_artifact(&obj.id).unwrap().bytes, quad_obj);
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }

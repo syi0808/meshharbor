@@ -401,7 +401,9 @@ impl McpServer {
         let core = self.core.clone();
         let asset_id = params.0.asset_id;
         let output_path = PathBuf::from(params.0.output_path);
-        match task::spawn_blocking(move || export_quad_obj_file(&core, &asset_id, &output_path)).await {
+        match task::spawn_blocking(move || export_quad_obj_file(&core, &asset_id, &output_path))
+            .await
+        {
             Ok(Ok(result)) => serde_json::to_string_pretty(&result)
                 .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
             Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
@@ -2640,7 +2642,8 @@ mod tests {
 
     #[test]
     fn mcp_quad_obj_export_preserves_topology_bytes_and_never_overwrites() {
-        let root = std::env::temp_dir().join(format!("meshharbor-quad-export-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-quad-export-{}", uuid::Uuid::new_v4()));
         let output_dir = root.join("store/exports");
         std::fs::create_dir_all(&output_dir).unwrap();
         let core = OperationCore::open(root.join("store")).unwrap();

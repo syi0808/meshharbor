@@ -18,8 +18,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    CoreError, CoreResult, RemeshRequest, RetopologyOptions, validate_remesh_request,
-    glb::extract_retopology_geometry,
+    CoreError, CoreResult, RemeshRequest, RetopologyOptions, glb::extract_retopology_geometry,
+    validate_remesh_request,
 };
 
 const MAX_OBJ_BYTES: usize = 64 * 1024 * 1024;
@@ -620,7 +620,9 @@ pub struct QuadRetopologyOptions {
 
 impl Default for QuadRetopologyOptions {
     fn default() -> Self {
-        Self { target_quads: 10_000 }
+        Self {
+            target_quads: 10_000,
+        }
     }
 }
 
@@ -789,7 +791,8 @@ struct QuadriflowTempDir(PathBuf);
 impl QuadriflowTempDir {
     fn create() -> CoreResult<Self> {
         for _ in 0..4 {
-            let path = std::env::temp_dir().join(format!("meshharbor-quadriflow-{}", Uuid::new_v4()));
+            let path =
+                std::env::temp_dir().join(format!("meshharbor-quadriflow-{}", Uuid::new_v4()));
             let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
             {
@@ -832,8 +835,12 @@ fn triangle_geometry_obj(positions: &[[f32; 3]], indices: &[u32]) -> CoreResult<
                 "QuadriFlow input positions must be finite.".into(),
             ));
         }
-        writeln!(&mut text, "v {} {} {}", position[0], position[1], position[2])
-            .expect("writing to a String cannot fail");
+        writeln!(
+            &mut text,
+            "v {} {} {}",
+            position[0], position[1], position[2]
+        )
+        .expect("writing to a String cannot fail");
         if text.len() > MAX_INPUT_OBJ_BYTES {
             return Err(CoreError::OperationUnavailable(
                 "Generated QuadriFlow OBJ input exceeds 64 MiB.".into(),
@@ -841,7 +848,10 @@ fn triangle_geometry_obj(positions: &[[f32; 3]], indices: &[u32]) -> CoreResult<
         }
     }
     for triangle in indices.chunks_exact(3) {
-        if triangle.iter().any(|index| *index as usize >= positions.len()) {
+        if triangle
+            .iter()
+            .any(|index| *index as usize >= positions.len())
+        {
             return Err(CoreError::InvalidInput(
                 "QuadriFlow input index references a missing position.".into(),
             ));
@@ -901,10 +911,12 @@ f 4 1 5 8\n";
         assert!(validate_quad_target(MAX_QUAD_TARGET).is_ok());
         assert!(validate_quad_target(3).is_err());
         assert!(validate_quad_target(MAX_QUAD_TARGET + 1).is_err());
-        assert!(serde_json::from_value::<QuadRetopologyOptions>(
-            json!({"target_quads": 12, "arbitrary_flag": true})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<QuadRetopologyOptions>(
+                json!({"target_quads": 12, "arbitrary_flag": true})
+            )
+            .is_err()
+        );
     }
 
     #[test]
