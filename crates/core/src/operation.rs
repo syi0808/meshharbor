@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    Asset, CoreError, CoreResult, GenerationOptions, GenerationResult, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime,
-    Pixal3dRuntimeManager, RuntimeSetupReport, SimplificationReport, Store, inspect_asset,
-    simplify_glb,
+    Asset, AtlasBakeError, AtlasBakeOptions, CoreError, CoreResult, GenerationOptions,
+    GenerationResult, MeshCleanupReport, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime,
+    Pixal3dRuntimeManager, RenderOptimizationReport, RuntimeSetupReport, SimplificationReport,
+    Store, bake_glb, cleanup_glb, compress_mesh_glb, inspect_asset, optimize_render_glb,
+    separate_components, simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +38,13 @@ pub struct OperationCore {
 pub struct SimplificationResult {
     pub asset: Asset,
     pub report: SimplificationReport,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshOperationResult {
+    pub asset: Asset,
+    pub report: Value,
 }
 
 impl OperationCore {
@@ -103,6 +112,83 @@ impl OperationCore {
         Ok(SimplificationResult { asset, report })
     }
 
+    /// Run a local mesh operation and persist its output as a separate derived asset.
+    /// The immutable source artifact is never overwritten.
+    pub fn process_mesh_asset(
+        &self,
+        asset_id: &str,
+        operation: &str,
+        parameters: Value,
+    ) -> CoreResult<MeshOperationResult> {
+        let source = self
+            .store
+            .get_asset(asset_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' was not found.")))?;
+        if source.kind != crate::AssetKind::Mesh {
+            return Err(CoreError::InvalidInput(
+                "Mesh processing requires a GLB mesh asset.".into(),
+            ));
+        }
+        let source_artifact = source
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "source")
+            .or_else(|| source.artifacts.first())
+            .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' has no stored artifact.")))?;
+        let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
+        let (suffix, output, report) = match operation {
+            "mesh.cleanup" => {
+                reject_unused_parameters(&parameters, operation)?;
+                let (output, report) = cleanup_glb(&bytes)?;
+                ("cleaned", output, serde_json::to_value(report)?)
+            }
+            "render.optimize" => {
+                let options: RenderOptimizationOptions =
+                    serde_json::from_value(parameters).map_err(|error| {
+                        CoreError::InvalidInput(format!(
+                            "Invalid render.optimize parameters: {error}"
+                        ))
+                    })?;
+                let (output, report) = optimize_render_glb(&bytes, options.overdraw_threshold)?;
+                ("render-optimized", output, serde_json::to_value(report)?)
+            }
+            "mesh.compress" => {
+                reject_unused_parameters(&parameters, operation)?;
+                let (output, report) = compress_mesh_glb(&bytes)?;
+                ("compressed", output, serde_json::to_value(report)?)
+            }
+            "mesh.separate_parts" => {
+                reject_unused_parameters(&parameters, operation)?;
+                let (output, report) = separate_components(&bytes)?;
+                ("separated-parts", output, serde_json::to_value(report)?)
+            }
+            "uv.unwrap" => {
+                let options: AtlasBakeOptions =
+                    serde_json::from_value(parameters).map_err(|error| {
+                        CoreError::InvalidInput(format!("Invalid uv.unwrap parameters: {error}"))
+                    })?;
+                let (output, report) = bake_glb(&bytes, options).map_err(map_atlas_bake_error)?;
+                ("atlas-unwrapped", output, serde_json::to_value(report)?)
+            }
+            other => {
+                return Err(CoreError::OperationUnavailable(format!(
+                    "Mesh operation '{other}' is not implemented by this build."
+                )));
+            }
+        };
+        let name = derived_mesh_name(&source.name, suffix);
+        let asset = self.store.import_derived_asset(
+            &name,
+            &output,
+            asset_id,
+            json!({
+                "operation": operation,
+                "report": report.clone(),
+            }),
+        )?;
+        Ok(MeshOperationResult { asset, report })
+    }
+
     pub fn generate_pixal3d_image(
         &self,
         input_asset_id: &str,
@@ -159,12 +245,13 @@ impl OperationCore {
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
             OperationDescriptor { id: "image.generate".into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Run a local Pixal3D 512 profile using the ready platform backend (MLX on Apple Silicon or CUDA on Linux/NVIDIA). Environment setup and model downloads are explicit; gated terms remain user-controlled.".into(), implemented: generation_ready },
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangle primitives with meshoptimizer while retaining original vertex streams, materials, and textures.".into(), implemented: true },
-            OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Conservative cleanup with seam-, material-, and boundary-preservation checks.".into(), implemented: false },
-            OperationDescriptor { id: "mesh.retopology".into(), title: "Retopology".into(), category: "mesh".into(), summary: "Reconstruct mesh topology; no implementation has passed dependency and quality gates.".into(), implemented: false },
-            OperationDescriptor { id: "uv.unwrap".into(), title: "UV unwrap".into(), category: "uv".into(), summary: "Generate UV charts for supported meshes using a validated xatlas integration.".into(), implemented: false },
-            OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Reproject supported PBR materials onto a new UV layout.".into(), implemented: false },
-            OperationDescriptor { id: "render.optimize".into(), title: "Render optimization".into(), category: "mesh".into(), summary: "Optimize vertex-cache, overdraw, and vertex-fetch order without changing geometry.".into(), implemented: false },
-            OperationDescriptor { id: "mesh.compress".into(), title: "Mesh compression".into(), category: "export".into(), summary: "Compress mesh payloads while retaining a validated editable source.".into(), implemented: false },
+            OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces while preserving seams, vertex streams, materials, and the source asset.".into(), implemented: true },
+            OperationDescriptor { id: "mesh.separate_parts".into(), title: "Separate connected parts".into(), category: "mesh".into(), summary: "Split one supported static indexed triangle primitive into connected-component TRIANGLES primitives in the same GLB mesh, using shared vertex indices; not separate scene nodes.".into(), implemented: true },
+            OperationDescriptor { id: "mesh.retopology".into(), title: "Retopology".into(), category: "mesh".into(), summary: "Reconstruct mesh topology; the experimental remeshing worker has not passed build, validation, and quality gates.".into(), implemented: false },
+            OperationDescriptor { id: "uv.unwrap".into(), title: "Atlas UV unwrap".into(), category: "uv".into(), summary: "Use xatlas to unwrap one supported static textured mesh and rebake its embedded base-color and metallic/roughness PNG maps from the same mesh's existing UVs; this is not high-to-low projection.".into(), implemented: true },
+            OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Generic high-to-low and arbitrary texture baking is not implemented; uv.unwrap only rebakes supported same-mesh embedded base-color and metallic/roughness PNG maps.".into(), implemented: false },
+            OperationDescriptor { id: "render.optimize".into(), title: "Render optimization".into(), category: "mesh".into(), summary: "Use meshoptimizer vertex-cache and overdraw reordering on opaque/masked indexed triangles; translucent order is preserved.".into(), implemented: true },
+            OperationDescriptor { id: "mesh.compress".into(), title: "Mesh compression".into(), category: "export".into(), summary: "Encode supported geometry bufferViews with required KHR_meshopt_compression while retaining the original editable source asset.".into(), implemented: true },
         ]
     }
 
@@ -240,12 +327,54 @@ impl OperationCore {
             operations: supported,
             model_backends,
             notes: vec![
-                "The Rust core and CPU mesh simplification are implemented; this does not yet constitute the full cross-platform Studio or one-file distribution.".into(),
-                "Atlas UV rebaking remains experimental and is not part of the product simplification path; mesh vertex data, material references, and embedded texture payloads are not rewritten, while external image URIs are not fetched.".into(),
+                "The Rust core includes CPU mesh simplification, conservative cleanup, shared-index connected-part splitting, xatlas UV atlas rebaking, render cache/overdraw optimization, and required KHR_meshopt_compression output; this does not yet constitute a full cross-platform Studio or one-file distribution.".into(),
+                "Connected-part splitting handles one indexed static TRIANGLES primitive, groups by shared vertex indices, and emits primitives within the same GLB mesh; it does not split scene nodes, weld duplicate positions, or retopologize.".into(),
+                "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
                 "The MIT license covers MeshHarbor code, not upstream model weights or separate DINOv3/NAF terms. Gated access is user-controlled, and generated user inputs stay local to the worker.".into(),
             ],
         }
+    }
+}
+
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenderOptimizationOptions {
+    #[serde(default = "default_overdraw_threshold")]
+    overdraw_threshold: f32,
+}
+
+fn default_overdraw_threshold() -> f32 {
+    1.05
+}
+
+fn map_atlas_bake_error(error: AtlasBakeError) -> CoreError {
+    match error {
+        AtlasBakeError::InvalidInput(message) => CoreError::InvalidInput(message),
+        AtlasBakeError::Unsupported(message) => CoreError::OperationUnavailable(message),
+        AtlasBakeError::Native(message) | AtlasBakeError::Output(message) => {
+            CoreError::OperationUnavailable(format!("Atlas UV bake failed: {message}"))
+        }
+    }
+}
+
+fn reject_unused_parameters(parameters: &Value, operation: &str) -> CoreResult<()> {
+    if parameters
+        .as_object()
+        .is_some_and(|parameters| !parameters.is_empty())
+    {
+        return Err(CoreError::InvalidInput(format!(
+            "{operation} does not accept parameters."
+        )));
+    }
+    Ok(())
+}
+
+fn derived_mesh_name(name: &str, suffix: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, extension)) => format!("{stem}-{suffix}.{extension}"),
+        None => format!("{name}-{suffix}.glb"),
     }
 }
 
@@ -273,7 +402,13 @@ mod tests {
         let core = OperationCore::open(&root).unwrap();
         let doctor = core.runtime_doctor();
         assert!(doctor.operations.contains(&"mesh.simplify".to_string()));
-        assert!(!doctor.operations.contains(&"uv.unwrap".to_string()));
+        assert!(doctor.operations.contains(&"mesh.cleanup".to_string()));
+        assert!(doctor.operations.contains(&"render.optimize".to_string()));
+        assert!(doctor.operations.contains(&"mesh.compress".to_string()));
+        assert!(doctor.operations.contains(&"mesh.separate_parts".to_string()));
+        assert!(doctor.operations.contains(&"uv.unwrap".to_string()));
+        assert!(!doctor.operations.contains(&"mesh.retopology".to_string()));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+

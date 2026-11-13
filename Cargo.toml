@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/meshharbor"]
+members = ["crates/core", "crates/meshharbor", "crates/atlas-baker", "crates/xatlas-sys"]
 resolver = "2"
 
 [workspace.package]
@@ -25,4 +25,5 @@ meshopt = "0.7.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
 

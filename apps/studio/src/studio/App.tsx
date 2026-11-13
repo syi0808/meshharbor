@@ -1,9 +1,42 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MeshHarborApi } from './api';
 import { ModelPreview } from './ModelPreview';
-import type { Asset, Job, Operation, RuntimeInfo, SimplificationReport } from './types';
+import type { Asset, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
+
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
+
+function formatSize(size: number) {
+  return size < 1024 * 1024 ? `${(size / 1024).toFixed(0)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const meshOperationOptions: Array<{ id: MeshOperationId; title: string; description: string }> = [
+  {
+    id: 'mesh.cleanup',
+    title: 'Cleanup',
+    description: 'Remove repeated-index, exact zero-area, and same-winding duplicate faces.',
+  },
+  {
+    id: 'mesh.separate_parts',
+    title: 'Separate connected parts',
+    description: 'Split disconnected indexed components into primitives within the same mesh; no node separation or welding.',
+  },
+  {
+    id: 'uv.unwrap',
+    title: 'Atlas UV + texture rebake',
+    description: 'Unwrap one supported static mesh and rebake its embedded base-color and metallic/roughness PNGs; not high-to-low projection.',
+  },
+  {
+    id: 'render.optimize',
+    title: 'Render optimization',
+    description: 'Reorder opaque and masked triangles for cache and overdraw; preserve translucent order.',
+  },
+  {
+    id: 'mesh.compress',
+    title: 'Compression',
+    description: 'Encode geometry with required KHR_meshopt_compression. The original asset stays editable.',
+  },
+];
 
 export function App() {
   const [connection, setConnection] = useState<Connection>('disconnected');
@@ -108,7 +141,10 @@ export function App() {
                     : 'The NAF checkpoint is converted and the Pixal3D runtime is ready.');
             return;
           }
-          setReport(latest.result?.report ?? null);
+          const jobReport = latest.result?.report;
+          setReport(latest.operation === 'mesh.simplify' && jobReport
+            ? jobReport as unknown as SimplificationReport
+            : null);
           let derived: Asset | null = null;
           if (latest.result?.asset_id) {
             derived = await api.derivedAsset(latest.result.asset_id);
@@ -121,9 +157,35 @@ export function App() {
             setSelectedId(completedAsset.id);
             setActiveView('result');
           }
-          setNotice(latest.operation === 'image.generate'
-            ? 'Image-to-3D generation complete. Your source image is unchanged.'
-            : 'Mesh simplification complete. Your original file is unchanged.');
+          const resultReport = latest.result?.report ?? {};
+          if (latest.operation === 'mesh.cleanup') {
+            const removed = Math.max(
+              0,
+              Number(resultReport.triangles_before ?? 0) - Number(resultReport.triangles_after ?? 0),
+            );
+            setNotice(removed > 0
+              ? `Cleanup complete. Removed ${removed.toLocaleString()} invalid or duplicate triangles.`
+              : 'Cleanup complete. No removable triangles were found.');
+          } else if (latest.operation === 'render.optimize') {
+            const before = Number(resultReport.vertex_cache_misses_before ?? 0);
+            const after = Number(resultReport.vertex_cache_misses_after ?? 0);
+            setNotice(`Render optimization complete. Estimated vertex-cache misses: ${before.toLocaleString()} → ${after.toLocaleString()}.`);
+          } else if (latest.operation === 'mesh.compress') {
+            const saved = Number(resultReport.bytes_saved ?? 0);
+            setNotice(`Compression complete. Saved ${formatSize(saved)}. This GLB requires KHR_meshopt_compression support; the original remains unchanged.`);
+          } else if (latest.operation === 'mesh.separate_parts') {
+            const parts = Number(resultReport.connected_parts ?? 0);
+            setNotice(`Part separation complete. Found ${parts.toLocaleString()} connected component${parts === 1 ? '' : 's'}, emitted as primitives in the same mesh.`);
+          } else if (latest.operation === 'uv.unwrap') {
+            const width = Number(resultReport.atlas_width ?? 0);
+            const height = Number(resultReport.atlas_height ?? 0);
+            const size = width && height ? ` at ${width}×${height}px` : '';
+            setNotice(`Atlas UV unwrap and same-mesh texture rebake complete${size}. This is not a high-to-low bake; the source remains unchanged.`);
+          } else {
+            setNotice(latest.operation === 'image.generate'
+              ? 'Image-to-3D generation complete. Your source image is unchanged.'
+              : 'Mesh simplification complete. Your original file is unchanged.');
+          }
           return;
         }
         if (latest.state === 'failed') {
@@ -141,7 +203,11 @@ export function App() {
             setRuntime(refreshed[0]);
             setOperations(refreshed[1]);
           }
-          setError(latest.error?.message ?? (latest.operation === 'image.generate' ? 'This image generation job failed.' : 'This simplification job failed.'));
+          setError(latest.error?.message ?? (latest.operation === 'image.generate'
+            ? 'This image generation job failed.'
+            : latest.operation === 'mesh.simplify'
+              ? 'This simplification job failed.'
+              : 'This mesh processing job failed.'));
           return;
         }
         if (latest.state === 'cancelled') {
@@ -227,6 +293,28 @@ export function App() {
       setActiveView('result');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not start simplification.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runMeshOperation(operation: MeshOperationId) {
+    if (!selectedAsset || selectedAsset.kind !== 'mesh') return;
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    setReport(null);
+    try {
+      const parameters = operation === 'render.optimize'
+        ? { overdraw_threshold: 1.05 }
+        : operation === 'uv.unwrap'
+          ? { resolution: 1024, padding: 8 }
+          : {};
+      const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
+      setJob(nextJob);
+      setActiveView('result');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not start mesh processing.');
     } finally {
       setBusy(false);
     }
@@ -356,7 +444,6 @@ export function App() {
   const canGenerate = !!selectedAsset && selectedAsset.kind === 'image'
     && !!operations.find((operation) => operation.id === 'image.generate')?.implemented
     && selectedGenerationBackend?.ready === true;
-  const formatSize = (size: number) => size < 1024 * 1024 ? `${(size / 1024).toFixed(0)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`;
 
   return (
     <div className="app-shell" onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); void importFiles(event.dataTransfer.files); }}>
@@ -381,6 +468,7 @@ export function App() {
           <button className="nav-item" onClick={() => document.getElementById('asset-library')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon cube-icon" /> Asset library <span className="nav-count">{assets.length}</span></button>
           <div className="sidebar-section-label operations-label">OPERATIONS</div>
           <div className="nav-item selected"><span className="nav-icon simplify-icon">◒</span> Simplify mesh <span className="selected-dot" /></div>
+          <button className="nav-item" onClick={() => document.getElementById('mesh-tools')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon">⌘</span> Cleanup &amp; export</button>
           <button className="nav-item" title="Image-to-3D generation" onClick={() => document.getElementById('image-generation')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon sparkle-icon">✳</span> Generate</button>
           <div className="nav-item unavailable" title="Not implemented in this build"><span className="nav-icon">⌘</span> Retopology <span className="soon-label">SOON</span></div>
           <div className="sidebar-bottom">
@@ -431,7 +519,7 @@ export function App() {
 
               <div className="library-section" id="asset-library">
                 <div className="section-heading"><div><h2>Recent assets</h2><span>Files stored locally in your workspace</span></div><button className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <span>↻</span></button></div>
-                {assets.length === 0 ? <div className="library-empty">Your imported models will appear here.</div> : <div className="asset-list">{assets.slice(0, 5).map((asset) => <button key={asset.id} className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`} onClick={() => { setSelectedId(asset.id); setActiveView('source'); setReport(null); }}><span className="asset-row-icon"><MiniCube /></span><span className="asset-row-name"><strong>{asset.name}</strong><small>{asset.source_asset_id ? 'Simplified result' : 'Original'} · {formatSize(asset.byte_size)}</small></span><span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>{asset.id === selectedId && <span className="asset-current-dot" />}</button>)}</div>}
+                {assets.length === 0 ? <div className="library-empty">Your imported models will appear here.</div> : <div className="asset-list">{assets.slice(0, 5).map((asset) => <button key={asset.id} className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`} onClick={() => { setSelectedId(asset.id); setActiveView('source'); setReport(null); }}><span className="asset-row-icon"><MiniCube /></span><span className="asset-row-name"><strong>{asset.name}</strong><small>{asset.source_asset_id ? 'Derived result' : 'Original'} · {formatSize(asset.byte_size)}</small></span><span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>{asset.id === selectedId && <span className="asset-current-dot" />}</button>)}</div>}
               </div>
             </section>
 
@@ -486,10 +574,50 @@ export function App() {
                   {connection !== 'connected' && <div className="engine-nudge">Start the local engine to generate.</div>}
                 </section>
                 {connection !== 'connected' && <div className="engine-nudge"><span>●</span> Start the local engine to process models.</div>}
-                {selectedAsset && selectedAsset.kind !== 'mesh' && <div className="engine-nudge">Simplification requires a GLB mesh file.</div>}
+                {selectedAsset && selectedAsset.kind !== 'mesh' && <div className="engine-nudge">Mesh processing requires a GLB mesh file.</div>}
               </div>
 
-              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>More is on the way</strong></div><p>UV unwrapping and texture baking are not available in this build yet. Both Pixal3D backends are opt-in; model terms remain separate from MeshHarbor’s MIT license.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
+              <div className="operation-card mesh-tools-card" id="mesh-tools">
+                <div className="operation-header">
+                  <div className="operation-symbol"><span className="capability-spark">⌘</span></div>
+                  <div><div className="operation-kicker">MESH TOOLS</div><h2>Refine &amp; export</h2></div>
+                </div>
+                <p className="operation-description">Each operation creates a new asset. Your source file is never overwritten.</p>
+                <div className="mesh-tool-list">
+                  {meshOperationOptions.map((tool) => {
+                    const available = operations.find((operation) => operation.id === tool.id)?.implemented === true;
+                    const processing = isRunning && job.operation === tool.id;
+                    return (
+                      <div className="mesh-tool-item" key={tool.id}>
+                        <strong>{tool.title}</strong>
+                        <p>{tool.description}</p>
+                        {processing ? (
+                          <div className="job-progress">
+                            <div className="job-progress-top">
+                              <span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating output' : `Running ${tool.title.toLowerCase()}`}</span>
+                              <span>{job.progress}%</span>
+                            </div>
+                            <div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>
+                            {job.state === 'queued' && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}
+                            <small>Source asset remains unchanged.</small>
+                          </div>
+                        ) : (
+                          <button
+                            className="button button-secondary mesh-tool-button"
+                            disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || !available || busy || connection !== 'connected' || isRunning}
+                            onClick={() => void runMeshOperation(tool.id)}
+                          >
+                            Run {tool.title}<span className="button-arrow">→</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="control-footnote">Compression exports a GLB that requires KHR_meshopt_compression support. The Studio preview includes its decoder. Atlas rebaking accepts one static mesh/material with embedded PNG base-color and metallic/roughness maps only; no high-to-low projection or separate scene-node splitting is performed.</div>
+              </div>
+
+              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking and retopology remain unavailable. Atlas UV unwrap only rebakes supported embedded same-mesh maps; mesh tools create derived assets and keep originals unchanged. Both Pixal3D backends are opt-in; model terms remain separate from MeshHarbor’s MIT license.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
             </aside>
           </div>
         </main>
@@ -510,3 +638,4 @@ function triangleReduction(report: SimplificationReport): number {
 function DownloadIcon() { return <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.8v9.1m0 0 3.3-3.3M10 11.9 6.7 8.6M3.5 13.6v2.2c0 .7.5 1.2 1.2 1.2h10.6c.7 0 1.2-.5 1.2-1.2v-2.2" /></svg>; }
 function SimplifyIcon() { return <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2.5 6.2 3.6v7.8L10 17.5l-6.2-3.6V6.1L10 2.5Z" /><path d="m3.8 6.1 6.2 3.7 6.2-3.7M10 9.8v7.7M7.1 4.2l6.1 3.7" /></svg>; }
 function MiniCube() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" /><path d="m4 7.5 8 4.7 8-4.7M12 12.2V21" /></svg>; }
+

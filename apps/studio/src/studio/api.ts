@@ -1,4 +1,4 @@
-import type { ApiErrorBody, Asset, Job, Operation, RuntimeInfo } from './types';
+import type { ApiErrorBody, Asset, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
 
 export class MeshHarborApi {
   private readonly dashboardHeaders = { 'X-MeshHarbor-Dashboard': 'local-ui-v1' };
@@ -114,6 +114,21 @@ export class MeshHarborApi {
     });
   }
 
+  createMeshOperationJob(
+    assetId: string,
+    operation: MeshOperationId,
+    parameters: Record<string, number> = {},
+  ): Promise<Job> {
+    return this.request('/api/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        operation,
+        input: { asset_id: assetId },
+        parameters,
+      }),
+    });
+  }
+
   createImageGenerationJob(assetId: string, backendId: string, textureSize: number, targetFaces: number): Promise<Job> {
     return this.request('/api/v1/jobs', {
       method: 'POST',
@@ -137,3 +152,4 @@ export class MeshHarborApi {
     return this.request(`/api/v1/assets/${encodeURIComponent(assetId)}`);
   }
 }
+

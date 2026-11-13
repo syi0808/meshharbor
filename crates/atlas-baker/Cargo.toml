@@ -1,0 +1,13 @@
+[package]
+name = "meshharbor-atlas-baker"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "A bounded glTF GLB xatlas UV unwrap and texture rebake operation for MeshHarbor"
+
+[dependencies]
+meshharbor-xatlas-sys = { path = "../xatlas-sys" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+

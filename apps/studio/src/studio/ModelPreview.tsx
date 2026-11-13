@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import type { Asset } from './types';
 
 interface Props {
@@ -112,7 +113,9 @@ function MeshPreview({ asset, loadModel, onError }: Props) {
           if (url.startsWith('data:')) return url;
           throw new Error('External GLB resources are blocked in local preview. Embed textures and buffers in the GLB first.');
         });
-        const gltf = await new GLTFLoader(manager).parseAsync(buffer, '');
+        const loader = new GLTFLoader(manager);
+        loader.setMeshoptDecoder(MeshoptDecoder);
+        const gltf = await loader.parseAsync(buffer, '');
         if (disposed) {
           disposeGroup(gltf.scene);
           return;
@@ -204,3 +207,4 @@ function disposeGroup(group: THREE.Group) {
     }
   });
 }
+

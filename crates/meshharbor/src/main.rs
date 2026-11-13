@@ -67,6 +67,14 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Run a supported local mesh operation and optionally write its derived GLB.
+    ProcessMesh {
+        asset_id: String,
+        #[arg(long, value_parser = ["mesh.cleanup", "mesh.separate_parts", "uv.unwrap", "render.optimize", "mesh.compress"])]
+        operation: String,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Generate a textured GLB from a previously imported image using a ready local Pixal3D backend.
     Generate {
         asset_id: String,
@@ -140,6 +148,16 @@ struct SimplifyArgs {
     target_triangles: u64,
     #[serde(default = "default_max_error")]
     max_error: f32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MeshProcessArgs {
+    asset_id: String,
+    /// One of mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, or mesh.compress.
+    operation: String,
+    /// Optional operation parameters, such as resolution/padding for uv.unwrap.
+    #[serde(default)]
+    parameters: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -294,6 +312,26 @@ impl McpServer {
         {
             Ok(job) => serde_json::to_string_pretty(&job)
                 .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+            Err(error) => json!({"error": error.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, or mesh.compress. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits connected-component primitives in one mesh. uv.unwrap uses xatlas and only rebakes supported embedded same-mesh base-color and metallic/roughness maps; it is not high-to-low projection. Compression emits a GLB requiring KHR_meshopt_compression support."
+    )]
+    async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
+        let args = params.0;
+        match start_mesh_operation_job(
+            self.core.clone(),
+            self.scheduler.clone(),
+            &args.asset_id,
+            &args.operation,
+            args.parameters.unwrap_or_else(|| json!({})),
+        )
+        .await
+        {
+            Ok(job) => serde_json::to_string_pretty(&job)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
             Err(error) => json!({"error": error.to_string()}).to_string(),
         }
     }
@@ -550,6 +588,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .iter()
                     .find(|artifact| artifact.kind == "derived")
                     .ok_or("Simplification output artifact was not found.")?;
+                let bytes = core.store().read_artifact(&artifact.id)?.bytes;
+                fs::write(path, bytes).await?;
+            }
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Command::ProcessMesh {
+            asset_id,
+            operation,
+            output,
+        } => {
+            let core = OperationCore::open(&root)?;
+            let result = core.process_mesh_asset(&asset_id, &operation, json!({}))?;
+            if let Some(path) = output {
+                let artifact = result
+                    .asset
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.kind == "derived")
+                    .ok_or("Mesh processing output artifact was not found.")?;
                 let bytes = core.store().read_artifact(&artifact.id)?.bytes;
                 fs::write(path, bytes).await?;
             }
@@ -1015,6 +1072,16 @@ async fn api_create_job(
             )
             .await?
         }
+        "mesh.cleanup" | "mesh.separate_parts" | "uv.unwrap" | "render.optimize" | "mesh.compress" => {
+            start_mesh_operation_job(
+                state.core,
+                state.scheduler,
+                &body.input.asset_id,
+                &body.operation,
+                parameters,
+            )
+            .await?
+        }
         "image.generate" => {
             let parameters: GenerationOptions =
                 serde_json::from_value(parameters).map_err(|error| {
@@ -1146,6 +1213,118 @@ async fn start_simplify_job(
                     100,
                     None,
                     Some(json!({"message":format!("Simplification worker failed: {error}")})),
+                );
+            }
+        }
+        drop(permit);
+    });
+    Ok(job)
+}
+
+
+async fn start_mesh_operation_job(
+    core: OperationCore,
+    scheduler: Arc<Semaphore>,
+    asset_id: &str,
+    operation: &str,
+    parameters: Value,
+) -> Result<meshharbor_core::Job, CoreError> {
+    let descriptor = core
+        .list_operations()
+        .into_iter()
+        .find(|item| item.id == operation)
+        .ok_or_else(|| CoreError::OperationUnavailable(format!(
+            "Mesh operation '{operation}' is not implemented by this build."
+        )))?;
+    if !descriptor.implemented {
+        return Err(CoreError::OperationUnavailable(format!(
+            "Mesh operation '{operation}' is not implemented by this build."
+        )));
+    }
+    let source = core
+        .store()
+        .get_asset(asset_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' was not found.")))?;
+    if source.kind != meshharbor_core::AssetKind::Mesh {
+        return Err(CoreError::InvalidInput(
+            "Mesh processing requires a previously imported GLB mesh asset.".into(),
+        ));
+    }
+    let job = core
+        .store()
+        .create_job(operation, Some(asset_id), &parameters)?;
+    let job_id = job.id.clone();
+    let worker_operation = operation.to_string();
+    tokio::spawn(async move {
+        let permit = match scheduler.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return,
+        };
+        let current = match core.store().get_job(&job_id) {
+            Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued => job,
+            _ => return,
+        };
+        if core
+            .store()
+            .update_job(&job_id, meshharbor_core::JobState::Running, 5, None, None)
+            .is_err()
+        {
+            return;
+        }
+        let worker_core = core.clone();
+        let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
+        let worker_parameters = parameters;
+        let operation_for_worker = worker_operation.clone();
+        let result = task::spawn_blocking(move || {
+            worker_core.process_mesh_asset(
+                &worker_asset_id,
+                &operation_for_worker,
+                worker_parameters,
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(result)) => {
+                if core
+                    .store()
+                    .update_job(
+                        &job_id,
+                        meshharbor_core::JobState::Validating,
+                        90,
+                        None,
+                        None,
+                    )
+                    .is_ok()
+                {
+                    let value = json!({
+                        "asset_id": result.asset.id,
+                        "report": result.report,
+                    });
+                    let _ = core.store().update_job(
+                        &job_id,
+                        meshharbor_core::JobState::Succeeded,
+                        100,
+                        Some(value),
+                        None,
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = core.store().update_job(
+                    &job_id,
+                    meshharbor_core::JobState::Failed,
+                    100,
+                    None,
+                    Some(json!({"message":error.to_string()})),
+                );
+            }
+            Err(error) => {
+                let _ = core.store().update_job(
+                    &job_id,
+                    meshharbor_core::JobState::Failed,
+                    100,
+                    None,
+                    Some(json!({"message":format!("Mesh processing worker failed: {error}")})),
                 );
             }
         }
@@ -2310,4 +2489,5 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
 

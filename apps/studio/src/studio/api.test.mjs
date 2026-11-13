@@ -111,3 +111,64 @@ test('Studio backend setup and image-generation flow downloads the generated GLB
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test('Studio starts a derived local mesh-processing job with explicit operation parameters', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    const path = String(input);
+    calls.push({ path, init });
+    if (path === '/api/v1/jobs' && init.method === 'POST') {
+      return Response.json({ id: 'mesh-job-1', state: 'queued' }, { status: 202 });
+    }
+    throw new Error('Unexpected Studio API request: ' + path);
+  };
+  try {
+    const api = new MeshHarborApi();
+    const job = await api.createMeshOperationJob(
+      'mesh-asset-1',
+      'render.optimize',
+      { overdraw_threshold: 1.05 },
+    );
+    assert.equal(job.id, 'mesh-job-1');
+    assert.equal(calls.length, 1);
+    assert.equal(new Headers(calls[0].init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      operation: 'render.optimize',
+      input: { asset_id: 'mesh-asset-1' },
+      parameters: { overdraw_threshold: 1.05 },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+
+test('Studio submits atlas options and part separation through the shared job API', async () => {
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    requests.push({ path: String(input), init });
+    return Response.json({ id: 'mesh-op-job', state: 'queued' }, { status: 202 });
+  };
+  try {
+    const api = new MeshHarborApi();
+    await api.createMeshOperationJob('mesh-asset-1', 'mesh.separate_parts', {});
+    await api.createMeshOperationJob('mesh-asset-1', 'uv.unwrap', { resolution: 1024, padding: 8 });
+    assert.deepEqual(requests.map(({ path }) => path), ['/api/v1/jobs', '/api/v1/jobs']);
+    assert.deepEqual(JSON.parse(requests[0].init.body), {
+      operation: 'mesh.separate_parts',
+      input: { asset_id: 'mesh-asset-1' },
+      parameters: {},
+    });
+    assert.deepEqual(JSON.parse(requests[1].init.body), {
+      operation: 'uv.unwrap',
+      input: { asset_id: 'mesh-asset-1' },
+      parameters: { resolution: 1024, padding: 8 },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

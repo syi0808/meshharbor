@@ -1,4 +1,5 @@
 export type AssetKind = 'image' | 'mesh';
+export type MeshOperationId = 'mesh.cleanup' | 'mesh.separate_parts' | 'uv.unwrap' | 'render.optimize' | 'mesh.compress';
 
 export interface Artifact {
   id: string;
@@ -61,7 +62,7 @@ export interface Job {
   state: 'queued' | 'running' | 'validating' | 'succeeded' | 'failed' | 'cancelling' | 'cancelled';
   input_asset_id?: string | null;
   progress: number;
-  result?: { asset_id?: string; report?: SimplificationReport; backend_id?: string } | null;
+  result?: { asset_id?: string; report?: Record<string, unknown>; backend_id?: string } | null;
   error?: { message?: string } | null;
   created_at: string;
   updated_at: string;
@@ -80,3 +81,4 @@ export interface SimplificationReport {
 export interface ApiErrorBody {
   error?: string;
 }
+
