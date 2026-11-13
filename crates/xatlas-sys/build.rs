@@ -12,6 +12,6 @@ fn main() {
         .include("vendor/xatlas")
         .include("vendor/stb")
         .flag_if_supported("-std=c++17")
-        .warnings(true)
+        .warnings(false)
         .compile("meshharbor_xatlas");
 }

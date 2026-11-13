@@ -274,7 +274,8 @@ extern "C" int meshharbor_atlas_bake(
             throw std::runtime_error("xatlas could not produce one packed image atlas");
         }
         const xatlas::Mesh &mesh = atlas->meshes[0];
-        if (!mesh.vertexArray || !mesh.indexArray || mesh.indexCount != index_count || mesh.indexCount % 3 != 0) {
+        if (!mesh.vertexArray || !mesh.indexArray || mesh.vertexCount > index_count
+            || mesh.indexCount != index_count || mesh.indexCount % 3 != 0) {
             throw std::runtime_error("xatlas output did not preserve triangle count");
         }
         std::vector<std::array<float, 2>> atlas_uv(mesh.vertexCount);

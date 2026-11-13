@@ -400,8 +400,12 @@ fn read_accessor(document: &Value, bin: &[u8], accessor_index: usize) -> Result<
     let element_size = component_size * component_count;
     let count = as_usize(accessor.get("count"), "accessor count")?;
     if count > MAX_INDICES { return Err(unsupported("accessor exceeds the 15M-element safety limit")); }
-    let accessor_offset = accessor.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let stride = view.get("byteStride").and_then(Value::as_u64).map(|value| value as usize).unwrap_or(element_size);
+    let accessor_offset = optional_usize(accessor.get("byteOffset"), 0, "accessor byteOffset")?;
+    let stride = if let Some(stride) = view.get("byteStride") {
+        as_usize(Some(stride), "bufferView byteStride")?
+    } else {
+        element_size
+    };
     if stride < element_size || stride % component_size != 0 { return Err(invalid("accessor stride is invalid")); }
     let end_in_view = if count == 0 { accessor_offset } else {
         accessor_offset.checked_add((count - 1).checked_mul(stride).ok_or_else(|| invalid("accessor size overflow"))?)
@@ -419,10 +423,8 @@ fn read_accessor(document: &Value, bin: &[u8], accessor_index: usize) -> Result<
 
 fn view_range(document: &Value, bin: &[u8], view_index: usize) -> Result<(usize, usize, usize), AtlasBakeError> {
     let view = array(document, "bufferViews")?.get(view_index).ok_or_else(|| invalid("bufferView index is out of range"))?;
-    let buffer = view.get("buffer").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let offset = as_usize(view.get("byteOffset"), "bufferView byteOffset").or_else(|error| {
-        if view.get("byteOffset").is_none() { Ok(0) } else { Err(error) }
-    })?;
+    let buffer = as_index(view.get("buffer").ok_or_else(|| invalid("bufferView buffer index is missing"))?, "bufferView buffer")?;
+    let offset = optional_usize(view.get("byteOffset"), 0, "bufferView byteOffset")?;
     let length = as_usize(view.get("byteLength"), "bufferView byteLength")?;
     let end = offset.checked_add(length).ok_or_else(|| invalid("bufferView range overflow"))?;
     let buffers = array(document, "buffers")?;
@@ -544,6 +546,12 @@ fn as_usize(value: Option<&Value>, name: &str) -> Result<usize, AtlasBakeError> 
     let number = value.and_then(Value::as_u64).ok_or_else(|| invalid(format!("{name} must be an unsigned integer")))?;
     usize::try_from(number).map_err(|_| invalid(format!("{name} is too large")))
 }
+fn optional_usize(value: Option<&Value>, default: usize, name: &str) -> Result<usize, AtlasBakeError> {
+    match value {
+        Some(value) => as_usize(Some(value), name),
+        None => Ok(default),
+    }
+}
 fn invalid(message: impl Into<String>) -> AtlasBakeError { AtlasBakeError::InvalidInput(message.into()) }
 fn unsupported(message: impl Into<String>) -> AtlasBakeError { AtlasBakeError::Unsupported(message.into()) }
 
@@ -616,7 +624,8 @@ impl Glb {
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, AtlasBakeError> {
-    let slice = bytes.get(offset..offset + 4).ok_or_else(|| invalid("GLB integer is truncated"))?;
+    let end = offset.checked_add(4).filter(|end| *end <= bytes.len()).ok_or_else(|| invalid("GLB integer is truncated"))?;
+    let slice = bytes.get(offset..end).ok_or_else(|| invalid("GLB integer is truncated"))?;
     Ok(u32::from_le_bytes(slice.try_into().unwrap()))
 }
 
