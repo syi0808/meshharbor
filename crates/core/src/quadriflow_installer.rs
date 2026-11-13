@@ -1459,7 +1459,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fs::read(&updated.executable).unwrap(), b"binary-two");
-        let rolled_back = rollback_with_verified_manifest(&root.0, platform, &test_verified_manifest(&first)).unwrap();
+        let rolled_back =
+            rollback_with_verified_manifest(&root.0, platform, &test_verified_manifest(&first))
+                .unwrap();
         assert_eq!(fs::read(rolled_back).unwrap(), b"binary-one");
 
         let active = root.0.join("backends/quadriflow/active");
@@ -1471,10 +1473,11 @@ mod tests {
             .and_then(marker_sequence)
             .unwrap();
 
-        let reactivated = install_test_manifest_with_fetcher(&root.0, &second, platform, |_, _, _| {
-            panic!("an existing verified version must not be downloaded again")
-        })
-        .unwrap();
+        let reactivated =
+            install_test_manifest_with_fetcher(&root.0, &second, platform, |_, _, _| {
+                panic!("an existing verified version must not be downloaded again")
+            })
+            .unwrap();
         assert!(reactivated.already_installed);
         let after_reactivation = active_markers(&active).unwrap();
         let reactivation_generation = after_reactivation
@@ -1484,7 +1487,9 @@ mod tests {
             .unwrap();
         assert!(reactivation_generation > rollback_generation);
 
-        let rolled_back_again = rollback_with_verified_manifest(&root.0, platform, &test_verified_manifest(&first)).unwrap();
+        let rolled_back_again =
+            rollback_with_verified_manifest(&root.0, platform, &test_verified_manifest(&first))
+                .unwrap();
         assert_eq!(fs::read(rolled_back_again).unwrap(), b"binary-one");
     }
 
@@ -1544,11 +1549,15 @@ mod tests {
         let (manifest, archive) = test_package(platform, "quadriflow-v1.0.0", b"binary");
         let mut fetched_bytes = archive;
         fetched_bytes[0] ^= 1;
-        let result =
-            install_test_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
+        let result = install_test_manifest_with_fetcher(
+            &root.0,
+            &manifest,
+            platform,
+            |_, _, destination| {
                 fs::write(destination, &fetched_bytes)?;
                 Ok(())
-            });
+            },
+        );
         assert!(result.is_err());
         assert!(
             resolve_installed(&root.0, platform, &test_verified_manifest(&manifest))
@@ -1617,12 +1626,16 @@ mod tests {
         let root = TestRoot::new();
         let platform = QuadriFlowPlatform::LinuxX86_64;
         let (manifest, archive) = test_package(platform, "quadriflow-v1.0.0", b"binary");
-        let result =
-            install_test_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
+        let result = install_test_manifest_with_fetcher(
+            &root.0,
+            &manifest,
+            platform,
+            |_, _, destination| {
                 fs::write(destination, &archive)?;
                 Ok(())
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         fs::write(&result.executable, b"changed").unwrap();
         assert!(
             resolve_installed(&root.0, platform, &test_verified_manifest(&manifest))
@@ -1636,12 +1649,16 @@ mod tests {
         let root = TestRoot::new();
         let platform = QuadriFlowPlatform::LinuxX86_64;
         let (manifest, archive) = test_package(platform, "quadriflow-v1.0.0", b"approved");
-        let result =
-            install_test_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
+        let result = install_test_manifest_with_fetcher(
+            &root.0,
+            &manifest,
+            platform,
+            |_, _, destination| {
                 fs::write(destination, &archive)?;
                 Ok(())
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         fs::write(&result.executable, b"unapproved").unwrap();
         let forged_marker = ActiveMarker {
@@ -1650,11 +1667,7 @@ mod tests {
             platform,
             executable_sha256: format!("{:x}", Sha256::digest(b"unapproved")),
         };
-        append_active_marker(
-            &root.0.join("backends/quadriflow/active"),
-            &forged_marker,
-        )
-        .unwrap();
+        append_active_marker(&root.0.join("backends/quadriflow/active"), &forged_marker).unwrap();
 
         assert!(
             resolve_installed(&root.0, platform, &test_verified_manifest(&manifest))

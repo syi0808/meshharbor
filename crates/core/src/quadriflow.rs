@@ -1092,10 +1092,7 @@ f 4 1 5 8\n";
 
     #[test]
     fn unmanaged_sidecar_file_is_not_auto_discovered() {
-        let root = std::env::temp_dir().join(format!(
-            "meshharbor-qf-unmanaged-{}",
-            Uuid::new_v4()
-        ));
+        let root = std::env::temp_dir().join(format!("meshharbor-qf-unmanaged-{}", Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let sidecar = root.join(format!("quadriflow{}", std::env::consts::EXE_SUFFIX));
         fs::write(&sidecar, b"not a trusted executable").unwrap();
