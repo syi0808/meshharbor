@@ -1425,6 +1425,99 @@ pub fn simplify_glb(
 const MAX_RETOPOLOGY_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETOPOLOGY_OUTPUT_BYTES: usize = 128 * 1024 * 1024;
 
+pub(crate) fn extract_retopology_geometry(
+    bytes: &[u8],
+) -> Result<(Vec<[f32; 3]>, Vec<u32>), CoreError> {
+    if bytes.len() > MAX_RETOPOLOGY_INPUT_BYTES {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts GLB files up to 64 MiB.".into(),
+        ));
+    }
+
+    let glb = GlbFile::parse(bytes)?;
+    let binary = glb.binary.as_ref().ok_or_else(|| {
+        CoreError::OperationUnavailable("Retopology requires an embedded GLB buffer.".into())
+    })?;
+    validate_single_embedded_buffer(&glb.document, binary.len())?;
+    validate_retopology_glb_document(&glb.document)?;
+
+    let primitive = &glb.document["meshes"][0]["primitives"][0];
+    let attributes = primitive
+        .get("attributes")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CoreError::InvalidInput("Primitive attributes are missing.".into()))?;
+    let position_accessor_index = attributes
+        .get("POSITION")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION accessor is missing.".into()))?
+        as usize;
+    let accessors = array(&glb.document, "accessors");
+    let position_accessor = accessors
+        .get(position_accessor_index)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION references a missing accessor.".into()))?;
+    if position_accessor
+        .get("componentType")
+        .and_then(Value::as_u64)
+        != Some(5126)
+        || position_accessor.get("normalized").and_then(Value::as_bool) == Some(true)
+        || position_accessor.get("type").and_then(Value::as_str) != Some("VEC3")
+        || position_accessor.get("sparse").is_some()
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology requires a non-sparse float32 VEC3 POSITION accessor.".into(),
+        ));
+    }
+    let position_count = position_accessor
+        .get("count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION count is missing.".into()))?
+        as usize;
+    if position_count == 0 || position_count > 100_000 {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts 1 to 100,000 POSITION vertices.".into(),
+        ));
+    }
+
+    let index_accessor_index = primitive
+        .get("indices")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            CoreError::OperationUnavailable("Retopology requires indexed triangles.".into())
+        })? as usize;
+    let index_accessor = accessors.get(index_accessor_index).ok_or_else(|| {
+        CoreError::InvalidInput("Primitive references a missing index accessor.".into())
+    })?;
+    let index_count = index_accessor
+        .get("count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CoreError::InvalidInput("Index count is missing.".into()))?
+        as usize;
+    if index_count == 0 || !index_count.is_multiple_of(3) || index_count > 600_000 {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts 1 to 200,000 indexed triangles.".into(),
+        ));
+    }
+    if index_accessor.get("normalized").and_then(Value::as_bool) == Some(true) {
+        return Err(CoreError::OperationUnavailable(
+            "Normalized index accessors are not supported.".into(),
+        ));
+    }
+
+    let position_vectors = decode_float_vectors(
+        &glb.document,
+        binary,
+        position_accessor_index,
+        "VEC3",
+        "POSITION",
+    )?;
+    let positions = position_vectors
+        .into_iter()
+        .map(|position| [position[0], position[1], position[2]])
+        .collect();
+    let indices = read_primitive_indices(&glb.document, binary, primitive)?;
+    Ok((positions, indices))
+}
+
 pub fn retopology_glb(
     bytes: &[u8],
     options: RetopologyOptions,
