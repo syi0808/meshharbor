@@ -6,8 +6,8 @@ mod cuda_runtime;
 mod generation;
 mod glb;
 mod operation;
-mod retopology;
 mod parts;
+mod retopology;
 mod runtime;
 mod store;
 mod uv_bootstrap;
@@ -20,12 +20,12 @@ pub use glb::{
     simplify_glb,
 };
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
-pub use retopology::{
-    RetopologyOptions, RetopologyReport, RemeshResponse, remesh_triangles_in_worker,
-};
 pub use operation::{
     MeshOperationResult, OperationCore, OperationDescriptor, RuntimeDoctor, SimplificationResult,
 };
 pub use parts::{PartSeparationReport, separate_components};
+pub use retopology::{
+    RetopologyOptions, RetopologyReport, RemeshResponse, remesh_triangles_in_worker,
+};
 pub use runtime::{Pixal3dRuntimeManager, RuntimeSetupReport};
 pub use store::{Artifact, Asset, AssetKind, CoreError, CoreResult, Job, JobState, Store};
