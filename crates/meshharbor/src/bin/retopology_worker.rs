@@ -367,7 +367,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remeshes_an_untextured_triangle_patch() {
+    fn rejects_open_untextured_triangle_patch() {
         let request = Request {
             protocol_version: PROTOCOL_VERSION,
             positions: vec![
@@ -382,7 +382,26 @@ mod tests {
                 iterations: 1,
             },
         };
-        let output = remesh(request).expect("isotropic remeshing should produce a triangle mesh");
+        assert!(validate_request(&request).unwrap_err().contains("closed"));
+    }
+
+    #[test]
+    fn remeshes_closed_untextured_tetrahedron() {
+        let request = Request {
+            protocol_version: PROTOCOL_VERSION,
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            indices: vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
+            options: Options {
+                target_edge_ratio: 0.2,
+                iterations: 1,
+            },
+        };
+        let output = remesh(request).expect("closed tetrahedron should remesh");
         assert!(!output.positions.is_empty());
         assert!(!output.indices.is_empty());
         assert_eq!(output.indices.len() % 3, 0);
