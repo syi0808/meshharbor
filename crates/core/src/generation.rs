@@ -469,7 +469,7 @@ pub(crate) fn generate_pixal3d_image(
             ));
         }
     };
-    let input_path = work_dir.join(input_filename);
+    let input_path = work_dir.join(format!("source-{input_filename}"));
     let output_path = work_dir.join("result.glb");
     std::fs::write(&input_path, input_bytes)?;
 
