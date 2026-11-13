@@ -30,11 +30,11 @@ The user-approved platform smoke builds the pinned official QuadriFlow source at
 
 - Linux x64: passed on Ubuntu 24.04 in [run 43416384828](https://github.com/syi0808/meshharbor/actions/runs/43416384828); uploaded artifact ID `14032331288`, SHA-256 `27f8da01b174633403c4f9180067e9287da1953196f03f635422a3e43b4ec90e`.
 - macOS ARM64: passed on macOS 15 in [run 43418178432](https://github.com/syi0808/meshharbor/actions/runs/43418178432); uploaded artifact ID `14032633014`, SHA-256 `c91d2b89f0ab8844d53eb306e803d3733fd93f8e28f384624b8c21978eecc685`. The runner's CMake 4 required `CMAKE_POLICY_VERSION_MINIMUM=3.5` because upstream declares CMake 3.1; the compatibility flag does not patch upstream source.
-- Windows x64: the Windows 2022 matrix job in run `43416384828` is still installing dependencies; no build/run result is available yet.
+- Windows x64: passed on Windows Server 2022 in [run 43424082291](https://github.com/syi0808/meshharbor/actions/runs/43424082291); artifact ID `14039052050`, artifact ZIP SHA-256 `98d40bf1f35eb95813da6ad484c412d6857866a91e8dbe94048fec5a7b0375cf`. The first attempt exposed a mismatch between vcpkg's static CRT and vendored LEMON; the retry set `CMP0091=NEW` and `CMAKE_MSVC_RUNTIME_LIBRARY` to the static `/MT` runtime and passed.
 
-An initial macOS 14 runner job was cancelled before receiving a runner. The label is marked deprecated in GitHub's runner image inventory, but that alone does not prove why the job was cancelled. The two successful artifacts are temporary, unsigned Actions evidence retained for 14 days; they are not signed or packaged MeshHarbor sidecars.
+An initial macOS 14 runner job was cancelled before receiving a runner. The label is marked deprecated in GitHub's runner image inventory, but that alone does not prove why the job was cancelled. The three successful artifacts are temporary, unsigned Actions evidence retained for 14 days; they are not signed or packaged MeshHarbor sidecars.
 
-These successful runs prove only a minimal source-build/run/parse path for a synthetic cube on those exact runners. They do not validate complex models, self-intersections, thin leaves, texture projection fidelity, macOS Intel, Windows, or a distributable MeshHarbor product.
+These successful runs prove only a minimal source-build/run/parse path for a synthetic cube on those exact runners. They do not validate complex models, self-intersections, thin leaves, texture projection fidelity, macOS Intel, or a distributable MeshHarbor product.
 
 ## Upstream and licensing
 
