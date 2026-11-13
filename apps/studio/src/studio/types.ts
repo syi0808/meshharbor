@@ -35,6 +35,7 @@ export interface RuntimeInfo {
   operations: string[];
   model_backends: Array<{
     id: string;
+    ready?: boolean;
     status: string;
     validation_level?: string;
     missing?: string[];
@@ -49,6 +50,7 @@ export interface RuntimeInfo {
     runtime_root?: string;
     python?: string;
     gated_model_access_required?: boolean;
+    license_notice?: string;
   }>;
   notes: string[];
 }
