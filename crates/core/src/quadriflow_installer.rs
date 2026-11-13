@@ -513,7 +513,6 @@ fn extract_ustar(
     let mut seen = HashSet::new();
     let mut found = HashSet::new();
     let mut header = [0u8; 512];
-    let mut terminated = false;
 
     loop {
         input.read_exact(&mut header)?;
@@ -535,7 +534,6 @@ fn extract_ustar(
                     return Err(archive_error("Nonzero bytes follow the USTAR trailer."));
                 }
             }
-            terminated = true;
             break;
         }
 
@@ -618,7 +616,7 @@ fn extract_ustar(
         .map(|(file, _)| file.path.as_str())
         .collect();
     let found_paths: HashSet<_> = found.iter().map(String::as_str).collect();
-    if !terminated || expected_paths != found_paths {
+    if expected_paths != found_paths {
         return Err(archive_error(
             "The USTAR archive is missing required payload files.",
         ));
@@ -780,7 +778,7 @@ fn resolve_marker(
     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 4096 {
         return Err(QuadriFlowInstallError::ActivationMetadata);
     }
-    let mut marker_file = File::open(path)?;
+    let marker_file = File::open(path)?;
     let mut bytes = Vec::new();
     marker_file.take(4097).read_to_end(&mut bytes)?;
     if bytes.len() > 4096 {
