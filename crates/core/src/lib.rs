@@ -6,6 +6,7 @@ mod cuda_runtime;
 mod generation;
 mod glb;
 mod operation;
+mod retopology;
 mod parts;
 mod runtime;
 mod store;
@@ -19,6 +20,9 @@ pub use glb::{
     simplify_glb,
 };
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
+pub use retopology::{
+    RetopologyOptions, RetopologyReport, RemeshResponse, remesh_triangles_in_worker,
+};
 pub use operation::{
     MeshOperationResult, OperationCore, OperationDescriptor, RuntimeDoctor, SimplificationResult,
 };
