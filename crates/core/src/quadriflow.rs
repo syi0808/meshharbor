@@ -760,7 +760,8 @@ pub(crate) fn quadriflow_retopology_glb_at(
     let input_obj = triangle_geometry_obj(&positions, &indices)?;
     let worker = quadriflow_sidecar_path(data_root).ok_or_else(|| {
         CoreError::OperationUnavailable(
-            "No compatible QuadriFlow sidecar is available for this MeshHarbor data directory.".into(),
+            "No compatible QuadriFlow sidecar is available for this MeshHarbor data directory."
+                .into(),
         )
     })?;
     let temp = QuadriflowTempDir::create()?;

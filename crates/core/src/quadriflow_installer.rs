@@ -21,8 +21,8 @@ use uuid::Uuid;
 
 use crate::{
     QuadriFlowArchiveFormat, QuadriFlowManifestError, QuadriFlowPlatform,
-    QuadriFlowReleaseArtifact, QuadriFlowReleaseManifest,
-    bundled_quadriflow_release_manifest, validate_quadriflow_release_manifest,
+    QuadriFlowReleaseArtifact, QuadriFlowReleaseManifest, bundled_quadriflow_release_manifest,
+    validate_quadriflow_release_manifest,
 };
 
 const MAX_CURL_TRAILER_BYTES: usize = 4096;
@@ -100,7 +100,12 @@ impl PrivateTempDir {
         for _ in 0..4 {
             let path = parent.join(format!(".{prefix}-{}", Uuid::new_v4()));
             match create_private_directory(&path) {
-                Ok(()) => return Ok(Self { path, cleanup: true }),
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        cleanup: true,
+                    });
+                }
                 Err(QuadriFlowInstallError::Io(error))
                     if error.kind() == io::ErrorKind::AlreadyExists =>
                 {
@@ -315,9 +320,7 @@ fn download_archive(
     destination: &Path,
 ) -> Result<(), QuadriFlowInstallError> {
     let curl = system_curl().ok_or_else(|| {
-        QuadriFlowInstallError::Download(
-            "A supported system curl executable was not found.".into(),
-        )
+        QuadriFlowInstallError::Download("A supported system curl executable was not found.".into())
     })?;
     let size = expected_size.to_string();
     let write_out = "\n__MESHHARBOR_META__%{size_download}\n%{url_effective}\n";
@@ -357,11 +360,10 @@ fn download_archive(
     let mut child = ChildGuard(command.spawn().map_err(|error| {
         QuadriFlowInstallError::Download(format!("Could not start system curl: {error}"))
     })?);
-    let mut stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or_else(|| QuadriFlowInstallError::Download("curl output is unavailable.".into()))?;
+    let mut stdout =
+        child.0.stdout.take().ok_or_else(|| {
+            QuadriFlowInstallError::Download("curl output is unavailable.".into())
+        })?;
     let mut output = create_private_file(destination)?;
     let mut remaining = expected_size;
     let mut buffer = [0u8; 64 * 1024];
@@ -369,7 +371,9 @@ fn download_archive(
         let amount = usize::try_from(remaining.min(buffer.len() as u64))
             .map_err(|_| QuadriFlowInstallError::Download("Invalid download size.".into()))?;
         stdout.read_exact(&mut buffer[..amount]).map_err(|error| {
-            QuadriFlowInstallError::Download(format!("The release download was incomplete: {error}"))
+            QuadriFlowInstallError::Download(format!(
+                "The release download was incomplete: {error}"
+            ))
         })?;
         output.write_all(&buffer[..amount])?;
         remaining -= amount as u64;
@@ -410,19 +414,14 @@ impl Drop for ChildGuard {
     }
 }
 
-fn validate_curl_trailer(
-    trailer: &[u8],
-    expected_size: u64,
-) -> Result<(), QuadriFlowInstallError> {
+fn validate_curl_trailer(trailer: &[u8], expected_size: u64) -> Result<(), QuadriFlowInstallError> {
     let text = std::str::from_utf8(trailer)
         .map_err(|_| QuadriFlowInstallError::Download("Invalid curl response metadata.".into()))?;
-    let remainder = text
-        .strip_prefix("\n__MESHHARBOR_META__")
-        .ok_or_else(|| {
-            QuadriFlowInstallError::Download(
-                "The response exceeded its pinned archive size or omitted metadata.".into(),
-            )
-        })?;
+    let remainder = text.strip_prefix("\n__MESHHARBOR_META__").ok_or_else(|| {
+        QuadriFlowInstallError::Download(
+            "The response exceeded its pinned archive size or omitted metadata.".into(),
+        )
+    })?;
     if remainder.matches("__MESHHARBOR_META__").count() != 0 {
         return Err(QuadriFlowInstallError::Download(
             "Unexpected bytes followed the pinned release archive.".into(),
@@ -445,7 +444,11 @@ fn trusted_effective_url(url: &str) -> bool {
         return false;
     };
     let authority = rest.split('/').next().unwrap_or_default();
-    if authority.is_empty() || authority.chars().any(|character| matches!(character, '@' | ':' | '\\')) {
+    if authority.is_empty()
+        || authority
+            .chars()
+            .any(|character| matches!(character, '@' | ':' | '\\'))
+    {
         return false;
     }
     matches!(
@@ -467,20 +470,19 @@ fn system_curl() -> Option<PathBuf> {
             .into_iter()
             .map(PathBuf::from)
             .find(|path| {
-                path.is_file()
-                    && {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            fs::metadata(path)
-                                .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-                                .unwrap_or(false)
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            true
-                        }
+                path.is_file() && {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::metadata(path)
+                            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+                            .unwrap_or(false)
                     }
+                    #[cfg(not(unix))]
+                    {
+                        true
+                    }
+                }
             })
     }
 }
@@ -519,7 +521,9 @@ fn extract_ustar(
             let mut second = [0u8; 512];
             input.read_exact(&mut second)?;
             if second.iter().any(|byte| *byte != 0) {
-                return Err(archive_error("The archive lacks two end-of-archive blocks."));
+                return Err(archive_error(
+                    "The archive lacks two end-of-archive blocks.",
+                ));
             }
             let mut trailing = [0u8; 512];
             loop {
@@ -560,7 +564,9 @@ fn extract_ustar(
             continue;
         }
         if kind != 0 && kind != b'0' {
-            return Err(archive_error("Links and special tar entry types are forbidden."));
+            return Err(archive_error(
+                "Links and special tar entry types are forbidden.",
+            ));
         }
         let Some((expected_file, executable)) =
             expected.iter().find(|(file, _)| file.path == normalized)
@@ -607,10 +613,15 @@ fn extract_ustar(
         }
     }
 
-    let expected_paths: HashSet<_> = expected.iter().map(|(file, _)| file.path.as_str()).collect();
+    let expected_paths: HashSet<_> = expected
+        .iter()
+        .map(|(file, _)| file.path.as_str())
+        .collect();
     let found_paths: HashSet<_> = found.iter().map(String::as_str).collect();
     if !terminated || expected_paths != found_paths {
-        return Err(archive_error("The USTAR archive is missing required payload files."));
+        return Err(archive_error(
+            "The USTAR archive is missing required payload files.",
+        ));
     }
     Ok(())
 }
@@ -638,9 +649,14 @@ fn validate_ustar_header(header: &[u8; 512]) -> Result<(), QuadriFlowInstallErro
 }
 
 fn header_string(field: &[u8]) -> Result<String, QuadriFlowInstallError> {
-    let end = field.iter().position(|byte| *byte == 0).unwrap_or(field.len());
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
     if field[end..].iter().any(|byte| *byte != 0) {
-        return Err(archive_error("A USTAR path field has nonzero data after NUL."));
+        return Err(archive_error(
+            "A USTAR path field has nonzero data after NUL.",
+        ));
     }
     let value = std::str::from_utf8(&field[..end])
         .map_err(|_| archive_error("A USTAR path is not valid UTF-8."))?;
@@ -661,10 +677,16 @@ fn normalize_archive_path(
     };
     if value.is_empty()
         || value.starts_with('/')
-        || value.chars().any(|character| matches!(character, '\\' | ':'))
-        || value.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || value
+            .chars()
+            .any(|character| matches!(character, '\\' | ':'))
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
-        return Err(archive_error("A USTAR path is absolute or contains unsafe components."));
+        return Err(archive_error(
+            "A USTAR path is absolute or contains unsafe components.",
+        ));
     }
     Ok(value.to_owned())
 }
@@ -674,15 +696,14 @@ fn parse_octal(field: &[u8]) -> Result<u64, QuadriFlowInstallError> {
         .iter()
         .position(|byte| *byte == 0 || *byte == b' ')
         .unwrap_or(field.len());
-    if field[end..]
-        .iter()
-        .any(|byte| *byte != 0 && *byte != b' ')
-    {
+    if field[end..].iter().any(|byte| *byte != 0 && *byte != b' ') {
         return Err(archive_error("A USTAR numeric field is malformed."));
     }
     let digits = &field[..end];
     if digits.is_empty() || digits.iter().any(|byte| !(b'0'..=b'7').contains(byte)) {
-        return Err(archive_error("Only octal USTAR numeric fields are supported."));
+        return Err(archive_error(
+            "Only octal USTAR numeric fields are supported.",
+        ));
     }
     digits.iter().try_fold(0u64, |value, digit| {
         value
@@ -765,8 +786,8 @@ fn resolve_marker(
     if bytes.len() > 4096 {
         return Err(QuadriFlowInstallError::ActivationMetadata);
     }
-    let marker: ActiveMarker = serde_json::from_slice(&bytes)
-        .map_err(|_| QuadriFlowInstallError::ActivationMetadata)?;
+    let marker: ActiveMarker =
+        serde_json::from_slice(&bytes).map_err(|_| QuadriFlowInstallError::ActivationMetadata)?;
     if marker.schema_version != ACTIVE_MARKER_SCHEMA
         || marker.platform != platform
         || marker.executable_sha256.len() != 64
@@ -897,8 +918,8 @@ fn append_active_marker(
     let temporary = directory.join(format!(".pending-{identifier}"));
     let final_path = directory.join(format!("active-{sequence:020}-{identifier}.json"));
     let result = (|| {
-        let bytes = serde_json::to_vec(marker)
-            .map_err(|_| QuadriFlowInstallError::ActivationMetadata)?;
+        let bytes =
+            serde_json::to_vec(marker).map_err(|_| QuadriFlowInstallError::ActivationMetadata)?;
         let mut file = create_private_file(&temporary)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
@@ -1021,10 +1042,7 @@ fn create_private_file(path: &Path) -> Result<File, QuadriFlowInstallError> {
     Ok(options.open(path)?)
 }
 
-fn set_installed_file_mode(
-    path: &Path,
-    executable: bool,
-) -> Result<(), QuadriFlowInstallError> {
+fn set_installed_file_mode(path: &Path, executable: bool) -> Result<(), QuadriFlowInstallError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1114,7 +1132,8 @@ mod tests {
 
     impl TestRoot {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("meshharbor-qf-installer-{}", Uuid::new_v4()));
+            let path =
+                std::env::temp_dir().join(format!("meshharbor-qf-installer-{}", Uuid::new_v4()));
             fs::create_dir(&path).unwrap();
             Self(path)
         }
@@ -1258,38 +1277,33 @@ mod tests {
         let root = TestRoot::new();
         let platform = QuadriFlowPlatform::LinuxX86_64;
         let (first, first_archive) = test_package(platform, "quadriflow-v1.0.0", b"binary-one");
-        let result = install_manifest_with_fetcher(
-            &root.0,
-            &first,
-            platform,
-            |_, _, destination| {
+        let result =
+            install_manifest_with_fetcher(&root.0, &first, platform, |_, _, destination| {
                 fs::write(destination, &first_archive)?;
                 Ok(())
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert!(!result.already_installed);
         assert_eq!(fs::read(&result.executable).unwrap(), b"binary-one");
         assert!(installed_quadriflow_sidecar(&root.0, platform).is_some());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&result.executable).unwrap().permissions().mode();
+            let mode = fs::metadata(&result.executable)
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o077, 0);
             assert_ne!(mode & 0o100, 0);
         }
 
         let (second, second_archive) = test_package(platform, "quadriflow-v1.1.0", b"binary-two");
-        let updated = install_manifest_with_fetcher(
-            &root.0,
-            &second,
-            platform,
-            |_, _, destination| {
+        let updated =
+            install_manifest_with_fetcher(&root.0, &second, platform, |_, _, destination| {
                 fs::write(destination, &second_archive)?;
                 Ok(())
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(fs::read(&updated.executable).unwrap(), b"binary-two");
         let rolled_back = rollback_quadriflow_sidecar(&root.0, platform).unwrap();
         assert_eq!(fs::read(rolled_back).unwrap(), b"binary-one");
@@ -1303,12 +1317,9 @@ mod tests {
             .and_then(marker_sequence)
             .unwrap();
 
-        let reactivated = install_manifest_with_fetcher(
-            &root.0,
-            &second,
-            platform,
-            |_, _, _| panic!("an existing verified version must not be downloaded again"),
-        )
+        let reactivated = install_manifest_with_fetcher(&root.0, &second, platform, |_, _, _| {
+            panic!("an existing verified version must not be downloaded again")
+        })
         .unwrap();
         assert!(reactivated.already_installed);
         let after_reactivation = active_markers(&active).unwrap();
@@ -1341,12 +1352,14 @@ mod tests {
             let mut malformed_artifact = artifact.clone();
             malformed_artifact.archive.size_bytes = tar.len() as u64;
             let staged = PrivateTempDir::create(&root.0, "bad-archive").unwrap();
-            assert!(extract_ustar(
-                &write_temp_archive(&root.0, &tar),
-                &staged.path,
-                &malformed_artifact
-            )
-            .is_err());
+            assert!(
+                extract_ustar(
+                    &write_temp_archive(&root.0, &tar),
+                    &staged.path,
+                    &malformed_artifact
+                )
+                .is_err()
+            );
         }
 
         let mut wrong = manifest.clone();
@@ -1360,12 +1373,14 @@ mod tests {
         ]);
         wrong.artifacts[0].archive.size_bytes = tar.len() as u64;
         let staged = PrivateTempDir::create(&root.0, "bad-hash").unwrap();
-        assert!(extract_ustar(
-            &write_temp_archive(&root.0, &tar),
-            &staged.path,
-            &wrong.artifacts[0]
-        )
-        .is_err());
+        assert!(
+            extract_ustar(
+                &write_temp_archive(&root.0, &tar),
+                &staged.path,
+                &wrong.artifacts[0]
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1375,15 +1390,11 @@ mod tests {
         let (manifest, archive) = test_package(platform, "quadriflow-v1.0.0", b"binary");
         let mut fetched_bytes = archive;
         fetched_bytes[0] ^= 1;
-        let result = install_manifest_with_fetcher(
-            &root.0,
-            &manifest,
-            platform,
-            |_, _, destination| {
+        let result =
+            install_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
                 fs::write(destination, &fetched_bytes)?;
                 Ok(())
-            },
-        );
+            });
         assert!(result.is_err());
         assert!(installed_quadriflow_sidecar(&root.0, platform).is_none());
         let base = root.0.join("backends/quadriflow");
@@ -1407,12 +1418,14 @@ mod tests {
             let mut test_artifact = artifact.clone();
             test_artifact.archive.size_bytes = archive.len() as u64;
             let stage = PrivateTempDir::create(&root.0, "member-set").unwrap();
-            assert!(extract_ustar(
-                &write_temp_archive(&root.0, &archive),
-                &stage.path,
-                &test_artifact
-            )
-            .is_err());
+            assert!(
+                extract_ustar(
+                    &write_temp_archive(&root.0, &archive),
+                    &stage.path,
+                    &test_artifact
+                )
+                .is_err()
+            );
         }
     }
 
@@ -1446,16 +1459,12 @@ mod tests {
         let root = TestRoot::new();
         let platform = QuadriFlowPlatform::LinuxX86_64;
         let (manifest, archive) = test_package(platform, "quadriflow-v1.0.0", b"binary");
-        let result = install_manifest_with_fetcher(
-            &root.0,
-            &manifest,
-            platform,
-            |_, _, destination| {
+        let result =
+            install_manifest_with_fetcher(&root.0, &manifest, platform, |_, _, destination| {
                 fs::write(destination, &archive)?;
                 Ok(())
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         fs::write(result.executable, b"changed").unwrap();
         assert!(installed_quadriflow_sidecar(&root.0, platform).is_none());
     }
@@ -1472,23 +1481,27 @@ mod tests {
         let mut bad_artifact = artifact.clone();
         bad_artifact.archive.size_bytes = bad_checksum.len() as u64;
         let stage = PrivateTempDir::create(&root.0, "bad-checksum").unwrap();
-        assert!(extract_ustar(
-            &write_temp_archive(&root.0, &bad_checksum),
-            &stage.path,
-            &bad_artifact
-        )
-        .is_err());
+        assert!(
+            extract_ustar(
+                &write_temp_archive(&root.0, &bad_checksum),
+                &stage.path,
+                &bad_artifact
+            )
+            .is_err()
+        );
 
         let truncated = &valid_archive[..valid_archive.len() - 512];
         let mut truncated_artifact = artifact.clone();
         truncated_artifact.archive.size_bytes = truncated.len() as u64;
         let stage = PrivateTempDir::create(&root.0, "truncated").unwrap();
-        assert!(extract_ustar(
-            &write_temp_archive(&root.0, truncated),
-            &stage.path,
-            &truncated_artifact
-        )
-        .is_err());
+        assert!(
+            extract_ustar(
+                &write_temp_archive(&root.0, truncated),
+                &stage.path,
+                &truncated_artifact
+            )
+            .is_err()
+        );
 
         let mut bad_padding = valid_archive.clone();
         // First member is the empty bin directory; the next member is the executable.
@@ -1497,12 +1510,14 @@ mod tests {
         let mut padding_artifact = artifact.clone();
         padding_artifact.archive.size_bytes = bad_padding.len() as u64;
         let stage = PrivateTempDir::create(&root.0, "bad-padding").unwrap();
-        assert!(extract_ustar(
-            &write_temp_archive(&root.0, &bad_padding),
-            &stage.path,
-            &padding_artifact
-        )
-        .is_err());
+        assert!(
+            extract_ustar(
+                &write_temp_archive(&root.0, &bad_padding),
+                &stage.path,
+                &padding_artifact
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1510,8 +1525,12 @@ mod tests {
         assert!(trusted_effective_url(
             "https://release-assets.githubusercontent.com/path?token=opaque"
         ));
-        assert!(trusted_effective_url("https://github.com/owner/repo/release"));
-        assert!(!trusted_effective_url("http://github.com/owner/repo/release"));
+        assert!(trusted_effective_url(
+            "https://github.com/owner/repo/release"
+        ));
+        assert!(!trusted_effective_url(
+            "http://github.com/owner/repo/release"
+        ));
         assert!(!trusted_effective_url("https://evil.example/release"));
         assert!(!trusted_effective_url(
             "https://release-assets.githubusercontent.com.evil.example/file"

@@ -156,7 +156,11 @@ impl OperationCore {
                 .map_err(|error| {
                     CoreError::InvalidInput(format!("Invalid mesh.retopology parameters: {error}"))
                 })?;
-            let (preview, quad_obj, report) = crate::quadriflow::quadriflow_retopology_glb_at(&bytes, options, self.store.data_root())?;
+            let (preview, quad_obj, report) = crate::quadriflow::quadriflow_retopology_glb_at(
+                &bytes,
+                options,
+                self.store.data_root(),
+            )?;
             let report_value = serde_json::to_value(&report)?;
             let name = derived_mesh_name(&source.name, "quad-retopologized");
             let asset = self.store.import_derived_asset_with_artifacts(
@@ -281,7 +285,8 @@ impl OperationCore {
             || Pixal3dCudaRuntimeManager::new(self.store.root())
                 .readiness()
                 .ready;
-        let quadriflow_ready = crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root());
+        let quadriflow_ready =
+            crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root());
         vec![
             OperationDescriptor { id: "asset.import".into(), title: "Import asset".into(), category: "asset".into(), summary: "Import PNG, JPEG, or GLB files while retaining an immutable content-addressed source artifact.".into(), implemented: true },
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
