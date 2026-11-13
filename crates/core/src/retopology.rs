@@ -451,7 +451,9 @@ pub fn validate_remesh_response(
         let edge_a = scale(sub(pb, pa), inverse_diagonal);
         let edge_b = scale(sub(pc, pa), inverse_diagonal);
         let cross_product = cross(edge_a, edge_b);
-        if !dot(cross_product, cross_product).is_finite() || dot(cross_product, cross_product) <= 1.0e-16 {
+        if !dot(cross_product, cross_product).is_finite()
+            || dot(cross_product, cross_product) <= 1.0e-16
+        {
             return Err(CoreError::OperationUnavailable(
                 "Remesh worker returned a zero-area or near-degenerate triangle.".into(),
             ));
@@ -612,13 +614,17 @@ mod tests {
         let bounds = geometry_bounds(&request.positions).unwrap();
         assert!((bounds.diagonal - 3.0f32.sqrt()).abs() < 1.0e-6);
         assert!(
-            (bounds.diagonal * request.options.target_edge_ratio
-                - 0.05 * 3.0f32.sqrt())
-                .abs()
+            (bounds.diagonal * request.options.target_edge_ratio - 0.05 * 3.0f32.sqrt()).abs()
                 < 1.0e-6
         );
         let (normalized, _, factor) = normalize_remesh_positions(&request).unwrap();
-        assert!((factor * request.options.target_edge_ratio * bounds.diagonal - 1.0).abs() < 1.0e-6);
-        assert!(normalized.iter().all(|point| point.iter().all(|x| x.is_finite())));
+        assert!(
+            (factor * request.options.target_edge_ratio * bounds.diagonal - 1.0).abs() < 1.0e-6
+        );
+        assert!(
+            normalized
+                .iter()
+                .all(|point| point.iter().all(|x| x.is_finite()))
+        );
     }
 }
