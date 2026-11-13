@@ -366,6 +366,15 @@ impl Drop for RemoveOnDrop {
     }
 }
 
+fn archive_hash_matches(bytes: &[u8], expected: &str) -> bool {
+    format!("{:x}", Sha256::digest(bytes)) == expected
+}
+
+#[cfg(test)]
+fn verify_archive_bytes(bytes: &[u8], expected: &str) -> bool {
+    archive_hash_matches(bytes, expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,13 +421,4 @@ mod tests {
         assert!(verify_archive_bytes(BLOB, &expected));
         assert!(!verify_archive_bytes(BLOB, &"0".repeat(64)));
     }
-}
-
-fn archive_hash_matches(bytes: &[u8], expected: &str) -> bool {
-    format!("{:x}", Sha256::digest(bytes)) == expected
-}
-
-#[cfg(test)]
-fn verify_archive_bytes(bytes: &[u8], expected: &str) -> bool {
-    archive_hash_matches(bytes, expected)
 }
