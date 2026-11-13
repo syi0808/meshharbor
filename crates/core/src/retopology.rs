@@ -337,6 +337,11 @@ pub fn validate_remesh_request(request: &RemeshRequest) -> CoreResult<()> {
             "The experimental remesher requires consistently oriented triangle faces.".into(),
         ));
     }
+    if !closed_vertex_links_are_manifold(&request.indices, request.positions.len()) {
+        return Err(CoreError::OperationUnavailable(
+            "The experimental remesher only accepts vertex-manifold triangle meshes.".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -480,7 +485,72 @@ pub fn validate_remesh_response(
             "Remesh worker returned inconsistently oriented faces.".into(),
         ));
     }
+    if !closed_vertex_links_are_manifold(&response.indices, response.positions.len()) {
+        return Err(CoreError::OperationUnavailable(
+            "Remesh worker returned a vertex-non-manifold mesh.".into(),
+        ));
+    }
     Ok(())
+}
+
+fn closed_vertex_links_are_manifold(indices: &[u32], vertex_count: usize) -> bool {
+    let mut links = vec![Vec::<(u32, u32)>::new(); vertex_count];
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+        links[a as usize].extend([(b, c), (c, b)]);
+        links[b as usize].extend([(c, a), (a, c)]);
+        links[c as usize].extend([(a, b), (b, a)]);
+    }
+
+    for link in &mut links {
+        if link.len() < 6 || !link.len().is_multiple_of(2) {
+            return false;
+        }
+        link.sort_unstable();
+
+        let mut unique_neighbors = 0;
+        let mut position = 0;
+        while position < link.len() {
+            let neighbor = link[position].0;
+            let start = position;
+            while position < link.len() && link[position].0 == neighbor {
+                position += 1;
+            }
+            if position - start != 2 {
+                return false;
+            }
+            unique_neighbors += 1;
+        }
+
+        let start = link[0].0;
+        let mut previous = u32::MAX;
+        let mut current = start;
+        let mut visited = 0;
+        loop {
+            if visited >= unique_neighbors {
+                return false;
+            }
+            let offset = link.partition_point(|(neighbor, _)| *neighbor < current);
+            if offset + 1 >= link.len() || link[offset].0 != current {
+                return false;
+            }
+            let next = if link[offset].1 != previous {
+                link[offset].1
+            } else {
+                link[offset + 1].1
+            };
+            previous = current;
+            current = next;
+            visited += 1;
+            if current == start {
+                break;
+            }
+        }
+        if visited != unique_neighbors {
+            return false;
+        }
+    }
+    true
 }
 
 fn geometry_bounds(positions: &[[f32; 3]]) -> CoreResult<Bounds> {
@@ -577,6 +647,18 @@ mod tests {
     fn rejects_duplicate_input_faces() {
         let mut request = valid_request();
         request.indices = vec![0, 1, 2, 0, 2, 1];
+        assert!(validate_remesh_request(&request).is_err());
+    }
+
+    #[test]
+    fn rejects_a_closed_edge_manifold_with_a_bow_tie_vertex() {
+        let mut request = valid_request();
+        request.positions.extend([
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0],
+        ]);
+        request.indices.extend([0, 1, 2, 0, 5, 4, 0, 4, 6, 4, 5, 6]);
         assert!(validate_remesh_request(&request).is_err());
     }
 
