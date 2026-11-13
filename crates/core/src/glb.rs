@@ -1436,10 +1436,9 @@ pub fn retopology_glb(
     }
 
     let mut glb = GlbFile::parse(bytes)?;
-    let mut binary = glb
-        .binary
-        .take()
-        .ok_or_else(|| CoreError::OperationUnavailable("Retopology requires an embedded GLB buffer.".into()))?;
+    let mut binary = glb.binary.take().ok_or_else(|| {
+        CoreError::OperationUnavailable("Retopology requires an embedded GLB buffer.".into())
+    })?;
     validate_single_embedded_buffer(&glb.document, binary.len())?;
     validate_retopology_glb_document(&glb.document)?;
 
@@ -1454,10 +1453,13 @@ pub fn retopology_glb(
         .ok_or_else(|| CoreError::InvalidInput("POSITION accessor is missing.".into()))?
         as usize;
     let accessors = array(&glb.document, "accessors");
-    let position_accessor = accessors.get(position_accessor_index).ok_or_else(|| {
-        CoreError::InvalidInput("POSITION references a missing accessor.".into())
-    })?;
-    if position_accessor.get("componentType").and_then(Value::as_u64) != Some(5126)
+    let position_accessor = accessors
+        .get(position_accessor_index)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION references a missing accessor.".into()))?;
+    if position_accessor
+        .get("componentType")
+        .and_then(Value::as_u64)
+        != Some(5126)
         || position_accessor.get("normalized").and_then(Value::as_bool) == Some(true)
         || position_accessor.get("type").and_then(Value::as_str) != Some("VEC3")
         || position_accessor.get("sparse").is_some()
@@ -1480,8 +1482,9 @@ pub fn retopology_glb(
     let index_accessor_index = primitive
         .get("indices")
         .and_then(Value::as_u64)
-        .ok_or_else(|| CoreError::OperationUnavailable("Retopology requires indexed triangles.".into()))?
-        as usize;
+        .ok_or_else(|| {
+            CoreError::OperationUnavailable("Retopology requires indexed triangles.".into())
+        })? as usize;
     let index_accessor = accessors.get(index_accessor_index).ok_or_else(|| {
         CoreError::InvalidInput("Primitive references a missing index accessor.".into())
     })?;
@@ -1513,8 +1516,7 @@ pub fn retopology_glb(
         positions.push([position[0], position[1], position[2]]);
     }
     let input_indices = read_primitive_indices(&glb.document, &binary, primitive)?;
-    let (response, mut report) =
-        remesh_triangles_in_worker(&positions, &input_indices, options)?;
+    let (response, mut report) = remesh_triangles_in_worker(&positions, &input_indices, options)?;
 
     let normals = generate_vertex_normals(&response.positions, &response.indices)?;
     let new_position_accessor =
@@ -1646,13 +1648,13 @@ fn validate_retopology_glb_document(document: &Value) -> Result<(), CoreError> {
 
 fn has_nonempty_extensions(value: &Value) -> bool {
     match value {
-        Value::Object(object) => {
-            object.iter().any(|(key, value)| {
-                (key == "extensions"
-                    && value.as_object().is_some_and(|extensions| !extensions.is_empty()))
-                    || has_nonempty_extensions(value)
-            })
-        }
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            (key == "extensions"
+                && value
+                    .as_object()
+                    .is_some_and(|extensions| !extensions.is_empty()))
+                || has_nonempty_extensions(value)
+        }),
         Value::Array(values) => values.iter().any(has_nonempty_extensions),
         _ => false,
     }
@@ -1674,7 +1676,11 @@ fn generate_vertex_normals(
 ) -> Result<Vec<[f32; 3]>, CoreError> {
     let mut normals = vec![[0.0f64; 3]; positions.len()];
     for triangle in indices.chunks_exact(3) {
-        let [a, b, c] = [triangle[0] as usize, triangle[1] as usize, triangle[2] as usize];
+        let [a, b, c] = [
+            triangle[0] as usize,
+            triangle[1] as usize,
+            triangle[2] as usize,
+        ];
         let pa = positions[a].map(f64::from);
         let pb = positions[b].map(f64::from);
         let pc = positions[c].map(f64::from);
@@ -1694,10 +1700,8 @@ fn generate_vertex_normals(
     normals
         .into_iter()
         .map(|normal| {
-            let length = (normal[0] * normal[0]
-                + normal[1] * normal[1]
-                + normal[2] * normal[2])
-                .sqrt();
+            let length =
+                (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
             if !length.is_finite() || length <= 1.0e-30 {
                 return Err(CoreError::OperationUnavailable(
                     "Retopology could not recompute a vertex normal.".into(),
@@ -2403,8 +2407,7 @@ mod tests {
     fn retopology_gate_accepts_a_minimal_untextured_tetrahedron() {
         let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
         validate_retopology_glb_document(&glb.document).unwrap();
-        validate_single_embedded_buffer(&glb.document, glb.binary.as_ref().unwrap().len())
-            .unwrap();
+        validate_single_embedded_buffer(&glb.document, glb.binary.as_ref().unwrap().len()).unwrap();
     }
 
     #[test]
@@ -2426,11 +2429,14 @@ mod tests {
 
         let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
         let mut document = glb.document.clone();
-        document["meshes"][0]["primitives"].as_array_mut().unwrap().push(json!({
-            "attributes": { "POSITION": 0 },
-            "indices": 1,
-            "mode": 4
-        }));
+        document["meshes"][0]["primitives"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "attributes": { "POSITION": 0 },
+                "indices": 1,
+                "mode": 4
+            }));
         assert!(validate_retopology_glb_document(&document).is_err());
     }
 
@@ -2447,10 +2453,8 @@ mod tests {
         assert_eq!(normals.len(), positions.len());
         for normal in normals {
             assert!(normal.iter().all(|component| component.is_finite()));
-            let length = (normal[0] * normal[0]
-                + normal[1] * normal[1]
-                + normal[2] * normal[2])
-                .sqrt();
+            let length =
+                (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
             assert!((length - 1.0).abs() < 1.0e-6);
         }
     }
