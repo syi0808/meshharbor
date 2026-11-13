@@ -1,0 +1,30 @@
+name: QuadriFlow native build smoke
+
+on:
+  push:
+    branches:
+      - feat/retopology-worker-rebased
+    paths:
+      - .github/workflows/quadriflow-source-build.yml
+      - scripts/quadriflow-build-smoke.sh
+      - crates/core/tests/quadriflow_output.rs
+      - crates/core/tests/fixtures/quadriflow_cube_triangles.obj
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke:
+    if: startsWith(github.event.head_commit.message, 'test(retopology): approved QuadriFlow cube smoke')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cmake g++ libeigen3-dev libboost-dev
+
+      - name: Build pinned upstream and run one synthetic cube
+        run: bash scripts/quadriflow-build-smoke.sh
