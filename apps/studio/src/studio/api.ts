@@ -41,7 +41,21 @@ export class MeshHarborApi {
   }
 
   installPixal3dModels(): Promise<Job> {
-    return this.request('/api/v1/runtime/pixal3d-mlx/models', { method: 'POST' });
+    return this.request('/api/v1/runtime/pixal3d-mlx/models', {
+      method: 'POST',
+      body: JSON.stringify({ confirm_large_download: true, confirm_gated_access: true }),
+    });
+  }
+
+  setupPixal3dCudaRuntime(): Promise<Job> {
+    return this.request('/api/v1/runtime/pixal3d-cuda/setup', { method: 'POST' });
+  }
+
+  installPixal3dCudaModels(): Promise<Job> {
+    return this.request('/api/v1/runtime/pixal3d-cuda/models', {
+      method: 'POST',
+      body: JSON.stringify({ confirm_large_download: true, confirm_gated_access: true }),
+    });
   }
 
   convertPixal3dNaf(): Promise<Job> {
@@ -100,13 +114,13 @@ export class MeshHarborApi {
     });
   }
 
-  createImageGenerationJob(assetId: string, textureSize: number, targetFaces: number): Promise<Job> {
+  createImageGenerationJob(assetId: string, backendId: string, textureSize: number, targetFaces: number): Promise<Job> {
     return this.request('/api/v1/jobs', {
       method: 'POST',
       body: JSON.stringify({
         operation: 'image.generate',
         input: { asset_id: assetId },
-        parameters: { texture_size: textureSize, target_faces: targetFaces },
+        parameters: { backend_id: backendId, texture_size: textureSize, target_faces: targetFaces },
       }),
     });
   }
