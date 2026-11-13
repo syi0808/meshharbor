@@ -289,11 +289,20 @@ pub fn validate_remesh_request(request: &RemeshRequest) -> CoreResult<()> {
     let bounds = geometry_bounds(&request.positions)?;
     let inverse_diagonal = 1.0 / bounds.diagonal;
     let mut edge_faces = std::collections::HashMap::<(u32, u32), u8>::new();
+    let mut unique_faces = std::collections::HashSet::<[u32; 3]>::new();
+    let (_, mesh_diagonal) = geometry_bounds(&request.positions)?;
     for triangle in request.indices.chunks_exact(3) {
         let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
         if a == b || b == c || c == a {
             return Err(CoreError::InvalidInput(
                 "Remesh input contains a degenerate triangle.".into(),
+            ));
+        }
+        let mut face_key = [a, b, c];
+        face_key.sort_unstable();
+        if !unique_faces.insert(face_key) {
+            return Err(CoreError::InvalidInput(
+                "Remesh input contains duplicate triangles.".into(),
             ));
         }
         let pa = request.positions[a as usize];
