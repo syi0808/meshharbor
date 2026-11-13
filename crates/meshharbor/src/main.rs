@@ -67,9 +67,11 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Generate a textured GLB from a previously imported image using the local Pixal3D MLX runtime.
+    /// Generate a textured GLB from a previously imported image using a ready local Pixal3D backend.
     Generate {
         asset_id: String,
+        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda"])]
+        backend_id: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
         #[arg(long, default_value_t = 512)]
@@ -96,10 +98,26 @@ enum RuntimeCommand {
     Setup,
     /// Sign into Hugging Face inside MeshHarbor's isolated model cache using an interactive terminal prompt.
     HfLogin,
-    /// Download pinned Pixal3D and gated DINOv3 model files (~24 GB). Requires DINOv3 access first.
-    InstallModels,
+    /// Download pinned Pixal3D and gated DINOv3 model files (~24 GB) after explicit confirmation.
+    InstallModels {
+        #[arg(long)]
+        confirm_large_download: bool,
+        #[arg(long)]
+        confirm_gated_access: bool,
+    },
     /// Retry the isolated one-time NAF checkpoint conversion after model files are downloaded.
     ConvertNaf,
+    /// Install a Linux x86_64 NVIDIA CUDA Python 3.12 runtime and run its CUDA/SDPA preflight.
+    CudaSetup,
+    /// Sign into Hugging Face inside the isolated Pixal3D CUDA model cache.
+    CudaHfLogin,
+    /// Download roughly 25–30 GB of pinned CUDA model files after gated DINOv3 access is granted.
+    CudaInstallModels {
+        #[arg(long)]
+        confirm_large_download: bool,
+        #[arg(long)]
+        confirm_gated_access: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -127,6 +145,8 @@ struct SimplifyArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GenerateArgs {
     asset_id: String,
+    #[serde(default = "default_generation_backend")]
+    backend_id: String,
     #[serde(default = "default_generation_seed")]
     seed: u64,
     #[serde(default = "default_generation_resolution")]
@@ -165,7 +185,7 @@ struct ExportGlbArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ModelInstallConfirmation {
-    /// Must be true to queue the approximately 24 GB model download.
+    /// Must be true to queue the approximately 25–30 GB model download.
     confirm_large_download: bool,
     /// Must be true only after the owner has obtained/accepted the gated DINOv3 access terms.
     confirm_gated_access: bool,
@@ -284,6 +304,7 @@ impl McpServer {
     async fn start_image_generation(&self, params: Parameters<GenerateArgs>) -> String {
         let args = params.0;
         let options = GenerationOptions {
+            backend_id: args.backend_id,
             seed: args.seed,
             resolution: args.resolution,
             texture_size: args.texture_size,
@@ -369,6 +390,49 @@ impl McpServer {
             self.core.clone(),
             self.scheduler.clone(),
             RuntimeJobKind::ConvertNaf,
+        )
+        .await
+        {
+            Ok(job) => serde_json::to_string_pretty(&job)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Err(error) => json!({"error": error.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Queue the managed Linux x86_64/NVIDIA CUDA environment setup. It bootstraps pinned uv and managed Python 3.12, resolves upstream dependency ranges into a private per-install lock, installs the PyTorch 2.6.0/CUDA 12.4 profile and runs the CUDA/SDPA preflight. No model weights are downloaded. Poll get_job for status."
+    )]
+    async fn setup_pixal3d_cuda_runtime(&self) -> String {
+        match start_runtime_job(
+            self.core.clone(),
+            self.scheduler.clone(),
+            RuntimeJobKind::CudaSetup,
+        )
+        .await
+        {
+            Ok(job) => serde_json::to_string_pretty(&job)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Err(error) => json!({"error": error.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Queue the explicit roughly 25–30 GB Pixal3D/DINOv3/NAF model download for CUDA. Invoke only after the owner explicitly confirms the large download and has obtained gated DINOv3 access. Login is separate via `meshharbor runtime cuda-hf-login`; this tool accepts no credentials. Poll get_job for status."
+    )]
+    async fn install_pixal3d_cuda_models(
+        &self,
+        params: Parameters<ModelInstallConfirmation>,
+    ) -> String {
+        if !params.0.confirm_large_download || !params.0.confirm_gated_access {
+            return json!({
+                "error": "CUDA model installation requires explicit confirmation of the 25–30 GB download and prior owner-approved DINOv3 access."
+            })
+            .to_string();
+        }
+        match start_runtime_job(
+            self.core.clone(),
+            self.scheduler.clone(),
+            RuntimeJobKind::CudaInstallModels,
         )
         .await
         {
@@ -493,6 +557,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Generate {
             asset_id,
+            backend_id,
             seed,
             resolution,
             texture_size,
@@ -503,6 +568,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = core.generate_pixal3d_image(
                 &asset_id,
                 GenerationOptions {
+                    backend_id,
                     seed,
                     resolution,
                     texture_size,
@@ -538,12 +604,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "Hugging Face authentication is configured in the isolated MeshHarbor cache."
                     );
                 }
-                RuntimeCommand::InstallModels => {
-                    let report = core.install_pixal3d_mlx_models()?;
+                RuntimeCommand::InstallModels {
+                    confirm_large_download,
+                    confirm_gated_access,
+                } => {
+                    let report = core.install_pixal3d_mlx_models(
+                        confirm_large_download,
+                        confirm_gated_access,
+                    )?;
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 }
                 RuntimeCommand::ConvertNaf => {
                     let report = core.convert_pixal3d_mlx_naf()?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                RuntimeCommand::CudaSetup => {
+                    let report = core.setup_pixal3d_cuda_environment()?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                RuntimeCommand::CudaHfLogin => {
+                    core.login_pixal3d_cuda_huggingface()?;
+                    println!("Hugging Face authentication is configured in the isolated Pixal3D CUDA cache.");
+                }
+                RuntimeCommand::CudaInstallModels {
+                    confirm_large_download,
+                    confirm_gated_access,
+                } => {
+                    let report = core.install_pixal3d_cuda_models(
+                        confirm_large_download,
+                        confirm_gated_access,
+                    )?;
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 }
             }
@@ -567,6 +657,14 @@ fn api_router(state: AppState, token: String) -> Router {
         .route(
             "/api/v1/runtime/pixal3d-mlx/convert-naf",
             post(api_start_runtime_naf_conversion),
+        )
+        .route(
+            "/api/v1/runtime/pixal3d-cuda/setup",
+            post(api_start_cuda_runtime_setup),
+        )
+        .route(
+            "/api/v1/runtime/pixal3d-cuda/models",
+            post(api_start_cuda_runtime_models),
         )
         .route("/api/v1/operations", get(api_operations))
         .route(
@@ -770,7 +868,13 @@ async fn api_start_runtime_setup(
 
 async fn api_start_runtime_models(
     State(state): State<AppState>,
+    Json(confirmation): Json<ModelInstallConfirmation>,
 ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    if !confirmation.confirm_large_download || !confirmation.confirm_gated_access {
+        return Err(ApiError(CoreError::InvalidInput(
+            "MLX model installation requires explicit confirmation of the large download and prior DINOv3 gated access.".into(),
+        )));
+    }
     let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::InstallModels).await?;
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
@@ -779,6 +883,31 @@ async fn api_start_runtime_naf_conversion(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
     let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::ConvertNaf).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn api_start_cuda_runtime_setup(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::CudaSetup).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn api_start_cuda_runtime_models(
+    State(state): State<AppState>,
+    Json(confirmation): Json<ModelInstallConfirmation>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    if !confirmation.confirm_large_download || !confirmation.confirm_gated_access {
+        return Err(ApiError(CoreError::InvalidInput(
+            "CUDA model installation requires explicit confirmation of the 25–30 GB download and prior DINOv3 gated access.".into(),
+        )));
+    }
+    let job = start_runtime_job(
+        state.core,
+        state.scheduler,
+        RuntimeJobKind::CudaInstallModels,
+    )
+    .await?;
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 async fn api_operations(
@@ -1040,9 +1169,14 @@ async fn start_generation_job(
             "image.generate requires a previously imported PNG or JPEG image asset.".into(),
         ));
     }
+    if !matches!(options.backend_id.as_str(), "auto" | "pixal3d-mlx" | "pixal3d-cuda") {
+        return Err(CoreError::InvalidInput(
+            "backend_id must be auto, pixal3d-mlx, or pixal3d-cuda.".into(),
+        ));
+    }
     if options.resolution != 512 {
         return Err(CoreError::InvalidInput(
-            "The current MLX integration exposes only the reviewed 512 generation profile.".into(),
+            "Both current Pixal3D backends expose only the reviewed 512 geometry profile.".into(),
         ));
     }
     if !matches!(options.texture_size, 512 | 1024 | 2048) {
@@ -1144,6 +1278,8 @@ enum RuntimeJobKind {
     Setup,
     InstallModels,
     ConvertNaf,
+    CudaSetup,
+    CudaInstallModels,
 }
 
 impl RuntimeJobKind {
@@ -1152,6 +1288,15 @@ impl RuntimeJobKind {
             Self::Setup => "runtime.pixal3d.setup",
             Self::InstallModels => "runtime.pixal3d.install_models",
             Self::ConvertNaf => "runtime.pixal3d.convert_naf",
+            Self::CudaSetup => "runtime.pixal3d.cuda_setup",
+            Self::CudaInstallModels => "runtime.pixal3d.cuda_install_models",
+        }
+    }
+
+    fn backend_id(self) -> &'static str {
+        match self {
+            Self::Setup | Self::InstallModels | Self::ConvertNaf => "pixal3d-mlx",
+            Self::CudaSetup | Self::CudaInstallModels => "pixal3d-cuda",
         }
     }
 }
@@ -1161,9 +1306,11 @@ async fn start_runtime_job(
     scheduler: Arc<Semaphore>,
     kind: RuntimeJobKind,
 ) -> Result<meshharbor_core::Job, CoreError> {
-    let job =
-        core.store()
-            .create_job(kind.operation(), None, &json!({"backend_id":"pixal3d-mlx"}))?;
+    let job = core.store().create_job(
+        kind.operation(),
+        None,
+        &json!({"backend_id":kind.backend_id()}),
+    )?;
     let job_id = job.id.clone();
     tokio::spawn(async move {
         let permit = match scheduler.acquire_owned().await {
@@ -1188,10 +1335,16 @@ async fn start_runtime_job(
                 .setup_pixal3d_mlx_environment()
                 .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
             RuntimeJobKind::InstallModels => worker_core
-                .install_pixal3d_mlx_models()
+                .install_pixal3d_mlx_models(true, true)
                 .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
             RuntimeJobKind::ConvertNaf => worker_core
                 .convert_pixal3d_mlx_naf()
+                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+            RuntimeJobKind::CudaSetup => worker_core
+                .setup_pixal3d_cuda_environment()
+                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+            RuntimeJobKind::CudaInstallModels => worker_core
+                .install_pixal3d_cuda_models(true, true)
                 .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
         })
         .await;
@@ -1402,6 +1555,10 @@ fn default_max_error() -> f32 {
 }
 fn default_generation_seed() -> u64 {
     GenerationOptions::default().seed
+}
+
+fn default_generation_backend() -> String {
+    "auto".into()
 }
 fn default_generation_resolution() -> u16 {
     GenerationOptions::default().resolution
@@ -2070,7 +2227,7 @@ mod tests {
                 &response.into_body().collect().await.unwrap().to_bytes()
             )
             .unwrap()["error"],
-            "The current MLX integration exposes only the reviewed 512 generation profile."
+            "Both current Pixal3D backends expose only the reviewed 512 geometry profile."
         );
         std::fs::remove_dir_all(root).unwrap();
     }
