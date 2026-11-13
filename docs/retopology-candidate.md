@@ -23,16 +23,23 @@ multi-primitive or multi-mesh inputs unless a later implementation explicitly
 preserves or rebakes them. In particular, atlas UV rebaking is not a high-to-low
 projection workflow, so remeshed geometry cannot inherit the source appearance.
 
-The geometry adapter validates finite positions/parameters, index range, triangle
-arity, repeated/duplicate faces, zero-area faces, and closed, watertight, consistently oriented edge-manifold input/output.
-It also bounds the output to the source bounding region. It does not prove
-vertex-manifold topology, eliminate self-intersections, or guarantee a measured
-Hausdorff/geometric error tolerance.
+The shared geometry validator checks finite positions/parameters, index range,
+triangle arity, repeated/duplicate faces, zero-area faces, closed and consistently
+oriented edge-manifold topology, the vertex-link manifold condition, and an
+area-based estimate for output budget.
+It checks the vertex-link condition for manifold topology and rejects disconnected
+links, in addition to edge-manifold validation. It does not eliminate
+self-intersections or guarantee a measured Hausdorff/geometric error tolerance.
+The output envelope is deliberately loose: positions must stay within a sphere of
+radius two source-bounds diagonals around the source center; this is a runaway-output
+guard, not an approximation-quality guarantee.
 
-Current limits are 200,000 input vertices, 400,000 input triangles, 1,000,000
-output vertices, 2,000,000 output triangles, target edge ratio 0.005–0.25 of the
-input bounding-box diagonal, 1–8 iterations, a 128 MiB request and 256 MiB response,
-and a 180-second host timeout.
+Current limits are 100,000 input vertices, 200,000 input triangles, 250,000
+output vertices, 500,000 output triangles, target edge ratio 0.005–0.25 of the
+input bounding-box diagonal (subject to a conservative estimated output budget of
+100,000 triangles), 1–8 iterations, 64 MiB request/response files, and a 180-second
+host timeout. These bounds and the area-based estimate reduce risk but are not a
+hard OS memory/CPU quota.
 
 ## Isolation and dependency
 
