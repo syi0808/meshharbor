@@ -117,6 +117,16 @@ pub fn remesh_triangles_in_worker(
     indices: &[u32],
     options: RetopologyOptions,
 ) -> CoreResult<(RemeshResponse, RetopologyReport)> {
+    if positions.len() > MAX_VERTICES || indices.len() > MAX_TRIANGLES.saturating_mul(3) {
+        return Err(CoreError::OperationUnavailable(
+            "Remesh input exceeds the 100,000-vertex or 200,000-triangle limit.".into(),
+        ));
+    }
+    if positions.is_empty() || indices.is_empty() || !indices.len().is_multiple_of(3) {
+        return Err(CoreError::InvalidInput(
+            "Remesh requires nonempty indexed triangle geometry.".into(),
+        ));
+    }
     let request = RemeshRequest {
         protocol_version: REMESH_PROTOCOL_VERSION,
         positions: positions.to_vec(),
