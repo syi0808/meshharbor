@@ -2315,6 +2315,44 @@ mod tests {
         pack_glb(document, binary)
     }
 
+    fn tetrahedron_glb() -> Vec<u8> {
+        let positions = [
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let indices = [0u16, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
+        let mut binary = Vec::new();
+        for position in positions {
+            for component in position {
+                binary.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        let index_offset = binary.len();
+        for index in indices {
+            binary.extend_from_slice(&index.to_le_bytes());
+        }
+        pack_glb(
+            json!({
+                "asset": { "version": "2.0" },
+                "bufferViews": [
+                    { "buffer": 0, "byteOffset": 0, "byteLength": 48, "byteStride": 12, "target": 34962 },
+                    { "buffer": 0, "byteOffset": index_offset, "byteLength": 24, "target": 34963 }
+                ],
+                "accessors": [
+                    { "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0] },
+                    { "bufferView": 1, "componentType": 5123, "count": 12, "type": "SCALAR", "min": [0], "max": [3] }
+                ],
+                "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 }, "indices": 1, "mode": 4 }] }],
+                "nodes": [{ "mesh": 0 }],
+                "scenes": [{ "nodes": [0] }],
+                "scene": 0
+            }),
+            binary,
+        )
+    }
+
     fn grid_glb(side: usize) -> Vec<u8> {
         let mut binary = Vec::new();
         let mut indices = Vec::<u16>::new();
@@ -2359,6 +2397,62 @@ mod tests {
             }),
             binary,
         )
+    }
+
+    #[test]
+    fn retopology_gate_accepts_a_minimal_untextured_tetrahedron() {
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        validate_retopology_glb_document(&glb.document).unwrap();
+        validate_single_embedded_buffer(&glb.document, glb.binary.as_ref().unwrap().len())
+            .unwrap();
+    }
+
+    #[test]
+    fn retopology_gate_rejects_uvs_textures_extensions_and_extra_primitives() {
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"] = json!(2);
+        assert!(validate_retopology_glb_document(&document).is_err());
+
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["textures"] = json!([{}]);
+        assert!(validate_retopology_glb_document(&document).is_err());
+
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["nodes"][0]["extensions"] = json!({ "VENDOR_example": {} });
+        assert!(validate_retopology_glb_document(&document).is_err());
+
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["meshes"][0]["primitives"].as_array_mut().unwrap().push(json!({
+            "attributes": { "POSITION": 0 },
+            "indices": 1,
+            "mode": 4
+        }));
+        assert!(validate_retopology_glb_document(&document).is_err());
+    }
+
+    #[test]
+    fn generated_vertex_normals_are_finite_and_unit_length() {
+        let positions = [
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let indices = [0u32, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
+        let normals = generate_vertex_normals(&positions, &indices).unwrap();
+        assert_eq!(normals.len(), positions.len());
+        for normal in normals {
+            assert!(normal.iter().all(|component| component.is_finite()));
+            let length = (normal[0] * normal[0]
+                + normal[1] * normal[1]
+                + normal[2] * normal[2])
+                .sqrt();
+            assert!((length - 1.0).abs() < 1.0e-6);
+        }
     }
 
     #[test]
