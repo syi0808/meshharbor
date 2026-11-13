@@ -536,7 +536,7 @@ fn decode_chunked(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
             .get(cursor..end)
             .ok_or_else(|| std::io::Error::other("truncated HTTP chunk"))?;
         output.extend_from_slice(chunk);
-        if !bytes.get(end..end + 2).is_some_and(|terminator| terminator == b"\r\n") {
+        if bytes.get(end..end + 2).is_none_or(|terminator| terminator != b"\r\n") {
             return Err(std::io::Error::other("invalid HTTP chunk terminator"));
         }
         cursor = end + 2;
