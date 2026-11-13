@@ -476,7 +476,7 @@ pub(crate) fn materialize_embedded_source(
     include_upstream: bool,
 ) -> CoreResult<()> {
     let source_root = runtime_root.join("source");
-    for (relative, contents) in bundle::PIXAL3D_MLX_FILES.iter().copied() {
+    for (relative, contents) in crate::runtime_bundle::PIXAL3D_MLX_FILES.iter().copied() {
         if relative.starts_with("upstream/") && !include_upstream {
             continue;
         }
