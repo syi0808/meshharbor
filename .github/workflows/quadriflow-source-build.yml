@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build-and-smoke:
-    if: startsWith(github.event.head_commit.message, 'test(retopology): approved QuadriFlow cube smoke')
+    if: "${{ startsWith(github.event.head_commit.message, 'test(retopology): approved QuadriFlow cube smoke') }}"
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
