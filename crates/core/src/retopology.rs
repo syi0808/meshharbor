@@ -6,6 +6,7 @@
 
 use std::{
     fs,
+    io::Read,
     path::PathBuf,
     process::{Command, Stdio},
     thread,
@@ -82,7 +83,13 @@ impl WorkerTempDir {
     fn create() -> CoreResult<Self> {
         for _ in 0..4 {
             let path = std::env::temp_dir().join(format!("meshharbor-retopo-{}", Uuid::new_v4()));
-            match fs::create_dir(&path) {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error.into()),
@@ -139,6 +146,7 @@ pub fn remesh_triangles_in_worker(
         .arg(&input_path)
         .arg("--output")
         .arg(&output_path)
+        .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -151,8 +159,14 @@ pub fn remesh_triangles_in_worker(
 
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
         }
         if started.elapsed() >= WORKER_TIMEOUT {
             let _ = child.kill();
@@ -165,9 +179,10 @@ pub fn remesh_triangles_in_worker(
     };
 
     if !status.success() {
-        let detail = read_log_excerpt(&stderr_path);
+        let stdout_detail = read_log_excerpt(&stdout_path);
+        let stderr_detail = read_log_excerpt(&stderr_path);
         return Err(CoreError::OperationUnavailable(format!(
-            "Experimental remesh worker exited with {status}. {detail}"
+            "Experimental remesh worker exited with {status}. stdout: {stdout_detail}; stderr: {stderr_detail}"
         )));
     }
 
@@ -210,12 +225,18 @@ fn worker_path() -> CoreResult<PathBuf> {
 }
 
 fn read_log_excerpt(path: &PathBuf) -> String {
-    fs::read(path)
-        .map(|bytes| {
-            let excerpt = &bytes[..bytes.len().min(4096)];
-            String::from_utf8_lossy(excerpt).trim().to_owned()
-        })
-        .unwrap_or_default()
+    let Ok(file) = fs::File::open(path) else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    if file.take(4097).read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    if bytes.len() > 4096 {
+        bytes.truncate(4096);
+        bytes.extend_from_slice(b" ...[truncated]");
+    }
+    String::from_utf8_lossy(&bytes).trim().to_owned()
 }
 
 pub fn validate_remesh_request(request: &RemeshRequest) -> CoreResult<()> {
