@@ -537,12 +537,12 @@ fn mark_accessor_role(
     accessor_index: usize,
     role: u8,
 ) -> Result<(), CoreError> {
-    if let Some(previous) = roles.insert(accessor_index, role) {
-        if previous != role {
-            return Err(CoreError::OperationUnavailable(
-                "An accessor is used as both vertex attributes and indices.".into(),
-            ));
-        }
+    if let Some(previous) = roles.insert(accessor_index, role)
+        && previous != role
+    {
+        return Err(CoreError::OperationUnavailable(
+            "An accessor is used as both vertex attributes and indices.".into(),
+        ));
     }
     Ok(())
 }
@@ -642,7 +642,7 @@ fn encode_attribute_buffer_view(
             .unwrap_or(0) as usize;
         if accessor_offset
             .checked_add(element_length)
-            .map_or(true, |end| end > stride)
+            .is_none_or(|end| end > stride)
         {
             return Ok(None);
         }
