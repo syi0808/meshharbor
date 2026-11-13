@@ -130,7 +130,7 @@ pub fn bake_glb(
         (0..u32::try_from(snapshot.source_vertices).map_err(|_| invalid("too many vertices"))?)
             .collect()
     };
-    if indices.is_empty() || indices.len() % 3 != 0 || indices.len() > MAX_INDICES {
+    if indices.is_empty() || !indices.len().is_multiple_of(3) || indices.len() > MAX_INDICES {
         return Err(AtlasBakeError::InvalidInput(
             "the primitive must contain a bounded, non-empty triangle index stream".into(),
         ));
@@ -162,7 +162,7 @@ pub fn bake_glb(
 
     if native.xref.len() > MAX_INDICES
         || native.xref.len() != native.uv.len()
-        || native.indices.len() % 3 != 0
+        || !native.indices.len().is_multiple_of(3)
         || native.indices.len() != indices.len()
         || native
             .xref
@@ -889,7 +889,7 @@ fn append_view(
     bytes: &[u8],
     target: Option<u64>,
 ) -> Result<usize, AtlasBakeError> {
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
     let offset = bin.len();
@@ -1063,7 +1063,7 @@ impl Glb {
             let length = usize::try_from(read_u32(bytes, cursor)?)
                 .map_err(|_| invalid("GLB chunk length is invalid"))?;
             let kind = read_u32(bytes, cursor + 4)?;
-            if length % 4 != 0 {
+            if !length.is_multiple_of(4) {
                 return Err(invalid("GLB chunk length must be 4-byte aligned"));
             }
             let start = header_end;
@@ -1112,12 +1112,12 @@ impl Glb {
         let mut chunks = Vec::<(u32, Vec<u8>)>::new();
         let mut json_bytes = serde_json::to_vec(&self.document)
             .map_err(|error| AtlasBakeError::Output(error.to_string()))?;
-        while json_bytes.len() % 4 != 0 {
+        while !json_bytes.len().is_multiple_of(4) {
             json_bytes.push(b' ');
         }
         chunks.push((JSON_CHUNK, json_bytes));
         let mut binary = self.binary.clone();
-        while binary.len() % 4 != 0 {
+        while !binary.len().is_multiple_of(4) {
             binary.push(0);
         }
         chunks.push((BIN_CHUNK, binary));

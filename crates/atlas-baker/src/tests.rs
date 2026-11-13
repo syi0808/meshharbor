@@ -20,7 +20,7 @@ fn append_view(
     bytes: &[u8],
     target: Option<u64>,
 ) -> usize {
-    while binary.len() % 4 != 0 {
+    while !binary.len().is_multiple_of(4) {
         binary.push(0);
     }
     let offset = binary.len();
