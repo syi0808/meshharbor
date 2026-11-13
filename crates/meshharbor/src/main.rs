@@ -2639,6 +2639,44 @@ mod tests {
     }
 
     #[test]
+    fn mcp_quad_obj_export_preserves_topology_bytes_and_never_overwrites() {
+        let root = std::env::temp_dir().join(format!("meshharbor-quad-export-{}", uuid::Uuid::new_v4()));
+        let output_dir = root.join("store/exports");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let core = OperationCore::open(root.join("store")).unwrap();
+        let asset = core
+            .import_asset("result.glb", &minimal_triangle_glb())
+            .unwrap();
+        let obj = b"v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n";
+        core.store()
+            .add_artifact(&asset.id, "quad_topology", "model/obj", obj)
+            .unwrap();
+
+        let destination = output_dir.join("result.obj");
+        let exported = export_quad_obj_file(&core, &asset.id, &destination).unwrap();
+        assert_eq!(exported["overwritten"], false);
+        assert_eq!(std::fs::read(&destination).unwrap(), obj);
+
+        let conflict = export_quad_obj_file(&core, &asset.id, &destination).unwrap_err();
+        assert!(matches!(conflict, CoreError::Conflict(_)));
+        assert_eq!(std::fs::read(&destination).unwrap(), obj);
+
+        let wrong_extension =
+            export_quad_obj_file(&core, &asset.id, &output_dir.join("result.glb")).unwrap_err();
+        assert!(matches!(wrong_extension, CoreError::InvalidInput(_)));
+
+        let outside_dir = root.join("outside");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let escaped =
+            export_quad_obj_file(&core, &asset.id, &outside_dir.join("escape.obj")).unwrap_err();
+        assert!(matches!(escaped, CoreError::InvalidInput(_)));
+        assert!(!outside_dir.join("escape.obj").exists());
+
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn mcp_glb_export_rejects_images_without_creating_files() {
         let root =
             std::env::temp_dir().join(format!("meshharbor-export-image-{}", uuid::Uuid::new_v4()));
