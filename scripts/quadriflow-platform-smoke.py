@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build pinned QuadriFlow and validate one synthetic cube per CI platform."""
+"""Build pinned QuadriFlow; optionally run the approved synthetic-cube smoke test."""
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -32,7 +33,18 @@ BUILD_OPTIONS = [
 ]
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--build-only",
+        action="store_true",
+        help="build and collect candidate evidence without executing QuadriFlow or running its smoke test",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     repository_root = Path(__file__).resolve().parents[1]
     temp_root = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
     work_root = temp_root / "quadriflow-platform-smoke"
@@ -151,35 +163,36 @@ def main() -> int:
             if executable is None:
                 raise RuntimeError("built QuadriFlow executable was not found in the expected CMake output paths")
 
-            fixture = repository_root / "crates" / "core" / "tests" / "fixtures" / "quadriflow_cube_triangles.obj"
-            if not fixture.is_file():
-                raise RuntimeError(f"synthetic cube fixture is missing: {fixture}")
-            run(
-                [str(executable), "-i", str(fixture), "-o", str(output_obj), "-f", "12", "-seed", "0"],
-                timeout=180,
-            )
-            if not output_obj.is_file() or output_obj.stat().st_size == 0:
-                raise RuntimeError("QuadriFlow did not produce a nonempty cube OBJ")
-
-            env = os.environ.copy()
-            env["MESHHARBOR_QUADRIFLOW_OBJ_OUTPUT"] = str(output_obj)
-            run(
-                [
-                    "cargo",
-                    "test",
-                    "-p",
-                    "meshharbor-core",
-                    "--locked",
-                    "--test",
-                    "quadriflow_output",
-                    "--",
-                    "--ignored",
-                    "--nocapture",
-                ],
-                cwd=repository_root,
-                env=env,
-                timeout=2400,
-            )
+            if not args.build_only:
+                fixture = repository_root / "crates" / "core" / "tests" / "fixtures" / "quadriflow_cube_triangles.obj"
+                if not fixture.is_file():
+                    raise RuntimeError(f"synthetic cube fixture is missing: {fixture}")
+                run(
+                    [str(executable), "-i", str(fixture), "-o", str(output_obj), "-f", "12", "-seed", "0"],
+                    timeout=180,
+                )
+                if not output_obj.is_file() or output_obj.stat().st_size == 0:
+                    raise RuntimeError("QuadriFlow did not produce a nonempty cube OBJ")
+    
+                env = os.environ.copy()
+                env["MESHHARBOR_QUADRIFLOW_OBJ_OUTPUT"] = str(output_obj)
+                run(
+                    [
+                        "cargo",
+                        "test",
+                        "-p",
+                        "meshharbor-core",
+                        "--locked",
+                        "--test",
+                        "quadriflow_output",
+                        "--",
+                        "--ignored",
+                        "--nocapture",
+                    ],
+                    cwd=repository_root,
+                    env=env,
+                    timeout=2400,
+                )
         except Exception as error:  # Preserve diagnostic output as an Actions artifact.
             log.write(f"\nERROR: {type(error).__name__}: {error}\n")
             log.flush()
@@ -204,10 +217,19 @@ def main() -> int:
         "rustc": version(["rustc", "--version"]),
         "cargo": version(["cargo", "--version"]),
         "git": version(["git", "--version"]),
+        "gh": version(["gh", "version"]),
     }
     fixture = repository_root / "crates" / "core" / "tests" / "fixtures" / "quadriflow_cube_triangles.obj"
     provenance = {
-        "purpose": "isolated CI build and smoke test only; not a product release",
+        "purpose": (
+            "manual pinned-source candidate build only; QuadriFlow was not executed"
+            if args.build_only
+            else "isolated CI build and smoke test only; not a product release"
+        ),
+        "meshharbor_source_commit": os.environ.get("MESHHARBOR_SOURCE_COMMIT"),
+        "meshharbor_workflow_commit": os.environ.get("MESHHARBOR_WORKFLOW_COMMIT"),
+        "meshharbor_workflow_path": os.environ.get("MESHHARBOR_WORKFLOW_PATH"),
+        "build_trigger": os.environ.get("MESHHARBOR_BUILD_TRIGGER"),
         "upstream_repository": QUADRIFLOW_REPOSITORY,
         "upstream_commit": QUADRIFLOW_COMMIT,
         "platform": platform_name,
@@ -219,16 +241,41 @@ def main() -> int:
         "build_mode": "Release",
         "fixture": "crates/core/tests/fixtures/quadriflow_cube_triangles.obj (synthetic cube; no user model)",
         "synthetic_fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
-        "smoke_test": "crates/core/tests/quadriflow_output.rs::validates_quad_output_and_builds_a_glb_preview",
-        "smoke_result": "passed",
+        "smoke_test": (
+            None
+            if args.build_only
+            else "crates/core/tests/quadriflow_output.rs::validates_quad_output_and_builds_a_glb_preview"
+        ),
+        "smoke_result": "not-run" if args.build_only else "passed",
         "license_note": (
             "Upstream LICENSE.txt is included. BUILD_FREE_LICENSE=ON requests Eigen's MPL2-only "
             "code path; this is not a complete dependency-license clearance or a redistribution approval."
         ),
-        "artifact_note": "Unsigned temporary CI evidence; do not treat as a trusted installer or product binary.",
+        "artifact_note": (
+            "Temporary candidate only; the later GitHub CLI attestation step verifies binary identity, "
+            "not release approval or license clearance."
+            if args.build_only
+            else "Unsigned temporary CI evidence; do not treat as a trusted installer or product binary."
+        ),
     }
     provenance_path = artifact_dir / "provenance.json"
     provenance_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+    candidate_status = {
+        "schema_version": 1,
+        "candidate_only": True,
+        "installable": False,
+        "release_ready": False,
+        "dependency_closure_verified": False,
+        "license_clearance": "not reviewed",
+        "quadriFlow_executable_run": not args.build_only,
+        "note": (
+            "This temporary evidence is not a product package or an installer input. "
+            "The product manifest remains empty."
+        ),
+    }
+    (artifact_dir / "CANDIDATE-STATUS.json").write_text(
+        json.dumps(candidate_status, indent=2) + "\n", encoding="utf-8"
+    )
 
     checksums = []
     for path in sorted(artifact_dir.iterdir()):

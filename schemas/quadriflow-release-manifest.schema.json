@@ -81,7 +81,7 @@
           "const": "syi0808/meshharbor"
         },
         "path": {
-          "const": ".github/workflows/quadriflow-source-build.yml"
+          "const": ".github/workflows/quadriflow-candidate-build.yml"
         },
         "run_id": {
           "type": "integer",
