@@ -177,7 +177,7 @@ fn validate_request(request: &Request) -> Result<(), String> {
 
     let mut edge_faces = HashMap::<(u32, u32), u8>::new();
     let mut unique_faces = HashSet::<[u32; 3]>::new();
-    let (center, diagonal) = bounds(&request.positions)?;
+    let (_, diagonal) = bounds(&request.positions)?;
     for triangle in request.indices.chunks_exact(3) {
         let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
         if a == b || b == c || c == a {
