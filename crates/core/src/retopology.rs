@@ -437,7 +437,7 @@ pub fn validate_remesh_response(
         let relative = scale(sub(*position, bounds.center), 1.0 / bounds.diagonal);
         if dot(relative, relative) > 4.0 {
             return Err(CoreError::OperationUnavailable(
-                "Remesh worker output escaped the source mesh bounds.".into(),
+                "Remesh worker output exceeded the broad 2x source-bounds-diagonal envelope.".into(),
             ));
         }
     }
