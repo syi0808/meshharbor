@@ -175,7 +175,7 @@ fn validate_request(request: &Request) -> Result<(), String> {
         }
     }
 
-    let mut edge_faces = HashMap::<(u32, u32), u8>::new();
+    let mut edge_faces = HashMap::<(u32, u32), (u8, i8)>::new();
     let mut unique_faces = HashSet::<[u32; 3]>::new();
     let (_, diagonal) = bounds(&request.positions)?;
     for triangle in request.indices.chunks_exact(3) {
@@ -199,12 +199,19 @@ fn validate_request(request: &Request) -> Result<(), String> {
         }
         for (u, v) in [(a, b), (b, c), (c, a)] {
             let edge = if u < v { (u, v) } else { (v, u) };
-            let count = edge_faces.entry(edge).or_default();
+            let (count, winding) = edge_faces.entry(edge).or_default();
             *count = count.saturating_add(1);
+            *winding += if u < v { 1 } else { -1 };
             if *count > 2 {
                 return Err("input is not edge-manifold".into());
             }
         }
+    }
+    if edge_faces.values().any(|(count, _)| *count != 2) {
+        return Err("input must be a closed, watertight triangle mesh".into());
+    }
+    if edge_faces.values().any(|(_, winding)| *winding != 0) {
+        return Err("input faces must have consistent orientation".into());
     }
     Ok(())
 }
@@ -286,12 +293,19 @@ fn validate_response(response: &Response, center: [f32; 3], diagonal: f32) -> Re
         }
         for (u, v) in [(a, b), (b, c), (c, a)] {
             let edge = if u < v { (u, v) } else { (v, u) };
-            let count = edge_faces.entry(edge).or_default();
+            let (count, winding) = edge_faces.entry(edge).or_default();
             *count = count.saturating_add(1);
+            *winding += if u < v { 1 } else { -1 };
             if *count > 2 {
                 return Err("remesher returned a non-manifold edge".into());
             }
         }
+    }
+    if edge_faces.values().any(|(count, _)| *count != 2) {
+        return Err("remesher returned an open or non-watertight mesh".into());
+    }
+    if edge_faces.values().any(|(_, winding)| *winding != 0) {
+        return Err("remesher returned inconsistently oriented faces".into());
     }
     Ok(())
 }
