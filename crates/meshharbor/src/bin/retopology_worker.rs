@@ -11,8 +11,8 @@ use std::{
 
 use clap::Parser;
 use meshharbor_core::{
-    REMESH_PROTOCOL_VERSION, RemeshRequest as Request, RemeshResponse as Response,
-    normalize_remesh_positions, restore_remesh_positions, validate_remesh_response,
+    RemeshRequest as Request, RemeshResponse as Response, normalize_remesh_positions,
+    restore_remesh_positions, validate_remesh_response,
 };
 use remesh::prelude::*;
 
@@ -106,7 +106,9 @@ fn remesh(request: Request) -> Result<Response, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meshharbor_core::{RetopologyOptions as Options, validate_remesh_request};
+    use meshharbor_core::{
+        REMESH_PROTOCOL_VERSION, RetopologyOptions as Options, validate_remesh_request,
+    };
 
     #[test]
     fn rejects_open_untextured_triangle_patch() {
