@@ -81,7 +81,7 @@ impl Pixal3dCudaRuntimeManager {
     /// Populate a private source copy from the pinned bytes embedded in the
     /// binary. No checkout path is consulted at runtime.
     pub fn ensure_source(&self) -> CoreResult<()> {
-        for (relative, contents) in bundle::PIXAL3D_CUDA_FILES.iter().copied() {
+        for (relative, contents) in crate::runtime_bundle::PIXAL3D_CUDA_FILES.iter().copied() {
             let target = self.runtime_root.join("source").join(relative);
             if target.is_file() && std::fs::read(&target)?.as_slice() == contents {
                 continue;
