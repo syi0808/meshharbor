@@ -1,4 +1,4 @@
-//! Strict geometry-only QuadriFlow OBJ result validation and GLB preview export.
+//! Strict QuadriFlow OBJ validation, quad preservation, and optional limited texture projection.
 //!
 //! GLB can only store triangle primitives. Keep the QuadriFlow OBJ as the editable
 //! quad-topology artifact and use the GLB produced here only as a viewer preview.
@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use meshharbor_atlas_baker::{
+    AtlasBakeOptions, ProjectedMeshBakeReport, bake_projected_mesh, encode_projected_mesh_glb,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -51,6 +54,12 @@ pub struct QuadMeshReport {
     pub output_quads: u64,
     pub preview_triangles: u64,
     pub warnings: Vec<String>,
+}
+
+struct QuadPreviewGeometry {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    indices: Vec<u32>,
 }
 
 /// Parses only the geometry-only OBJ emitted by the pinned QuadriFlow CLI.
@@ -173,63 +182,29 @@ pub fn parse_quad_obj_output(
 /// This does not replace the original OBJ artifact: glTF/GLB has no quad-face
 /// primitive mode, so the editable quad topology would otherwise be lost.
 pub fn quad_mesh_preview_glb(mesh: &QuadMesh) -> CoreResult<Vec<u8>> {
-    let mesh_bounds = bounds(&mesh.positions)
-        .map_err(|_| output_error("Quad preview has invalid mesh bounds."))?;
-    let mut triangle_indices = Vec::with_capacity(mesh.quads.len() * 6);
-    for quad in &mesh.quads {
-        triangle_indices.extend(triangulate_quad(
-            quad,
-            &mesh.positions,
-            mesh_bounds.diagonal,
-        )?);
-    }
-
-    let mut normals = vec![[0.0f64; 3]; mesh.positions.len()];
-    for triangle in triangle_indices.chunks_exact(3) {
-        let a = point(mesh.positions[triangle[0] as usize]);
-        let b = point(mesh.positions[triangle[1] as usize]);
-        let c = point(mesh.positions[triangle[2] as usize]);
-        let normal = cross(sub(b, a), sub(c, a));
-        for index in triangle {
-            let accumulated = &mut normals[*index as usize];
-            for axis in 0..3 {
-                accumulated[axis] += normal[axis];
-            }
-        }
-    }
-
-    let mut packed_normals = Vec::with_capacity(mesh.positions.len());
-    for normal in normals {
-        let length = dot(normal, normal).sqrt();
-        if !length.is_finite() || length <= 1.0e-18 {
-            return Err(output_error(
-                "Quad preview contains a vertex with an undefined normal.",
-            ));
-        }
-        packed_normals.push([
-            (normal[0] / length) as f32,
-            (normal[1] / length) as f32,
-            (normal[2] / length) as f32,
-        ]);
-    }
+    let QuadPreviewGeometry {
+        positions,
+        normals: packed_normals,
+        indices: triangle_indices,
+    } = quad_mesh_preview_geometry(mesh)?;
 
     let mut minimum = [f32::INFINITY; 3];
     let mut maximum = [f32::NEG_INFINITY; 3];
-    for position in &mesh.positions {
+    for position in &positions {
         for (axis, component) in position.iter().enumerate() {
             minimum[axis] = minimum[axis].min(*component);
             maximum[axis] = maximum[axis].max(*component);
         }
     }
 
-    let position_byte_length = mesh.positions.len() * 12;
+    let position_byte_length = positions.len() * 12;
     let normal_byte_offset = position_byte_length;
     let normal_byte_length = packed_normals.len() * 12;
     let index_byte_offset = normal_byte_offset + normal_byte_length;
     let index_byte_length = triangle_indices.len() * 4;
     let mut binary = Vec::with_capacity(index_byte_offset + index_byte_length);
 
-    for position in &mesh.positions {
+    for position in &positions {
         for component in position {
             binary.extend_from_slice(&component.to_le_bytes());
         }
@@ -266,7 +241,7 @@ pub fn quad_mesh_preview_glb(mesh: &QuadMesh) -> CoreResult<Vec<u8>> {
                 "bufferView": 0,
                 "byteOffset": 0,
                 "componentType": 5126,
-                "count": mesh.positions.len(),
+                "count": positions.len(),
                 "type": "VEC3",
                 "min": minimum,
                 "max": maximum
@@ -285,7 +260,7 @@ pub fn quad_mesh_preview_glb(mesh: &QuadMesh) -> CoreResult<Vec<u8>> {
                 "count": triangle_indices.len(),
                 "type": "SCALAR",
                 "min": [0],
-                "max": [mesh.positions.len() - 1]
+                "max": [positions.len() - 1]
             }
         ]
     });
@@ -315,6 +290,50 @@ pub fn quad_mesh_preview_glb(mesh: &QuadMesh) -> CoreResult<Vec<u8>> {
     glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
     glb.extend_from_slice(&binary);
     Ok(glb)
+}
+
+fn quad_mesh_preview_geometry(mesh: &QuadMesh) -> CoreResult<QuadPreviewGeometry> {
+    let mesh_bounds = bounds(&mesh.positions)
+        .map_err(|_| output_error("Quad preview has invalid mesh bounds."))?;
+    let mut triangle_indices = Vec::with_capacity(mesh.quads.len() * 6);
+    for quad in &mesh.quads {
+        triangle_indices.extend(triangulate_quad(
+            quad,
+            &mesh.positions,
+            mesh_bounds.diagonal,
+        )?);
+    }
+    let mut accumulated = vec![[0.0f64; 3]; mesh.positions.len()];
+    for triangle in triangle_indices.chunks_exact(3) {
+        let a = point(mesh.positions[triangle[0] as usize]);
+        let b = point(mesh.positions[triangle[1] as usize]);
+        let c = point(mesh.positions[triangle[2] as usize]);
+        let normal = cross(sub(b, a), sub(c, a));
+        for index in triangle {
+            for axis in 0..3 {
+                accumulated[*index as usize][axis] += normal[axis];
+            }
+        }
+    }
+    let mut normals = Vec::with_capacity(mesh.positions.len());
+    for normal in accumulated {
+        let length = dot(normal, normal).sqrt();
+        if !length.is_finite() || length <= 1.0e-18 {
+            return Err(output_error(
+                "Quad preview contains a vertex with an undefined normal.",
+            ));
+        }
+        normals.push([
+            (normal[0] / length) as f32,
+            (normal[1] / length) as f32,
+            (normal[2] / length) as f32,
+        ]);
+    }
+    Ok(QuadPreviewGeometry {
+        positions: mesh.positions.clone(),
+        normals,
+        indices: triangle_indices,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -635,7 +654,46 @@ pub struct QuadRetopologyReport {
     pub output_vertices: u64,
     pub output_quads: u64,
     pub preview_triangles: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub appearance_projection: Option<ProjectedMeshBakeReport>,
     pub warnings: Vec<String>,
+}
+
+fn build_quad_preview(
+    source_glb: &[u8],
+    mesh: &QuadMesh,
+    project_appearance: bool,
+) -> CoreResult<(Vec<u8>, Option<ProjectedMeshBakeReport>)> {
+    if !project_appearance {
+        return Ok((quad_mesh_preview_glb(mesh)?, None));
+    }
+
+    let target = quad_mesh_preview_geometry(mesh)?;
+    let projected = bake_projected_mesh(
+        source_glb,
+        &target.positions,
+        &target.normals,
+        &target.indices,
+        AtlasBakeOptions::default(),
+        0.02,
+    )
+    .map_err(|error| {
+        CoreError::OperationUnavailable(format!(
+            "Retopology appearance projection failed closed: {error}"
+        ))
+    })?;
+    let report = projected.report.clone();
+    let preview = encode_projected_mesh_glb(&projected).map_err(|error| {
+        CoreError::OperationUnavailable(format!(
+            "Could not encode projected retopology preview: {error}"
+        ))
+    })?;
+    if preview.len() > MAX_PREVIEW_BYTES {
+        return Err(CoreError::OperationUnavailable(
+            "Projected retopology preview exceeds 128 MiB.".into(),
+        ));
+    }
+    Ok((preview, Some(report)))
 }
 
 /// Checks for a packaged, same-directory QuadriFlow sidecar without executing it.
@@ -661,7 +719,18 @@ pub fn quadriflow_retopology_glb(
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
     validate_quad_target(options.target_quads)?;
 
-    let (positions, indices) = extract_retopology_geometry(bytes)?;
+    let (positions, indices, project_appearance) = match extract_retopology_geometry(bytes) {
+        Ok((positions, indices)) => (positions, indices, false),
+        Err(_) => {
+            let source = meshharbor_atlas_baker::extract_projection_source_mesh(bytes)
+                    .map_err(|error| {
+                        CoreError::OperationUnavailable(format!(
+                            "Retopology accepts either supported untextured geometry or one static embedded PNG PBR mesh for projection: {error}"
+                        ))
+                    })?;
+            (source.positions, source.indices, true)
+        }
+    };
     let validation = RemeshRequest {
         protocol_version: crate::REMESH_PROTOCOL_VERSION,
         positions: positions.clone(),
@@ -740,14 +809,25 @@ pub fn quadriflow_retopology_glb(
     }
     let quad_obj = fs::read(&output_path)?;
     let (mesh, parsed_report) = parse_quad_obj_output(&quad_obj, &positions)?;
-    let preview_glb = quad_mesh_preview_glb(&mesh)?;
+    let (preview_glb, appearance_projection) =
+        build_quad_preview(bytes, &mesh, project_appearance)?;
 
     let mut warnings = parsed_report.warnings;
+    warnings.push(
+        "The OBJ preserves editable quad topology only; the GLB is a triangulated viewer preview."
+            .into(),
+    );
+    if project_appearance {
+        warnings.extend([
+            "The preview projects only embedded base-color and metallic-roughness PNGs; UVs, colors, and other vertex streams are not transferred to the OBJ.".into(),
+            "Projection is nearest-surface with a 2% source-bounds distance cap, similarly-facing normal gate, 99.5% coverage threshold, and thin-shell ambiguity rejection; passing does not certify visual texture quality.".into(),
+        ]);
+    } else {
+        warnings.push("This geometry-only input has no appearance maps to project.".into());
+    }
     warnings.extend([
-        "QuadriFlow processes geometry only. UVs, textures, vertex colors, and source material appearance are not transferred.".into(),
-        "The OBJ preserves editable quad topology; GLB is only a triangulated viewer preview.".into(),
         "This candidate does not certify self-intersection freedom or a measured surface-error tolerance; inspect the result before production use.".into(),
-        "The only native end-to-end smoke test used a synthetic cube; broad model quality and platform packaging remain unverified.".into(),
+        "The only native end-to-end QuadriFlow smoke test used a synthetic cube; broad model quality and platform packaging remain unverified.".into(),
     ]);
     if parsed_report.output_quads != u64::from(options.target_quads) {
         warnings.push(format!(
@@ -763,6 +843,7 @@ pub fn quadriflow_retopology_glb(
         output_vertices: parsed_report.output_vertices,
         output_quads: parsed_report.output_quads,
         preview_triangles: parsed_report.preview_triangles,
+        appearance_projection,
         warnings,
     };
     Ok((preview_glb, quad_obj, report))
@@ -905,6 +986,108 @@ f 4 1 5 8\n";
         ]
     }
 
+    const BASE_PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6,
+        0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 20, 73, 68, 65, 84, 120, 218, 99, 252, 47, 199, 245,
+        159, 129, 129, 129, 129, 137, 1, 10, 0, 33, 141, 2, 42, 48, 155, 50, 207, 0, 0, 0, 0, 73,
+        69, 78, 68, 174, 66, 96, 130,
+    ];
+    const MR_PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6,
+        0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 20, 73, 68, 65, 84, 120, 218, 99, 100, 104, 248, 255,
+        159, 129, 129, 129, 129, 137, 1, 10, 0, 37, 25, 2, 130, 79, 188, 53, 61, 0, 0, 0, 0, 73,
+        69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    fn append_view(
+        binary: &mut Vec<u8>,
+        views: &mut Vec<serde_json::Value>,
+        bytes: &[u8],
+        target: Option<u64>,
+    ) -> usize {
+        while !binary.len().is_multiple_of(4) {
+            binary.push(0);
+        }
+        let offset = binary.len();
+        binary.extend_from_slice(bytes);
+        let mut view = json!({"buffer":0,"byteOffset":offset,"byteLength":bytes.len()});
+        if let Some(target) = target {
+            view["target"] = json!(target);
+        }
+        views.push(view);
+        views.len() - 1
+    }
+
+    fn floats(values: &[f32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn textured_square_glb() -> Vec<u8> {
+        let mut binary = Vec::new();
+        let mut views = Vec::new();
+        let positions = [
+            0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+        ];
+        let normals = [
+            0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+        ];
+        let uv = [0.0f32, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+        let position_view = append_view(&mut binary, &mut views, &floats(&positions), Some(34962));
+        let normal_view = append_view(&mut binary, &mut views, &floats(&normals), Some(34962));
+        let uv_view = append_view(&mut binary, &mut views, &floats(&uv), Some(34962));
+        let index_bytes: Vec<u8> = [0u16, 1, 2, 0, 2, 3]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let index_view = append_view(&mut binary, &mut views, &index_bytes, Some(34963));
+        let base_view = append_view(&mut binary, &mut views, BASE_PNG, None);
+        let mr_view = append_view(&mut binary, &mut views, MR_PNG, None);
+        let document = json!({
+            "asset":{"version":"2.0"},
+            "buffers":[{"byteLength":binary.len()}],
+            "bufferViews":views,
+            "accessors":[
+                {"bufferView":position_view,"componentType":5126,"count":4,"type":"VEC3"},
+                {"bufferView":normal_view,"componentType":5126,"count":4,"type":"VEC3"},
+                {"bufferView":uv_view,"componentType":5126,"count":4,"type":"VEC2"},
+                {"bufferView":index_view,"componentType":5123,"count":6,"type":"SCALAR"}
+            ],
+            "images":[{"bufferView":base_view,"mimeType":"image/png"},{"bufferView":mr_view,"mimeType":"image/png"}],
+            "textures":[{"source":0},{"source":1}],
+            "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0},"metallicRoughnessTexture":{"index":1}}}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":0,"mode":4}]}],
+            "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0
+        });
+        let mut json_bytes = serde_json::to_vec(&document).unwrap();
+        while !json_bytes.len().is_multiple_of(4) {
+            json_bytes.push(b' ');
+        }
+        while !binary.len().is_multiple_of(4) {
+            binary.push(0);
+        }
+        let total_length = 12 + 8 + json_bytes.len() + 8 + binary.len();
+        let mut glb = Vec::with_capacity(total_length);
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total_length as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(binary.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        glb.extend_from_slice(&binary);
+        glb
+    }
+
+    fn preview_json(bytes: &[u8]) -> serde_json::Value {
+        assert_eq!(&bytes[..4], b"glTF");
+        let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        serde_json::from_slice(&bytes[20..20 + length]).unwrap()
+    }
+
     #[test]
     fn bounds_quad_target_and_rejects_unknown_parameters() {
         assert!(validate_quad_target(4).is_ok());
@@ -947,6 +1130,55 @@ f 4 1 5 8\n";
         let inspected = crate::inspect_asset("cube-preview.glb", &preview).unwrap();
         assert_eq!(inspected.kind, crate::AssetKind::Mesh);
         assert_eq!(inspected.metadata["triangles"], 12);
+    }
+
+    #[test]
+    fn textured_quad_preview_projects_supported_maps_and_reports_coverage() {
+        let source = textured_square_glb();
+        let mesh = QuadMesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            quads: vec![[0, 1, 2, 3]],
+        };
+
+        let (preview, report) = build_quad_preview(&source, &mesh, true).unwrap();
+        let report = report.unwrap();
+        assert!(report.projection_coverage >= 0.995);
+        assert_eq!(report.ambiguous_texels, 0);
+        assert_eq!(
+            report.rebaked_maps,
+            ["baseColorTexture", "metallicRoughnessTexture"]
+        );
+        let document = preview_json(&preview);
+        assert_eq!(document["images"].as_array().unwrap().len(), 2);
+        assert_eq!(document["textures"].as_array().unwrap().len(), 2);
+        assert_eq!(document["meshes"][0]["primitives"][0]["mode"], 4);
+        assert!(preview.len() <= MAX_PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn projection_failure_does_not_fall_back_to_an_untextured_preview() {
+        let source = textured_square_glb();
+        let mesh = QuadMesh {
+            positions: vec![
+                [0.0, 0.0, 0.2],
+                [1.0, 0.0, 0.2],
+                [1.0, 1.0, 0.2],
+                [0.0, 1.0, 0.2],
+            ],
+            quads: vec![[0, 1, 2, 3]],
+        };
+
+        let error = build_quad_preview(&source, &mesh, true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("appearance projection failed closed")
+        );
     }
 
     #[test]

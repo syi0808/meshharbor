@@ -5,16 +5,17 @@ import type { Artifact, Asset, Job, MeshOperationId, Operation, RuntimeInfo, Sim
 
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
+type StudioMeshOperationId = Exclude<MeshOperationId, 'uv.unwrap'>;
 
 function formatSize(size: number) {
   return size < 1024 * 1024 ? `${(size / 1024).toFixed(0)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const meshOperationOptions: Array<{ id: MeshOperationId; title: string; description: string }> = [
+const meshOperationOptions: Array<{ id: StudioMeshOperationId; title: string; description: string }> = [
   {
     id: 'mesh.retopology',
     title: 'Quad retopology (experimental)',
-    description: 'Geometry-only QuadriFlow for supported untextured static meshes. Download the original quad OBJ separately; the GLB preview is triangulated. No UV, texture, rig, or animation transfer.',
+    description: 'QuadriFlow remeshes geometry. Supported embedded base-color/metallic-roughness PNGs are projected only into the triangulated GLB preview; the separate quad OBJ remains geometry-only. Unsupported inputs fail closed.',
   },
   {
     id: 'mesh.cleanup',
@@ -25,11 +26,6 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; descript
     id: 'mesh.separate_parts',
     title: 'Separate connected parts',
     description: 'Split disconnected indexed components into primitives within the same mesh; no node separation or welding.',
-  },
-  {
-    id: 'uv.unwrap',
-    title: 'Atlas UV + texture rebake',
-    description: 'Unwrap one supported static mesh and rebake its embedded base-color and metallic/roughness PNGs; not high-to-low projection.',
   },
   {
     id: 'render.optimize',
@@ -71,6 +67,7 @@ export function App() {
   const api = useMemo(() => new MeshHarborApi(), []);
   const selectedAsset = assets.find((asset) => asset.id === selectedId) ?? null;
   const quadArtifact = quadTopologyArtifact(selectedAsset);
+  const retopologyAvailable = operations.find((operation) => operation.id === 'mesh.retopology')?.implemented === true;
   const isRunning = !!job && ['queued', 'running', 'validating', 'cancelling'].includes(job.state);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
   const mlxBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-mlx');
@@ -185,7 +182,14 @@ export function App() {
             const parts = Number(resultReport.connected_parts ?? 0);
             setNotice(`Part separation complete. Found ${parts.toLocaleString()} connected component${parts === 1 ? '' : 's'}, emitted as primitives in the same mesh.`);
           } else if (latest.operation === 'mesh.retopology') {
-            setNotice('Experimental geometry-only retopology complete. The GLB preview is triangulated; download the quad OBJ for editable quad topology. No appearance or rig transfer was performed.');
+            const projection = resultReport.appearance_projection;
+            const coverage = projection && typeof projection === 'object'
+              ? Number((projection as Record<string, unknown>).projection_coverage)
+              : Number.NaN;
+            const projectionNotice = Number.isFinite(coverage)
+              ? ` Supported base-color and metallic-roughness maps passed ${(coverage * 100).toFixed(1)}% projection coverage in the preview.`
+              : ' No appearance maps were projected.';
+            setNotice(`Experimental retopology complete.${projectionNotice} The GLB preview is triangulated; the separate quad OBJ contains geometry only.`);
           } else if (latest.operation === 'uv.unwrap') {
             const width = Number(resultReport.atlas_width ?? 0);
             const height = Number(resultReport.atlas_height ?? 0);
@@ -308,7 +312,7 @@ export function App() {
     }
   }
 
-  async function runMeshOperation(operation: MeshOperationId) {
+  async function runMeshOperation(operation: StudioMeshOperationId) {
     if (!selectedAsset || selectedAsset.kind !== 'mesh') return;
     setError(null);
     setNotice(null);
@@ -317,9 +321,7 @@ export function App() {
     try {
       const parameters: Record<string, number> = operation === 'render.optimize'
         ? { overdraw_threshold: 1.05 }
-        : operation === 'uv.unwrap'
-          ? { resolution: 1024, padding: 8 }
-          : {};
+        : {};
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
       setJob(nextJob);
       setActiveView('result');
@@ -486,7 +488,15 @@ export function App() {
           <div className="nav-item selected"><span className="nav-icon simplify-icon">◒</span> Simplify mesh <span className="selected-dot" /></div>
           <button className="nav-item" onClick={() => document.getElementById('mesh-tools')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon">⌘</span> Cleanup &amp; export</button>
           <button className="nav-item" title="Image-to-3D generation" onClick={() => document.getElementById('image-generation')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon sparkle-icon">✳</span> Generate</button>
-          <div className="nav-item unavailable" title="Not implemented in this build"><span className="nav-icon">⌘</span> Retopology <span className="soon-label">SOON</span></div>
+          <button
+            className="nav-item"
+            title={retopologyAvailable
+              ? 'Experimental QuadriFlow; the pinned sidecar is present.'
+              : 'Retopology requires the pinned QuadriFlow sidecar beside the MeshHarbor executable.'}
+            onClick={() => document.getElementById('mesh-tools')?.scrollIntoView({ behavior: 'smooth' })}
+          >
+            <span className="nav-icon">⌘</span> Retopology <span className="soon-label">{retopologyAvailable ? 'READY' : 'SIDECAR'}</span>
+          </button>
           <div className="sidebar-bottom">
             <div className="local-card">
               <div className="local-card-top"><span className="local-lock">⌑</span><span>PRIVATE BY DESIGN</span></div>
@@ -631,10 +641,10 @@ export function App() {
                     );
                   })}
                 </div>
-                <div className="control-footnote">Compression exports a GLB that requires KHR_meshopt_compression support. The Studio preview includes its decoder. Atlas rebaking accepts one static mesh/material with embedded PNG base-color and metallic/roughness maps only; no high-to-low projection or separate scene-node splitting is performed.</div>
+                <div className="control-footnote">Compression exports a GLB that requires KHR_meshopt_compression support. The Studio preview includes its decoder. Part separation creates connected-component primitives inside the same mesh; it does not split scene nodes.</div>
               </div>
 
-              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking remains unavailable. Experimental geometry-only QuadriFlow is available only when enabled by the local engine; quad topology is preserved in a separate OBJ, not the GLB preview. Atlas UV unwrap only rebakes supported embedded same-mesh maps; mesh tools create derived assets and keep originals unchanged. Both Pixal3D backends are opt-in; model terms remain separate from MeshHarbor’s MIT license.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
+              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is available only when the local engine has its sidecar; editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. Both Pixal3D backends are opt-in; model terms remain separate from MeshHarbor’s MIT license.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
             </aside>
           </div>
         </main>

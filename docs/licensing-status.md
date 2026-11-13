@@ -8,7 +8,7 @@ The current `Cargo.lock` resolves the Rust workspace dependency graph. A `cargo 
 
 The mesh simplifier uses `meshopt` 0.7.0 (`MIT OR Apache-2.0`), which wraps/builds upstream meshoptimizer (`MIT`). The dependency graph is in `Cargo.lock`; it includes no model weights.
 
-The feature-branch-only retopology candidate adds optional `remesh` 0.0.5 (`MIT OR Apache-2.0`) and its resolved package closure to `Cargo.lock`. That path is not wired into the active operation catalog; its transitive license inventory still needs review before integration. See [the candidate scope](retopology-candidate.md).
+The optional `remesh` 0.0.5 crate (`MIT OR Apache-2.0`) is a separate isotropic triangle-remesher prototype, not QuadriFlow and not dispatched by `mesh.retopology`. It remains outside the active operation path; its transitive license inventory still needs review before any use. See [the candidate scope](retopology-candidate.md).
 
 ## Vendored Pixal3D source snapshots
 
@@ -43,7 +43,15 @@ MeshHarbor vendors only xatlas at `f700c7790aaa030e794b52ba7791a05c085faf0c` and
 
 The new local crates were added to the workspace and lockfile, but `cargo metadata --locked` and the full workspace dependency-license inventory have not yet been rerun after that change. Re-audit the generated lock and target-specific native build before release. Current atlas tests are synthetic and do not establish broad visual or real-asset quality. See [`source-provenance.md`](source-provenance.md).
 
+## QuadriFlow sidecar candidate
+
+`mesh.retopology` is wired to an external QuadriFlow process, but no QuadriFlow source or binary is copied into the MeshHarbor tree. The operation is advertised only if a compatible `quadriflow` sidecar is already placed beside the MeshHarbor executable; no product package, download installer, or release asset supplies it. The candidate source is pinned to `hjwdzh/QuadriFlow` commit `810b7a0967c35b0dc85b4464e3835e26a756c967`. Its `LICENSE.txt` contains BSD-style three-clause terms plus an additional grant for publicly available enhancements, despite the README's MIT description.
+
+The build smoke uses `BUILD_FREE_LICENSE=ON` (which selects Eigen's `EIGEN_MPL2_ONLY` path) and disables TBB, OpenMP, Gurobi, and Lemon's GLPK, ILOG, COIN, and SoPlex backends. Reviewed bundled components include Lemon under Boost Software License 1.0 and pcg32 under Apache-2.0. These settings and notices do not constitute complete dependency/SBOM clearance or a redistribution approval. Temporary Actions artifacts are unsigned CI evidence, expire after 14 days, and are not product installers. Preserve the upstream and third-party notices and obtain a full per-platform dependency review before shipping any binary.
+
+The [retopology candidate report](retopology-candidate.md) records the platform-by-platform smoke status and evidence artifact checksums. QuadriFlow itself receives geometry-only OBJ input. MeshHarbor can optionally project only supported embedded base-color/metallic-roughness PNG maps onto the triangulated GLB preview after the sidecar returns; the editable quad OBJ remains geometry-only. This candidate texture path is fail-closed but has no real-asset fidelity certification.
+
 ## Scope of use today
 
-The implemented operation catalog includes simplify, cleanup, shared-index part separation, render ordering, required mesh compression, and bounded xatlas atlas/rebake functions; each remains constrained by the format limits in `architecture.md`. Core integration and whole-workspace Rust verification are still pending on this executor, and synthetic/unit tests do not establish real-asset or visual quality. Generic high-to-low texture baking and retopology remain unavailable. The separate MLX and CUDA runtime actions can download dependencies and model files only when explicitly requested, but neither setup nor inference was run here. This limited validation does not establish commercial clearance for the whole application or an inference backend.
+The operation catalog includes simplify, cleanup, shared-index part separation, render ordering, required mesh compression, and bounded xatlas atlas/rebake functions. The QuadriFlow retopology adapter is also integrated, but is unavailable in an ordinary build unless the separately packaged sidecar is present. Its source-build smoke results are platform-limited; they do not establish real-asset or visual quality. Generic high-to-low texture baking remains unavailable. The separate MLX and CUDA runtime actions can download dependencies and model files only when explicitly requested, but neither setup nor inference was run here. This limited validation does not establish commercial clearance for the whole application or an inference backend.
 
