@@ -545,6 +545,41 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_input_faces() {
+        let mut request = valid_request();
+        request.indices = vec![0, 1, 2, 0, 2, 1];
+        assert!(validate_remesh_request(&request).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_degenerate_and_non_manifold_worker_output() {
+        let request = valid_request();
+        let duplicated = RemeshResponse {
+            positions: request.positions.clone(),
+            indices: vec![0, 1, 2, 0, 2, 1],
+        };
+        assert!(validate_remesh_response(&duplicated, &request).is_err());
+
+        let degenerate = RemeshResponse {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            indices: vec![0, 1, 2],
+        };
+        assert!(validate_remesh_response(&degenerate, &request).is_err());
+
+        let non_manifold = RemeshResponse {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, -1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            indices: vec![0, 1, 2, 1, 0, 3, 0, 1, 4],
+        };
+        assert!(validate_remesh_response(&non_manifold, &request).is_err());
+    }
+
+    #[test]
     fn target_edge_ratio_is_a_fraction_of_bounds() {
         let request = valid_request();
         let bounds = geometry_bounds(&request.positions).unwrap();
