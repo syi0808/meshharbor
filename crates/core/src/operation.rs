@@ -464,7 +464,18 @@ mod tests {
                 .contains(&"mesh.separate_parts".to_string())
         );
         assert!(doctor.operations.contains(&"uv.unwrap".to_string()));
-        assert!(!doctor.operations.contains(&"mesh.retopology".to_string()));
+        assert_eq!(
+            doctor.operations.contains(&"mesh.retopology".to_string()),
+            crate::quadriflow_sidecar_available()
+        );
+        assert_eq!(
+            core.list_operations()
+                .iter()
+                .find(|operation| operation.id == "mesh.retopology")
+                .unwrap()
+                .implemented,
+            crate::quadriflow_sidecar_available()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
