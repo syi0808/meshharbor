@@ -1,3 +1,7 @@
+mod runtime_bundle {
+    include!(concat!(env!("OUT_DIR"), "/pixal3d_runtime_bundle.rs"));
+}
+
 mod generation;
 mod cuda_runtime;
 mod glb;
