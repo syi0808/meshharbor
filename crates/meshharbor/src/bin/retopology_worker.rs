@@ -4,7 +4,6 @@
 //! deliberately separate from the REST/MCP process because remesh 0.0.5 is
 //! experimental, may panic, and writes progress to stdout.
 use std::{
-    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
@@ -12,13 +11,11 @@ use std::{
 
 use clap::Parser;
 use meshharbor_core::{
-    RemeshRequest as Request, RemeshResponse as Response, RetopologyOptions as Options,
-    normalize_remesh_positions, restore_remesh_positions, validate_remesh_request,
-    validate_remesh_response,
+    RemeshRequest as Request, RemeshResponse as Response, normalize_remesh_positions,
+    restore_remesh_positions, validate_remesh_request, validate_remesh_response,
 };
 use remesh::prelude::*;
 
-const PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -106,13 +103,10 @@ fn remesh(request: Request) -> Result<Response, String> {
     Ok(response)
 }
 
-fn validate_request(request: &Request) -> Result<(), String> {
-    validate_remesh_request(request).map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meshharbor_core::RetopologyOptions as Options;
 
     #[test]
     fn rejects_open_untextured_triangle_patch() {
@@ -130,7 +124,12 @@ mod tests {
                 iterations: 1,
             },
         };
-        assert!(validate_request(&request).unwrap_err().contains("closed"));
+        assert!(
+            validate_remesh_request(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("closed")
+        );
     }
 
     #[test]
