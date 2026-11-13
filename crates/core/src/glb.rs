@@ -2144,8 +2144,8 @@ mod tests {
         let fallback_buffer = &buffers[1];
         assert!(fallback_buffer.get("uri").is_none());
         assert_eq!(
-            fallback_buffer["extensions"]["KHR_meshopt_compression"]["fallback"],
-            true
+            fallback_buffer["extensions"]["KHR_meshopt_compression"]["fallback"].as_bool(),
+            Some(true)
         );
         let compressed_views = array(&glb.document, "bufferViews");
         let mut fallback_view_end = 0u64;
