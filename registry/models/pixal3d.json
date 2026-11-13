@@ -1,16 +1,16 @@
 {
   "id": "pixal3d",
   "title": "Pixal3D",
-  "status": "pending",
-  "installable": false,
-  "image_to_3d": false,
+  "status": "experimental_opt_in",
+  "installable": true,
+  "image_to_3d": true,
   "backends": [
     {
       "id": "cuda",
       "repository": "https://github.com/syi0808/pixal3d-cuda",
       "source_revision": "a4cb2b226cdb2bf3328eb280d4a02e510cc78e8c",
       "port_license": "MIT",
-      "runtime_status": "source_only_pending"
+      "runtime_status": "managed_setup_linux_nvidia_preview_unverified"
     },
     {
       "id": "mlx",
@@ -27,7 +27,9 @@
       "DINOv3 uses a separate gated agreement for source and weights.",
       "MLX rembg model selection is unpinned and current releases may select BRIA RMBG-2.0 (CC BY-NC 4.0).",
       "The MLX default hole filling uses CGAL components with GPL-3.0-or-later or separate commercial terms.",
-      "No end-to-end pinned dependency manifest and cross-platform execution matrix has been approved."
+      "CUDA upstream has dependency ranges rather than a committed lock; setup resolves a private per-install lock.",
+      "No fresh end-to-end GPU inference validation has been completed for the current vendored CUDA snapshot.",
+      "The runtime is experimental and platform-specific; no commercial clearance is implied."
     ]
   },
   "source_policy": {
@@ -35,15 +37,12 @@
       "runtimes/pixal3d/cuda/upstream",
       "runtimes/pixal3d/mlx/upstream"
     ],
-    "source_only_backend_paths": [
-      "runtimes/pixal3d/cuda"
-    ],
     "vendor_scope": "full pinned source snapshot except enumerated generated evidence/binary assets; see docs/pixal3d-source-inventory.json and subtree notices",
     "snapshot_counts": {
       "cuda": {"upstream_blobs": 59, "preserved": 56, "excluded": 3},
       "mlx": {"upstream_blobs": 189, "preserved": 150, "excluded": 39}
     },
-    "runtime_enabled": false,
+    "runtime_enabled": true,
     "weights_bundled": false,
     "downloads_enabled": true,
     "require_explicit_model_approval": true
