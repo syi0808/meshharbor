@@ -2,11 +2,11 @@
 
 ## Status
 
-This is a feature-branch candidate only. The worker and geometry adapter are not
-wired into MeshHarbor's operation catalog, GLB job flow, REST/MCP tools, or Studio.
-Keep `mesh.retopology` unavailable until the Cargo lock is committed, the worker
-builds and passes its tests, and an asset-level acceptance path rejects unsupported
-GLB data.
+This remains a feature-branch candidate. Core now has an isolated worker adapter
+and a strict untextured-GLB adapter, with a real child-process end-to-end test, but
+it is not wired into the operation catalog, GLB job flow, REST/MCP tools, or Studio.
+Keep `mesh.retopology` unavailable until broader geometry-quality/self-intersection
+acceptance and application packaging of the sidecar worker are complete.
 
 This is a real isotropic **triangle remesher**, not mesh simplification and not a
 field-aligned quad remesher. It splits and collapses edges, flips edges for triangle
@@ -15,21 +15,20 @@ parts into separate assets; that is a different operation.
 
 ## Data contract
 
-The candidate worker accepts only a versioned JSON request containing indexed
-triangle positions and indices. It has no attribute-transfer API. Any GLB caller
-must reject UVs, textures, colors, tangents, normals/custom vertex attributes,
-skinning, morph targets, animations, compressed/extension-bearing primitives, and
-multi-primitive or multi-mesh inputs unless a later implementation explicitly
-preserves or rebakes them. In particular, atlas UV rebaking is not a high-to-low
-projection workflow, so remeshed geometry cannot inherit the source appearance.
+The worker accepts only a versioned JSON request containing indexed triangle
+positions and indices. The GLB adapter accepts one embedded, untextured static
+TRIANGLES primitive with POSITION-only float32 geometry; it rejects UVs, textures,
+input normals, colors, tangents, custom attributes, skinning, morph targets,
+animations, extensions, extra nodes/meshes/primitives, and blended materials. It
+recomputes vertex normals and preserves only a supported untextured material. There
+is no attribute or appearance transfer. Atlas UV rebaking is same-geometry only,
+not a high-to-low projection workflow.
 
 The shared geometry validator checks finite positions/parameters, index range,
 triangle arity, repeated/duplicate faces, zero-area faces, closed and consistently
-oriented edge-manifold topology, the vertex-link manifold condition, and an
-area-based estimate for output budget.
-It checks the vertex-link condition for manifold topology and rejects disconnected
-links, in addition to edge-manifold validation. It does not eliminate
-self-intersections or guarantee a measured Hausdorff/geometric error tolerance.
+oriented edge-manifold topology, connected vertex links, and an area-based output
+budget estimate. It does not eliminate self-intersections or guarantee a measured
+Hausdorff/geometric error tolerance.
 The output envelope is deliberately loose: positions must stay within a sphere of
 radius two source-bounds diagonals around the source center; this is a runaway-output
 guard, not an approximation-quality guarantee.
@@ -50,11 +49,13 @@ cleared and its JSON/log files live in a temporary directory (mode 0700 on Unix)
 This is **not an OS sandbox** and does not impose a hard memory/CPU limit; it runs
 with the same OS user privileges and filesystem access as MeshHarbor.
 
-The adapter pins `remesh = 0.0.5`, an experimental crate dual-licensed under
-MIT OR Apache-2.0. Do not treat that direct-dependency notice as a project-wide
-license decision. The exact MeshHarbor transitive lock graph still needs to be
-generated, reviewed, committed, and tested before merging or enabling this path.
+The adapter pins `remesh = 0.0.5`, an experimental crate whose source carries
+`MIT OR Apache-2.0`. The exact transitive graph is committed in `Cargo.lock` and
+has passed locked builds/tests on stable Rust and the workspace's declared Rust
+1.88 MSRV. This is not a complete per-crate license/SBOM audit; there is no copied
+upstream source in MeshHarbor.
 
-The branch workflow checks formatting and runs `cargo test --workspace
---all-features`, then exports the generated lockfile for review. These CI checks
-must pass on the final code before integration.
+The branch workflow checks formatting, strict Clippy (allowing one new lint from
+the latest toolchain in an existing xatlas file), locked all-feature tests on stable
+and Rust 1.88, and exports the lockfile artifact. Re-run these checks on the final
+code before integration.
