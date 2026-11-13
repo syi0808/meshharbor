@@ -1549,7 +1549,7 @@ pub fn retopology_glb(
 }
 
 fn validate_retopology_glb_document(document: &Value) -> Result<(), CoreError> {
-    if array(document, "animations").len() > 0 || array(document, "skins").len() > 0 {
+    if !array(document, "animations").is_empty() || !array(document, "skins").is_empty() {
         return Err(CoreError::OperationUnavailable(
             "Retopology does not support animated or skinned GLB assets.".into(),
         ));
