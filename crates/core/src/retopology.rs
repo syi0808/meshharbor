@@ -653,11 +653,9 @@ mod tests {
     #[test]
     fn rejects_a_closed_edge_manifold_with_a_bow_tie_vertex() {
         let mut request = valid_request();
-        request.positions.extend([
-            [-1.0, 0.0, 0.0],
-            [0.0, -1.0, 0.0],
-            [0.0, 0.0, -1.0],
-        ]);
+        request
+            .positions
+            .extend([[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]);
         request.indices.extend([0, 4, 5, 0, 6, 4, 0, 5, 6, 4, 6, 5]);
         assert!(validate_remesh_request(&request).is_err());
     }
