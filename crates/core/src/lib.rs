@@ -6,6 +6,7 @@ mod cuda_runtime;
 mod generation;
 mod glb;
 mod operation;
+mod quadriflow;
 mod parts;
 mod retopology;
 mod runtime;
@@ -24,6 +25,7 @@ pub use operation::{
     MeshOperationResult, OperationCore, OperationDescriptor, RuntimeDoctor, SimplificationResult,
 };
 pub use parts::{PartSeparationReport, separate_components};
+pub use quadriflow::{parse_quad_obj_output, quad_mesh_preview_glb, QuadMesh, QuadMeshReport};
 pub use retopology::{
     REMESH_PROTOCOL_VERSION, RemeshRequest, RemeshResponse, RetopologyOptions, RetopologyReport,
     normalize_remesh_positions, remesh_triangles_in_worker, restore_remesh_positions,
