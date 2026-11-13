@@ -25,7 +25,11 @@ pub use operation::{
     MeshOperationResult, OperationCore, OperationDescriptor, RuntimeDoctor, SimplificationResult,
 };
 pub use parts::{PartSeparationReport, separate_components};
-pub use quadriflow::{QuadMesh, QuadMeshReport, parse_quad_obj_output, quad_mesh_preview_glb};
+pub use quadriflow::{
+    QuadMesh, QuadMeshReport, QuadRetopologyOptions, QuadRetopologyReport,
+    parse_quad_obj_output, quad_mesh_preview_glb, quadriflow_retopology_glb,
+    quadriflow_sidecar_available,
+};
 pub use retopology::{
     REMESH_PROTOCOL_VERSION, RemeshRequest, RemeshResponse, RetopologyOptions, RetopologyReport,
     normalize_remesh_positions, remesh_triangles_in_worker, restore_remesh_positions,
