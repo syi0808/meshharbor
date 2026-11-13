@@ -1218,10 +1218,11 @@ mod tests {
     }
 
     fn write_octal(field: &mut [u8], value: u64) {
-        field.fill(0);
+        field.fill(b'0');
         let digits = format!("{value:o}");
         let start = field.len() - digits.len() - 1;
         field[start..start + digits.len()].copy_from_slice(digits.as_bytes());
+        field[field.len() - 1] = 0;
     }
 
     fn write_checksum(field: &mut [u8], value: u64) {
