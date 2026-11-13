@@ -8,6 +8,8 @@ The current `Cargo.lock` resolves the Rust workspace dependency graph. A `cargo 
 
 The mesh simplifier uses `meshopt` 0.7.0 (`MIT OR Apache-2.0`), which wraps/builds upstream meshoptimizer (`MIT`). The dependency graph is in `Cargo.lock`; it includes no model weights.
 
+The feature-branch-only retopology candidate adds optional `remesh` 0.0.5 (`MIT OR Apache-2.0`) and its resolved package closure to `Cargo.lock`. That path is not wired into the active operation catalog; its transitive license inventory still needs review before integration. See [the candidate scope](retopology-candidate.md).
+
 ## Vendored Pixal3D source snapshots
 
 The two source repositories were copied as pinned, file-by-file snapshots, not reduced to helper-only subsets:
