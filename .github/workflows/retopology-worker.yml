@@ -23,6 +23,10 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Resolve dependencies against declared Rust 1.88 MSRV
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+        run: cargo update
       - name: Run workspace tests with optional remesher and committed lockfile
         run: cargo test --workspace --all-features --locked
       - name: Install declared minimum Rust toolchain
