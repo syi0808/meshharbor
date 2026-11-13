@@ -175,5 +175,35 @@ class NoticeTests(unittest.TestCase):
             q.strict_json_object([("source_commit", q.PIN), ("source_commit", q.PIN)])
 
 
+class ReleaseManifestSchemaTests(unittest.TestCase):
+    def test_archive_schema_matches_runtime_ustar_contract(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        schema = json.loads(
+            (repository_root / "schemas" / "quadriflow-release-manifest.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        archive = schema["$defs"]["archive"]["properties"]
+        self.assertCountEqual(
+            archive["filename"]["enum"],
+            [
+                "quadriflow-linux-x86_64.tar",
+                "quadriflow-macos-aarch64.tar",
+                "quadriflow-windows-x86_64.tar",
+            ],
+        )
+        self.assertEqual(archive["format"], {"const": "tar"})
+        self.assertTrue(archive["url"]["pattern"].endswith(r"\.tar$"))
+        self.assertEqual(archive["size_bytes"]["maximum"], 128 * 1024 * 1024)
+
+        runtime_source = (
+            repository_root / "crates" / "core" / "src" / "quadriflow_manifest.rs"
+        ).read_text(encoding="utf-8")
+        for filename in archive["filename"]["enum"]:
+            self.assertIn(filename, runtime_source)
+        self.assertIn("pub enum QuadriFlowArchiveFormat", runtime_source)
+        self.assertIn("    Tar,", runtime_source)
+
+
 if __name__ == "__main__":
     unittest.main()

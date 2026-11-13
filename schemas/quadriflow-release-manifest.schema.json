@@ -105,16 +105,13 @@
       "properties": {
         "filename": {
           "enum": [
-            "quadriflow-linux-x86_64.tar.gz",
-            "quadriflow-macos-aarch64.tar.gz",
-            "quadriflow-windows-x86_64.zip"
+            "quadriflow-linux-x86_64.tar",
+            "quadriflow-macos-aarch64.tar",
+            "quadriflow-windows-x86_64.tar"
           ]
         },
         "format": {
-          "enum": [
-            "tar-gz",
-            "zip"
-          ]
+          "const": "tar"
         },
         "url": {
           "type": "string",
