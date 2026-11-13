@@ -19,12 +19,14 @@ use uuid::Uuid;
 use crate::{CoreError, CoreResult};
 
 pub const REMESH_PROTOCOL_VERSION: u32 = 1;
-const MAX_VERTICES: usize = 200_000;
-const MAX_TRIANGLES: usize = 400_000;
-const MAX_OUTPUT_VERTICES: usize = 1_000_000;
-const MAX_OUTPUT_TRIANGLES: usize = 2_000_000;
-const MAX_REQUEST_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_VERTICES: usize = 100_000;
+const MAX_TRIANGLES: usize = 200_000;
+const MAX_OUTPUT_VERTICES: usize = 250_000;
+const MAX_OUTPUT_TRIANGLES: usize = 500_000;
+const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ESTIMATED_OUTPUT_TRIANGLES: f64 = 100_000.0;
+const OUTPUT_ESTIMATE_SAFETY_FACTOR: f64 = 4.0;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -288,6 +290,7 @@ pub fn validate_remesh_request(request: &RemeshRequest) -> CoreResult<()> {
 
     let bounds = geometry_bounds(&request.positions)?;
     let inverse_diagonal = 1.0 / bounds.diagonal;
+    let mut total_area_in_normalized_units = 0.0f64;
     let mut edge_faces = std::collections::HashMap::<(u32, u32), (u8, i8)>::new();
     let mut unique_faces = std::collections::HashSet::<[u32; 3]>::new();
     for triangle in request.indices.chunks_exact(3) {
@@ -310,11 +313,13 @@ pub fn validate_remesh_request(request: &RemeshRequest) -> CoreResult<()> {
         let edge_a = scale(sub(pb, pa), inverse_diagonal);
         let edge_b = scale(sub(pc, pa), inverse_diagonal);
         let cross_product = cross(edge_a, edge_b);
-        if dot(cross_product, cross_product) <= 1.0e-16 {
+        let double_area_squared = dot(cross_product, cross_product);
+        if double_area_squared <= 1.0e-16 {
             return Err(CoreError::InvalidInput(
                 "Remesh input contains a zero-area or near-degenerate triangle.".into(),
             ));
         }
+        total_area_in_normalized_units += (double_area_squared as f64).sqrt() * 0.5;
         for (u, v) in [(a, b), (b, c), (c, a)] {
             let key = if u < v { (u, v) } else { (v, u) };
             let (count, winding) = edge_faces.entry(key).or_default();
@@ -335,6 +340,17 @@ pub fn validate_remesh_request(request: &RemeshRequest) -> CoreResult<()> {
     if edge_faces.values().any(|(_, winding)| *winding != 0) {
         return Err(CoreError::OperationUnavailable(
             "The experimental remesher requires consistently oriented triangle faces.".into(),
+        ));
+    }
+    let estimated_triangles = total_area_in_normalized_units
+        / (request.options.target_edge_ratio as f64).powi(2)
+        * (4.0 / 3.0f64.sqrt())
+        * OUTPUT_ESTIMATE_SAFETY_FACTOR;
+    if !estimated_triangles.is_finite()
+        || estimated_triangles > MAX_ESTIMATED_OUTPUT_TRIANGLES
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Requested edge size exceeds the worker's conservative output budget; use a coarser target.".into(),
         ));
     }
     if !closed_vertex_links_are_manifold(&request.indices, request.positions.len()) {
