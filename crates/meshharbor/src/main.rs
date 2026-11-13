@@ -1770,6 +1770,114 @@ fn export_glb_file(
     }))
 }
 
+fn export_quad_obj_file(
+    core: &OperationCore,
+    asset_id: &str,
+    output_path: &std::path::Path,
+) -> Result<Value, CoreError> {
+    const MAX_QUAD_OBJ_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
+    if !output_path.is_absolute() {
+        return Err(CoreError::InvalidInput(
+            "Export path must be absolute on the local MCP host.".into(),
+        ));
+    }
+    if !output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("obj"))
+    {
+        return Err(CoreError::InvalidInput(
+            "Quad topology exports must use a .obj filename.".into(),
+        ));
+    }
+    let asset = core
+        .store()
+        .get_asset(asset_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' was not found.")))?;
+    if asset.kind != meshharbor_core::AssetKind::Mesh {
+        return Err(CoreError::InvalidInput(
+            "Only mesh assets can contain a quad topology artifact.".into(),
+        ));
+    }
+    let artifact = asset
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "quad_topology")
+        .ok_or_else(|| {
+            CoreError::NotFound("Mesh asset has no QuadriFlow quad topology OBJ artifact.".into())
+        })?;
+    if artifact.mime_type != "model/obj" || artifact.byte_size > MAX_QUAD_OBJ_EXPORT_BYTES {
+        return Err(CoreError::InvalidInput(
+            "Artifact is not a supported OBJ or exceeds the 64 MiB export limit.".into(),
+        ));
+    }
+
+    let file_name = output_path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CoreError::InvalidInput("Export path must name a file.".into()))?;
+    let requested_parent = output_path.parent().ok_or_else(|| {
+        CoreError::InvalidInput("Export path must include a parent directory.".into())
+    })?;
+    let configured_export_root = std::env::var_os("MESHHARBOR_EXPORT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| core.store().root().join("exports"));
+    std::fs::create_dir_all(&configured_export_root)?;
+    let canonical_export_root = std::fs::canonicalize(&configured_export_root)?;
+    let canonical_parent = std::fs::canonicalize(requested_parent)?;
+    if !canonical_parent.is_dir() {
+        return Err(CoreError::InvalidInput(
+            "Export destination parent must be an existing directory.".into(),
+        ));
+    }
+    if !canonical_parent.starts_with(&canonical_export_root) {
+        return Err(CoreError::InvalidInput(format!(
+            "MCP exports must stay inside the configured export directory: {}",
+            canonical_export_root.display()
+        )));
+    }
+    let destination = canonical_parent.join(file_name);
+    let content = core.store().read_artifact(&artifact.id)?;
+    if content.bytes.len() as u64 > MAX_QUAD_OBJ_EXPORT_BYTES
+        || std::str::from_utf8(&content.bytes).is_err()
+    {
+        return Err(CoreError::InvalidInput(
+            "Stored quad topology artifact is not a valid-size UTF-8 OBJ.".into(),
+        ));
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                CoreError::Conflict(format!(
+                    "Export destination already exists and was not overwritten: {}",
+                    destination.display()
+                ))
+            } else {
+                CoreError::Io(error)
+            }
+        })?;
+    let write_result =
+        std::io::Write::write_all(&mut file, &content.bytes).and_then(|()| file.sync_all());
+    if let Err(error) = write_result {
+        drop(file);
+        let _ = std::fs::remove_file(&destination);
+        return Err(CoreError::Io(error));
+    }
+
+    Ok(json!({
+        "asset_id": asset.id,
+        "artifact_id": artifact.id,
+        "output_path": destination,
+        "byte_size": content.bytes.len(),
+        "sha256": artifact.sha256,
+        "overwritten": false
+    }))
+}
+
 fn default_data_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("MESHHARBOR_HOME") {
         return PathBuf::from(path);
