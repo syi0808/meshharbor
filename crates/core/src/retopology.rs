@@ -535,8 +535,13 @@ mod tests {
     fn valid_request() -> RemeshRequest {
         RemeshRequest {
             protocol_version: REMESH_PROTOCOL_VERSION,
-            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            indices: vec![0, 1, 2],
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            indices: vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
             options: RetopologyOptions::default(),
         }
     }
@@ -605,10 +610,10 @@ mod tests {
     fn target_edge_ratio_is_a_fraction_of_bounds() {
         let request = valid_request();
         let bounds = geometry_bounds(&request.positions).unwrap();
-        assert!((bounds.diagonal - 2.0f32.sqrt()).abs() < 1.0e-6);
+        assert!((bounds.diagonal - 3.0f32.sqrt()).abs() < 1.0e-6);
         assert!(
             (bounds.diagonal * request.options.target_edge_ratio
-                - 0.05 * 2.0f32.sqrt())
+                - 0.05 * 3.0f32.sqrt())
                 .abs()
                 < 1.0e-6
         );
