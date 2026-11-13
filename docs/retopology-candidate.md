@@ -24,7 +24,7 @@ preserves or rebakes them. In particular, atlas UV rebaking is not a high-to-low
 projection workflow, so remeshed geometry cannot inherit the source appearance.
 
 The geometry adapter validates finite positions/parameters, index range, triangle
-arity, repeated/duplicate faces, zero-area faces, and edge-manifold input/output.
+arity, repeated/duplicate faces, zero-area faces, and closed, watertight, consistently oriented edge-manifold input/output.
 It also bounds the output to the source bounding region. It does not prove
 vertex-manifold topology, eliminate self-intersections, or guarantee a measured
 Hausdorff/geometric error tolerance.
