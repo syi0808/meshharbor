@@ -1,6 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { MeshHarborApi } from './api.ts';
+import { readFile } from 'node:fs/promises';
+
+// Use the project's TypeScript compiler when installed (Node 20+), with a
+// native type-stripping fallback for minimal Node 24 test environments.
+let MeshHarborApi;
+try {
+  const ts = await import('typescript');
+  const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
+  const compiled = ts.default.transpileModule(source, {
+    compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
+  }).outputText;
+  ({ MeshHarborApi } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+} catch (error) {
+  if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
+  ({ MeshHarborApi } = await import('./api.ts'));
+}
 
 test('Studio backend setup and image-generation flow downloads the generated GLB', async () => {
   const sourceAsset = { id: 'image-1', artifacts: [{ id: 'source-1', kind: 'source' }] };
