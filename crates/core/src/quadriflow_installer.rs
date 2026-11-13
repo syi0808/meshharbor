@@ -956,13 +956,6 @@ fn resolve_marker(
     Ok(Some(executable))
 }
 
-fn platform_executable(platform: QuadriFlowPlatform) -> &'static str {
-    match platform {
-        QuadriFlowPlatform::WindowsX86_64 => "bin/quadriflow.exe",
-        QuadriFlowPlatform::LinuxX86_64 | QuadriFlowPlatform::MacosAarch64 => "bin/quadriflow",
-    }
-}
-
 fn active_markers(directory: &Path) -> Result<Vec<PathBuf>, QuadriFlowInstallError> {
     let Some(metadata) = symlink_metadata_optional(directory)? else {
         return Ok(Vec::new());
