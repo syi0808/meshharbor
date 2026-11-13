@@ -19,10 +19,6 @@ use crate::{
     CoreError, CoreResult,
 };
 
-mod bundle {
-    include!(concat!(env!("OUT_DIR"), "/pixal3d_runtime_bundle.rs"));
-}
-
 const PYTHON_REQUEST: &str = "3.12";
 const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
 const DINO_REVISION: &str = "ea8dc2863c51be0a264bab82070e3e8836b02d51";
