@@ -1682,6 +1682,9 @@ fn validate_retopology_glb_document(document: &Value) -> Result<(), CoreError> {
         || nodes[0].get("skin").is_some()
         || nodes[0].get("camera").is_some()
         || !array(&nodes[0], "children").is_empty()
+        || ["matrix", "translation", "rotation", "scale"]
+            .iter()
+            .any(|transform| nodes[0].get(*transform).is_some())
         || scenes.len() != 1
         || array(&scenes[0], "nodes").len() != 1
         || array(&scenes[0], "nodes")[0].as_u64() != Some(0)
@@ -1689,7 +1692,7 @@ fn validate_retopology_glb_document(document: &Value) -> Result<(), CoreError> {
         || !array(document, "cameras").is_empty()
     {
         return Err(CoreError::OperationUnavailable(
-            "Retopology requires one scene containing a single node that references mesh 0.".into(),
+            "Retopology requires one scene containing a single node that references mesh 0 with no node transform; bake transforms into vertex positions first.".into(),
         ));
     }
 
@@ -2513,6 +2516,11 @@ mod tests {
         let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
         let mut document = glb.document.clone();
         document["textures"] = json!([{}]);
+        assert!(validate_retopology_glb_document(&document).is_err());
+
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["nodes"][0]["translation"] = json!([2.0, 0.0, 0.0]);
         assert!(validate_retopology_glb_document(&document).is_err());
 
         let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
