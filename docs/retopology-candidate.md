@@ -1,104 +1,43 @@
-# Experimental retopology candidates
+# Experimental retopology
 
-## Status
+## Product status
 
-This remains a feature-branch candidate. Core now has an isolated worker adapter
-and a strict untextured-GLB adapter with a child-process end-to-end test, plus a
-separate QuadriFlow OBJ-output validator and triangle-only GLB preview builder.
-Neither candidate is wired into the operation catalog, GLB job flow, REST/MCP tools,
-or Studio.
-Keep `mesh.retopology` unavailable until broader geometry-quality/self-intersection
-acceptance and application packaging of the sidecar worker are complete.
+MeshHarbor's `mesh.retopology` path is now a real QuadriFlow quad-remeshing candidate, not the separate isotropic triangle-remesher prototype.
 
-This is a real isotropic **triangle remesher**, not mesh simplification and not a
-field-aligned quad remesher. It splits and collapses edges, flips edges for triangle
-quality, and smooths vertices. It does not produce quads. It does not split connected
-parts into separate assets; that is a different operation.
+The operation is wired through the Rust core, REST job API, MCP tool, CLI, and Studio. It is reported as available only when an executable `quadriflow` sidecar is present beside the running MeshHarbor executable (on Windows, `quadriflow.exe`). Availability detection checks the file and its Unix executable bit without executing it. The current source build does not build, download, or install the sidecar automatically, so ordinary packages still report the operation as unavailable until a sidecar is packaged.
 
-## Data contract
+A completed job stores two outputs together:
+- A triangle-only GLB preview for viewing.
+- The exact validated QuadriFlow OBJ bytes as a `quad_topology` artifact, which preserves editable quad faces.
 
-The worker accepts only a versioned JSON request containing indexed triangle
-positions and indices. The GLB adapter accepts one embedded, untextured static
-TRIANGLES primitive with POSITION-only float32 geometry; it rejects UVs, textures,
-input normals, colors, tangents, custom attributes, skinning, morph targets,
-animations, extensions, extra nodes/meshes/primitives, and blended materials. It
-recomputes vertex normals and preserves only a supported untextured material. There
-is no attribute or appearance transfer. Atlas UV rebaking is same-geometry only,
-not a high-to-low projection workflow.
+The core commits both artifacts in one database transaction. REST artifact downloads and the Studio download control can retrieve the OBJ. CLI can write it with `--quad-output`; MCP can export it with `export_quad_obj`, restricted to the configured MeshHarbor export directory and refusing to overwrite an existing file.
 
-The shared geometry validator checks finite positions/parameters, index range,
-triangle arity, repeated/duplicate faces, zero-area faces, closed and consistently
-oriented edge-manifold topology, connected vertex links, and an area-based output
-budget estimate. It does not eliminate self-intersections or guarantee a measured
-Hausdorff/geometric error tolerance.
-The output envelope is deliberately loose: positions must stay within a sphere of
-radius two source-bounds diagonals around the source center; this is a runaway-output
-guard, not an approximation-quality guarantee.
+## Geometry and operation contract
 
-Current limits are 100,000 input vertices, 200,000 input triangles, 250,000
-output vertices, 500,000 output triangles, target edge ratio 0.005–0.25 of the
-input bounding-box diagonal (subject to a conservative estimated output budget of
-100,000 triangles), 1–8 iterations, 64 MiB request/response files, and a 180-second
-host timeout. These bounds and the area-based estimate reduce risk but are not a
-hard OS memory/CPU quota.
+The operation accepts one embedded-buffer GLB containing one static, indexed TRIANGLES primitive with POSITION-only float32 geometry. It rejects animated/skinned assets, morph targets, extensions, multiple nodes/meshes/primitives, node transforms, UVs, images, textures, vertex colors, and unsupported attributes. The source asset remains immutable. A supported untextured material may be present, but appearance, materials, normals, UVs, and textures are not transferred to the OBJ. The GLB preview is triangulated because glTF/GLB has no quad primitive mode.
 
-## Isolation and dependency
+Input validation requires closed, consistently oriented, edge- and vertex-manifold geometry, rejects duplicate or degenerate faces, and enforces the conservative output budget used by the existing geometry validator. The generated OBJ contains only positions and triangle faces; arbitrary OBJ from a user is never passed directly to QuadriFlow. The wrapper uses fixed arguments and seed, never enables `-sat`, clears the child environment, redirects standard streams to null, uses a private per-job temporary directory, bounds inputs/outputs, and terminates the child after 180 seconds. This is process isolation, not an OS sandbox, and it does not impose a hard memory or CPU quota.
 
-The optional worker is a separate executable so an upstream panic terminates that
-child instead of the REST/MCP process, and unconditional stdout/stderr progress is
-captured rather than corrupting MCP's stdio protocol. The child environment is
-cleared and its JSON/log files live in a temporary directory (mode 0700 on Unix).
-This is **not an OS sandbox** and does not impose a hard memory/CPU limit; it runs
-with the same OS user privileges and filesystem access as MeshHarbor.
+Current limits are 64 MiB input GLB, 100,000 input vertices, 200,000 input triangles, a requested target of 4–50,000 quads (default 10,000), 64 MiB output OBJ, 250,000 output vertices, 500,000 output quads, and 180 seconds. QuadriFlow's target count is approximate.
 
-The adapter pins `remesh = 0.0.5`, an experimental crate whose source carries
-`MIT OR Apache-2.0`. The exact transitive graph is committed in `Cargo.lock` and
-has passed locked builds/tests on stable Rust and the workspace's declared Rust
-1.88 MSRV. This is not a complete per-crate license/SBOM audit; there is no copied
-upstream source in MeshHarbor.
+The output parser enforces UTF-8 and byte/record/count bounds, finite positions in a broad source-bounds envelope, four distinct in-range vertices per triangulable quad, duplicate-face rejection, nonzero face area, closed and consistently oriented edge manifoldness, and connected vertex links. It creates smooth-normal triangle GLB previews. It does **not** certify self-intersection freedom, a Hausdorff/surface-error tolerance, thin-feature retention, or high-to-low texture fidelity. The UI and operation report label this limitation; inspect experimental output before production use.
 
+## Verified native smoke test
 
-## QuadriFlow path (not yet integrated)
+The isolated GitHub Actions job built the official QuadriFlow source at commit `810b7a0967c35b0dc85b4464e3835e26a756c967` on Ubuntu 24.04, using the free-license SparseLU option and disabling optional TBB, OpenMP, Gurobi, and Lemon solver backends. It ran exactly once on a synthetic cube (not a user model), with a fixed face target and seed. The actual output passed the strict quad OBJ validator and GLB preview inspector. Run: [43397667911](https://github.com/syi0808/meshharbor/actions/runs/43397667911).
 
-The upstream QuadriFlow repository was inspected at commit
-`810b7a0967c35b0dc85b4464e3835e26a756c967`. No upstream code has been copied or
-built into MeshHarbor. The repository README calls the project MIT, but its
-`LICENSE.txt` contains BSD-style three-clause terms plus an additional grant for
-publicly available enhancements. Preserve that full license text and obtain a
-proper license review before distribution. Other included components declare
-Boost Software License 1.0 (Lemon), Apache-2.0 (pcg32), and BSD-3-Clause
-(`parallel_stable_sort.h`, used with TBB). Eigen's Sparse Cholesky component is
-LGPL; `BUILD_FREE_LICENSE=ON` selects Eigen's MPL2-only SparseLU path. This does
-not make every dependency MIT.
+That one test proves only a minimal build/run/parse path for a synthetic cube. It did not preserve a distributable executable artifact or record a general quality metric, and it does not validate complex models, self-intersections, thin leaves, textures, macOS, or Windows. No additional QuadriFlow build or model run is authorized by this smoke result.
 
-Upstream requires C++14, Boost, and Eigen. A controlled build should set
-`BUILD_FREE_LICENSE=ON`, disable TBB/Gurobi/SAT, and explicitly disable Lemon's
-GLPK, ILOG, COIN, and SoPlex backends. Although `BUILD_OPENMP=OFF` is available,
-the upstream CMake file adds `-fopenmp` unconditionally for GNU compilers. Build
-compatibility, dependency versions, packaging, and runtime behavior have not yet
-been verified on Linux, macOS, or Windows.
+## Upstream and licensing
 
-The CLI accepts OBJ and outputs OBJ with four-index quad faces. Its loader ignores
-UVs and normals, and its argument parser is not robust against missing values.
-A future wrapper must create a strict geometry-only OBJ itself, use fixed bounded
-arguments and a private per-job working directory, and avoid the `-sat` option:
-that path invokes external `minisat` and `timeout` commands. The original quad
-OBJ must be retained as a downloadable artifact because GLB can only carry
-triangle primitives. The core candidate in `crates/core/src/quadriflow.rs`
-validates QuadriFlow-style OBJ output and builds a triangle-only GLB preview; it
-does not invoke QuadriFlow or attach/save the OBJ artifact.
+No QuadriFlow source code is copied into MeshHarbor. The upstream repository was inspected at the pinned commit above. Its README describes the project as MIT, but `LICENSE.txt` contains BSD-style three-clause terms plus an additional grant for publicly available enhancements. Preserve the complete upstream license and copyright notices and obtain license review before distribution.
 
-The current quad-output validator enforces UTF-8 and file/record/count bounds,
-finite coordinates within a broad source-bounds envelope, four distinct indices
-per triangulable quad, duplicate-face rejection, closed and consistently oriented
-edge-manifold topology, and connected vertex links. It rejects unsupported OBJ
-records and creates a smooth-normal GLB preview. It does **not** test
-self-intersections, compare output surface error to the input, or certify
-QuadriFlow's output quality. Keep the operation unavailable until source/build
-packaging, OBJ artifact delivery, quality gates, and native-process isolation are
-implemented and tested.
+Other reviewed components declare Boost Software License 1.0 (Lemon), Apache-2.0 (pcg32), and BSD-3-Clause (`parallel_stable_sort.h`, included with TBB). Eigen's Sparse Cholesky path is LGPL; `BUILD_FREE_LICENSE=ON` defines `EIGEN_MPL2_ONLY` and selects Eigen SparseLU. This does not make every dependency MIT. A controlled build should explicitly disable TBB, OpenMP, Gurobi, and Lemon's GLPK, ILOG, COIN, and SoPlex backends. The upstream CMake file adds `-fopenmp` unconditionally for GNU compilers despite the OpenMP option, so every intended platform still needs independent build and packaging verification.
 
-The branch workflow checks formatting, strict Clippy (allowing one new lint from
-the latest toolchain in an existing xatlas file), locked all-feature tests on stable
-and Rust 1.88, and exports the lockfile artifact. Re-run these checks on the final
-code before integration.
+## Packaging work still required
+
+A distributable build must place a pinned, tested `quadriflow` executable beside the MeshHarbor executable and retain all applicable upstream/dependency notices. The current branch detects that sidecar and routes jobs through it, but does not build or download the executable automatically, does not yet ship it for any platform, and has not passed a full per-crate license/SBOM audit. Do not mark the feature available in a package that omits the sidecar. No model data leaves the local MeshHarbor process.
+
+## Separate triangle-remesher prototype
+
+The optional Rust `remesh = 0.0.5` worker is an experimental isotropic **triangle** remesher. It splits/collapses/flips edges and smooths vertices; it is not QuadriFlow, does not produce quads, does not split assets into separate scene nodes, and is not dispatched by `mesh.retopology`. Its strict geometry-only GLB candidate remains separate. It pins its Cargo dependency graph in `Cargo.lock`, uses a separate child process with private temporary files and a 180-second timeout, and has passed stable/MSRV checks. This is not an OS sandbox or proof of geometric quality.
