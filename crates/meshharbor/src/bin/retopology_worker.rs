@@ -11,7 +11,8 @@ use std::{
 
 use clap::Parser;
 use meshharbor_core::{
-    RemeshRequest as Request, RemeshResponse as Response, normalize_remesh_positions,
+    RemeshRequest as Request, RemeshResponse as Response, REMESH_PROTOCOL_VERSION,
+    normalize_remesh_positions,
     restore_remesh_positions, validate_remesh_response,
 };
 use remesh::prelude::*;
@@ -111,7 +112,7 @@ mod tests {
     #[test]
     fn rejects_open_untextured_triangle_patch() {
         let request = Request {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: REMESH_PROTOCOL_VERSION,
             positions: vec![
                 [0.0, 0.0, 0.0],
                 [1.0, 0.0, 0.0],
@@ -135,7 +136,7 @@ mod tests {
     #[test]
     fn remeshes_closed_untextured_tetrahedron() {
         let request = Request {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: REMESH_PROTOCOL_VERSION,
             positions: vec![
                 [0.0, 0.0, 0.0],
                 [1.0, 0.0, 0.0],
