@@ -650,19 +650,23 @@ f 4 1 5 8\n";
         );
 
         let open = CUBE_OBJ.replacen("f 4 1 5 8\n", "", 1);
-        assert!(parse_quad_obj_output(open.as_bytes(), &cube_positions())
-            .unwrap_err()
-            .to_string()
-            .contains("open or non-watertight"));
+        assert!(
+            parse_quad_obj_output(open.as_bytes(), &cube_positions())
+                .unwrap_err()
+                .to_string()
+                .contains("open or non-watertight")
+        );
     }
 
     #[test]
     fn rejects_unsupported_obj_records_and_bad_indices() {
         let with_uv = CUBE_OBJ.replace("v -1 -1 -1", "vt 0 0\nv -1 -1 -1");
-        assert!(parse_quad_obj_output(with_uv.as_bytes(), &cube_positions())
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported record"));
+        assert!(
+            parse_quad_obj_output(with_uv.as_bytes(), &cube_positions())
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported record")
+        );
 
         let bad_index = CUBE_OBJ.replacen("f 1 4 3 2", "f 1 4 3 0", 1);
         assert!(
@@ -676,9 +680,11 @@ f 4 1 5 8\n";
     #[test]
     fn rejects_output_far_outside_source_bounds() {
         let far = CUBE_OBJ.replace("v 1 1 1", "v 100 100 100");
-        assert!(parse_quad_obj_output(far.as_bytes(), &cube_positions())
-            .unwrap_err()
-            .to_string()
-            .contains("envelope"));
+        assert!(
+            parse_quad_obj_output(far.as_bytes(), &cube_positions())
+                .unwrap_err()
+                .to_string()
+                .contains("envelope")
+        );
     }
 }
