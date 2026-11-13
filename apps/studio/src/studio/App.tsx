@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MeshHarborApi } from './api';
+import { MeshHarborApi, quadTopologyArtifact } from './api';
 import { ModelPreview } from './ModelPreview';
-import type { Asset, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
+import type { Artifact, Asset, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
 
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
@@ -11,6 +11,11 @@ function formatSize(size: number) {
 }
 
 const meshOperationOptions: Array<{ id: MeshOperationId; title: string; description: string }> = [
+  {
+    id: 'mesh.retopology',
+    title: 'Quad retopology (experimental)',
+    description: 'Geometry-only QuadriFlow for supported untextured static meshes. Download the original quad OBJ separately; the GLB preview is triangulated. No UV, texture, rig, or animation transfer.',
+  },
   {
     id: 'mesh.cleanup',
     title: 'Cleanup',
@@ -55,6 +60,8 @@ export function App() {
   const [job, setJob] = useState<Job | null>(null);
   const [report, setReport] = useState<SimplificationReport | null>(null);
   const [busy, setBusy] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const downloadInFlight = useRef(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -63,6 +70,7 @@ export function App() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const api = useMemo(() => new MeshHarborApi(), []);
   const selectedAsset = assets.find((asset) => asset.id === selectedId) ?? null;
+  const quadArtifact = quadTopologyArtifact(selectedAsset);
   const isRunning = !!job && ['queued', 'running', 'validating', 'cancelling'].includes(job.state);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
   const mlxBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-mlx');
@@ -176,6 +184,8 @@ export function App() {
           } else if (latest.operation === 'mesh.separate_parts') {
             const parts = Number(resultReport.connected_parts ?? 0);
             setNotice(`Part separation complete. Found ${parts.toLocaleString()} connected component${parts === 1 ? '' : 's'}, emitted as primitives in the same mesh.`);
+          } else if (latest.operation === 'mesh.retopology') {
+            setNotice('Experimental geometry-only retopology complete. The GLB preview is triangulated; download the quad OBJ for editable quad topology. No appearance or rig transfer was performed.');
           } else if (latest.operation === 'uv.unwrap') {
             const width = Number(resultReport.atlas_width ?? 0);
             const height = Number(resultReport.atlas_height ?? 0);
@@ -411,18 +421,24 @@ export function App() {
     }
   }
 
-  async function downloadResult() {
-    if (!selectedAsset) return;
+  async function downloadResult(artifact?: Artifact) {
+    if (!selectedAsset || downloadInFlight.current || connection !== 'connected') return;
+    downloadInFlight.current = true;
+    setDownloading(true);
+    setError(null);
     try {
-      const blob = await api.artifact(selectedAsset);
+      const blob = artifact ? await api.downloadArtifact(artifact) : await api.artifact(selectedAsset);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = selectedAsset.name;
+      anchor.download = artifact ? `${selectedAsset.name.replace(/\.[^.]+$/, '')}-quads.obj` : selectedAsset.name;
       anchor.click();
-      URL.revokeObjectURL(url);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not download this asset.');
+    } finally {
+      downloadInFlight.current = false;
+      setDownloading(false);
     }
   }
 
@@ -502,7 +518,8 @@ export function App() {
                     <button className={activeView === 'source' ? 'active' : ''} onClick={() => { setActiveView('source'); if (selectedAsset?.source_asset_id) setSelectedId(selectedAsset.source_asset_id); }}>Original</button>
                     <button className={activeView === 'result' ? 'active' : ''} onClick={() => { setActiveView('result'); const derivedId = job?.result?.asset_id ?? assets.find((asset) => asset.source_asset_id === selectedAsset?.id)?.id; if (derivedId) setSelectedId(derivedId); }} disabled={!job?.result?.asset_id && !selectedAsset?.source_asset_id && !assets.some((asset) => asset.source_asset_id === selectedAsset?.id)}>Result</button>
                   </div>
-                  <button className="icon-button" title="Download selected GLB" aria-label="Download selected GLB" disabled={!selectedAsset} onClick={() => void downloadResult()}><DownloadIcon /></button>
+                  {quadArtifact && <button className="button button-secondary" title="Original editable quad topology, without textures or UVs" disabled={downloading || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Download quad OBJ</button>}
+                  <button className="icon-button" title="Download selected GLB" aria-label="Download selected GLB" disabled={!selectedAsset || downloading || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadIcon /></button>
                 </div>
                 <ModelPreview asset={previewAsset} loadModel={loadPreview} onError={reportPreviewError} />
                 {selectedAsset && (
@@ -617,7 +634,7 @@ export function App() {
                 <div className="control-footnote">Compression exports a GLB that requires KHR_meshopt_compression support. The Studio preview includes its decoder. Atlas rebaking accepts one static mesh/material with embedded PNG base-color and metallic/roughness maps only; no high-to-low projection or separate scene-node splitting is performed.</div>
               </div>
 
-              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking and retopology remain unavailable. Atlas UV unwrap only rebakes supported embedded same-mesh maps; mesh tools create derived assets and keep originals unchanged. Both Pixal3D backends are opt-in; model terms remain separate from MeshHarbor’s MIT license.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
+              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking remains unavailable. Experimental geometry-only QuadriFlow is available only when enabled by the local engine; quad topology is preserved in a separate OBJ, not the GLB preview. Atlas UV unwrap only rebakes supported embedded same-mesh maps; mesh tools create derived assets and keep originals unchanged. Both Pixal3D backends are opt-in; model terms remain separate from MeshHarbor’s MIT license.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
             </aside>
           </div>
         </main>
