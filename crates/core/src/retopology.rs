@@ -658,7 +658,7 @@ mod tests {
             [0.0, -1.0, 0.0],
             [0.0, 0.0, -1.0],
         ]);
-        request.indices.extend([0, 1, 2, 0, 5, 4, 0, 4, 6, 4, 5, 6]);
+        request.indices.extend([0, 4, 5, 0, 6, 4, 0, 5, 6, 4, 6, 5]);
         assert!(validate_remesh_request(&request).is_err());
     }
 
