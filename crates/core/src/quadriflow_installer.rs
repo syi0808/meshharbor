@@ -1249,7 +1249,7 @@ mod tests {
             },
             workflow: QuadriFlowWorkflowEvidence {
                 repository: "syi0808/meshharbor".into(),
-                path: ".github/workflows/quadriflow-source-build.yml".into(),
+                path: ".github/workflows/quadriflow-candidate-build.yml".into(),
                 run_id: 1,
                 commit: "a".repeat(40),
             },
