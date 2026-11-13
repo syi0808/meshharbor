@@ -174,7 +174,16 @@ impl Pixal3dRuntimeManager {
 
     /// Download the pinned model files after the user has accepted any gated
     /// DINOv3 terms in Hugging Face and signed in using this isolated HOME.
-    pub fn install_models(&self) -> CoreResult<RuntimeSetupReport> {
+    pub fn install_models(
+        &self,
+        confirm_large_download: bool,
+        confirm_gated_access: bool,
+    ) -> CoreResult<RuntimeSetupReport> {
+        if !confirm_large_download || !confirm_gated_access {
+            return Err(CoreError::InvalidInput(
+                "MLX model installation requires explicit confirmation of the large download and prior DINOv3 gated access.".into(),
+            ));
+        }
         self.ensure_apple_silicon()?;
         self.ensure_source()?;
         self.validate_source()?;
@@ -395,7 +404,7 @@ impl Pixal3dRuntimeManager {
             Ok(())
         } else {
             Err(CoreError::OperationUnavailable(
-                "The Pixal3D MLX runtime installer currently supports Apple Silicon macOS only. CUDA installation is not yet implemented.".into(),
+                "The Pixal3D MLX runtime supports Apple Silicon macOS only. Use the separate Linux x86_64/NVIDIA CUDA profile on compatible hosts.".into(),
             ))
         }
     }
@@ -549,6 +558,16 @@ mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
     use uuid::Uuid;
+
+    #[test]
+    fn model_download_requires_explicit_large_download_and_gated_access_confirmation() {
+        let root = env::temp_dir().join(format!("meshharbor-mlx-consent-{}", Uuid::new_v4()));
+        let manager = Pixal3dRuntimeManager::new(&root);
+        assert!(manager.install_models(false, false).is_err());
+        assert!(manager.install_models(true, false).is_err());
+        assert!(manager.install_models(false, true).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn huggingface_login_invokes_auth_login_in_isolated_home() {
