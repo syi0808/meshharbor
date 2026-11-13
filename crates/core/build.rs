@@ -18,7 +18,9 @@ fn main() {
             collect_files(&directory, &mut files);
         }
         files.sort();
-        generated.push_str(&format!("pub(super) static {symbol}: &[(&str, &[u8])] = &[\n"));
+        generated.push_str(&format!(
+            "pub(super) static {symbol}: &[(&str, &[u8])] = &[\n"
+        ));
         for file in files {
             let relative = file
                 .strip_prefix(&root)
@@ -35,8 +37,8 @@ fn main() {
         println!("cargo:rerun-if-changed={}", root.display());
     }
 
-    let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"))
-        .join("pixal3d_runtime_bundle.rs");
+    let output =
+        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("pixal3d_runtime_bundle.rs");
     fs::write(output, generated).expect("write embedded runtime manifest");
 }
 
@@ -57,7 +59,10 @@ fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) {
         {
             files.push(path);
         } else {
-            panic!("unsupported symlink or special runtime asset: {}", path.display());
+            panic!(
+                "unsupported symlink or special runtime asset: {}",
+                path.display()
+            );
         }
     }
 }

@@ -305,7 +305,7 @@ export function App() {
     setBusy(true);
     setReport(null);
     try {
-      const parameters = operation === 'render.optimize'
+      const parameters: Record<string, number> = operation === 'render.optimize'
         ? { overdraw_threshold: 1.05 }
         : operation === 'uv.unwrap'
           ? { resolution: 1024, padding: 8 }

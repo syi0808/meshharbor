@@ -145,14 +145,18 @@ pub fn bake_glb(
     let base_png = read_png_image(&glb.document, &glb.binary, snapshot.base_image)?;
     let mr_png = read_png_image(&glb.document, &glb.binary, snapshot.mr_image)?;
     let native = meshharbor_xatlas_sys::unwrap_and_bake(
-        &positions,
-        normals.as_deref(),
-        &source_uv,
-        &indices,
-        &base_png,
-        &mr_png,
-        options.resolution,
-        options.padding,
+        meshharbor_xatlas_sys::AtlasInput {
+            positions: &positions,
+            normals: normals.as_deref(),
+            original_uv: &source_uv,
+            indices: &indices,
+            base_png: &base_png,
+            mr_png: &mr_png,
+        },
+        meshharbor_xatlas_sys::AtlasSettings {
+            resolution: options.resolution,
+            padding: options.padding,
+        },
     )
     .map_err(AtlasBakeError::Native)?;
 
@@ -1155,4 +1159,3 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, AtlasBakeError> {
 
 #[cfg(test)]
 mod tests;
-

@@ -5,8 +5,7 @@
 //! application-data directory. No shell is used for download or extraction.
 
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -83,7 +82,11 @@ pub(crate) fn ensure_uv(data_root: &Path) -> CoreResult<PathBuf> {
 
 fn managed_executable(data_root: &Path) -> PathBuf {
     let bin = data_root.join("tools").join(format!("uv-{UV_VERSION}"));
-    if cfg!(windows) { bin.join("uv.exe") } else { bin.join("uv") }
+    if cfg!(windows) {
+        bin.join("uv.exe")
+    } else {
+        bin.join("uv")
+    }
 }
 
 fn find_on_path() -> Option<PathBuf> {
@@ -172,9 +175,7 @@ fn select_asset(os: &str, arch: &str, abi: &str) -> Option<UvAsset> {
 fn install_pinned(data_root: &Path) -> CoreResult<PathBuf> {
     let asset = current_asset()?;
     let filename = asset.filename();
-    let url = format!(
-        "https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{filename}"
-    );
+    let url = format!("https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{filename}");
     let tools_dir = data_root.join("tools");
     fs::create_dir_all(&tools_dir)?;
     let stage = tools_dir.join(format!(".uv-bootstrap-{}", Uuid::new_v4()));
@@ -183,10 +184,7 @@ fn install_pinned(data_root: &Path) -> CoreResult<PathBuf> {
     restrict_directory(&stage)?;
 
     let archive = stage.join(asset.archive_name());
-    eprintln!(
-        "Downloading official uv {UV_VERSION} for {}…",
-        asset.triple
-    );
+    eprintln!("Downloading official uv {UV_VERSION} for {}…", asset.triple);
     download_https(&url, &archive)?;
     verify_archive(&archive, asset.sha256)?;
 
@@ -260,7 +258,9 @@ fn download_https(url: &str, destination: &Path) -> CoreResult<()> {
     if !status.success() {
         return Err(CoreError::OperationUnavailable(format!(
             "The official uv download failed (curl exit {}). Check network access and retry.",
-            status.code().map_or_else(|| "signal".into(), |code| code.to_string())
+            status
+                .code()
+                .map_or_else(|| "signal".into(), |code| code.to_string())
         )));
     }
     Ok(())
@@ -306,7 +306,9 @@ fn extract_archive(archive: &Path, destination: &Path, windows: bool) -> CoreRes
     if !status.success() {
         return Err(CoreError::OperationUnavailable(format!(
             "Could not extract the SHA-256-verified uv archive (exit {}).",
-            status.code().map_or_else(|| "signal".into(), |code| code.to_string())
+            status
+                .code()
+                .map_or_else(|| "signal".into(), |code| code.to_string())
         )));
     }
     Ok(())

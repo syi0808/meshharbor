@@ -14,10 +14,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{Asset, AssetKind, CoreError, CoreResult, OperationCore, inspect_asset};
-use crate::{
-    cuda_runtime::Pixal3dCudaRuntimeManager,
-    runtime::Pixal3dRuntimeManager,
-};
+use crate::{cuda_runtime::Pixal3dCudaRuntimeManager, runtime::Pixal3dRuntimeManager};
 
 const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
@@ -482,7 +479,9 @@ pub(crate) fn generate_pixal3d_image(
                     runtime.readiness().missing.join("; ")
                 )));
             }
-            runtime.generate(&input_path, &output_path, &options)?.elapsed_ms
+            runtime
+                .generate(&input_path, &output_path, &options)?
+                .elapsed_ms
         }
         "pixal3d-cuda" => {
             let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());

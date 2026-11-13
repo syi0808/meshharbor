@@ -13,10 +13,8 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    generation::RuntimeReadiness,
-    runtime::RuntimeSetupReport,
+    CoreError, CoreResult, generation::RuntimeReadiness, runtime::RuntimeSetupReport,
     uv_bootstrap::ensure_uv,
-    CoreError, CoreResult,
 };
 
 const PYTHON_REQUEST: &str = "3.12";
@@ -86,7 +84,9 @@ impl Pixal3dCudaRuntimeManager {
                 continue;
             }
             let parent = target.parent().ok_or_else(|| {
-                CoreError::OperationUnavailable("Embedded CUDA source path has no parent directory.".into())
+                CoreError::OperationUnavailable(
+                    "Embedded CUDA source path has no parent directory.".into(),
+                )
             })?;
             std::fs::create_dir_all(parent)?;
             std::fs::write(target, contents)?;
@@ -138,7 +138,10 @@ impl Pixal3dCudaRuntimeManager {
         run_visible(install, "uv could not install managed Python 3.12")?;
 
         let managed_python = self.find_managed_python(&uv)?;
-        let version = run_capture(Command::new(&managed_python).arg("--version"), "Could not verify managed Python")?;
+        let version = run_capture(
+            Command::new(&managed_python).arg("--version"),
+            "Could not verify managed Python",
+        )?;
         if !version.starts_with("Python 3.12.") {
             return Err(CoreError::OperationUnavailable(format!(
                 "uv returned unexpected interpreter {version}; the CUDA profile requires Python 3.12."
@@ -155,7 +158,9 @@ impl Pixal3dCudaRuntimeManager {
         let python = self.python_path();
         let lockfile = self.managed_root.join("uv.lock");
         if !lockfile.is_file() {
-            eprintln!("[3/4] Resolving the vendored dependency ranges into a private per-install uv.lock…");
+            eprintln!(
+                "[3/4] Resolving the vendored dependency ranges into a private per-install uv.lock…"
+            );
             let mut lock = self.uv_command(&uv);
             lock.current_dir(&self.managed_root)
                 .arg("lock")
@@ -207,10 +212,14 @@ impl Pixal3dCudaRuntimeManager {
         }
         let executable = self.runtime_root.join(".venv/bin/hf");
         if !executable.is_file() {
-            return Err(CoreError::OperationUnavailable("The isolated Hugging Face CLI is missing; rerun CUDA setup.".into()));
+            return Err(CoreError::OperationUnavailable(
+                "The isolated Hugging Face CLI is missing; rerun CUDA setup.".into(),
+            ));
         }
         std::fs::create_dir_all(self.home_path())?;
-        eprintln!("Hugging Face will prompt for the token in this terminal. It is saved only in MeshHarbor's isolated cache.");
+        eprintln!(
+            "Hugging Face will prompt for the token in this terminal. It is saved only in MeshHarbor's isolated cache."
+        );
         let mut command = Command::new(executable);
         command
             .args(["auth", "login"])
@@ -219,7 +228,10 @@ impl Pixal3dCudaRuntimeManager {
             .env("HF_HOME", self.hf_home())
             .env("HF_HUB_DISABLE_TELEMETRY", "1")
             .env("PATH", managed_path(&self.runtime_root));
-        run_visible(command, "Hugging Face login failed; MeshHarbor did not receive the token")
+        run_visible(
+            command,
+            "Hugging Face login failed; MeshHarbor did not receive the token",
+        )
     }
 
     /// Download only the single-view CUDA model profile (no MoGe and no
@@ -239,7 +251,9 @@ impl Pixal3dCudaRuntimeManager {
         self.ensure_source()?;
         let python = self.python_path();
         if !python.is_file() {
-            return Err(CoreError::OperationUnavailable("Run `meshharbor runtime cuda-setup` before installing CUDA models.".into()));
+            return Err(CoreError::OperationUnavailable(
+                "Run `meshharbor runtime cuda-setup` before installing CUDA models.".into(),
+            ));
         }
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
@@ -257,16 +271,24 @@ impl Pixal3dCudaRuntimeManager {
             .args(["-c", access_check.as_str()])
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
-        run_visible(preflight, "DINOv3 access check failed; accept the model terms in Hugging Face and run `meshharbor runtime cuda-hf-login` first")?;
+        run_visible(
+            preflight,
+            "DINOv3 access check failed; accept the model terms in Hugging Face and run `meshharbor runtime cuda-hf-login` first",
+        )?;
 
-        eprintln!("[2/2] Downloading pinned Pixal3D, DINOv3 and NAF checkpoints (roughly 25–30 GB)…");
+        eprintln!(
+            "[2/2] Downloading pinned Pixal3D, DINOv3 and NAF checkpoints (roughly 25–30 GB)…"
+        );
         let mut download = self.python_command(&python);
         download
             .current_dir(&self.upstream_root)
             .args(["-m", "pixalcuda.cli", "download", "--skip-camera"])
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
-        run_visible(download, "CUDA model download failed; retrying is safe and uses the isolated HF cache")?;
+        run_visible(
+            download,
+            "CUDA model download failed; retrying is safe and uses the isolated HF cache",
+        )?;
 
         let readiness = self.readiness();
         if !readiness.models_downloaded {
@@ -289,7 +311,9 @@ impl Pixal3dCudaRuntimeManager {
         let mut missing = Vec::new();
         let supported = is_supported_target(env::consts::OS, env::consts::ARCH);
         if !supported {
-            missing.push("Pixal3D CUDA is supported only on Linux x86_64 with an NVIDIA CUDA device.".into());
+            missing.push(
+                "Pixal3D CUDA is supported only on Linux x86_64 with an NVIDIA CUDA device.".into(),
+            );
         }
         if let Err(error) = self.detect_gpu() {
             missing.push(error.to_string());
@@ -306,8 +330,14 @@ impl Pixal3dCudaRuntimeManager {
         }
 
         let hub = self.hf_home().join("hub");
-        let pixal_snapshot = hub.join(PIXAL_REPOSITORY).join("snapshots").join(PIXAL_REVISION);
-        let dino_snapshot = hub.join(DINO_REPOSITORY).join("snapshots").join(DINO_REVISION);
+        let pixal_snapshot = hub
+            .join(PIXAL_REPOSITORY)
+            .join("snapshots")
+            .join(PIXAL_REVISION);
+        let dino_snapshot = hub
+            .join(DINO_REPOSITORY)
+            .join("snapshots")
+            .join(DINO_REVISION);
         let mut model_files_ready = true;
         let mut models_downloaded = true;
         for filename in PIXAL_CHECKPOINTS {
@@ -317,18 +347,27 @@ impl Pixal3dCudaRuntimeManager {
                 missing.push(format!("Missing pinned Pixal3D checkpoint: {filename}"));
             }
         }
-        for path in [pixal_snapshot.join("pipeline.json"), dino_snapshot.join("model.safetensors"), hub.join("pixal3d-cuda/naf_release.pth")] {
+        for path in [
+            pixal_snapshot.join("pipeline.json"),
+            dino_snapshot.join("model.safetensors"),
+            hub.join("pixal3d-cuda/naf_release.pth"),
+        ] {
             if !path.is_file() {
                 model_files_ready = false;
                 models_downloaded = false;
-                missing.push(format!("Missing pinned CUDA model file: {}", path.display()));
+                missing.push(format!(
+                    "Missing pinned CUDA model file: {}",
+                    path.display()
+                ));
             }
         }
 
         RuntimeReadiness {
             backend_id: "pixal3d-cuda".into(),
             ready: supported && environment_ready && model_files_ready && self.detect_gpu().is_ok(),
-            validation_level: "required_paths_nvidia_smi_and_last_cuda_smoke_test_current_driver_not_rechecked".into(),
+            validation_level:
+                "required_paths_nvidia_smi_and_last_cuda_smoke_test_current_driver_not_rechecked"
+                    .into(),
             runtime_root: Some(self.runtime_root.clone()),
             python: Some(self.python_path()),
             missing,
@@ -363,7 +402,12 @@ impl Pixal3dCudaRuntimeManager {
         let python = self.python_path();
         self.verify_cuda_environment(&python)?;
         std::fs::create_dir_all(output_dir)?;
-        let snapshot = self.hf_home().join("hub").join(PIXAL_REPOSITORY).join("snapshots").join(PIXAL_REVISION);
+        let snapshot = self
+            .hf_home()
+            .join("hub")
+            .join(PIXAL_REPOSITORY)
+            .join("snapshots")
+            .join(PIXAL_REVISION);
         let started = std::time::Instant::now();
         let mut command = self.python_command(&python);
         command
@@ -396,7 +440,9 @@ impl Pixal3dCudaRuntimeManager {
 
         let output = output_dir.join("result.glb");
         if !output.is_file() {
-            return Err(CoreError::InvalidInput("Pixal3D CUDA exited successfully but did not produce result.glb.".into()));
+            return Err(CoreError::InvalidInput(
+                "Pixal3D CUDA exited successfully but did not produce result.glb.".into(),
+            ));
         }
         let bytes = std::fs::metadata(output)?.len();
         if bytes == 0 || bytes > MAX_GENERATED_GLB_BYTES {
@@ -425,7 +471,11 @@ impl Pixal3dCudaRuntimeManager {
         let output = Command::new("nvidia-smi")
             .args(["--query-gpu=name", "--format=csv,noheader"])
             .output()
-            .map_err(|error| CoreError::OperationUnavailable(format!("NVIDIA driver utility nvidia-smi is unavailable: {error}")))?;
+            .map_err(|error| {
+                CoreError::OperationUnavailable(format!(
+                    "NVIDIA driver utility nvidia-smi is unavailable: {error}"
+                ))
+            })?;
         if !output.status.success() {
             return Err(CoreError::OperationUnavailable(format!(
                 "nvidia-smi could not query an NVIDIA GPU: {}",
@@ -439,7 +489,9 @@ impl Pixal3dCudaRuntimeManager {
             .map(str::trim)
             .unwrap_or("");
         if name.is_empty() {
-            return Err(CoreError::OperationUnavailable("nvidia-smi found no NVIDIA GPU.".into()));
+            return Err(CoreError::OperationUnavailable(
+                "nvidia-smi found no NVIDIA GPU.".into(),
+            ));
         }
         Ok(name.to_owned())
     }
@@ -467,10 +519,15 @@ impl Pixal3dCudaRuntimeManager {
         command.args(["-m", "pixalcuda.cli", "doctor"]);
         let output = run_capture(&mut command, "PyTorch CUDA preflight failed")?;
         let report: Value = serde_json::from_str(&output).map_err(|error| {
-            CoreError::OperationUnavailable(format!("Pixal3D CUDA doctor returned invalid JSON: {error}"))
+            CoreError::OperationUnavailable(format!(
+                "Pixal3D CUDA doctor returned invalid JSON: {error}"
+            ))
         })?;
         let torch = report.get("torch").and_then(Value::as_str).unwrap_or("");
-        let cuda_runtime = report.get("cuda_runtime").and_then(Value::as_str).unwrap_or("");
+        let cuda_runtime = report
+            .get("cuda_runtime")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let sdpa_fp16 = report.get("sdpa_torch.float16").and_then(Value::as_bool) == Some(true);
         let sdpa_fp32 = report.get("sdpa_torch.float32").and_then(Value::as_bool) == Some(true);
         if report.get("cuda_available").and_then(Value::as_bool) != Some(true)
@@ -487,7 +544,10 @@ impl Pixal3dCudaRuntimeManager {
         let versions = "import torch, torchvision; assert torch.__version__.startswith('2.6.0'); assert torchvision.__version__.startswith('0.21.0')";
         let mut verify_packages = self.python_command(python);
         verify_packages.args(["-c", versions]);
-        run_visible(verify_packages, "Installed CUDA package versions do not match the reviewed PyTorch profile")?;
+        run_visible(
+            verify_packages,
+            "Installed CUDA package versions do not match the reviewed PyTorch profile",
+        )?;
         Ok(report)
     }
 
@@ -508,8 +568,15 @@ impl Pixal3dCudaRuntimeManager {
     }
 
     fn find_managed_python(&self, uv: &Path) -> CoreResult<PathBuf> {
-        let output = self.uv_command(uv)
-            .args(["python", "find", "--no-project", "--managed-python", PYTHON_REQUEST])
+        let output = self
+            .uv_command(uv)
+            .args([
+                "python",
+                "find",
+                "--no-project",
+                "--managed-python",
+                PYTHON_REQUEST,
+            ])
             .output()?;
         if !output.status.success() {
             return Err(CoreError::OperationUnavailable(format!(
@@ -519,7 +586,9 @@ impl Pixal3dCudaRuntimeManager {
         }
         let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if path.is_empty() {
-            return Err(CoreError::OperationUnavailable("uv returned an empty path for its managed Python.".into()));
+            return Err(CoreError::OperationUnavailable(
+                "uv returned an empty path for its managed Python.".into(),
+            ));
         }
         Ok(PathBuf::from(path))
     }
@@ -527,13 +596,19 @@ impl Pixal3dCudaRuntimeManager {
 
 fn validate_generation_options(options: &crate::GenerationOptions) -> CoreResult<()> {
     if options.resolution != 512 {
-        return Err(CoreError::InvalidInput("Pixal3D CUDA exposes only the reviewed 512 geometry profile.".into()));
+        return Err(CoreError::InvalidInput(
+            "Pixal3D CUDA exposes only the reviewed 512 geometry profile.".into(),
+        ));
     }
     if !matches!(options.texture_size, 512 | 1024 | 2048) {
-        return Err(CoreError::InvalidInput("texture_size must be 512, 1024, or 2048.".into()));
+        return Err(CoreError::InvalidInput(
+            "texture_size must be 512, 1024, or 2048.".into(),
+        ));
     }
     if options.target_faces < 4 {
-        return Err(CoreError::InvalidInput("target_faces must be at least 4.".into()));
+        return Err(CoreError::InvalidInput(
+            "target_faces must be at least 4.".into(),
+        ));
     }
     Ok(())
 }
@@ -547,26 +622,31 @@ fn managed_path(runtime_root: &Path) -> String {
     if let Some(path) = env::var_os("PATH") {
         paths.extend(env::split_paths(&path));
     }
-    env::join_paths(paths).unwrap_or_default().to_string_lossy().into_owned()
+    env::join_paths(paths)
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn run_visible(mut command: Command, failure_prefix: &str) -> CoreResult<()> {
-    let status = command.status().map_err(|error| {
-        CoreError::OperationUnavailable(format!("{failure_prefix}: {error}"))
-    })?;
+    let status = command
+        .status()
+        .map_err(|error| CoreError::OperationUnavailable(format!("{failure_prefix}: {error}")))?;
     if !status.success() {
         return Err(CoreError::OperationUnavailable(format!(
             "{failure_prefix} (exit status {}). See the command output above.",
-            status.code().map_or_else(|| "signal".into(), |code| code.to_string())
+            status
+                .code()
+                .map_or_else(|| "signal".into(), |code| code.to_string())
         )));
     }
     Ok(())
 }
 
 fn run_capture(command: &mut Command, failure_prefix: &str) -> CoreResult<String> {
-    let output = command.output().map_err(|error| {
-        CoreError::OperationUnavailable(format!("{failure_prefix}: {error}"))
-    })?;
+    let output = command
+        .output()
+        .map_err(|error| CoreError::OperationUnavailable(format!("{failure_prefix}: {error}")))?;
     if !output.status.success() {
         return Err(CoreError::OperationUnavailable(format!(
             "{failure_prefix}: {}",

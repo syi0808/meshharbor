@@ -19,11 +19,11 @@ use std::{
 };
 
 const IMAGE_PNG: &[u8] = &[
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-    0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
-    0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xb0,
-    0xa9, 0x38, 0x01, 0x00, 0x02, 0x70, 0x01, 0x7d, 0xe5, 0xc6, 0x55, 0x54, 0x00, 0x00, 0x00,
-    0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xb0, 0xa9, 0x38, 0x01,
+    0x00, 0x02, 0x70, 0x01, 0x7d, 0xe5, 0xc6, 0x55, 0x54, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+    0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
 const PIXAL_CHECKPOINTS: &[&str] = &[
@@ -40,7 +40,8 @@ struct TempTree(PathBuf);
 
 impl TempTree {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("meshharbor-{label}-{}", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("meshharbor-{label}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&path).expect("create isolated test directory");
         Self(path)
     }
@@ -93,8 +94,9 @@ impl MockRuntime {
         fs::set_permissions(&python, permissions).unwrap();
 
         let hub = runtime_root.join("home/.cache/huggingface/hub");
-        let pixal = hub
-            .join("models--TencentARC--Pixal3D/snapshots/0b31f9160aa400719af409098bff7936a932f726/ckpts");
+        let pixal = hub.join(
+            "models--TencentARC--Pixal3D/snapshots/0b31f9160aa400719af409098bff7936a932f726/ckpts",
+        );
         fs::create_dir_all(&pixal).unwrap();
         for checkpoint in PIXAL_CHECKPOINTS {
             fs::write(pixal.join(checkpoint), b"test placeholder; never loaded").unwrap();
@@ -103,7 +105,11 @@ impl MockRuntime {
             "models--facebook--dinov3-vitl16-pretrain-lvd1689m/snapshots/ea8dc2863c51be0a264bab82070e3e8836b02d51",
         );
         fs::create_dir_all(&dino).unwrap();
-        fs::write(dino.join("mock.safetensors"), b"test placeholder; never loaded").unwrap();
+        fs::write(
+            dino.join("mock.safetensors"),
+            b"test placeholder; never loaded",
+        )
+        .unwrap();
 
         Self {
             _tree: tree,
@@ -143,12 +149,12 @@ fn cli_import_generate_and_export_uses_mock_runtime_without_models() {
     let image = runtime._tree.0.join("input.png");
     fs::write(&image, IMAGE_PNG).unwrap();
 
-    let imported = run_cli(
-        &runtime,
-        &data_dir,
-        &["import", image.to_str().unwrap()],
+    let imported = run_cli(&runtime, &data_dir, &["import", image.to_str().unwrap()]);
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
     );
-    assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stderr));
     let asset: Value = serde_json::from_slice(&imported.stdout).unwrap();
     let asset_id = asset["id"].as_str().expect("imported image asset id");
 
@@ -165,7 +171,11 @@ fn cli_import_generate_and_export_uses_mock_runtime_without_models() {
             output_glb.to_str().unwrap(),
         ],
     );
-    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
     let result: Value = serde_json::from_slice(&generated.stdout).unwrap();
     assert_eq!(result["backend_id"], "pixal3d-mlx");
     assert_eq!(fs::read(output_glb).unwrap(), runtime.generated_glb);
@@ -202,7 +212,10 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
         address,
         "POST",
         "/api/v1/assets?filename=source.png",
-        &[ ("Authorization", authorization.as_str()), ("Content-Type", "image/png") ],
+        &[
+            ("Authorization", authorization.as_str()),
+            ("Content-Type", "image/png"),
+        ],
         IMAGE_PNG,
     )
     .unwrap();
@@ -319,31 +332,54 @@ fn mcp_import_generation_and_glb_export_use_the_same_mock_generation_core() {
             }
         }
     });
-    let mut client = McpClient { child, stdin, lines: line_rx, next_id: 1 };
+    let mut client = McpClient {
+        child,
+        stdin,
+        lines: line_rx,
+        next_id: 1,
+    };
 
-    let initialized = client.request("initialize", json!({
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": { "name": "meshharbor-mock-e2e", "version": "0.1.0" }
-    }));
-    assert!(initialized.get("result").is_some(), "MCP initialize: {initialized}");
+    let initialized = client.request(
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "meshharbor-mock-e2e", "version": "0.1.0" }
+        }),
+    );
+    assert!(
+        initialized.get("result").is_some(),
+        "MCP initialize: {initialized}"
+    );
     client.notify("notifications/initialized", json!({}));
 
-    let imported = client.tool("import_asset", json!({
-        "filename": "source.png",
-        "bytes_base64": encode_base64(IMAGE_PNG)
-    }));
-    let source_id = imported["id"].as_str().expect("MCP import asset id").to_owned();
+    let imported = client.tool(
+        "import_asset",
+        json!({
+            "filename": "source.png",
+            "bytes_base64": encode_base64(IMAGE_PNG)
+        }),
+    );
+    let source_id = imported["id"]
+        .as_str()
+        .expect("MCP import asset id")
+        .to_owned();
 
-    let submitted = client.tool("start_image_generation", json!({
-        "asset_id": source_id,
-        "backend_id": "pixal3d-mlx",
-        "seed": 23,
-        "resolution": 512,
-        "texture_size": 512,
-        "target_faces": 64
-    }));
-    let job_id = submitted["id"].as_str().expect("MCP generation job id").to_owned();
+    let submitted = client.tool(
+        "start_image_generation",
+        json!({
+            "asset_id": source_id,
+            "backend_id": "pixal3d-mlx",
+            "seed": 23,
+            "resolution": 512,
+            "texture_size": 512,
+            "target_faces": 64
+        }),
+    );
+    let job_id = submitted["id"]
+        .as_str()
+        .expect("MCP generation job id")
+        .to_owned();
     let mut completed = None;
     for _ in 0..200 {
         let job = client.tool("get_job", json!({"job_id": job_id}));
@@ -358,10 +394,13 @@ fn mcp_import_generation_and_glb_export_use_the_same_mock_generation_core() {
     assert_eq!(completed["result"]["backend_id"], "pixal3d-mlx");
     let generated_asset_id = completed["result"]["asset_id"].as_str().unwrap();
     let destination = export_dir.join("generated.glb");
-    let exported = client.tool("export_glb", json!({
-        "asset_id": generated_asset_id,
-        "output_path": destination.to_string_lossy()
-    }));
+    let exported = client.tool(
+        "export_glb",
+        json!({
+            "asset_id": generated_asset_id,
+            "output_path": destination.to_string_lossy()
+        }),
+    );
     assert_eq!(exported["overwritten"], false);
     assert_eq!(fs::read(destination).unwrap(), runtime.generated_glb);
 
@@ -413,13 +452,20 @@ impl McpClient {
 
     fn tool(&mut self, name: &str, arguments: Value) -> Value {
         let response = self.request("tools/call", json!({"name":name,"arguments":arguments}));
-        assert!(response.get("error").is_none(), "MCP {name} RPC error: {response}");
-        assert_ne!(response["result"]["isError"], true, "MCP {name} returned error: {response}");
+        assert!(
+            response.get("error").is_none(),
+            "MCP {name} RPC error: {response}"
+        );
+        assert_ne!(
+            response["result"]["isError"], true,
+            "MCP {name} returned error: {response}"
+        );
         let text = response["result"]["content"]
             .as_array()
             .and_then(|content| content.iter().find_map(|item| item["text"].as_str()))
             .expect("MCP tool returns a text result");
-        serde_json::from_str(text).unwrap_or_else(|error| panic!("MCP {name} returned invalid JSON ({error}): {text}"))
+        serde_json::from_str(text)
+            .unwrap_or_else(|error| panic!("MCP {name} returned invalid JSON ({error}): {text}"))
     }
 
     fn shutdown(mut self) {
@@ -459,7 +505,10 @@ fn wait_for_health(address: &SocketAddr, child: &mut Child) -> (u16, Vec<u8>) {
         if let Ok(response) = http_request(*address, "GET", "/api/v1/health", &[], &[]) {
             return response;
         }
-        assert!(Instant::now() < deadline, "REST server did not start before timeout");
+        assert!(
+            Instant::now() < deadline,
+            "REST server did not start before timeout"
+        );
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -536,7 +585,10 @@ fn decode_chunked(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
             .get(cursor..end)
             .ok_or_else(|| std::io::Error::other("truncated HTTP chunk"))?;
         output.extend_from_slice(chunk);
-        if bytes.get(end..end + 2).is_none_or(|terminator| terminator != b"\r\n") {
+        if bytes
+            .get(end..end + 2)
+            .is_none_or(|terminator| terminator != b"\r\n")
+        {
             return Err(std::io::Error::other("invalid HTTP chunk terminator"));
         }
         cursor = end + 2;
@@ -552,15 +604,28 @@ fn encode_base64(bytes: &[u8]) -> String {
         let c = *chunk.get(2).unwrap_or(&0);
         encoded.push(ALPHABET[(a >> 2) as usize] as char);
         encoded.push(ALPHABET[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
-        encoded.push(if chunk.len() > 1 { ALPHABET[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char } else { '=' });
-        encoded.push(if chunk.len() > 2 { ALPHABET[(c & 0x3f) as usize] as char } else { '=' });
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(c & 0x3f) as usize] as char
+        } else {
+            '='
+        });
     }
     encoded
 }
 
 fn minimal_triangle_glb() -> Vec<u8> {
     let mut binary = Vec::new();
-    for position in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0]] {
+    for position in [
+        [0.0f32, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+    ] {
         for component in position {
             binary.extend_from_slice(&component.to_le_bytes());
         }
@@ -583,8 +648,12 @@ fn minimal_triangle_glb() -> Vec<u8> {
         "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}]
     });
     let mut json_bytes = serde_json::to_vec(&document).unwrap();
-    while !json_bytes.len().is_multiple_of(4) { json_bytes.push(b' '); }
-    while !binary.len().is_multiple_of(4) { binary.push(0); }
+    while !json_bytes.len().is_multiple_of(4) {
+        json_bytes.push(b' ');
+    }
+    while !binary.len().is_multiple_of(4) {
+        binary.push(0);
+    }
     let total_len = 12 + 8 + json_bytes.len() + 8 + binary.len();
     let mut bytes = Vec::with_capacity(total_len);
     bytes.extend_from_slice(b"glTF");

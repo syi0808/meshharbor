@@ -5,10 +5,9 @@ use serde_json::{Value, json};
 
 use crate::{
     Asset, AtlasBakeError, AtlasBakeOptions, CoreError, CoreResult, GenerationOptions,
-    GenerationResult, MeshCleanupReport, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime,
-    Pixal3dRuntimeManager, RenderOptimizationReport, RuntimeSetupReport, SimplificationReport,
-    Store, bake_glb, cleanup_glb, compress_mesh_glb, inspect_asset, optimize_render_glb,
-    separate_components, simplify_glb,
+    GenerationResult, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dRuntimeManager,
+    RuntimeSetupReport, SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb,
+    inspect_asset, optimize_render_glb, separate_components, simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +38,6 @@ pub struct SimplificationResult {
     pub asset: Asset,
     pub report: SimplificationReport,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshOperationResult {
@@ -134,7 +132,12 @@ impl OperationCore {
             .iter()
             .find(|artifact| artifact.kind == "source")
             .or_else(|| source.artifacts.first())
-            .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' has no stored artifact.")))?;
+            .ok_or_else(|| {
+                CoreError::NotFound(format!("Asset '{asset_id}' has no stored artifact."))
+            })?;
+        if operation == "mesh.separate_parts" {
+            crate::parts::validate_part_glb_size(source_artifact.byte_size)?;
+        }
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
         let (suffix, output, report) = match operation {
             "mesh.cleanup" => {
@@ -143,8 +146,8 @@ impl OperationCore {
                 ("cleaned", output, serde_json::to_value(report)?)
             }
             "render.optimize" => {
-                let options: RenderOptimizationOptions =
-                    serde_json::from_value(parameters).map_err(|error| {
+                let options: RenderOptimizationOptions = serde_json::from_value(parameters)
+                    .map_err(|error| {
                         CoreError::InvalidInput(format!(
                             "Invalid render.optimize parameters: {error}"
                         ))
@@ -239,14 +242,16 @@ impl OperationCore {
         let generation_ready = Pixal3dMlxRuntime::discover(self.store.root())
             .readiness()
             .ready
-            || Pixal3dCudaRuntimeManager::new(self.store.root()).readiness().ready;
+            || Pixal3dCudaRuntimeManager::new(self.store.root())
+                .readiness()
+                .ready;
         vec![
             OperationDescriptor { id: "asset.import".into(), title: "Import asset".into(), category: "asset".into(), summary: "Import PNG, JPEG, or GLB files while retaining an immutable content-addressed source artifact.".into(), implemented: true },
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
             OperationDescriptor { id: "image.generate".into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Run a local Pixal3D 512 profile using the ready platform backend (MLX on Apple Silicon or CUDA on Linux/NVIDIA). Environment setup and model downloads are explicit; gated terms remain user-controlled.".into(), implemented: generation_ready },
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangle primitives with meshoptimizer while retaining original vertex streams, materials, and textures.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces while preserving seams, vertex streams, materials, and the source asset.".into(), implemented: true },
-            OperationDescriptor { id: "mesh.separate_parts".into(), title: "Separate connected parts".into(), category: "mesh".into(), summary: "Split one supported static indexed triangle primitive into connected-component TRIANGLES primitives in the same GLB mesh, using shared vertex indices; not separate scene nodes.".into(), implemented: true },
+            OperationDescriptor { id: "mesh.separate_parts".into(), title: "Separate connected parts".into(), category: "mesh".into(), summary: "Split one embedded static indexed TRIANGLES GLB (max 64 MiB total, 4 MiB JSON, 1,000,000 POSITION vertices, 3,000,000 indices, 256 parts) into connected primitives in the same mesh; shared-index connectivity, not scene nodes.".into(), implemented: true },
             OperationDescriptor { id: "mesh.retopology".into(), title: "Retopology".into(), category: "mesh".into(), summary: "Reconstruct mesh topology; the experimental remeshing worker has not passed build, validation, and quality gates.".into(), implemented: false },
             OperationDescriptor { id: "uv.unwrap".into(), title: "Atlas UV unwrap".into(), category: "uv".into(), summary: "Use xatlas to unwrap one supported static textured mesh and rebake its embedded base-color and metallic/roughness PNG maps from the same mesh's existing UVs; this is not high-to-low projection.".into(), implemented: true },
             OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Generic high-to-low and arbitrary texture baking is not implemented; uv.unwrap only rebakes supported same-mesh embedded base-color and metallic/roughness PNG maps.".into(), implemented: false },
@@ -337,7 +342,6 @@ impl OperationCore {
     }
 }
 
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RenderOptimizationOptions {
@@ -405,10 +409,13 @@ mod tests {
         assert!(doctor.operations.contains(&"mesh.cleanup".to_string()));
         assert!(doctor.operations.contains(&"render.optimize".to_string()));
         assert!(doctor.operations.contains(&"mesh.compress".to_string()));
-        assert!(doctor.operations.contains(&"mesh.separate_parts".to_string()));
+        assert!(
+            doctor
+                .operations
+                .contains(&"mesh.separate_parts".to_string())
+        );
         assert!(doctor.operations.contains(&"uv.unwrap".to_string()));
         assert!(!doctor.operations.contains(&"mesh.retopology".to_string()));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
-

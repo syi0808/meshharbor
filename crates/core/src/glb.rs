@@ -1,6 +1,6 @@
 use meshopt::{SimplifyOptions, SimplifyVertex, VertexDataAdapter};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::{AssetKind, CoreError};
 
@@ -25,7 +25,6 @@ pub struct SimplificationReport {
     pub preserved: Vec<String>,
     pub warnings: Vec<String>,
 }
-
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MeshCleanupReport {
@@ -274,8 +273,6 @@ fn inspect_glb(bytes: &[u8]) -> Result<AssetDescriptor, CoreError> {
     })
 }
 
-
-
 /// Compresses supported geometry bufferViews with the Khronos
 /// KHR_meshopt_compression extension. The output requires consumers to support
 /// that extension; uncompressed fallback geometry is intentionally not copied.
@@ -291,7 +288,9 @@ pub fn compress_mesh_glb(bytes: &[u8]) -> Result<(Vec<u8>, CompressionReport), C
         .get("byteLength")
         .and_then(Value::as_u64)
         .and_then(|length| usize::try_from(length).ok())
-        .ok_or_else(|| CoreError::InvalidInput("Embedded buffer byteLength is missing or invalid.".into()))?;
+        .ok_or_else(|| {
+            CoreError::InvalidInput("Embedded buffer byteLength is missing or invalid.".into())
+        })?;
     if array(&glb.document, "bufferViews")
         .iter()
         .any(|view| view.get("extensions").is_some())
@@ -318,14 +317,18 @@ pub fn compress_mesh_glb(bytes: &[u8]) -> Result<(Vec<u8>, CompressionReport), C
             let index_accessor = primitive
                 .get("indices")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| CoreError::OperationUnavailable(
-                    "Compression requires indexed triangle primitives.".into(),
-                ))? as usize;
+                .ok_or_else(|| {
+                    CoreError::OperationUnavailable(
+                        "Compression requires indexed triangle primitives.".into(),
+                    )
+                })? as usize;
             mark_accessor_role(&mut accessor_roles, index_accessor, 2)?;
             let attributes = primitive
                 .get("attributes")
                 .and_then(Value::as_object)
-                .ok_or_else(|| CoreError::InvalidInput("Triangle primitive has no attributes.".into()))?;
+                .ok_or_else(|| {
+                    CoreError::InvalidInput("Triangle primitive has no attributes.".into())
+                })?;
             for accessor in attributes.values() {
                 let accessor_index = accessor.as_u64().ok_or_else(|| {
                     CoreError::InvalidInput("Primitive attribute accessor is invalid.".into())
@@ -386,11 +389,8 @@ pub fn compress_mesh_glb(bytes: &[u8]) -> Result<(Vec<u8>, CompressionReport), C
         if roles.len() != 1 {
             continue;
         }
-        let (start, byte_length) = buffer_view_range(
-            &glb.document,
-            view_index,
-            declared_original_length,
-        )?;
+        let (start, byte_length) =
+            buffer_view_range(&glb.document, view_index, declared_original_length)?;
         let role = *roles.iter().next().expect("one accessor role");
         let candidate = if role == 1 {
             encode_attribute_buffer_view(
@@ -434,11 +434,8 @@ pub fn compress_mesh_glb(bytes: &[u8]) -> Result<(Vec<u8>, CompressionReport), C
         if candidates.contains_key(&view_index) {
             continue;
         }
-        let (start, byte_length) = buffer_view_range(
-            &glb.document,
-            view_index,
-            declared_original_length,
-        )?;
+        let (start, byte_length) =
+            buffer_view_range(&glb.document, view_index, declared_original_length)?;
         while !compressed_binary.len().is_multiple_of(4) {
             compressed_binary.push(0);
         }
@@ -472,8 +469,16 @@ pub fn compress_mesh_glb(bytes: &[u8]) -> Result<(Vec<u8>, CompressionReport), C
         });
     }
 
-    ensure_extension(&mut glb.document, "extensionsUsed", "KHR_meshopt_compression");
-    ensure_extension(&mut glb.document, "extensionsRequired", "KHR_meshopt_compression");
+    ensure_extension(
+        &mut glb.document,
+        "extensionsUsed",
+        "KHR_meshopt_compression",
+    );
+    ensure_extension(
+        &mut glb.document,
+        "extensionsRequired",
+        "KHR_meshopt_compression",
+    );
     let buffers = glb
         .document
         .get_mut("buffers")
@@ -564,7 +569,9 @@ fn buffer_view_range(
     offset
         .checked_add(length)
         .filter(|end| *end <= binary_len)
-        .ok_or_else(|| CoreError::InvalidInput("bufferView exceeds the embedded GLB buffer.".into()))?;
+        .ok_or_else(|| {
+            CoreError::InvalidInput("bufferView exceeds the embedded GLB buffer.".into())
+        })?;
     Ok((offset, length))
 }
 
@@ -577,7 +584,10 @@ fn encode_attribute_buffer_view(
     byte_length: usize,
     binary: &[u8],
 ) -> Result<Option<MeshoptCandidate>, CoreError> {
-    let Some(first_accessor) = accessor_indices.first().and_then(|index| accessors.get(*index)) else {
+    let Some(first_accessor) = accessor_indices
+        .first()
+        .and_then(|index| accessors.get(*index))
+    else {
         return Ok(None);
     };
     let count = first_accessor
@@ -585,13 +595,15 @@ fn encode_attribute_buffer_view(
         .and_then(Value::as_u64)
         .ok_or_else(|| CoreError::InvalidInput("Attribute accessor count is missing.".into()))?
         as usize;
-    if count == 0 || accessor_indices.iter().any(|index| {
-        accessors
-            .get(*index)
-            .and_then(|accessor| accessor.get("count"))
-            .and_then(Value::as_u64)
-            != Some(count as u64)
-    }) {
+    if count == 0
+        || accessor_indices.iter().any(|index| {
+            accessors
+                .get(*index)
+                .and_then(|accessor| accessor.get("count"))
+                .and_then(Value::as_u64)
+                != Some(count as u64)
+        })
+    {
         return Ok(None);
     }
     let explicit_stride = view.get("byteStride").and_then(Value::as_u64);
@@ -684,7 +696,11 @@ fn encode_triangle_buffer_view(
         || !count.is_multiple_of(3)
         || accessor.get("type").and_then(Value::as_str) != Some("SCALAR")
         || accessor.get("sparse").is_some()
-        || accessor.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) != 0
+        || accessor
+            .get("byteOffset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            != 0
         || count.checked_mul(byte_stride) != Some(byte_length)
     {
         return Ok(None);
@@ -705,11 +721,14 @@ fn encode_triangle_buffer_view(
         .unwrap_or(0)
         .checked_add(1)
         .and_then(|count| usize::try_from(count).ok())
-        .ok_or_else(|| CoreError::InvalidInput("Index vertex count is not representable.".into()))?;
-    let encoded = meshopt::encode_index_buffer(&indices, vertex_count)
-        .map_err(|error| CoreError::OperationUnavailable(format!(
+        .ok_or_else(|| {
+            CoreError::InvalidInput("Index vertex count is not representable.".into())
+        })?;
+    let encoded = meshopt::encode_index_buffer(&indices, vertex_count).map_err(|error| {
+        CoreError::OperationUnavailable(format!(
             "meshoptimizer could not encode bufferView {view_index}: {error}"
-        )))?;
+        ))
+    })?;
     Ok(Some(MeshoptCandidate {
         original_offset: start,
         byte_length,
@@ -735,11 +754,13 @@ fn encode_vertex_buffer_with_stride(
                     record
                 })
                 .collect();
-            meshopt::encode_vertex_buffer(&records).map(Some).map_err(|error| {
-                CoreError::OperationUnavailable(format!(
-                    "meshoptimizer could not encode vertex buffer: {error}"
-                ))
-            })
+            meshopt::encode_vertex_buffer(&records)
+                .map(Some)
+                .map_err(|error| {
+                    CoreError::OperationUnavailable(format!(
+                        "meshoptimizer could not encode vertex buffer: {error}"
+                    ))
+                })
         }};
     }
     if bytes.len() != count.saturating_mul(stride) {
@@ -818,7 +839,9 @@ fn ensure_extension(document: &mut Value, list_name: &str, extension: &str) {
     if !document[list_name].is_array() {
         document[list_name] = json!([]);
     }
-    let list = document[list_name].as_array_mut().expect("extension list is an array");
+    let list = document[list_name]
+        .as_array_mut()
+        .expect("extension list is an array");
     if !list.iter().any(|item| item.as_str() == Some(extension)) {
         list.push(json!(extension));
     }
@@ -861,7 +884,10 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
                 .checked_add((indices.len() / 3) as u64)
                 .ok_or_else(|| CoreError::InvalidInput("Triangle count overflowed.".into()))?;
             let positions = read_cleanup_positions(&glb.document, binary, primitive)?;
-            if indices.iter().any(|index| *index as usize >= positions.len()) {
+            if indices
+                .iter()
+                .any(|index| *index as usize >= positions.len())
+            {
                 return Err(CoreError::InvalidInput(
                     "Primitive index refers to a vertex outside POSITION.".into(),
                 ));
@@ -1008,7 +1034,10 @@ pub fn optimize_render_glb(
             }
 
             let positions = read_cleanup_positions(&glb.document, binary, primitive)?;
-            if indices.iter().any(|index| *index as usize >= positions.len()) {
+            if indices
+                .iter()
+                .any(|index| *index as usize >= positions.len())
+            {
                 return Err(CoreError::InvalidInput(
                     "Primitive index refers to a vertex outside POSITION.".into(),
                 ));
@@ -1019,14 +1048,11 @@ pub fn optimize_render_glb(
                     position_bytes.extend_from_slice(&component.to_le_bytes());
                 }
             }
-            let adapter = VertexDataAdapter::new(&position_bytes, 12, 0)
-                .map_err(|error| CoreError::InvalidInput(format!("Invalid POSITION data: {error}")))?;
+            let adapter = VertexDataAdapter::new(&position_bytes, 12, 0).map_err(|error| {
+                CoreError::InvalidInput(format!("Invalid POSITION data: {error}"))
+            })?;
             let mut optimized = meshopt::optimize_vertex_cache(&indices, positions.len());
-            meshopt::optimize_overdraw_in_place(
-                &mut optimized,
-                &adapter,
-                overdraw_threshold,
-            );
+            meshopt::optimize_overdraw_in_place(&mut optimized, &adapter, overdraw_threshold);
             let misses_after = simulate_vertex_cache_misses(&optimized, CACHE_SIZE);
             cache_misses_after += misses_after;
             processed_primitives += 1;
@@ -1104,7 +1130,10 @@ fn read_cleanup_positions(
         .get(position_index)
         .ok_or_else(|| CoreError::InvalidInput("POSITION accessor does not exist.".into()))?;
     if accessor.get("componentType").and_then(Value::as_u64) != Some(5126)
-        || accessor.get("normalized").and_then(Value::as_bool).unwrap_or(false)
+        || accessor
+            .get("normalized")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     {
         return Err(CoreError::OperationUnavailable(
             "POSITION must use unnormalized FLOAT components.".into(),
@@ -1159,7 +1188,9 @@ fn primitive_uses_blending(document: &Value, primitive: &Value) -> Result<bool, 
     };
     let material = array(document, "materials")
         .get(material_index as usize)
-        .ok_or_else(|| CoreError::InvalidInput("Primitive references a missing material.".into()))?;
+        .ok_or_else(|| {
+            CoreError::InvalidInput("Primitive references a missing material.".into())
+        })?;
     Ok(material
         .get("alphaMode")
         .and_then(Value::as_str)
@@ -1897,7 +1928,11 @@ mod tests {
         glb
     }
 
-    fn triangle_list_glb(positions: &[[f32; 3]], indices: &[u16], alpha_mode: Option<&str>) -> Vec<u8> {
+    fn triangle_list_glb(
+        positions: &[[f32; 3]],
+        indices: &[u16],
+        alpha_mode: Option<&str>,
+    ) -> Vec<u8> {
         let mut binary = Vec::new();
         for position in positions {
             for component in position {
@@ -2105,6 +2140,29 @@ mod tests {
         assert!(report.compressed_buffer_views > 0);
         let glb = GlbFile::parse(&compressed).unwrap();
         assert_eq!(glb.document["buffers"].as_array().unwrap().len(), 2);
+        let buffers = array(&glb.document, "buffers");
+        let fallback_buffer = &buffers[1];
+        assert!(fallback_buffer.get("uri").is_none());
+        assert_eq!(
+            fallback_buffer["extensions"]["KHR_meshopt_compression"]["fallback"],
+            true
+        );
+        let compressed_views = array(&glb.document, "bufferViews");
+        let mut fallback_view_end = 0u64;
+        for view in compressed_views {
+            if view.get("buffer").and_then(Value::as_u64) == Some(1) {
+                assert!(
+                    view.get("extensions")
+                        .and_then(|extensions| extensions.get("KHR_meshopt_compression"))
+                        .is_some(),
+                    "every fallback bufferView must have a compressed representation"
+                );
+                let end =
+                    view["byteOffset"].as_u64().unwrap_or(0) + view["byteLength"].as_u64().unwrap();
+                fallback_view_end = fallback_view_end.max(end);
+            }
+        }
+        assert!(fallback_buffer["byteLength"].as_u64().unwrap() >= fallback_view_end);
         assert!(
             array(&glb.document, "extensionsRequired")
                 .iter()
@@ -2122,7 +2180,10 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(view_index, view)| {
-                Some((view_index, view.get("extensions")?.get("KHR_meshopt_compression")?))
+                Some((
+                    view_index,
+                    view.get("extensions")?.get("KHR_meshopt_compression")?,
+                ))
             })
             .collect::<Vec<_>>();
         assert!(!compressed_views.is_empty());
@@ -2135,8 +2196,7 @@ mod tests {
                 "ATTRIBUTES" => {
                     assert_eq!(extension["byteStride"].as_u64(), Some(12));
                     let decoded =
-                        meshopt::decode_vertex_buffer::<[u8; 12]>(compressed_data, count)
-                            .unwrap();
+                        meshopt::decode_vertex_buffer::<[u8; 12]>(compressed_data, count).unwrap();
                     let (source_offset, source_length) = buffer_view_range(
                         &original_glb.document,
                         view_index,
@@ -2147,7 +2207,10 @@ mod tests {
                         .iter()
                         .flat_map(|record| record.iter().copied())
                         .collect::<Vec<_>>();
-                    assert_eq!(decoded_bytes, original_binary[source_offset..source_offset + source_length]);
+                    assert_eq!(
+                        decoded_bytes,
+                        original_binary[source_offset..source_offset + source_length]
+                    );
                 }
                 "TRIANGLES" => {
                     let decoded = match extension["byteStride"].as_u64().unwrap() {
@@ -2171,6 +2234,4 @@ mod tests {
         let original = grid_glb(2);
         assert!(compress_mesh_glb(&original).is_err());
     }
-
 }
-

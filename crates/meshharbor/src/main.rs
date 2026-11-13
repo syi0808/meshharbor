@@ -68,6 +68,7 @@ enum Command {
         output: Option<PathBuf>,
     },
     /// Run a supported local mesh operation and optionally write its derived GLB.
+    /// Part separation limits: 64 MiB GLB, 4 MiB JSON, 1,000,000 vertices, 3,000,000 indices, and 256 output parts.
     ProcessMesh {
         asset_id: String,
         #[arg(long, value_parser = ["mesh.cleanup", "mesh.separate_parts", "uv.unwrap", "render.optimize", "mesh.compress"])]
@@ -373,7 +374,9 @@ impl McpServer {
             Ok(Ok(result)) => serde_json::to_string_pretty(&result)
                 .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
             Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
-            Err(error) => json!({"error": format!("GLB export worker failed: {error}")}).to_string(),
+            Err(error) => {
+                json!({"error": format!("GLB export worker failed: {error}")}).to_string()
+            }
         }
     }
 
@@ -665,10 +668,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     confirm_large_download,
                     confirm_gated_access,
                 } => {
-                    let report = core.install_pixal3d_mlx_models(
-                        confirm_large_download,
-                        confirm_gated_access,
-                    )?;
+                    let report = core
+                        .install_pixal3d_mlx_models(confirm_large_download, confirm_gated_access)?;
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 }
                 RuntimeCommand::ConvertNaf => {
@@ -681,7 +682,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 RuntimeCommand::CudaHfLogin => {
                     core.login_pixal3d_cuda_huggingface()?;
-                    println!("Hugging Face authentication is configured in the isolated Pixal3D CUDA cache.");
+                    println!(
+                        "Hugging Face authentication is configured in the isolated Pixal3D CUDA cache."
+                    );
                 }
                 RuntimeCommand::CudaInstallModels {
                     confirm_large_download,
@@ -1072,7 +1075,11 @@ async fn api_create_job(
             )
             .await?
         }
-        "mesh.cleanup" | "mesh.separate_parts" | "uv.unwrap" | "render.optimize" | "mesh.compress" => {
+        "mesh.cleanup"
+        | "mesh.separate_parts"
+        | "uv.unwrap"
+        | "render.optimize"
+        | "mesh.compress" => {
             start_mesh_operation_job(
                 state.core,
                 state.scheduler,
@@ -1221,7 +1228,6 @@ async fn start_simplify_job(
     Ok(job)
 }
 
-
 async fn start_mesh_operation_job(
     core: OperationCore,
     scheduler: Arc<Semaphore>,
@@ -1233,9 +1239,11 @@ async fn start_mesh_operation_job(
         .list_operations()
         .into_iter()
         .find(|item| item.id == operation)
-        .ok_or_else(|| CoreError::OperationUnavailable(format!(
-            "Mesh operation '{operation}' is not implemented by this build."
-        )))?;
+        .ok_or_else(|| {
+            CoreError::OperationUnavailable(format!(
+                "Mesh operation '{operation}' is not implemented by this build."
+            ))
+        })?;
     if !descriptor.implemented {
         return Err(CoreError::OperationUnavailable(format!(
             "Mesh operation '{operation}' is not implemented by this build."
@@ -1348,7 +1356,10 @@ async fn start_generation_job(
             "image.generate requires a previously imported PNG or JPEG image asset.".into(),
         ));
     }
-    if !matches!(options.backend_id.as_str(), "auto" | "pixal3d-mlx" | "pixal3d-cuda") {
+    if !matches!(
+        options.backend_id.as_str(),
+        "auto" | "pixal3d-mlx" | "pixal3d-cuda"
+    ) {
         return Err(CoreError::InvalidInput(
             "backend_id must be auto, pixal3d-mlx, or pixal3d-cuda.".into(),
         ));
@@ -1647,9 +1658,9 @@ fn export_glb_file(
         .file_name()
         .filter(|name| !name.is_empty())
         .ok_or_else(|| CoreError::InvalidInput("Export path must name a file.".into()))?;
-    let requested_parent = output_path
-        .parent()
-        .ok_or_else(|| CoreError::InvalidInput("Export path must include a parent directory.".into()))?;
+    let requested_parent = output_path.parent().ok_or_else(|| {
+        CoreError::InvalidInput("Export path must include a parent directory.".into())
+    })?;
     let configured_export_root = std::env::var_os("MESHHARBOR_EXPORT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| core.store().root().join("exports"));
@@ -1689,8 +1700,8 @@ fn export_glb_file(
                 CoreError::Io(error)
             }
         })?;
-    let write_result = std::io::Write::write_all(&mut file, &content.bytes)
-        .and_then(|()| file.sync_all());
+    let write_result =
+        std::io::Write::write_all(&mut file, &content.bytes).and_then(|()| file.sync_all());
     if let Err(error) = write_result {
         drop(file);
         let _ = std::fs::remove_file(&destination);
@@ -2437,18 +2448,18 @@ mod tests {
             "a repeated export must leave the existing file untouched"
         );
 
-        let relative = export_glb_file(&core, &asset.id, std::path::Path::new("result.glb"))
-            .unwrap_err();
+        let relative =
+            export_glb_file(&core, &asset.id, std::path::Path::new("result.glb")).unwrap_err();
         assert!(matches!(relative, CoreError::InvalidInput(_)));
 
-        let wrong_extension = export_glb_file(&core, &asset.id, &output_dir.join("result.obj"))
-            .unwrap_err();
+        let wrong_extension =
+            export_glb_file(&core, &asset.id, &output_dir.join("result.obj")).unwrap_err();
         assert!(matches!(wrong_extension, CoreError::InvalidInput(_)));
 
         let outside_dir = root.join("outside");
         std::fs::create_dir_all(&outside_dir).unwrap();
-        let escaped = export_glb_file(&core, &asset.id, &outside_dir.join("escape.glb"))
-            .unwrap_err();
+        let escaped =
+            export_glb_file(&core, &asset.id, &outside_dir.join("escape.glb")).unwrap_err();
         assert!(matches!(escaped, CoreError::InvalidInput(_)));
         assert!(!outside_dir.join("escape.glb").exists());
 
@@ -2457,12 +2468,9 @@ mod tests {
             use std::os::unix::fs::symlink;
             let symlinked_dir = output_dir.join("outside-link");
             symlink(&outside_dir, &symlinked_dir).unwrap();
-            let through_symlink = export_glb_file(
-                &core,
-                &asset.id,
-                &symlinked_dir.join("symlink-escape.glb"),
-            )
-            .unwrap_err();
+            let through_symlink =
+                export_glb_file(&core, &asset.id, &symlinked_dir.join("symlink-escape.glb"))
+                    .unwrap_err();
             assert!(matches!(through_symlink, CoreError::InvalidInput(_)));
             assert!(!outside_dir.join("symlink-escape.glb").exists());
         }
@@ -2472,10 +2480,8 @@ mod tests {
 
     #[test]
     fn mcp_glb_export_rejects_images_without_creating_files() {
-        let root = std::env::temp_dir().join(format!(
-            "meshharbor-export-image-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-export-image-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let core = OperationCore::open(root.join("store")).unwrap();
         let image = core
@@ -2489,5 +2495,3 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
-
-

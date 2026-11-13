@@ -76,18 +76,40 @@ unsafe extern "C" {
     fn meshharbor_atlas_free(output: *mut RawResult);
 }
 
+/// CPU data supplied to xatlas. The references are borrowed for one synchronous bake.
+pub struct AtlasInput<'a> {
+    pub positions: &'a [[f32; 3]],
+    pub normals: Option<&'a [[f32; 3]]>,
+    pub original_uv: &'a [[f32; 2]],
+    pub indices: &'a [u32],
+    pub base_png: &'a [u8],
+    pub mr_png: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AtlasSettings {
+    pub resolution: u32,
+    pub padding: u32,
+}
+
 /// Generate an xatlas UV set and rebake an embedded glTF base-color and
 /// metallic/roughness PNG pair. Geometry is not simplified by this crate.
 pub fn unwrap_and_bake(
-    positions: &[[f32; 3]],
-    normals: Option<&[[f32; 3]]>,
-    original_uv: &[[f32; 2]],
-    indices: &[u32],
-    base_png: &[u8],
-    mr_png: &[u8],
-    resolution: u32,
-    padding: u32,
+    input: AtlasInput<'_>,
+    settings: AtlasSettings,
 ) -> Result<AtlasResult, String> {
+    let AtlasInput {
+        positions,
+        normals,
+        original_uv,
+        indices,
+        base_png,
+        mr_png,
+    } = input;
+    let AtlasSettings {
+        resolution,
+        padding,
+    } = settings;
     if positions.is_empty() || positions.len() != original_uv.len() {
         return Err("positions and TEXCOORD_0 must have the same non-zero vertex count".into());
     }
@@ -107,23 +129,30 @@ pub fn unwrap_and_bake(
             return Err("NORMAL must contain only finite values".into());
         }
     }
-    if indices.is_empty() || indices.len() % 3 != 0 {
+    if indices.is_empty() || !indices.len().is_multiple_of(3) {
         return Err("indices must contain one or more complete triangles".into());
     }
-    if indices.iter().any(|index| *index as usize >= positions.len()) {
+    if indices
+        .iter()
+        .any(|index| *index as usize >= positions.len())
+    {
         return Err("an index points outside the POSITION array".into());
     }
-    if !(64..=4096).contains(&resolution) || padding > 64
+    if !(64..=4096).contains(&resolution)
+        || padding > 64
         || u64::from(resolution) * u64::from(resolution) > 16_777_216
     {
         return Err("resolution must be 64..4096, the atlas may not exceed 16M texels, and padding must be 0..64".into());
     }
-    if base_png.len() > 128 * 1024 * 1024 || mr_png.len() > 128 * 1024 * 1024
-        || !base_png.starts_with(b"\x89PNG\r\n\x1a\n") || !mr_png.starts_with(b"\x89PNG\r\n\x1a\n")
+    if base_png.len() > 128 * 1024 * 1024
+        || mr_png.len() > 128 * 1024 * 1024
+        || !base_png.starts_with(b"\x89PNG\r\n\x1a\n")
+        || !mr_png.starts_with(b"\x89PNG\r\n\x1a\n")
     {
         return Err("base-color and metallic-roughness inputs must be PNGs under 128 MiB".into());
     }
-    let vertex_count = u32::try_from(positions.len()).map_err(|_| "too many vertices for xatlas")?;
+    let vertex_count =
+        u32::try_from(positions.len()).map_err(|_| "too many vertices for xatlas")?;
     let index_count = u32::try_from(indices.len()).map_err(|_| "too many indices for xatlas")?;
     let flat_positions: Vec<f32> = positions.iter().flatten().copied().collect();
     let flat_normals: Vec<f32> = normals
@@ -137,7 +166,11 @@ pub fn unwrap_and_bake(
     let status = unsafe {
         meshharbor_atlas_bake(
             flat_positions.as_ptr(),
-            if flat_normals.is_empty() { ptr::null() } else { flat_normals.as_ptr() },
+            if flat_normals.is_empty() {
+                ptr::null()
+            } else {
+                flat_normals.as_ptr()
+            },
             flat_uv.as_ptr(),
             vertex_count,
             indices.as_ptr(),
@@ -160,21 +193,34 @@ pub fn unwrap_and_bake(
             String::from_utf8_lossy(&bytes[..end]).into_owned()
         };
         unsafe { meshharbor_atlas_free(&mut raw) };
-        return Err(if message.is_empty() { "xatlas CPU baker failed".into() } else { message });
+        return Err(if message.is_empty() {
+            "xatlas CPU baker failed".into()
+        } else {
+            message
+        });
     }
-    if raw.vertex_count == 0 || raw.index_count == 0 || raw.uv.is_null() || raw.xref.is_null()
-        || raw.indices.is_null() || raw.base_png.is_null() || raw.mr_png.is_null()
+    if raw.vertex_count == 0
+        || raw.index_count == 0
+        || raw.uv.is_null()
+        || raw.xref.is_null()
+        || raw.indices.is_null()
+        || raw.base_png.is_null()
+        || raw.mr_png.is_null()
     {
         unsafe { meshharbor_atlas_free(&mut raw) };
         return Err("xatlas returned an incomplete native result".into());
     }
     let result = unsafe {
         let uv_flat = std::slice::from_raw_parts(raw.uv, raw.vertex_count as usize * 2);
-        let uv = uv_flat.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect();
+        let uv = uv_flat
+            .chunks_exact(2)
+            .map(|pair| [pair[0], pair[1]])
+            .collect();
         let xref = std::slice::from_raw_parts(raw.xref, raw.vertex_count as usize).to_vec();
         let indices = std::slice::from_raw_parts(raw.indices, raw.index_count as usize).to_vec();
         let base_color_png = std::slice::from_raw_parts(raw.base_png, raw.base_png_len).to_vec();
-        let metallic_roughness_png = std::slice::from_raw_parts(raw.mr_png, raw.mr_png_len).to_vec();
+        let metallic_roughness_png =
+            std::slice::from_raw_parts(raw.mr_png, raw.mr_png_len).to_vec();
         AtlasResult {
             uv,
             xref,
@@ -194,30 +240,60 @@ pub fn unwrap_and_bake(
 
 #[cfg(test)]
 mod tests {
-    use super::unwrap_and_bake;
+    use super::{AtlasInput, AtlasSettings, unwrap_and_bake};
 
     const PNG: &[u8] = &[
-        137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,2,0,0,0,2,8,6,0,0,0,114,182,13,36,
-        0,0,0,20,73,68,65,84,120,218,99,252,47,199,245,159,129,129,129,129,137,1,10,0,33,141,2,42,
-        48,155,50,207,0,0,0,0,73,69,78,68,174,66,96,130,
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6,
+        0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 20, 73, 68, 65, 84, 120, 218, 99, 252, 47, 199, 245,
+        159, 129, 129, 129, 129, 137, 1, 10, 0, 33, 141, 2, 42, 48, 155, 50, 207, 0, 0, 0, 0, 73,
+        69, 78, 68, 174, 66, 96, 130,
     ];
 
     #[test]
     fn disconnected_charts_get_separate_islands_and_same_chart_gutters() {
         let positions = [
-            [0.0,0.0,0.0],[1.0,0.0,0.0],[1.0,1.0,0.0],
-            [2.0,0.0,0.0],[3.0,0.0,0.0],[3.0,1.0,0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [3.0, 1.0, 0.0],
         ];
-        let normals = [[0.0,0.0,1.0]; 6];
-        let uv = [[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,0.0],[1.0,0.0],[1.0,1.0]];
-        let indices = [0,1,2,3,4,5];
-        let result = unwrap_and_bake(&positions, Some(&normals), &uv, &indices, PNG, PNG, 128, 8).unwrap();
+        let normals = [[0.0, 0.0, 1.0]; 6];
+        let uv = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+        ];
+        let indices = [0, 1, 2, 3, 4, 5];
+        let result = unwrap_and_bake(
+            AtlasInput {
+                positions: &positions,
+                normals: Some(&normals),
+                original_uv: &uv,
+                indices: &indices,
+                base_png: PNG,
+                mr_png: PNG,
+            },
+            AtlasSettings {
+                resolution: 128,
+                padding: 8,
+            },
+        )
+        .unwrap();
         assert_eq!(result.indices.len(), 6);
         assert_eq!(result.uv.len(), result.xref.len());
         assert!(result.chart_count >= 2);
         assert!(result.covered_texels > 0);
         assert!(result.gutter_texels > 0);
         assert!(result.base_color_png.starts_with(b"\x89PNG\r\n\x1a\n"));
-        assert!(result.metallic_roughness_png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(
+            result
+                .metallic_roughness_png
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+        );
     }
 }

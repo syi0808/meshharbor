@@ -13,7 +13,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{uv_bootstrap::ensure_uv, CoreError, CoreResult};
+use crate::{CoreError, CoreResult, uv_bootstrap::ensure_uv};
 
 const PYTHON_REQUEST: &str = "3.12";
 const NAF_SHA256: &str = "c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f";
@@ -485,9 +485,7 @@ pub(crate) fn materialize_embedded_source(
             continue;
         }
         let parent = target.parent().ok_or_else(|| {
-            CoreError::OperationUnavailable(
-                "Embedded backend file has no parent directory.".into(),
-            )
+            CoreError::OperationUnavailable("Embedded backend file has no parent directory.".into())
         })?;
         std::fs::create_dir_all(parent)?;
         std::fs::write(target, contents)?;
@@ -585,7 +583,10 @@ mod tests {
         command.env("CAPTURE_DIR", &root);
         let status = command.status().unwrap();
         assert!(status.success());
-        assert_eq!(fs::read_to_string(root.join("args")).unwrap(), "auth\nlogin\n");
+        assert_eq!(
+            fs::read_to_string(root.join("args")).unwrap(),
+            "auth\nlogin\n"
+        );
         let expected_home = isolated_home.to_string_lossy().into_owned();
         let expected_hf_home = isolated_home
             .join(".cache/huggingface")
@@ -599,7 +600,10 @@ mod tests {
             fs::read_to_string(root.join("hf_home")).unwrap().trim(),
             expected_hf_home.as_str()
         );
-        assert_eq!(fs::read_to_string(root.join("hf_token_present")).unwrap(), "\n");
+        assert_eq!(
+            fs::read_to_string(root.join("hf_token_present")).unwrap(),
+            "\n"
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -612,7 +616,10 @@ mod tests {
         assert!(root.join("source/upstream/uv.lock").is_file());
         assert!(root.join("source/upstream/LICENSE").is_file());
         assert!(root.join("source/managed/download_models.py").is_file());
-        assert!(root.join("source/managed/convert_naf_checkpoint.py").is_file());
+        assert!(
+            root.join("source/managed/convert_naf_checkpoint.py")
+                .is_file()
+        );
 
         // Extraction is idempotent, as runtime setup may be retried.
         materialize_embedded_source(&root, true).unwrap();
