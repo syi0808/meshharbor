@@ -100,9 +100,8 @@ fn remesh(request: Request) -> Result<Response, String> {
         .run(request.options.iterations as usize)
         .map_err(|error| format!("isotropic remeshing failed: {error}"))?;
 
-    let positions =
-        restore_remesh_positions(&output_positions, center, scale_factor)
-            .map_err(|error| error.to_string())?;
+    let positions = restore_remesh_positions(&output_positions, center, scale_factor)
+        .map_err(|error| error.to_string())?;
     let response = Response {
         positions,
         indices: output_indices,
