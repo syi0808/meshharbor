@@ -1,10 +1,11 @@
-# Experimental triangle-remeshing worker
+# Experimental retopology candidates
 
 ## Status
 
 This remains a feature-branch candidate. Core now has an isolated worker adapter
-and a strict untextured-GLB adapter, with a real child-process end-to-end test, but
-it is not wired into the operation catalog, GLB job flow, REST/MCP tools, or Studio.
+a strict untextured-GLB adapter and child-process end-to-end test, plus a separate
+QuadriFlow OBJ-output validator and triangle-only GLB preview builder, but neither
+candidate is wired into the operation catalog, GLB job flow, REST/MCP tools, or Studio.
 Keep `mesh.retopology` unavailable until broader geometry-quality/self-intersection
 acceptance and application packaging of the sidecar worker are complete.
 
@@ -54,6 +55,47 @@ The adapter pins `remesh = 0.0.5`, an experimental crate whose source carries
 has passed locked builds/tests on stable Rust and the workspace's declared Rust
 1.88 MSRV. This is not a complete per-crate license/SBOM audit; there is no copied
 upstream source in MeshHarbor.
+
+
+## QuadriFlow path (not yet integrated)
+
+The upstream QuadriFlow repository was inspected at commit
+`810b7a0967c35b0dc85b4464e3835e26a756c967`. No upstream code has been copied or
+built into MeshHarbor. The repository README calls the project MIT, but its
+`LICENSE.txt` contains BSD-style three-clause terms plus an additional grant for
+publicly available enhancements. Preserve that full license text and obtain a
+proper license review before distribution. Other included components declare
+Boost Software License 1.0 (Lemon), Apache-2.0 (pcg32), and BSD-3-Clause
+(`parallel_stable_sort.h`, used with TBB). Eigen's Sparse Cholesky component is
+LGPL; `BUILD_FREE_LICENSE=ON` selects Eigen's MPL2-only SparseLU path. This does
+not make every dependency MIT.
+
+Upstream requires C++14, Boost, and Eigen. A controlled build should set
+`BUILD_FREE_LICENSE=ON`, disable TBB/Gurobi/SAT, and explicitly disable Lemon's
+GLPK, ILOG, COIN, and SoPlex backends. Although `BUILD_OPENMP=OFF` is available,
+the upstream CMake file adds `-fopenmp` unconditionally for GNU compilers. Build
+compatibility, dependency versions, packaging, and runtime behavior have not yet
+been verified on Linux, macOS, or Windows.
+
+The CLI accepts OBJ and outputs OBJ with four-index quad faces. Its loader ignores
+UVs and normals, and its argument parser is not robust against missing values.
+A future wrapper must create a strict geometry-only OBJ itself, use fixed bounded
+arguments and a private per-job working directory, and avoid the `-sat` option:
+that path invokes external `minisat` and `timeout` commands. The original quad
+OBJ must be retained as a downloadable artifact because GLB can only carry
+triangle primitives. The core candidate in `crates/core/src/quadriflow.rs`
+validates QuadriFlow-style OBJ output and builds a triangle-only GLB preview; it
+does not invoke QuadriFlow or attach/save the OBJ artifact.
+
+The current quad-output validator enforces UTF-8 and file/record/count bounds,
+finite coordinates within a broad source-bounds envelope, four distinct indices
+per triangulable quad, duplicate-face rejection, closed and consistently oriented
+edge-manifold topology, and connected vertex links. It rejects unsupported OBJ
+records and creates a smooth-normal GLB preview. It does **not** test
+self-intersections, compare output surface error to the input, or certify
+QuadriFlow's output quality. Keep the operation unavailable until source/build
+packaging, OBJ artifact delivery, quality gates, and native-process isolation are
+implemented and tested.
 
 The branch workflow checks formatting, strict Clippy (allowing one new lint from
 the latest toolchain in an existing xatlas file), locked all-feature tests on stable
