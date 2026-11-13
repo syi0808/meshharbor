@@ -346,9 +346,7 @@ pub fn validate_remesh_request(request: &RemeshRequest) -> CoreResult<()> {
         / (request.options.target_edge_ratio as f64).powi(2)
         * (4.0 / 3.0f64.sqrt())
         * OUTPUT_ESTIMATE_SAFETY_FACTOR;
-    if !estimated_triangles.is_finite()
-        || estimated_triangles > MAX_ESTIMATED_OUTPUT_TRIANGLES
-    {
+    if !estimated_triangles.is_finite() || estimated_triangles > MAX_ESTIMATED_OUTPUT_TRIANGLES {
         return Err(CoreError::OperationUnavailable(
             "Requested edge size exceeds the worker's conservative output budget; use a coarser target.".into(),
         ));
@@ -437,7 +435,8 @@ pub fn validate_remesh_response(
         let relative = scale(sub(*position, bounds.center), 1.0 / bounds.diagonal);
         if dot(relative, relative) > 4.0 {
             return Err(CoreError::OperationUnavailable(
-                "Remesh worker output exceeded the broad 2x source-bounds-diagonal envelope.".into(),
+                "Remesh worker output exceeded the broad 2x source-bounds-diagonal envelope."
+                    .into(),
             ));
         }
     }
