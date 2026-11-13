@@ -25,4 +25,5 @@ meshopt = "0.7.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+remesh = "=0.0.5"
 
