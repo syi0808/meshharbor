@@ -162,7 +162,7 @@ impl OperationCore {
                 crate::quadriflow_retopology_glb(&bytes, options)?;
             let report_value = serde_json::to_value(&report)?;
             let name = derived_mesh_name(&source.name, "quad-retopologized");
-            let mut asset = self.store.import_derived_asset(
+            let asset = self.store.import_derived_asset_with_artifacts(
                 &name,
                 &preview,
                 asset_id,
@@ -171,16 +171,8 @@ impl OperationCore {
                     "report": report_value.clone(),
                     "quad_topology_artifact": true,
                 }),
+                &[("quad_topology", "model/obj", &quad_obj)],
             )?;
-            self.store.add_artifact(
-                &asset.id,
-                "quad_topology",
-                "model/obj",
-                &quad_obj,
-            )?;
-            asset = self.store.get_asset(&asset.id)?.ok_or_else(|| {
-                CoreError::Conflict("Retopology output asset was not visible after artifact creation.".into())
-            })?;
             return Ok(MeshOperationResult {
                 asset,
                 report: report_value,
