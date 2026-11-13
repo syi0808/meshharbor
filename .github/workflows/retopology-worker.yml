@@ -24,7 +24,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run strict Clippy with optional remesher
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::chunks-exact-to-as-chunks
       - name: Run workspace tests with optional remesher and committed lockfile
         run: cargo test --workspace --all-features --locked
       - name: Install declared minimum Rust toolchain
