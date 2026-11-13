@@ -20,9 +20,11 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: clippy, rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Run strict Clippy with optional remesher
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Run workspace tests with optional remesher and committed lockfile
         run: cargo test --workspace --all-features --locked
       - name: Install declared minimum Rust toolchain
