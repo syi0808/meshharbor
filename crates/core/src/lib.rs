@@ -17,7 +17,7 @@ pub use generation::{GenerationOptions, GenerationResult, Pixal3dMlxRuntime, Run
 pub use glb::{
     AssetDescriptor, CompressionReport, MeshCleanupReport, RenderOptimizationReport,
     SimplificationReport, cleanup_glb, compress_mesh_glb, inspect_asset, optimize_render_glb,
-    simplify_glb,
+    retopology_glb, simplify_glb,
 };
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
 pub use operation::{
