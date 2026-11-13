@@ -1,8 +1,6 @@
 //! End-to-end validation of a real QuadriFlow output, enabled only by the native build smoke workflow.
 
-use meshharbor_core::{
-    AssetKind, inspect_asset, parse_quad_obj_output, quad_mesh_preview_glb,
-};
+use meshharbor_core::{AssetKind, inspect_asset, parse_quad_obj_output, quad_mesh_preview_glb};
 
 #[test]
 #[ignore = "requires the separately built pinned QuadriFlow smoke executable"]
@@ -29,8 +27,5 @@ fn validates_quad_output_and_builds_a_glb_preview() {
     let descriptor = inspect_asset("quadriflow-cube-preview.glb", &preview)
         .expect("the generated preview should pass the GLB inspector");
     assert_eq!(descriptor.kind, AssetKind::Mesh);
-    assert_eq!(
-        descriptor.metadata["triangles"],
-        report.preview_triangles
-    );
+    assert_eq!(descriptor.metadata["triangles"], report.preview_triangles);
 }
