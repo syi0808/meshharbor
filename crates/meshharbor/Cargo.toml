@@ -8,12 +8,22 @@ rust-version.workspace = true
 name = "meshharbor"
 path = "src/main.rs"
 
+[[bin]]
+name = "meshharbor-retopo-worker"
+path = "src/bin/retopology_worker.rs"
+required-features = ["experimental-retopology-worker"]
+
+[features]
+default = []
+experimental-retopology-worker = ["dep:remesh"]
+
 [dependencies]
 axum.workspace = true
 clap.workspace = true
 http-body-util.workspace = true
 meshharbor-core = { path = "../core" }
 rmcp.workspace = true
+remesh = { workspace = true, optional = true }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
