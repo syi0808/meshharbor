@@ -1,9 +1,6 @@
 #![cfg(feature = "experimental-retopology-worker")]
 
-use std::{
-    fs,
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 use meshharbor_core::{RetopologyOptions, remesh_triangles_in_worker};
 
