@@ -428,7 +428,7 @@ pub fn validate_remesh_response(
     if response.positions.is_empty()
         || response.positions.len() > MAX_OUTPUT_VERTICES
         || response.indices.is_empty()
-        || response.indices.len() % 3 != 0
+        || !response.indices.len().is_multiple_of(3)
         || response.indices.len() / 3 > MAX_OUTPUT_TRIANGLES
     {
         return Err(CoreError::OperationUnavailable(
