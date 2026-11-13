@@ -9,6 +9,7 @@ mod operation;
 mod parts;
 mod quadriflow;
 mod quadriflow_manifest;
+mod quadriflow_installer;
 mod retopology;
 mod runtime;
 mod store;
@@ -36,6 +37,10 @@ pub use quadriflow_manifest::{
     QuadriFlowReleaseManifest, QuadriFlowSource, QuadriFlowWorkflowEvidence,
     bundled_quadriflow_release_manifest, parse_quadriflow_release_manifest,
     validate_quadriflow_release_manifest, verify_quadriflow_payload_file,
+};
+pub use quadriflow_installer::{
+    QuadriFlowInstallError, QuadriFlowInstallResult, install_bundled_quadriflow_sidecar,
+    installed_quadriflow_sidecar, rollback_quadriflow_sidecar,
 };
 pub use retopology::{
     REMESH_PROTOCOL_VERSION, RemeshRequest, RemeshResponse, RetopologyOptions, RetopologyReport,

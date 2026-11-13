@@ -139,9 +139,9 @@ impl OperationCore {
             crate::parts::validate_part_glb_size(source_artifact.byte_size)?;
         }
         if operation == "mesh.retopology" {
-            if !crate::quadriflow_sidecar_available() {
+            if !crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root()) {
                 return Err(CoreError::OperationUnavailable(
-                    "QuadriFlow is not packaged. Install the pinned geometry-only sidecar beside the MeshHarbor executable.".into(),
+                    "No compatible QuadriFlow sidecar is available for this MeshHarbor data directory.".into(),
                 ));
             }
             if source_artifact.byte_size > 64 * 1024 * 1024 {
@@ -156,7 +156,7 @@ impl OperationCore {
                 .map_err(|error| {
                     CoreError::InvalidInput(format!("Invalid mesh.retopology parameters: {error}"))
                 })?;
-            let (preview, quad_obj, report) = crate::quadriflow_retopology_glb(&bytes, options)?;
+            let (preview, quad_obj, report) = crate::quadriflow::quadriflow_retopology_glb_at(&bytes, options, self.store.data_root())?;
             let report_value = serde_json::to_value(&report)?;
             let name = derived_mesh_name(&source.name, "quad-retopologized");
             let asset = self.store.import_derived_asset_with_artifacts(
@@ -281,7 +281,7 @@ impl OperationCore {
             || Pixal3dCudaRuntimeManager::new(self.store.root())
                 .readiness()
                 .ready;
-        let quadriflow_ready = crate::quadriflow_sidecar_available();
+        let quadriflow_ready = crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root());
         vec![
             OperationDescriptor { id: "asset.import".into(), title: "Import asset".into(), category: "asset".into(), summary: "Import PNG, JPEG, or GLB files while retaining an immutable content-addressed source artifact.".into(), implemented: true },
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
@@ -289,7 +289,7 @@ impl OperationCore {
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangle primitives with meshoptimizer while retaining original vertex streams, materials, and textures.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces while preserving seams, vertex streams, materials, and the source asset.".into(), implemented: true },
             OperationDescriptor { id: "mesh.separate_parts".into(), title: "Separate connected parts".into(), category: "mesh".into(), summary: "Split one embedded static indexed TRIANGLES GLB (max 64 MiB total, 4 MiB JSON, 1,000,000 POSITION vertices, 3,000,000 indices, 256 parts) into connected primitives in the same mesh; shared-index connectivity, not scene nodes.".into(), implemented: true },
-            OperationDescriptor { id: "mesh.retopology".into(), title: "Quad retopology".into(), category: "mesh".into(), summary: "Experimental QuadriFlow quad remeshing through a packaged sidecar. Accepts one closed static triangle GLB; textured inputs also require TEXCOORD_0, optional NORMAL, and the narrow supported embedded base-color/metallic-roughness PNG maps. Those maps are projected only into a triangulated GLB preview with distance, normal, coverage, and ambiguity gates; the editable quad OBJ remains geometry-only. Other attributes/maps, self-intersection freedom, and a measured surface-error tolerance are not supported or certified.".into(), implemented: quadriflow_ready },
+            OperationDescriptor { id: "mesh.retopology".into(), title: "Quad retopology".into(), category: "mesh".into(), summary: "Experimental QuadriFlow quad remeshing through a managed or adjacent sidecar. Accepts one closed static triangle GLB; textured inputs also require TEXCOORD_0, optional NORMAL, and the narrow supported embedded base-color/metallic-roughness PNG maps. Those maps are projected only into a triangulated GLB preview with distance, normal, coverage, and ambiguity gates; the editable quad OBJ remains geometry-only. Other attributes/maps, self-intersection freedom, and a measured surface-error tolerance are not supported or certified.".into(), implemented: quadriflow_ready },
             OperationDescriptor { id: "uv.unwrap".into(), title: "Atlas UV unwrap".into(), category: "uv".into(), summary: "Use xatlas to unwrap one supported static textured mesh and rebake its embedded base-color and metallic/roughness PNG maps from the same mesh's existing UVs; this is not high-to-low projection.".into(), implemented: true },
             OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Generic high-to-low and arbitrary texture baking is not implemented; uv.unwrap only rebakes supported same-mesh embedded base-color and metallic/roughness PNG maps.".into(), implemented: false },
             OperationDescriptor { id: "render.optimize".into(), title: "Render optimization".into(), category: "mesh".into(), summary: "Use meshoptimizer vertex-cache and overdraw reordering on opaque/masked indexed triangles; translucent order is preserved.".into(), implemented: true },
@@ -371,7 +371,7 @@ impl OperationCore {
             notes: vec![
                 "The Rust core includes CPU mesh simplification, conservative cleanup, shared-index connected-part splitting, xatlas UV atlas rebaking, render cache/overdraw optimization, and required KHR_meshopt_compression output; this does not yet constitute a full cross-platform Studio or one-file distribution.".into(),
                 "Connected-part splitting handles one indexed static TRIANGLES primitive, groups by shared vertex indices, and emits primitives within the same GLB mesh; it does not split scene nodes, weld duplicate positions, or retopologize.".into(),
-                "Quad retopology is available only when the pinned QuadriFlow sidecar is packaged beside MeshHarbor. It accepts one closed static triangle mesh; textured input needs POSITION, TEXCOORD_0, optional NORMAL, and the supported embedded base-color/metallic-roughness PNG maps. Supported maps are projected with distance, facing-normal, coverage, and opposing-shell ambiguity gates into the triangulated GLB preview only; the separate OBJ retains quad topology without UVs or appearance. Other maps/attributes are rejected, and self-intersection freedom or measured surface-error tolerance is not certified.".into(),
+                "Quad retopology is available only when the pinned QuadriFlow sidecar is managed in the MeshHarbor data directory or placed beside the executable. It accepts one closed static triangle mesh; textured input needs POSITION, TEXCOORD_0, optional NORMAL, and the supported embedded base-color/metallic-roughness PNG maps. Supported maps are projected with distance, facing-normal, coverage, and opposing-shell ambiguity gates into the triangulated GLB preview only; the separate OBJ retains quad topology without UVs or appearance. Other maps/attributes are rejected, and self-intersection freedom or measured surface-error tolerance is not certified.".into(),
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
                 "The MIT license covers MeshHarbor code, not upstream model weights or separate DINOv3/NAF terms. Gated access is user-controlled, and generated user inputs stay local to the worker.".into(),
@@ -455,7 +455,7 @@ mod tests {
         assert!(doctor.operations.contains(&"uv.unwrap".to_string()));
         assert_eq!(
             doctor.operations.contains(&"mesh.retopology".to_string()),
-            crate::quadriflow_sidecar_available()
+            crate::quadriflow::quadriflow_sidecar_available_at(core.store.data_root())
         );
         assert_eq!(
             core.list_operations()
@@ -463,7 +463,7 @@ mod tests {
                 .find(|operation| operation.id == "mesh.retopology")
                 .unwrap()
                 .implemented,
-            crate::quadriflow_sidecar_available()
+            crate::quadriflow::quadriflow_sidecar_available_at(core.store.data_root())
         );
         std::fs::remove_dir_all(root).unwrap();
     }

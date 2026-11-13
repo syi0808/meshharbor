@@ -118,7 +118,7 @@
         },
         "url": {
           "type": "string",
-          "pattern": "^https://github\\.com/syi0808/meshharbor/releases/download/quadriflow-v[0-9][A-Za-z0-9._-]*/quadriflow-(linux-x86_64|macos-aarch64|windows-x86_64)\\.(tar\\.gz|zip)$"
+          "pattern": "^https://github\\.com/syi0808/meshharbor/releases/download/quadriflow-v[0-9][A-Za-z0-9._-]*/quadriflow-(linux-x86_64|macos-aarch64|windows-x86_64)\\.tar$"
         },
         "sha256": {
           "$ref": "#/$defs/sha256"

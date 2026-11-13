@@ -161,6 +161,10 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn data_root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn open(root: impl AsRef<Path>) -> CoreResult<Self> {
         let root = root.as_ref().to_path_buf();
         let artifact_root = root.join("artifacts");

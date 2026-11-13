@@ -1,9 +1,9 @@
-//! Structural validation for a future QuadriFlow sidecar release manifest.
+//! Structural validation for the QuadriFlow sidecar release manifest.
 //!
-//! This module deliberately does not download, unpack, install, execute, or
-//! cryptographically attest a sidecar. A non-empty manifest is not a release
-//! approval. The embedded manifest remains empty until a reviewed, signed
-//! release is published and a separate installer implementation is approved.
+//! Network and filesystem effects live in the separate quadriflow_installer
+//! module. This validator does not verify Sigstore signatures or claims. A
+//! non-empty manifest is not legal, provenance, or release approval; the
+//! embedded manifest remains empty until its release gates are complete.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -63,8 +63,7 @@ pub struct QuadriFlowArchive {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QuadriFlowArchiveFormat {
-    TarGz,
-    Zip,
+    Tar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,17 +107,14 @@ pub enum QuadriFlowPlatform {
 impl QuadriFlowPlatform {
     fn archive_filename(self) -> &'static str {
         match self {
-            Self::LinuxX86_64 => "quadriflow-linux-x86_64.tar.gz",
-            Self::MacosAarch64 => "quadriflow-macos-aarch64.tar.gz",
-            Self::WindowsX86_64 => "quadriflow-windows-x86_64.zip",
+            Self::LinuxX86_64 => "quadriflow-linux-x86_64.tar",
+            Self::MacosAarch64 => "quadriflow-macos-aarch64.tar",
+            Self::WindowsX86_64 => "quadriflow-windows-x86_64.tar",
         }
     }
 
     fn archive_format(self) -> QuadriFlowArchiveFormat {
-        match self {
-            Self::LinuxX86_64 | Self::MacosAarch64 => QuadriFlowArchiveFormat::TarGz,
-            Self::WindowsX86_64 => QuadriFlowArchiveFormat::Zip,
-        }
+        QuadriFlowArchiveFormat::Tar
     }
 
     fn executable_path(self) -> &'static str {
@@ -403,7 +399,7 @@ mod tests {
         let bytes = serde_json::to_vec(&manifest).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["artifacts"][0]["platform"], "linux-x86_64");
-        assert_eq!(value["artifacts"][0]["archive"]["format"], "tar-gz");
+        assert_eq!(value["artifacts"][0]["archive"]["format"], "tar");
         assert_eq!(parse_quadriflow_release_manifest(&bytes).unwrap(), manifest);
     }
 

@@ -7,7 +7,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write as FmtWrite,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -696,9 +696,13 @@ fn build_quad_preview(
     Ok((preview, Some(report)))
 }
 
-/// Checks for a packaged, same-directory QuadriFlow sidecar without executing it.
+/// Checks for a packaged or managed QuadriFlow sidecar without executing it.
 pub fn quadriflow_sidecar_available() -> bool {
-    quadriflow_sidecar_path().is_some()
+    quadriflow_sidecar_available_at(&crate::quadriflow_installer::default_data_root())
+}
+
+pub(crate) fn quadriflow_sidecar_available_at(data_root: &Path) -> bool {
+    quadriflow_sidecar_path(data_root).is_some()
 }
 
 /// Run the packaged sidecar on a generated geometry-only OBJ. The original OBJ
@@ -716,6 +720,15 @@ fn validate_quad_target(target_quads: u32) -> CoreResult<()> {
 pub fn quadriflow_retopology_glb(
     bytes: &[u8],
     options: QuadRetopologyOptions,
+) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
+    let data_root = crate::quadriflow_installer::default_data_root();
+    quadriflow_retopology_glb_at(bytes, options, &data_root)
+}
+
+pub(crate) fn quadriflow_retopology_glb_at(
+    bytes: &[u8],
+    options: QuadRetopologyOptions,
+    data_root: &Path,
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
     validate_quad_target(options.target_quads)?;
 
@@ -745,9 +758,9 @@ pub fn quadriflow_retopology_glb(
     validate_remesh_request(&validation)?;
 
     let input_obj = triangle_geometry_obj(&positions, &indices)?;
-    let worker = quadriflow_sidecar_path().ok_or_else(|| {
+    let worker = quadriflow_sidecar_path(data_root).ok_or_else(|| {
         CoreError::OperationUnavailable(
-            "QuadriFlow is not packaged. Install the pinned geometry-only sidecar beside the MeshHarbor executable.".into(),
+            "No compatible QuadriFlow sidecar is available for this MeshHarbor data directory.".into(),
         )
     })?;
     let temp = QuadriflowTempDir::create()?;
@@ -849,7 +862,10 @@ pub fn quadriflow_retopology_glb(
     Ok((preview_glb, quad_obj, report))
 }
 
-fn quadriflow_sidecar_path() -> Option<PathBuf> {
+fn quadriflow_sidecar_path(data_root: &Path) -> Option<PathBuf> {
+    if let Some(sidecar) = crate::quadriflow_installer::native_installed_sidecar(data_root) {
+        return Some(sidecar);
+    }
     let executable = std::env::current_exe().ok()?;
     let name = format!("quadriflow{}", std::env::consts::EXE_SUFFIX);
     let sidecar = executable.with_file_name(name);
