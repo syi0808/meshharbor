@@ -297,8 +297,8 @@ impl Store {
                 base.insert(key.clone(), value.clone());
             }
         }
-        let digest = digest(bytes);
-        let artifact_path = self.artifact_path_for_hash(&digest);
+        let asset_digest = digest(bytes);
+        let artifact_path = self.artifact_path_for_hash(&asset_digest);
         self.write_content_addressed(&artifact_path, bytes)?;
 
         let mut additional_rows = Vec::with_capacity(additional_artifacts.len());
@@ -335,7 +335,7 @@ impl Store {
                 safe_name,
                 descriptor.kind.as_str(),
                 descriptor.mime_type,
-                digest,
+                asset_digest,
                 bytes.len() as i64,
                 source_asset_id,
                 metadata_json,
@@ -349,7 +349,7 @@ impl Store {
                 artifact_id,
                 asset_id,
                 artifact_kind,
-                digest,
+                asset_digest,
                 bytes.len() as i64,
                 descriptor.mime_type,
                 artifact_path.to_string_lossy(),
