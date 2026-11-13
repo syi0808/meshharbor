@@ -644,15 +644,20 @@ pub fn quadriflow_sidecar_available() -> bool {
 /// Run the packaged sidecar on a generated geometry-only OBJ. The original OBJ
 /// bytes are returned separately so callers can persist the actual editable quads;
 /// the GLB is only a triangle preview.
-pub fn quadriflow_retopology_glb(
-    bytes: &[u8],
-    options: QuadRetopologyOptions,
-) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
-    if !(4..=MAX_QUAD_TARGET).contains(&options.target_quads) {
+fn validate_quad_target(target_quads: u32) -> CoreResult<()> {
+    if !(4..=MAX_QUAD_TARGET).contains(&target_quads) {
         return Err(CoreError::InvalidInput(format!(
             "target_quads must be between 4 and {MAX_QUAD_TARGET}."
         )));
     }
+    Ok(())
+}
+
+pub fn quadriflow_retopology_glb(
+    bytes: &[u8],
+    options: QuadRetopologyOptions,
+) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
+    validate_quad_target(options.target_quads)?;
 
     let (positions, indices) = extract_retopology_geometry(bytes)?;
     let validation = RemeshRequest {
@@ -888,6 +893,35 @@ f 4 1 5 8\n";
             [1.0, 1.0, 1.0],
             [-1.0, 1.0, 1.0],
         ]
+    }
+
+    #[test]
+    fn bounds_quad_target_and_rejects_unknown_parameters() {
+        assert!(validate_quad_target(4).is_ok());
+        assert!(validate_quad_target(MAX_QUAD_TARGET).is_ok());
+        assert!(validate_quad_target(3).is_err());
+        assert!(validate_quad_target(MAX_QUAD_TARGET + 1).is_err());
+        assert!(serde_json::from_value::<QuadRetopologyOptions>(
+            json!({"target_quads": 12, "arbitrary_flag": true})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn generates_only_geometry_records_for_the_native_input() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let indices = [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
+        let obj = triangle_geometry_obj(&positions, &indices).unwrap();
+        assert_eq!(obj.lines().filter(|line| line.starts_with("v ")).count(), 4);
+        assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 4);
+        assert!(obj.contains("f 1 3 2\n"));
+        assert!(!obj.contains("vt "));
+        assert!(!obj.contains("vn "));
     }
 
     #[test]
