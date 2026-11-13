@@ -16,7 +16,9 @@ export function App() {
   const [maxError, setMaxError] = useState(0.02);
   const [textureSize, setTextureSize] = useState(1024);
   const [targetFaces, setTargetFaces] = useState(100000);
+  const [generationBackend, setGenerationBackend] = useState('auto');
   const [modelDownloadAcknowledged, setModelDownloadAcknowledged] = useState(false);
+  const [cudaModelDownloadAcknowledged, setCudaModelDownloadAcknowledged] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [report, setReport] = useState<SimplificationReport | null>(null);
   const [busy, setBusy] = useState(false);
@@ -31,6 +33,11 @@ export function App() {
   const isRunning = !!job && ['queued', 'running', 'validating', 'cancelling'].includes(job.state);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
   const mlxBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-mlx');
+  const cudaBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-cuda');
+  const automaticBackend = runtime?.platform === 'linux' ? cudaBackend : mlxBackend;
+  const selectedGenerationBackend = generationBackend === 'auto'
+    ? automaticBackend
+    : runtime?.model_backends.find((backend) => backend.id === generationBackend);
 
   const refreshAssets = useCallback(async (client: MeshHarborApi) => {
     const items = await client.assets();
@@ -89,11 +96,16 @@ export function App() {
             setRuntime(runtimeInfo);
             setOperations(operationList);
             setModelDownloadAcknowledged(false);
+            setCudaModelDownloadAcknowledged(false);
             setNotice(latest.operation === 'runtime.pixal3d.setup'
               ? 'The isolated Python environment is ready. Sign into Hugging Face from a local terminal before downloading gated model files.'
               : latest.operation === 'runtime.pixal3d.install_models'
                 ? 'Pinned model files are ready. MeshHarbor completed the one-time NAF conversion in an isolated tool environment.'
-                : 'The NAF checkpoint is converted and the Pixal3D runtime is ready.');
+                : latest.operation === 'runtime.pixal3d.cuda_setup'
+                  ? 'The isolated CUDA environment and GPU preflight are ready. Sign into Hugging Face in a local terminal before the model download.'
+                  : latest.operation === 'runtime.pixal3d.cuda_install_models'
+                    ? 'Pinned CUDA model files are ready. Generation can now run offline on this NVIDIA host.'
+                    : 'The NAF checkpoint is converted and the Pixal3D runtime is ready.');
             return;
           }
           setReport(latest.result?.report ?? null);
@@ -195,7 +207,7 @@ export function App() {
       setSelectedId(imported.id);
       setActiveView('source');
       setReport(null);
-      setNotice(`${file.name} imported locally${isImage ? '. Generate a 3D asset from it when the MLX runtime is ready.' : '.'}`);
+      setNotice(`${file.name} imported locally${isImage ? '. Generate a 3D asset from it when a Pixal3D runtime is ready.' : '.'}`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not import this file.');
     } finally {
@@ -227,7 +239,7 @@ export function App() {
     setBusy(true);
     setReport(null);
     try {
-      const nextJob = await api.createImageGenerationJob(selectedAsset.id, textureSize, Math.max(4, Math.floor(targetFaces)));
+      const nextJob = await api.createImageGenerationJob(selectedAsset.id, generationBackend, textureSize, Math.max(4, Math.floor(targetFaces)));
       setJob(nextJob);
       setActiveView('result');
     } catch (cause) {
@@ -281,6 +293,36 @@ export function App() {
     }
   }
 
+  async function setupPixal3dCudaRuntime() {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const nextJob = await api.setupPixal3dCudaRuntime();
+      setJob(nextJob);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not set up the Pixal3D CUDA runtime.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function installPixal3dCudaModels() {
+    if (!cudaModelDownloadAcknowledged) return;
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const nextJob = await api.installPixal3dCudaModels();
+      setJob(nextJob);
+      setCudaModelDownloadAcknowledged(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not start the CUDA model download.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function downloadResult() {
     if (!selectedAsset) return;
     try {
@@ -311,7 +353,9 @@ export function App() {
 
   const triangleCount = Number(selectedAsset?.metadata.triangles ?? 0);
   const canSimplify = !!selectedAsset && selectedAsset.kind === 'mesh' && !!operations.find((operation) => operation.id === 'mesh.simplify')?.implemented;
-  const canGenerate = !!selectedAsset && selectedAsset.kind === 'image' && !!operations.find((operation) => operation.id === 'image.generate')?.implemented;
+  const canGenerate = !!selectedAsset && selectedAsset.kind === 'image'
+    && !!operations.find((operation) => operation.id === 'image.generate')?.implemented
+    && selectedGenerationBackend?.ready === true;
   const formatSize = (size: number) => size < 1024 * 1024 ? `${(size / 1024).toFixed(0)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`;
 
   return (
@@ -405,7 +449,13 @@ export function App() {
                 {isRunning && job.operation === 'mesh.simplify' ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating output' : 'Simplifying mesh'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{job.state === 'queued' && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Native simplification can’t be interrupted once it starts.</small></div> : <button className="button button-primary simplify-button" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><span className="spinner small" /> Working…</> : <><SimplifyIcon /> Simplify mesh <span className="button-arrow">→</span></>}</button>}
                 <section className="generation-card" id="image-generation">
                   <div className="generation-heading"><span className="capability-spark">✳</span><strong>Generate from image</strong></div>
-                  <p>Set up the isolated local Pixal3D MLX 512 runtime. Dependencies and model files are separate opt-in steps.</p>
+                  <p>Generate a GLB from a local image with the 512 Pixal3D profile. Choose a ready backend; setup and model downloads stay separate opt-in steps.</p>
+                  <div className="field-label-row"><label htmlFor="generation-backend">Backend</label><span className="field-hint">Auto selects this host’s backend</span></div>
+                  <select id="generation-backend" value={generationBackend} onChange={(event) => setGenerationBackend(event.target.value)} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning}>
+                    <option value="auto">Auto ({automaticBackend?.id === 'pixal3d-cuda' ? 'CUDA' : 'MLX'})</option>
+                    <option value="pixal3d-mlx">Pixal3D MLX (Apple Silicon)</option>
+                    <option value="pixal3d-cuda">Pixal3D CUDA (Linux/NVIDIA)</option>
+                  </select>
                   <div className="field-label-row"><label htmlFor="texture-size">Texture size</label><span className="field-hint">Higher uses more memory</span></div>
                   <select id="texture-size" value={textureSize} onChange={(event) => setTextureSize(Number(event.target.value))} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning}>
                     <option value={512}>512</option><option value={1024}>1024</option><option value={2048}>2048</option>
@@ -421,18 +471,25 @@ export function App() {
                     {!isRunning && mlxBackend?.installable && !mlxBackend.environment_ready && <><p>MeshHarbor will create a private Python 3.12 environment and install the pinned backend dependencies. Install <a href="https://docs.astral.sh/uv/getting-started/installation/" target="_blank" rel="noreferrer">uv</a> first if it is not already on PATH.</p><button className="button button-secondary runtime-action" disabled={busy || isRunning || connection !== 'connected'} onClick={() => void setupPixal3dRuntime()}>{busy ? 'Starting…' : 'Set up Python environment'} <span className="button-arrow">→</span></button></>}
                     {!isRunning && mlxBackend?.environment_ready && !mlxBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime hf-login</code>. The token is entered through Hugging Face's masked prompt and stored only in MeshHarbor's isolated cache.</p><p className="runtime-terms">Model checkpoints have separate terms from MeshHarbor's MIT license. Review the DINOv3 and NAF checkpoint terms and obtain gated access before continuing. This download uses about 24 GB of disk space, then installs an isolated CPU-only NAF conversion environment.</p><label className="runtime-consent"><input type="checkbox" checked={modelDownloadAcknowledged} onChange={(event) => setModelDownloadAcknowledged(event.target.checked)} disabled={busy || isRunning || connection !== 'connected'} /><span>I have reviewed the model terms, have access to gated DINOv3, and am ready to download the files to this computer.</span></label><button className="button button-secondary runtime-action" disabled={!mlxBackend.downloads_enabled || !modelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dModels()}>{busy ? 'Starting…' : 'Download model files'} <span className="button-arrow">↓</span></button></>}
                     {!isRunning && mlxBackend?.models_downloaded && mlxBackend.naf_conversion_required && <div className="runtime-conversion"><strong>One setup step remains</strong><span>The verified NAF checkpoint needs one-time conversion. MeshHarbor installs the pinned CPU-only converter into a separate environment.</span><button className="button button-secondary runtime-action" disabled={!mlxBackend.conversion_enabled || busy || isRunning || connection !== 'connected'} onClick={() => void convertPixal3dNaf()}>{busy ? 'Starting…' : 'Finish NAF conversion'} <span className="button-arrow">→</span></button></div>}
-                    {!isRunning && mlxBackend?.installable === false && <p>Pixal3D MLX setup is supported on Apple Silicon macOS only. The CUDA backend remains source-only in this build.</p>}
+                    {!isRunning && mlxBackend?.installable === false && <p>Pixal3D MLX setup is supported on Apple Silicon macOS only. CUDA setup is a separate Linux/NVIDIA runtime.</p>}
+                    <div className="runtime-panel-heading">Pixal3D CUDA setup <span>{cudaBackend?.status.replaceAll('_', ' ') ?? 'engine disconnected'}</span></div>
+                    {isRunning && job.operation === 'runtime.pixal3d.cuda_setup' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Installing CUDA Python environment and running GPU checks'}</span></div><div className="progress-track"><span /></div><small>Uses Python 3.12, PyTorch 2.6.0 with CUDA 12.4, and an app-private per-install lock. Detailed output appears in the engine terminal.</small></div>}
+                    {isRunning && job.operation === 'runtime.pixal3d.cuda_install_models' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Downloading pinned CUDA model files'}</span></div><div className="progress-track"><span /></div><small>About 25–30 GB; the DINOv3 access check happens before the checkpoint download.</small></div>}
+                    {!isRunning && cudaBackend?.installable && !cudaBackend.environment_ready && <><p>On Linux x86_64 with an NVIDIA GPU, MeshHarbor will create a private Python 3.12 environment, resolve upstream dependency ranges into an app-private lock, install the CUDA 12.4 profile, and run a CUDA/SDPA preflight. This does not download model weights.</p><button className="button button-secondary runtime-action" disabled={busy || isRunning || connection !== 'connected'} onClick={() => void setupPixal3dCudaRuntime()}>{busy ? 'Starting…' : 'Set up CUDA environment'} <span className="button-arrow">→</span></button></>}
+                    {!isRunning && cudaBackend?.environment_ready && !cudaBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime cuda-hf-login</code>. Hugging Face's prompt stores credentials only in the isolated CUDA cache.</p><p className="runtime-terms">The project is MIT, but model/checkpoint terms are separate. Review DINOv3, Pixal3D, and NAF terms and obtain gated DINOv3 access first. The download is about 25–30 GB and needs roughly 40 GiB of free disk space.</p><label className="runtime-consent"><input type="checkbox" checked={cudaModelDownloadAcknowledged} onChange={(event) => setCudaModelDownloadAcknowledged(event.target.checked)} disabled={busy || isRunning || connection !== 'connected'} /><span>I reviewed the model terms, have gated DINOv3 access, and approve downloading the CUDA model files to this computer.</span></label><button className="button button-secondary runtime-action" disabled={!cudaBackend.downloads_enabled || !cudaModelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dCudaModels()}>{busy ? 'Starting…' : 'Download CUDA model files'} <span className="button-arrow">↓</span></button></>}
+                    {!isRunning && cudaBackend?.installable === false && <p>Pixal3D CUDA setup is Linux x86_64/NVIDIA only. Use the Apple MLX backend on supported Macs; the CUDA backend is not available on this host.</p>}
+                    {cudaBackend?.license_notice && <p className="runtime-terms">{cudaBackend.license_notice}</p>}
                     {isRunning && job.operation.startsWith('runtime.') && <small className="runtime-serial-note">Runtime installation and generation share one local worker.</small>}
                   </div>
                   {selectedAsset?.kind !== 'image' && <div className="engine-nudge">Import or select a PNG/JPEG image to generate a mesh.</div>}
-                  {selectedAsset?.kind === 'image' && !canGenerate && <div className="engine-nudge">{backendStatus('pixal3d-mlx')}. Complete the runtime and model steps above before starting inference.</div>}
+                  {selectedAsset?.kind === 'image' && !canGenerate && <div className="engine-nudge">{selectedGenerationBackend?.status.replaceAll('_', ' ') ?? 'No supported backend detected'}. Complete that backend’s runtime and model steps before starting inference.</div>}
                   {connection !== 'connected' && <div className="engine-nudge">Start the local engine to generate.</div>}
                 </section>
                 {connection !== 'connected' && <div className="engine-nudge"><span>●</span> Start the local engine to process models.</div>}
                 {selectedAsset && selectedAsset.kind !== 'mesh' && <div className="engine-nudge">Simplification requires a GLB mesh file.</div>}
               </div>
 
-              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>More is on the way</strong></div><p>UV unwrapping and texture baking are not available in this build yet. The optional MLX runtime can be prepared locally; CUDA setup is still under development.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
+              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>More is on the way</strong></div><p>UV unwrapping and texture baking are not available in this build yet. Both Pixal3D backends are opt-in; model terms remain separate from MeshHarbor’s MIT license.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
             </aside>
           </div>
         </main>
