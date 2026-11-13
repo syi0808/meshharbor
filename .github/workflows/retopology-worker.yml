@@ -23,8 +23,12 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Run workspace tests with optional remesher
-        run: cargo test --workspace --all-features
+      - name: Run workspace tests with optional remesher and committed lockfile
+        run: cargo test --workspace --all-features --locked
+      - name: Install declared minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+      - name: Run workspace tests on minimum Rust version
+        run: cargo test --workspace --all-features --locked
       - name: Export resolved lockfile for review
         run: |
           echo "MESHHARBOR_LOCKFILE_B64_BEGIN"
