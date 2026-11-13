@@ -27,6 +27,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::chunks-exact-to-as-chunks
       - name: Run workspace tests with optional remesher and committed lockfile
         run: cargo test --workspace --all-features --locked
+      - name: Test QuadriFlow notice and SBOM evidence helper
+        run: python3 -m unittest discover -s scripts -p 'test_quadriflow_notices.py'
       - name: Install declared minimum Rust toolchain
         uses: dtolnay/rust-toolchain@1.88.0
       - name: Run workspace tests on minimum Rust version
