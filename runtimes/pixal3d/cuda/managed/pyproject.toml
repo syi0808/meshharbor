@@ -1,0 +1,23 @@
+[project]
+name = "meshharbor-pixal3d-cuda-runtime"
+version = "0.1.0"
+description = "Isolated Linux CUDA profile for the vendored Pixal3D backend"
+requires-python = "==3.12.*"
+dependencies = [
+    "pixal3d-cuda",
+    "torch==2.6.0",
+    "torchvision==0.21.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+pixal3d-cuda = { path = "../upstream", editable = false }
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
