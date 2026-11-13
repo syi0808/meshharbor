@@ -3,9 +3,10 @@
 ## Status
 
 This remains a feature-branch candidate. Core now has an isolated worker adapter
-a strict untextured-GLB adapter and child-process end-to-end test, plus a separate
-QuadriFlow OBJ-output validator and triangle-only GLB preview builder, but neither
-candidate is wired into the operation catalog, GLB job flow, REST/MCP tools, or Studio.
+and a strict untextured-GLB adapter with a child-process end-to-end test, plus a
+separate QuadriFlow OBJ-output validator and triangle-only GLB preview builder.
+Neither candidate is wired into the operation catalog, GLB job flow, REST/MCP tools,
+or Studio.
 Keep `mesh.retopology` unavailable until broader geometry-quality/self-intersection
 acceptance and application packaging of the sidecar worker are complete.
 
