@@ -51,7 +51,9 @@ pub fn parse_quad_obj_output(
     source_positions: &[[f32; 3]],
 ) -> CoreResult<(QuadMesh, QuadMeshReport)> {
     if bytes.is_empty() || bytes.len() > MAX_OBJ_BYTES {
-        return Err(output_error("QuadriFlow OBJ output is empty or exceeds 64 MiB."));
+        return Err(output_error(
+            "QuadriFlow OBJ output is empty or exceeds 64 MiB.",
+        ));
     }
     let text = std::str::from_utf8(bytes)
         .map_err(|_| output_error("QuadriFlow OBJ output is not UTF-8."))?;
@@ -97,7 +99,9 @@ pub fn parse_quad_obj_output(
             }
             "f" => {
                 if quads.len() >= MAX_QUADS {
-                    return Err(output_error("QuadriFlow output exceeds 500,000 quad faces."));
+                    return Err(output_error(
+                        "QuadriFlow output exceeds 500,000 quad faces.",
+                    ));
                 }
                 let mut face = [0u32; 4];
                 for index in &mut face {
@@ -161,7 +165,11 @@ pub fn quad_mesh_preview_glb(mesh: &QuadMesh) -> CoreResult<Vec<u8>> {
         .map_err(|_| output_error("Quad preview has invalid mesh bounds."))?;
     let mut triangle_indices = Vec::with_capacity(mesh.quads.len() * 6);
     for quad in &mesh.quads {
-        triangle_indices.extend(triangulate_quad(quad, &mesh.positions, mesh_bounds.diagonal)?);
+        triangle_indices.extend(triangulate_quad(
+            quad,
+            &mesh.positions,
+            mesh_bounds.diagonal,
+        )?);
     }
 
     let mut normals = vec![[0.0f64; 3]; mesh.positions.len()];
@@ -282,8 +290,8 @@ pub fn quad_mesh_preview_glb(mesh: &QuadMesh) -> CoreResult<Vec<u8>> {
     if total_length > MAX_PREVIEW_BYTES {
         return Err(output_error("Quad preview GLB exceeds 128 MiB."));
     }
-    let total_length = u32::try_from(total_length)
-        .map_err(|_| output_error("Quad preview GLB is too large."))?;
+    let total_length =
+        u32::try_from(total_length).map_err(|_| output_error("Quad preview GLB is too large."))?;
     let mut glb = Vec::with_capacity(total_length as usize);
     glb.extend_from_slice(b"glTF");
     glb.extend_from_slice(&2u32.to_le_bytes());
@@ -309,7 +317,9 @@ fn validate_quad_mesh(mesh: &QuadMesh, source_bounds: Bounds) -> CoreResult<()> 
         || mesh.quads.is_empty()
         || mesh.quads.len() > MAX_QUADS
     {
-        return Err(output_error("QuadriFlow returned an empty or oversized quad mesh."));
+        return Err(output_error(
+            "QuadriFlow returned an empty or oversized quad mesh.",
+        ));
     }
     for position in &mesh.positions {
         if position.iter().any(|component| !component.is_finite()) {
@@ -332,8 +342,13 @@ fn validate_quad_mesh(mesh: &QuadMesh, source_bounds: Bounds) -> CoreResult<()> 
     let mut edge_faces = HashMap::<(u32, u32), (u8, i8)>::new();
     let mut unique_faces = HashSet::<[u32; 4]>::new();
     for quad in &mesh.quads {
-        if quad.iter().any(|index| *index as usize >= mesh.positions.len()) {
-            return Err(output_error("QuadriFlow returned an out-of-range quad index."));
+        if quad
+            .iter()
+            .any(|index| *index as usize >= mesh.positions.len())
+        {
+            return Err(output_error(
+                "QuadriFlow returned an out-of-range quad index.",
+            ));
         }
         if (0..4).any(|index| quad[index] == quad[(index + 1) % 4]) {
             return Err(output_error("QuadriFlow returned a degenerate quad."));
@@ -353,9 +368,7 @@ fn validate_quad_mesh(mesh: &QuadMesh, source_bounds: Bounds) -> CoreResult<()> 
             *count = count.saturating_add(1);
             *winding += if u < v { 1 } else { -1 };
             if *count > 2 {
-                return Err(output_error(
-                    "QuadriFlow returned a non-manifold edge.",
-                ));
+                return Err(output_error("QuadriFlow returned a non-manifold edge."));
             }
         }
     }
@@ -453,7 +466,11 @@ fn triangulate_quad(
         (true, true) => {
             let diagonal_ac = squared_distance(positions[a as usize], positions[c as usize]);
             let diagonal_bd = squared_distance(positions[b as usize], positions[d as usize]);
-            Ok(if diagonal_ac <= diagonal_bd { first } else { second })
+            Ok(if diagonal_ac <= diagonal_bd {
+                first
+            } else {
+                second
+            })
         }
         (true, false) => Ok(first),
         (false, true) => Ok(second),
@@ -486,12 +503,7 @@ fn valid_triangulation(triangles: &[u32; 6], positions: &[[f32; 3]], diagonal: f
         && dot(first, second) > 0.0
 }
 
-fn normalized_triangle_normal(
-    a: [f32; 3],
-    b: [f32; 3],
-    c: [f32; 3],
-    diagonal: f64,
-) -> [f64; 3] {
+fn normalized_triangle_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3], diagonal: f64) -> [f64; 3] {
     let a = point(a);
     let b = point(b);
     let c = point(c);
@@ -616,8 +628,7 @@ f 4 1 5 8\n";
 
     #[test]
     fn parses_closed_quad_obj_and_writes_triangle_preview_glb() {
-        let (mesh, report) =
-            parse_quad_obj_output(CUBE_OBJ.as_bytes(), &cube_positions()).unwrap();
+        let (mesh, report) = parse_quad_obj_output(CUBE_OBJ.as_bytes(), &cube_positions()).unwrap();
         assert_eq!(mesh.vertex_count(), 8);
         assert_eq!(mesh.quad_count(), 6);
         assert_eq!(report.preview_triangles, 12);
@@ -639,23 +650,19 @@ f 4 1 5 8\n";
         );
 
         let open = CUBE_OBJ.replacen("f 4 1 5 8\n", "", 1);
-        assert!(
-            parse_quad_obj_output(open.as_bytes(), &cube_positions())
-                .unwrap_err()
-                .to_string()
-                .contains("open or non-watertight")
-        );
+        assert!(parse_quad_obj_output(open.as_bytes(), &cube_positions())
+            .unwrap_err()
+            .to_string()
+            .contains("open or non-watertight"));
     }
 
     #[test]
     fn rejects_unsupported_obj_records_and_bad_indices() {
         let with_uv = CUBE_OBJ.replace("v -1 -1 -1", "vt 0 0\nv -1 -1 -1");
-        assert!(
-            parse_quad_obj_output(with_uv.as_bytes(), &cube_positions())
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported record")
-        );
+        assert!(parse_quad_obj_output(with_uv.as_bytes(), &cube_positions())
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported record"));
 
         let bad_index = CUBE_OBJ.replacen("f 1 4 3 2", "f 1 4 3 0", 1);
         assert!(
@@ -669,11 +676,9 @@ f 4 1 5 8\n";
     #[test]
     fn rejects_output_far_outside_source_bounds() {
         let far = CUBE_OBJ.replace("v 1 1 1", "v 100 100 100");
-        assert!(
-            parse_quad_obj_output(far.as_bytes(), &cube_positions())
-                .unwrap_err()
-                .to_string()
-                .contains("envelope")
-        );
+        assert!(parse_quad_obj_output(far.as_bytes(), &cube_positions())
+            .unwrap_err()
+            .to_string()
+            .contains("envelope"));
     }
 }
