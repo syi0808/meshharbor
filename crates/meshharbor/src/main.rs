@@ -299,7 +299,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start an asynchronous image.generate job using a user-provisioned local Pixal3D MLX runtime. This tool never downloads models or installs packages; gated model access must be arranged by the user outside MeshHarbor."
+        description = "Start an asynchronous image.generate job using the selected, already prepared local Pixal3D backend (MLX on Apple Silicon or CUDA on Linux/NVIDIA). The `backend_id` can select `auto`, `pixal3d-mlx`, or `pixal3d-cuda`. This tool never downloads models or installs packages; model downloads and gated access are separate user-controlled steps."
     )]
     async fn start_image_generation(&self, params: Parameters<GenerateArgs>) -> String {
         let args = params.0;
