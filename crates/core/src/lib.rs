@@ -26,9 +26,8 @@ pub use operation::{
 pub use parts::{PartSeparationReport, separate_components};
 pub use retopology::{
     REMESH_PROTOCOL_VERSION, RemeshRequest, RemeshResponse, RetopologyOptions, RetopologyReport,
-    normalize_remesh_positions,
-    remesh_triangles_in_worker, restore_remesh_positions, validate_remesh_request,
-    validate_remesh_response,
+    normalize_remesh_positions, remesh_triangles_in_worker, restore_remesh_positions,
+    validate_remesh_request, validate_remesh_response,
 };
 pub use runtime::{Pixal3dRuntimeManager, RuntimeSetupReport};
 pub use store::{Artifact, Asset, AssetKind, CoreError, CoreResult, Job, JobState, Store};
