@@ -91,7 +91,10 @@ impl Pixal3dRuntimeManager {
         self.ensure_source()?;
         self.validate_source()?;
         let uv = ensure_uv(&self.runtime_root)?;
+        self.setup_environment_with_uv(&uv)
+    }
 
+    fn setup_environment_with_uv(&self, uv: &Path) -> CoreResult<RuntimeSetupReport> {
         let python_dir = self.runtime_root.join("python");
         let cache_dir = self.runtime_root.join("uv-cache");
         let home_dir = self.home_path();
@@ -101,16 +104,18 @@ impl Pixal3dRuntimeManager {
         std::fs::create_dir_all(&home_dir)?;
 
         eprintln!("[1/4] Installing an isolated managed Python {PYTHON_REQUEST} runtime…");
-        let mut install = self.uv_command(&uv, &home_dir, &cache_dir);
+        let mut install = self.uv_command(uv, &home_dir, &cache_dir);
         install
             .args(["python", "install", PYTHON_REQUEST, "--install-dir"])
             .arg(&python_dir);
         run_visible(install, "uv could not install managed Python 3.12")?;
 
         eprintln!("[2/4] Locating the managed Python interpreter…");
-        let python = self.find_managed_python(&uv, &home_dir, &cache_dir)?;
+        let python = self.find_managed_python(uv, &home_dir, &cache_dir)?;
+        let mut version_check = self.python_command(&python);
+        version_check.arg("--version");
         let python_version = run_capture(
-            Command::new(&python).arg("--version"),
+            &mut version_check,
             "Could not verify the managed Python interpreter",
         )?;
         if !python_version.starts_with("Python 3.12.") {
@@ -120,7 +125,7 @@ impl Pixal3dRuntimeManager {
         }
 
         eprintln!("[3/4] Creating the isolated MLX environment…");
-        let mut venv = self.uv_command(&uv, &home_dir, &cache_dir);
+        let mut venv = self.uv_command(uv, &home_dir, &cache_dir);
         venv.args(["venv", "--no-project", "--allow-existing", "--python"])
             .arg(&python)
             .arg(&venv_dir);
@@ -132,7 +137,7 @@ impl Pixal3dRuntimeManager {
         } else {
             venv_dir.join("bin/python")
         };
-        let mut sync = self.uv_command(&uv, &home_dir, &cache_dir);
+        let mut sync = self.uv_command(uv, &home_dir, &cache_dir);
         sync.env("UV_PROJECT_ENVIRONMENT", &venv_dir)
             .arg("sync")
             .arg("--project")
@@ -142,8 +147,10 @@ impl Pixal3dRuntimeManager {
             .args(["--locked", "--no-dev", "--no-editable"]);
         run_visible(sync, "uv could not install the pinned MLX dependencies")?;
 
+        let mut version_check = self.python_command(&venv_python);
+        version_check.arg("--version");
         let verified_version = run_capture(
-            Command::new(&venv_python).arg("--version"),
+            &mut version_check,
             "Could not verify the created MLX environment",
         )?;
         if !verified_version.starts_with("Python 3.12.") {
@@ -151,11 +158,13 @@ impl Pixal3dRuntimeManager {
                 "The managed environment uses unexpected interpreter {verified_version}."
             )));
         }
+        let mut import_check = self.python_command(&venv_python);
+        import_check.args([
+            "-c",
+            "import mlx, huggingface_hub, safetensors; print('MLX runtime imports are available')",
+        ]);
         run_capture(
-            Command::new(&venv_python).args([
-                "-c",
-                "import mlx, huggingface_hub, safetensors; print('MLX runtime imports are available')",
-            ]),
+            &mut import_check,
             "The locked Python environment was created, but MLX imports failed",
         )?;
         Ok(RuntimeSetupReport {
@@ -190,16 +199,24 @@ impl Pixal3dRuntimeManager {
                 python.display()
             )));
         }
+        let uv = ensure_uv(&self.runtime_root)?;
+        self.install_models_with_tools(&uv, &python)
+    }
+
+    fn install_models_with_tools(
+        &self,
+        uv: &Path,
+        python: &Path,
+    ) -> CoreResult<RuntimeSetupReport> {
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
         let weights = self.runtime_root.join("weights");
         std::fs::create_dir_all(&weights)?;
-        let uv = ensure_uv(&self.runtime_root)?;
         let scripts = self.managed_scripts_root();
         eprintln!(
             "[1/3] Checking access to the gated DINOv3 model before downloading large checkpoints…"
         );
-        let mut preflight = Command::new(&python);
+        let mut preflight = self.python_command(python);
         preflight
             .current_dir(&self.source_root)
             .env_clear()
@@ -224,7 +241,7 @@ impl Pixal3dRuntimeManager {
         eprintln!(
             "[2/3] Downloading pinned model files. Large files can take time; progress is shown below…"
         );
-        let mut download = Command::new(&python);
+        let mut download = self.python_command(python);
         download
             .current_dir(&self.source_root)
             .env_clear()
@@ -247,12 +264,12 @@ impl Pixal3dRuntimeManager {
         eprintln!(
             "[3/3] Preparing an isolated CPU-only conversion environment for the NAF checkpoint…"
         );
-        self.convert_naf_checkpoint(&uv, &home, &self.runtime_root.join("uv-cache"), &weights)?;
+        self.convert_naf_checkpoint(uv, &home, &self.runtime_root.join("uv-cache"), &weights)?;
         Ok(RuntimeSetupReport {
             backend_id: "pixal3d-mlx".into(),
             status: "model_files_ready".into(),
             runtime_root: self.runtime_root.clone(),
-            python,
+            python: python.to_path_buf(),
             lockfile: self.source_root.join("uv.lock"),
             message: "Pinned Pixal3D and gated DINOv3 snapshots were downloaded; Pixal3D/NAF hashes were verified, and NAF was converted in an isolated CPU-only environment.".into(),
         })
@@ -441,6 +458,23 @@ impl Pixal3dRuntimeManager {
         command
     }
 
+    fn python_command(&self, python: &Path) -> Command {
+        let home = self.home_path();
+        let mut command = Command::new(python);
+        command
+            .env_clear()
+            .env("HOME", &home)
+            .env("HF_HOME", home.join(".cache/huggingface"))
+            .env("PATH", managed_path(&self.runtime_root))
+            .env("PYTHONNOUSERSITE", "1");
+        for temporary_key in ["TMPDIR", "TEMP", "TMP"] {
+            if let Some(value) = env::var_os(temporary_key) {
+                command.env(temporary_key, value);
+            }
+        }
+        command
+    }
+
     fn find_managed_python(&self, uv: &Path, home: &Path, cache: &Path) -> CoreResult<PathBuf> {
         let mut command = self.uv_command(uv, home, cache);
         let output = command
@@ -501,7 +535,8 @@ fn huggingface_login_command(executable: &Path, runtime_root: &Path, home: &Path
         .env("HOME", home)
         .env("HF_HOME", home.join(".cache/huggingface"))
         .env("PATH", managed_path(runtime_root))
-        .env("HF_HUB_DISABLE_TELEMETRY", "1");
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .env("PYTHONNOUSERSITE", "1");
     command
 }
 
@@ -623,6 +658,215 @@ mod tests {
 
         // Extraction is idempotent, as runtime setup may be retried.
         materialize_embedded_source(&root, true).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_test_script(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    #[test]
+    fn managed_python_setup_retries_failed_sync_in_private_storage_without_credentials() {
+        let root = env::temp_dir().join(format!("meshharbor-mlx-setup-retry-{}", Uuid::new_v4()));
+        let data_root = root.join("app-data");
+        let runtime_root = data_root.join("runtimes/pixal3d-mlx");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::write(data_root.join("owner-sentinel"), "preserve me").unwrap();
+        let manager = Pixal3dRuntimeManager {
+            source_root: runtime_root.join("source/upstream"),
+            runtime_root: runtime_root.clone(),
+        };
+        materialize_embedded_source(&runtime_root, true).unwrap();
+        manager.validate_source().unwrap();
+
+        let fake_python = root.join("fake-python");
+        write_test_script(
+            &fake_python,
+            r#"#!/bin/sh
+printf '%s|%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOME" "$PYTHONNOUSERSITE" >> "$HOME/python-env.log"
+case "$1" in
+  --version) echo "Python 3.12.9" ;;
+  -c) echo "fake imports are available" ;;
+  *) exit 0 ;;
+esac
+"#,
+        );
+        let fake_uv = root.join("fake-uv");
+        let mut uv_script = String::from(
+            r#"#!/bin/sh
+printf '%s:%s|%s|%s\n' "$1" "$2" "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" >> "$UV_CACHE_DIR/uv.log"
+FAKE_PYTHON_PLACEHOLDER
+case "$1:$2" in
+  python:install)
+    interpreter="$UV_PYTHON_INSTALL_DIR/cpython-3.12.9/bin/python"
+    mkdir -p "$(dirname "$interpreter")"
+    cp "$FAKE_PYTHON" "$interpreter"
+    chmod +x "$interpreter"
+    ;;
+  python:find)
+    echo "$UV_PYTHON_INSTALL_DIR/cpython-3.12.9/bin/python"
+    ;;
+  venv:*)
+    destination=""
+    for argument in "$@"; do destination="$argument"; done
+    mkdir -p "$destination/bin"
+    cp "$FAKE_PYTHON" "$destination/bin/python"
+    chmod +x "$destination/bin/python"
+    ;;
+  sync:*)
+    if [ ! -e "$UV_CACHE_DIR/sync-failed-once" ]; then
+      : > "$UV_CACHE_DIR/sync-failed-once"
+      exit 17
+    fi
+    ;;
+  *)
+    echo "unexpected fake uv arguments: $*" >&2
+    exit 81
+    ;;
+esac
+"#,
+        );
+        uv_script = uv_script.replace(
+            "FAKE_PYTHON_PLACEHOLDER",
+            &format!(
+                "FAKE_PYTHON={}",
+                shell_quote(&fake_python.to_string_lossy())
+            ),
+        );
+        write_test_script(&fake_uv, &uv_script);
+
+        assert!(manager.setup_environment_with_uv(&fake_uv).is_err());
+        let report = manager.setup_environment_with_uv(&fake_uv).unwrap();
+        assert_eq!(report.backend_id, "pixal3d-mlx");
+        assert_eq!(
+            report.status,
+            "python_environment_ready_models_not_installed"
+        );
+        assert!(report.runtime_root.starts_with(&data_root));
+        assert!(report.python.starts_with(&runtime_root));
+        assert!(report.lockfile.is_file());
+        assert!(!runtime_root.join("weights").exists());
+
+        let uv_log = fs::read_to_string(runtime_root.join("uv-cache/uv.log")).unwrap();
+        assert_eq!(uv_log.matches("sync:--project").count(), 2);
+        assert!(uv_log.lines().all(|line| line.contains("||")));
+        let python_log = fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
+        assert!(python_log.lines().all(|line| {
+            let fields: Vec<_> = line.split('|').collect();
+            fields.len() == 5
+                && fields[0].is_empty()
+                && fields[1].is_empty()
+                && fields[2].starts_with(&manager.home_path().to_string_lossy().to_string())
+                && fields[3].starts_with(
+                    &manager
+                        .home_path()
+                        .join(".cache/huggingface")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                && fields[4] == "1"
+        }));
+        assert_eq!(
+            fs::read_to_string(data_root.join("owner-sentinel")).unwrap(),
+            "preserve me"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_download_retry_keeps_partial_cache_and_reaches_checkpoint_validation() {
+        let root =
+            env::temp_dir().join(format!("meshharbor-mlx-download-retry-{}", Uuid::new_v4()));
+        let data_root = root.join("app-data");
+        let runtime_root = data_root.join("runtimes/pixal3d-mlx");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::write(data_root.join("owner-sentinel"), "preserve me").unwrap();
+        let manager = Pixal3dRuntimeManager {
+            source_root: runtime_root.join("source/upstream"),
+            runtime_root: runtime_root.clone(),
+        };
+        materialize_embedded_source(&runtime_root, true).unwrap();
+        manager.validate_source().unwrap();
+
+        let fake_python = root.join("fake-python");
+        write_test_script(
+            &fake_python,
+            r#"#!/bin/sh
+printf '%s|%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOME" "$PYTHONNOUSERSITE" >> "$HOME/python-env.log"
+case "$1" in
+  -c) echo "fake access check passed"; exit 0 ;;
+esac
+case " $* " in
+  *" --preflight-only "*) exit 0 ;;
+esac
+weights=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--weights-dir" ]; then weights="$2"; shift 2; else shift; fi
+done
+count_file="$HOME/download-attempts"
+if [ -f "$count_file" ]; then count=$(cat "$count_file"); else count=0; fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then
+  mkdir -p "$HF_HOME/hub/.cache/download"
+  printf 'partial checkpoint bytes' > "$HF_HOME/hub/.cache/download/partial"
+  exit 23
+fi
+mkdir -p "$weights"
+printf 'invalid fixture bytes' > "$weights/naf_release.pth"
+exit 0
+"#,
+        );
+        let partial = manager
+            .home_path()
+            .join(".cache/huggingface/hub/.cache/download/partial");
+        let unused_uv = root.join("unused-uv");
+
+        let first = manager.install_models_with_tools(&unused_uv, &fake_python);
+        assert!(first.is_err());
+        assert_eq!(
+            fs::read_to_string(&partial).unwrap(),
+            "partial checkpoint bytes"
+        );
+
+        let second = manager.install_models_with_tools(&unused_uv, &fake_python);
+        let error = second.expect_err("fake fixture must reach the pinned checkpoint hash check");
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert_eq!(
+            fs::read_to_string(&partial).unwrap(),
+            "partial checkpoint bytes"
+        );
+        assert_eq!(
+            fs::read_to_string(runtime_root.join("weights/naf_release.pth")).unwrap(),
+            "invalid fixture bytes"
+        );
+        let python_log = fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
+        assert!(python_log.lines().all(|line| {
+            let fields: Vec<_> = line.split('|').collect();
+            fields.len() == 5
+                && fields[0].is_empty()
+                && fields[1].is_empty()
+                && fields[2].starts_with(&manager.home_path().to_string_lossy().to_string())
+                && fields[3].starts_with(
+                    &manager
+                        .home_path()
+                        .join(".cache/huggingface")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                && fields[4] == "1"
+        }));
+        assert_eq!(
+            fs::read_to_string(data_root.join("owner-sentinel")).unwrap(),
+            "preserve me"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

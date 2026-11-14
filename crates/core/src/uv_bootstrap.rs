@@ -5,7 +5,9 @@
 //! application-data directory. No shell is used for download or extraction.
 
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -230,7 +232,33 @@ fn download_https(url: &str, destination: &Path) -> CoreResult<()> {
     // URL is constructed solely from a compile-time release pin and a
     // compile-time target mapping. curl is invoked without a shell.
     let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+    download_https_with(curl, url, destination)
+}
+
+fn download_https_with(curl: impl AsRef<OsStr>, url: &str, destination: &Path) -> CoreResult<()> {
     let mut command = Command::new(curl);
+    command.env_clear();
+    for name in [
+        "PATH",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "CURL_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+    ] {
+        if let Some(value) = env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     command
         .args([
             "--disable",
@@ -256,6 +284,10 @@ fn download_https(url: &str, destination: &Path) -> CoreResult<()> {
         ))
     })?;
     if !status.success() {
+        // curl can leave a truncated archive after a timeout. Do not leave it
+        // looking like a reusable download; the app-managed stage is removed
+        // by its owner as well.
+        let _ = fs::remove_file(destination);
         return Err(CoreError::OperationUnavailable(format!(
             "The official uv download failed (curl exit {}). Check network access and retry.",
             status
@@ -422,5 +454,47 @@ mod tests {
         let expected = format!("{:x}", Sha256::digest(BLOB));
         assert!(verify_archive_bytes(BLOB, &expected));
         assert!(!verify_archive_bytes(BLOB, &"0".repeat(64)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_curl_download_drops_partial_archive_and_hf_tokens() {
+        use std::os::unix::fs::PermissionsExt;
+        use uuid::Uuid;
+
+        let root = env::temp_dir().join(format!("meshharbor-uv-download-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let fake_curl = root.join("fake-curl");
+        fs::write(
+            &fake_curl,
+            r#"#!/bin/sh
+output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then output="$2"; shift 2; else shift; fi
+done
+printf 'partial archive bytes' > "$output"
+printf '%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" > "$output.env"
+exit 28
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_curl).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_curl, permissions).unwrap();
+
+        let destination = root.join("uv.tar.gz");
+        let error = download_https_with(
+            &fake_curl,
+            "https://example.invalid/uv.tar.gz",
+            &destination,
+        )
+        .expect_err("the fake curl deliberately simulates a timeout");
+        assert!(error.to_string().contains("curl exit 28"));
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read_to_string(root.join("uv.tar.gz.env")).unwrap(),
+            "|\n"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

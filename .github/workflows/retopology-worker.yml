@@ -23,6 +23,10 @@ jobs:
       - name: Run strict Clippy with optional remesher
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::chunks-exact-to-as-chunks
       - name: Run workspace tests with optional remesher and committed lockfile
+        env:
+          # Non-credential sentinels prove managed child processes do not inherit HF tokens.
+          HF_TOKEN: meshharbor-test-sentinel-not-a-credential
+          HUGGING_FACE_HUB_TOKEN: meshharbor-test-sentinel-not-a-credential
         run: cargo test --workspace --all-features --locked
       - name: Test QuadriFlow notice and SBOM evidence helper
         run: python3 -m unittest discover -s scripts -p 'test_quadriflow_*.py'
