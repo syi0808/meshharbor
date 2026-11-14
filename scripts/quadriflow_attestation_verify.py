@@ -122,6 +122,7 @@ def _validate_predicate(
     workflow_run_id: int,
     workflow_run_attempt: int,
     platform: str,
+    artifact_sha256: str,
 ) -> None:
     if workflow_commit != source_commit:
         raise VerificationError("workflow and source commits must match for main-branch builds")
@@ -156,6 +157,12 @@ def _validate_predicate(
             "event_name": "workflow_dispatch",
         },
         "meshharbor_platform": platform,
+        "meshharbor_reproducibility": {
+            "strategy": "independent-job-byte-identical",
+            "primary_replica": "primary",
+            "independent_replica": "independent",
+            "independent_build_sha256": artifact_sha256,
+        },
     }
     if build_definition.get("internalParameters") != expected_internal:
         raise VerificationError("SLSA GitHub context did not match the pinned policy")
@@ -348,6 +355,7 @@ def _validate_cli_result(
         workflow_run_id,
         workflow_run_attempt,
         platform,
+        artifact_digest,
     )
 
     timestamps = verified.get("verifiedTimestamps")

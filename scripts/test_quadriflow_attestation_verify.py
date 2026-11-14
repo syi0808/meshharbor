@@ -102,6 +102,7 @@ class CandidateVerifierTests(unittest.TestCase):
                 self.workflow_run_id,
                 self.workflow_run_attempt,
                 self.platform,
+                hashlib.sha256(self.binary.read_bytes()).hexdigest(),
             )
         return json.dumps([
             {
@@ -296,6 +297,7 @@ class CandidateVerifierTests(unittest.TestCase):
             self.workflow_run_id,
             self.workflow_run_attempt,
             self.platform,
+            hashlib.sha256(self.binary.read_bytes()).hexdigest(),
         )
         mutations = []
         wrong_workflow = copy.deepcopy(valid)
@@ -308,6 +310,16 @@ class CandidateVerifierTests(unittest.TestCase):
             "windows-x86_64"
         )
         mutations.append(wrong_platform)
+        wrong_independent_digest = copy.deepcopy(valid)
+        wrong_independent_digest["buildDefinition"]["internalParameters"][
+            "meshharbor_reproducibility"
+        ]["independent_build_sha256"] = "0" * 64
+        mutations.append(wrong_independent_digest)
+        wrong_independent_replica = copy.deepcopy(valid)
+        wrong_independent_replica["buildDefinition"]["internalParameters"][
+            "meshharbor_reproducibility"
+        ]["independent_replica"] = "primary"
+        mutations.append(wrong_independent_replica)
         missing_material = copy.deepcopy(valid)
         missing_material["buildDefinition"]["resolvedDependencies"].pop()
         mutations.append(missing_material)

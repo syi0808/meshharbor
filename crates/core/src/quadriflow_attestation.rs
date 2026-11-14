@@ -371,6 +371,12 @@ fn validate_build_definition(
             "event_name": "workflow_dispatch",
         },
         "meshharbor_platform": artifact.platform,
+        "meshharbor_reproducibility": {
+            "strategy": "independent-job-byte-identical",
+            "primary_replica": "primary",
+            "independent_replica": "independent",
+            "independent_build_sha256": artifact.payload.executable.sha256,
+        },
     });
     if Value::Object(internal.clone()) != expected_internal {
         return Err(AttestationVerificationError);
@@ -679,6 +685,12 @@ mod tests {
                             "event_name": "workflow_dispatch",
                         },
                         "meshharbor_platform": artifact.platform,
+                        "meshharbor_reproducibility": {
+                            "strategy": "independent-job-byte-identical",
+                            "primary_replica": "primary",
+                            "independent_replica": "independent",
+                            "independent_build_sha256": artifact.payload.executable.sha256,
+                        },
                     },
                     "resolvedDependencies": [
                         {
@@ -775,6 +787,22 @@ mod tests {
         let artifact = test_artifact();
         let valid = valid_slsa_statement(&artifact);
         assert!(validate_slsa_statement(&valid, PINNED_SOURCE_COMMIT, &artifact).is_ok());
+
+        let mut wrong_independent_digest = valid.clone();
+        wrong_independent_digest["predicate"]["buildDefinition"]["internalParameters"]["meshharbor_reproducibility"]
+            ["independent_build_sha256"] = Value::String("0".repeat(64));
+        assert!(
+            validate_slsa_statement(&wrong_independent_digest, PINNED_SOURCE_COMMIT, &artifact)
+                .is_err()
+        );
+
+        let mut wrong_replica_policy = valid.clone();
+        wrong_replica_policy["predicate"]["buildDefinition"]["internalParameters"]["meshharbor_reproducibility"]
+            ["independent_replica"] = Value::String("primary".to_owned());
+        assert!(
+            validate_slsa_statement(&wrong_replica_policy, PINNED_SOURCE_COMMIT, &artifact)
+                .is_err()
+        );
 
         let mut wrong_material = valid.clone();
         wrong_material["predicate"]["buildDefinition"]["resolvedDependencies"][1]["digest"]["gitCommit"] =

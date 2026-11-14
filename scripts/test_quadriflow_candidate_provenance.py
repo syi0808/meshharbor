@@ -14,7 +14,9 @@ class CandidateProvenanceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.candidate_dir = self.root / "candidate"
+        self.independent_candidate_dir = self.root / "independent"
         self.candidate_dir.mkdir()
+        self.independent_candidate_dir.mkdir()
         self.source_commit = "a" * 40
         self.workflow_commit = self.source_commit
         self.run_id = 12345
@@ -22,11 +24,12 @@ class CandidateProvenanceTests(unittest.TestCase):
         self.platform = "linux-x86_64"
         self.executable = candidate.PLATFORMS[self.platform]
         (self.candidate_dir / self.executable).write_bytes(b"synthetic executable")
+        (self.independent_candidate_dir / self.executable).write_bytes(b"synthetic executable")
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def write_status(self, **overrides):
+    def write_status(self, directory=None, **overrides):
         status = {
             "schema_version": 1,
             "candidate_only": True,
@@ -36,11 +39,12 @@ class CandidateProvenanceTests(unittest.TestCase):
             "quadriFlow_executable_run": False,
         }
         status.update(overrides)
-        (self.candidate_dir / "CANDIDATE-STATUS.json").write_text(
+        directory = directory or self.candidate_dir
+        (directory / "CANDIDATE-STATUS.json").write_text(
             json.dumps(status), encoding="utf-8"
         )
 
-    def write_provenance(self, **overrides):
+    def write_provenance(self, directory=None, replica="primary", **overrides):
         provenance = {
             "purpose": "manual pinned-source candidate build only; QuadriFlow was not executed",
             "meshharbor_source_commit": self.source_commit,
@@ -54,9 +58,11 @@ class CandidateProvenanceTests(unittest.TestCase):
             "build_options": candidate._expected_build_options(self.platform),
             "smoke_test": None,
             "smoke_result": "not-run",
+            "build_replica": replica,
         }
         provenance.update(overrides)
-        (self.candidate_dir / "provenance.json").write_text(
+        directory = directory or self.candidate_dir
+        (directory / "provenance.json").write_text(
             json.dumps(provenance), encoding="utf-8"
         )
 
@@ -64,6 +70,7 @@ class CandidateProvenanceTests(unittest.TestCase):
         return candidate.prepare_candidate(
             Path(__file__).resolve().parents[1],
             self.candidate_dir,
+            self.independent_candidate_dir,
             self.executable,
             self.source_commit,
             self.workflow_commit,
@@ -75,7 +82,9 @@ class CandidateProvenanceTests(unittest.TestCase):
 
     def test_predicate_binds_workflow_source_upstream_recipe_and_run(self):
         self.write_status()
-        self.write_provenance()
+        self.write_provenance(replica="primary")
+        self.write_status(self.independent_candidate_dir)
+        self.write_provenance(self.independent_candidate_dir, replica="independent")
         output = self.root / "predicate.json"
         predicate = self.prepare(output)
 
@@ -91,6 +100,17 @@ class CandidateProvenanceTests(unittest.TestCase):
         self.assertEqual(
             predicate["buildDefinition"]["externalParameters"]["inputs"],
             {"confirm_candidate": "true"},
+        )
+        self.assertEqual(
+            predicate["buildDefinition"]["internalParameters"]["meshharbor_reproducibility"],
+            {
+                "strategy": "independent-job-byte-identical",
+                "primary_replica": "primary",
+                "independent_replica": "independent",
+                "independent_build_sha256": hashlib.sha256(
+                    b"synthetic executable"
+                ).hexdigest(),
+            },
         )
         dependencies = predicate["buildDefinition"]["resolvedDependencies"]
         self.assertEqual(len(dependencies), 3)
@@ -115,11 +135,14 @@ class CandidateProvenanceTests(unittest.TestCase):
 
     def test_rejects_release_ready_status_and_never_overwrites(self):
         self.write_status(installable=True)
-        self.write_provenance()
+        self.write_provenance(replica="primary")
+        self.write_status(self.independent_candidate_dir)
+        self.write_provenance(self.independent_candidate_dir, replica="independent")
         with self.assertRaisesRegex(candidate.CandidateProvenanceError, "fail-closed"):
             self.prepare(self.root / "predicate.json")
 
         self.write_status()
+        self.write_status(self.independent_candidate_dir)
         output = self.root / "existing.json"
         output.write_text("keep", encoding="utf-8")
         with self.assertRaisesRegex(candidate.CandidateProvenanceError, "overwrite"):
@@ -128,13 +151,15 @@ class CandidateProvenanceTests(unittest.TestCase):
 
     def test_rejects_untrusted_provenance_material_changes(self):
         self.write_status()
-        self.write_provenance(upstream_commit="c" * 40)
+        self.write_provenance(replica="primary", upstream_commit="c" * 40)
+        self.write_status(self.independent_candidate_dir)
+        self.write_provenance(self.independent_candidate_dir, replica="independent")
         with self.assertRaisesRegex(candidate.CandidateProvenanceError, "upstream_commit"):
             self.prepare(self.root / "predicate.json")
 
     def test_rejects_wrong_platform_executable_pair(self):
         self.write_status()
-        self.write_provenance()
+        self.write_provenance(replica="primary")
         with self.assertRaisesRegex(candidate.CandidateProvenanceError, "platform"):
             candidate.validate_candidate(
                 self.candidate_dir,
@@ -142,7 +167,27 @@ class CandidateProvenanceTests(unittest.TestCase):
                 self.platform,
                 self.source_commit,
                 self.workflow_commit,
+                "primary",
             )
+
+    def test_rejects_a_substituted_executable_when_independent_build_differs(self):
+        self.write_status()
+        self.write_provenance(replica="primary")
+        self.write_status(self.independent_candidate_dir)
+        self.write_provenance(self.independent_candidate_dir, replica="independent")
+        (self.independent_candidate_dir / self.executable).write_bytes(
+            b"different executable with forged matching metadata"
+        )
+        with self.assertRaisesRegex(candidate.CandidateProvenanceError, "not byte-identical"):
+            self.prepare(self.root / "predicate.json")
+
+    def test_rejects_swapped_replica_evidence(self):
+        self.write_status()
+        self.write_provenance(replica="independent")
+        self.write_status(self.independent_candidate_dir)
+        self.write_provenance(self.independent_candidate_dir, replica="primary")
+        with self.assertRaisesRegex(candidate.CandidateProvenanceError, "build_replica"):
+            self.prepare(self.root / "predicate.json")
 
     def test_rejects_duplicate_json_keys_and_symlinks(self):
         status = self.candidate_dir / "CANDIDATE-STATUS.json"
@@ -152,12 +197,15 @@ class CandidateProvenanceTests(unittest.TestCase):
             '"dependency_closure_verified":false,"quadriFlow_executable_run":false}',
             encoding="utf-8",
         )
-        self.write_provenance()
+        self.write_provenance(replica="primary")
+        self.write_status(self.independent_candidate_dir)
+        self.write_provenance(self.independent_candidate_dir, replica="independent")
         with self.assertRaisesRegex(candidate.CandidateProvenanceError, "duplicate"):
             self.prepare(self.root / "predicate.json")
 
         status.unlink()
         self.write_status()
+        self.write_status(self.independent_candidate_dir)
         executable = self.candidate_dir / self.executable
         executable.unlink()
         executable.symlink_to(self.root / "missing-target")
@@ -175,6 +223,7 @@ class CandidateProvenanceTests(unittest.TestCase):
                 self.run_id,
                 self.run_attempt,
                 self.platform,
+                "a" * 64,
             )
 
 

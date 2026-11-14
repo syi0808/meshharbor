@@ -56,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     log_path = artifact_dir / "build-and-smoke.log"
     platform_name = os.environ.get("RUNNER_OS", platform.system())
     candidate_platform = os.environ.get("MESHHARBOR_PLATFORM", platform_name)
+    build_replica = os.environ.get("MESHHARBOR_BUILD_REPLICA", "single")
+    if build_replica not in {"single", "primary", "independent"}:
+        raise RuntimeError("MESHHARBOR_BUILD_REPLICA is not supported")
     executable_name = "quadriflow.exe" if os.name == "nt" else "quadriflow"
 
     if work_root.exists():
@@ -153,8 +156,24 @@ def main(argv: list[str] | None = None) -> int:
                     ]
                 )
                 cmake_command.extend(platform_build_options)
-            run(cmake_command, timeout=600)
-            run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", "2"], timeout=2400)
+            # Normalize common timestamp/locale sources; signer still requires
+            # byte-identical output from the separately scheduled runner.
+            reproducible_env = os.environ.copy()
+            reproducible_env.update(
+                {
+                    "SOURCE_DATE_EPOCH": "0",
+                    "TZ": "UTC",
+                    "LC_ALL": "C",
+                    "LANG": "C",
+                    "ZERO_AR_DATE": "1",
+                }
+            )
+            run(cmake_command, env=reproducible_env, timeout=600)
+            run(
+                ["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", "2"],
+                env=reproducible_env,
+                timeout=2400,
+            )
 
             executable_candidates = [
                 build_dir / executable_name,
@@ -234,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         "upstream_repository": QUADRIFLOW_REPOSITORY,
         "upstream_commit": QUADRIFLOW_COMMIT,
         "platform": candidate_platform,
+        "build_replica": build_replica,
         "machine": platform.machine(),
         "platform_release": platform.release(),
         "tool_versions": tool_versions,

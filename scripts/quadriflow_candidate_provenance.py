@@ -125,6 +125,7 @@ def create_predicate(
     workflow_run_id: int,
     workflow_run_attempt: int,
     platform: str,
+    reproducibility_sha256: str,
 ) -> dict[str, Any]:
     source_commit = _parse_commit(source_commit_value, "source commit")
     workflow_commit = _parse_commit(workflow_commit_value, "workflow commit")
@@ -136,6 +137,8 @@ def create_predicate(
     run_attempt = _parse_positive(workflow_run_attempt, "workflow run attempt")
     if platform not in PLATFORMS:
         raise CandidateProvenanceError("platform is not supported by the candidate policy")
+    if not re.fullmatch(r"[0-9a-f]{64}", reproducibility_sha256):
+        raise CandidateProvenanceError("independent build digest is invalid")
 
     root = Path(repository_root)
     recipe_path, recipe_bytes = _read_regular_file(
@@ -179,6 +182,12 @@ def create_predicate(
                     "event_name": "workflow_dispatch",
                 },
                 "meshharbor_platform": platform,
+                "meshharbor_reproducibility": {
+                    "strategy": "independent-job-byte-identical",
+                    "primary_replica": "primary",
+                    "independent_replica": "independent",
+                    "independent_build_sha256": reproducibility_sha256,
+                },
             },
             "resolvedDependencies": dependencies,
         },
@@ -199,14 +208,17 @@ def validate_candidate(
     platform: str,
     source_commit: str,
     workflow_commit: str,
-) -> None:
+    expected_replica: str,
+) -> str:
     if platform not in PLATFORMS or executable_name != PLATFORMS[platform]:
         raise CandidateProvenanceError("candidate executable does not match the platform")
+    if expected_replica not in {"primary", "independent"}:
+        raise CandidateProvenanceError("candidate build replica is not supported")
     candidate_dir = Path(candidate_dir_value)
     if candidate_dir.is_symlink() or not candidate_dir.is_dir():
         raise CandidateProvenanceError("candidate directory must be a real directory")
 
-    _read_regular_file(
+    _, executable_bytes = _read_regular_file(
         candidate_dir / executable_name,
         "candidate executable",
         MAX_CANDIDATE_FILE_BYTES,
@@ -241,6 +253,7 @@ def validate_candidate(
         "build_options": _expected_build_options(platform),
         "smoke_test": None,
         "smoke_result": "not-run",
+        "build_replica": expected_replica,
     }
     if not isinstance(provenance, dict):
         raise CandidateProvenanceError("candidate provenance must be an object")
@@ -249,11 +262,13 @@ def validate_candidate(
             raise CandidateProvenanceError(
                 f"candidate provenance {key} does not match the pinned policy"
             )
+    return _sha256(executable_bytes)
 
 
 def prepare_candidate(
     repository_root: str | Path,
     candidate_dir: str | Path,
+    independent_candidate_dir: str | Path,
     executable_name: str,
     source_commit: str,
     workflow_commit: str,
@@ -262,9 +277,29 @@ def prepare_candidate(
     platform: str,
     output_value: str | Path,
 ) -> dict[str, Any]:
+    """Sign only after two separately uploaded build replicas match by digest."""
     source_sha = _parse_commit(source_commit, "source commit")
     workflow_sha = _parse_commit(workflow_commit, "workflow commit")
-    validate_candidate(candidate_dir, executable_name, platform, source_sha, workflow_sha)
+    primary_sha256 = validate_candidate(
+        candidate_dir,
+        executable_name,
+        platform,
+        source_sha,
+        workflow_sha,
+        "primary",
+    )
+    independent_sha256 = validate_candidate(
+        independent_candidate_dir,
+        executable_name,
+        platform,
+        source_sha,
+        workflow_sha,
+        "independent",
+    )
+    if primary_sha256 != independent_sha256:
+        raise CandidateProvenanceError(
+            "independent build output is not byte-identical to the primary candidate"
+        )
     predicate = create_predicate(
         repository_root,
         source_sha,
@@ -272,6 +307,7 @@ def prepare_candidate(
         workflow_run_id,
         workflow_run_attempt,
         platform,
+        independent_sha256,
     )
     output = Path(output_value)
     if output.exists() or output.is_symlink():
@@ -289,6 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("command", choices=("prepare",))
     parser.add_argument("--repository-root", required=True)
     parser.add_argument("--candidate-dir", required=True)
+    parser.add_argument("--independent-candidate-dir", required=True)
     parser.add_argument("--executable", required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--workflow-commit", required=True)
@@ -305,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         prepare_candidate(
             args.repository_root,
             args.candidate_dir,
+            args.independent_candidate_dir,
             args.executable,
             args.source_commit,
             args.workflow_commit,
