@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -14,6 +14,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::inspect_asset;
+
+const MAX_STORED_ARTIFACT_BYTES: u64 = crate::MAX_ASSET_BYTES as u64;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
@@ -541,9 +543,10 @@ impl Store {
                 CoreError::NotFound(format!("Artifact '{artifact_id}' was not found."))
             })?;
         drop(conn);
+        let bytes = read_verified_artifact(&record.1, &record.0)?;
         Ok(ArtifactContent {
             artifact: record.0,
-            bytes: fs::read(record.1)?,
+            bytes,
         })
     }
 
@@ -722,23 +725,46 @@ impl Store {
     }
 
     fn write_content_addressed(&self, path: &Path, bytes: &[u8]) -> CoreResult<()> {
+        let expected_sha256 = digest(bytes);
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected_sha256.as_str()) {
+            return Err(CoreError::InvalidInput(
+                "Content-addressed artifact path must match the payload SHA-256.".into(),
+            ));
+        }
+        if bytes.len() as u64 > MAX_STORED_ARTIFACT_BYTES {
+            return Err(CoreError::InvalidInput(format!(
+                "Artifact exceeds the {} MiB storage limit.",
+                MAX_STORED_ARTIFACT_BYTES / (1024 * 1024)
+            )));
+        }
+
         let parent = path.parent().expect("artifact has parent directory");
         fs::create_dir_all(parent)?;
         if path.exists() {
-            return Ok(());
+            return verify_existing_content_addressed(path, bytes, &expected_sha256);
         }
+
         let temporary = parent.join(format!(".tmp-{}", Uuid::new_v4().simple()));
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        match fs::rename(&temporary, path) {
-            Ok(()) => Ok(()),
-            Err(_error) if path.exists() => {
+        let write_result = file.write_all(bytes).and_then(|()| file.sync_all());
+        if let Err(error) = write_result {
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+        drop(file);
+
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => {
                 let _ = fs::remove_file(&temporary);
                 Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&temporary);
+                verify_existing_content_addressed(path, bytes, &expected_sha256)
             }
             Err(error) => {
                 let _ = fs::remove_file(&temporary);
@@ -746,6 +772,82 @@ impl Store {
             }
         }
     }
+}
+
+fn read_bounded_artifact_path(
+    path: &Path,
+    expected_size: u64,
+    description: &str,
+) -> CoreResult<Vec<u8>> {
+    if expected_size > MAX_STORED_ARTIFACT_BYTES {
+        return Err(CoreError::Conflict(format!(
+            "{description} has a recorded size above the {} MiB artifact limit.",
+            MAX_STORED_ARTIFACT_BYTES / (1024 * 1024)
+        )));
+    }
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        CoreError::Conflict(format!("{description} could not be verified: {error}"))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(CoreError::Conflict(format!(
+            "{description} is not a regular artifact file."
+        )));
+    }
+    if metadata.len() != expected_size {
+        return Err(CoreError::Conflict(format!(
+            "{description} has {} bytes; the recorded size is {expected_size}.",
+            metadata.len()
+        )));
+    }
+
+    let read_limit = expected_size.checked_add(1).ok_or_else(|| {
+        CoreError::Conflict(format!("{description} has an invalid recorded size."))
+    })?;
+    let file = fs::File::open(path).map_err(|error| {
+        CoreError::Conflict(format!("{description} could not be verified: {error}"))
+    })?;
+    let mut bounded = file.take(read_limit);
+    let mut bytes = Vec::new();
+    bounded.read_to_end(&mut bytes).map_err(|error| {
+        CoreError::Conflict(format!("{description} could not be verified: {error}"))
+    })?;
+    if bytes.len() as u64 != expected_size {
+        return Err(CoreError::Conflict(format!(
+            "{description} changed size while being read."
+        )));
+    }
+    Ok(bytes)
+}
+
+fn read_verified_artifact(path: &Path, artifact: &Artifact) -> CoreResult<Vec<u8>> {
+    let description = format!("Artifact '{}'", artifact.id);
+    let bytes = read_bounded_artifact_path(path, artifact.byte_size, &description)?;
+    if digest(&bytes) != artifact.sha256 {
+        return Err(CoreError::Conflict(format!(
+            "{description} failed SHA-256 verification; stored data may be corrupt."
+        )));
+    }
+    Ok(bytes)
+}
+
+fn verify_existing_content_addressed(
+    path: &Path,
+    expected_bytes: &[u8],
+    expected_sha256: &str,
+) -> CoreResult<()> {
+    let description = format!("Content-addressed artifact '{expected_sha256}'");
+    let existing = read_bounded_artifact_path(
+        path,
+        expected_bytes.len() as u64,
+        &description,
+    )?;
+    if existing != expected_bytes {
+        return Err(CoreError::Conflict(format!(
+            "{description} does not match the expected content; existing data was left untouched."
+        )));
+    }
+    Ok(())
 }
 
 fn job_state_from_transaction(transaction: &Transaction<'_>, id: &str) -> CoreResult<JobState> {
@@ -844,6 +946,131 @@ mod tests {
             store.get_asset(&imported.id).unwrap().unwrap().sha256,
             imported.sha256
         );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn duplicate_import_reuses_valid_content_addressed_artifact() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let bytes = crate::glb::test_png_with_dimensions(1, 1);
+        let first = store.import_asset("first.png", &bytes).unwrap();
+        let second = store.import_asset("second.png", &bytes).unwrap();
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.sha256, second.sha256);
+        assert_eq!(
+            store.artifact_path(&first.artifacts[0].id).unwrap(),
+            store.artifact_path(&second.artifacts[0].id).unwrap()
+        );
+        assert_eq!(
+            store.read_artifact(&second.artifacts[0].id).unwrap().bytes,
+            bytes
+        );
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_artifact_rejects_same_length_sha256_mismatch_without_repairing() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let bytes = crate::glb::test_png_with_dimensions(1, 1);
+        let asset = store.import_asset("source.png", &bytes).unwrap();
+        let artifact = &asset.artifacts[0];
+        let path = store.artifact_path(&artifact.id).unwrap();
+        let mut corrupted = bytes.clone();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 1;
+        fs::write(&path, &corrupted).unwrap();
+
+        let error = store.read_artifact(&artifact.id).unwrap_err();
+        assert!(error.to_string().contains("SHA-256 verification"));
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_artifact_rejects_truncated_and_oversized_files() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let bytes = crate::glb::test_png_with_dimensions(1, 1);
+        let asset = store.import_asset("source.png", &bytes).unwrap();
+        let artifact = &asset.artifacts[0];
+        let path = store.artifact_path(&artifact.id).unwrap();
+
+        fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(
+            store
+                .read_artifact(&artifact.id)
+                .unwrap_err()
+                .to_string()
+                .contains("recorded size")
+        );
+
+        let mut oversized = bytes.clone();
+        oversized.push(0);
+        fs::write(&path, &oversized).unwrap();
+        assert!(
+            store
+                .read_artifact(&artifact.id)
+                .unwrap_err()
+                .to_string()
+                .contains("recorded size")
+        );
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_artifact_rejects_untrusted_oversized_database_metadata() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let bytes = crate::glb::test_png_with_dimensions(1, 1);
+        let asset = store.import_asset("source.png", &bytes).unwrap();
+        let artifact = &asset.artifacts[0];
+        {
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE artifacts SET byte_size=?1 WHERE id=?2",
+                    rusqlite::params![
+                        MAX_STORED_ARTIFACT_BYTES as i64 + 1,
+                        &artifact.id
+                    ],
+                )
+                .unwrap();
+        }
+
+        let error = store.read_artifact(&artifact.id).unwrap_err();
+        assert!(error.to_string().contains("above the 512 MiB artifact limit"));
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reimport_fails_closed_when_content_addressed_file_is_corrupt() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let bytes = crate::glb::test_png_with_dimensions(1, 1);
+        let original = store.import_asset("source.png", &bytes).unwrap();
+        let path = store.artifact_path(&original.artifacts[0].id).unwrap();
+        let mut corrupted = bytes.clone();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 1;
+        fs::write(&path, &corrupted).unwrap();
+
+        let error = store.import_asset("same-content.png", &bytes).unwrap_err();
+        assert!(error.to_string().contains("existing data was left untouched"));
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+        assert_eq!(store.list_assets(10).unwrap().len(), 1);
+
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
