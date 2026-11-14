@@ -23,21 +23,6 @@ jobs:
           components: clippy, rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Generate MSRV-compatible lockfile for review
-        run: |
-          cp Cargo.lock Cargo.lock.before-resolve
-          test "$(git hash-object Cargo.lock.before-resolve)" = "524b9eb2efeb4f8b624e0aa754da153b3458f005"
-          rm Cargo.lock
-          cargo generate-lockfile
-      - name: Upload resolver input and output for review
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-msrv-lock-${{ github.sha }}
-          path: |
-            Cargo.lock
-            Cargo.lock.before-resolve
-          if-no-files-found: error
       - name: Run strict Clippy with optional remesher
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::chunks-exact-to-as-chunks
       - name: Run workspace tests with optional remesher and committed lockfile
