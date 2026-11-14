@@ -70,6 +70,7 @@ enum Command {
         target_triangles: u64,
         #[arg(long, default_value_t = 0.02)]
         max_error: f32,
+        /// Write a new output file; existing files are never overwritten.
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
@@ -82,10 +83,10 @@ enum Command {
         /// Requested approximate quad count for mesh.retopology (4 to 50,000).
         #[arg(long)]
         target_quads: Option<u32>,
-        /// Optional path for a derived GLB or the triangulated retopology preview.
+        /// Optional new path for a derived GLB or the triangulated retopology preview; existing files are never overwritten.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Optional path for the original editable quad OBJ from mesh.retopology.
+        /// Optional new path for the original editable quad OBJ from mesh.retopology; existing files are never overwritten.
         #[arg(long)]
         quad_output: Option<PathBuf>,
     },
@@ -102,6 +103,7 @@ enum Command {
         texture_size: u16,
         #[arg(long, default_value_t = 100_000)]
         target_faces: u32,
+        /// Write a new output file; existing files are never overwritten.
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
@@ -683,6 +685,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_error,
             output,
         } => {
+            preflight_cli_output_paths(output.as_deref(), None)?;
             let core = OperationCore::open(&root)?;
             let result = core.simplify_asset(&asset_id, target_triangles, max_error)?;
             if let Some(path) = output {
@@ -693,7 +696,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .find(|artifact| artifact.kind == "derived")
                     .ok_or("Simplification output artifact was not found.")?;
                 let bytes = core.store().read_artifact(&artifact.id)?.bytes;
-                fs::write(path, bytes).await?;
+                write_cli_output(&path, &bytes)?;
             }
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -704,10 +707,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             quad_output,
         } => {
-            let core = OperationCore::open(&root)?;
             if operation != "mesh.retopology" && (target_quads.is_some() || quad_output.is_some()) {
                 return Err("--target-quads and --quad-output require mesh.retopology.".into());
             }
+            preflight_cli_output_paths(output.as_deref(), quad_output.as_deref())?;
+            let core = OperationCore::open(&root)?;
             let parameters = if operation == "mesh.retopology" {
                 json!({ "target_quads": target_quads.unwrap_or(10_000) })
             } else {
@@ -722,7 +726,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .find(|artifact| artifact.kind == "derived")
                     .ok_or("Mesh processing output artifact was not found.")?;
                 let bytes = core.store().read_artifact(&artifact.id)?.bytes;
-                fs::write(path, bytes).await?;
+                write_cli_output(&path, &bytes)?;
             }
             if let Some(path) = quad_output {
                 let artifact = result
@@ -732,7 +736,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .find(|artifact| artifact.kind == "quad_topology")
                     .ok_or("Quad retopology OBJ artifact was not found.")?;
                 let bytes = core.store().read_artifact(&artifact.id)?.bytes;
-                fs::write(path, bytes).await?;
+                write_cli_output(&path, &bytes)?;
             }
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -745,6 +749,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_faces,
             output,
         } => {
+            preflight_cli_output_paths(output.as_deref(), None)?;
             let _runtime_lock = acquire_generation_runtime_lock(&root)?;
             let core = OperationCore::open(&root)?;
             let result = core.generate_pixal3d_image(
@@ -765,7 +770,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .find(|artifact| artifact.kind == "derived")
                     .ok_or("Generation output artifact was not found.")?;
                 let bytes = core.store().read_artifact(&artifact.id)?.bytes;
-                fs::write(path, bytes).await?;
+                write_cli_output(&path, &bytes)?;
             }
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -1836,6 +1841,146 @@ async fn api_read_artifact(
 }
 
 const MAX_MCP_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
+
+fn canonical_cli_output_path(path: &std::path::Path) -> Result<PathBuf, CoreError> {
+    let file_name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CoreError::InvalidInput("CLI output path must name a file.".into()))?;
+    let requested_parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let absolute_parent = if requested_parent.is_absolute() {
+        requested_parent.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(requested_parent)
+    };
+    let canonical_parent = std::fs::canonicalize(absolute_parent)?;
+    if !canonical_parent.is_dir() {
+        return Err(CoreError::InvalidInput(
+            "CLI output parent must be an existing directory.".into(),
+        ));
+    }
+    Ok(canonical_parent.join(file_name))
+}
+
+#[cfg(windows)]
+fn cli_output_destinations_alias(
+    first: &std::path::Path,
+    second: &std::path::Path,
+) -> Result<bool, CoreError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let first: Vec<u16> = first.as_os_str().encode_wide().collect();
+    let second: Vec<u16> = second.as_os_str().encode_wide().collect();
+    let first_len = i32::try_from(first.len()).map_err(|_| {
+        CoreError::InvalidInput("CLI output path is too long to compare safely.".into())
+    })?;
+    let second_len = i32::try_from(second.len()).map_err(|_| {
+        CoreError::InvalidInput("CLI output path is too long to compare safely.".into())
+    })?;
+
+    // CompareStringOrdinal compares Windows file names without linguistic rules.
+    // Its lengths exclude terminating NULs, and 1 requests case-insensitive comparison.
+    let result = unsafe {
+        windows_sys::Win32::Globalization::CompareStringOrdinal(
+            first.as_ptr(),
+            first_len,
+            second.as_ptr(),
+            second_len,
+            1,
+        )
+    };
+    match result {
+        1 | 3 => Ok(false),
+        2 => Ok(true),
+        _ => Err(CoreError::Io(std::io::Error::last_os_error())),
+    }
+}
+
+#[cfg(not(windows))]
+fn cli_output_destinations_alias(
+    first: &std::path::Path,
+    second: &std::path::Path,
+) -> Result<bool, CoreError> {
+    Ok(first == second)
+}
+
+fn preflight_cli_output_paths(
+    output_path: Option<&std::path::Path>,
+    quad_output_path: Option<&std::path::Path>,
+) -> Result<(), CoreError> {
+    let output_destination = output_path.map(canonical_cli_output_path).transpose()?;
+    let quad_destination = quad_output_path
+        .map(canonical_cli_output_path)
+        .transpose()?;
+    let destinations_alias = match (&output_destination, &quad_destination) {
+        (Some(output), Some(quad)) => cli_output_destinations_alias(output, quad)?,
+        _ => false,
+    };
+    if destinations_alias {
+        return Err(CoreError::InvalidInput(
+            "--output and --quad-output must name different destinations.".into(),
+        ));
+    }
+
+    for destination in output_destination.iter().chain(quad_destination.iter()) {
+        match std::fs::symlink_metadata(destination) {
+            Ok(_) => {
+                return Err(CoreError::Conflict(format!(
+                    "CLI output already exists and was not overwritten: {}",
+                    destination.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CoreError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+fn write_cli_output_with<F>(
+    path: &std::path::Path,
+    bytes: &[u8],
+    write: F,
+) -> Result<PathBuf, CoreError>
+where
+    F: FnOnce(&mut std::fs::File, &std::path::Path, &[u8]) -> std::io::Result<()>,
+{
+    let destination = canonical_cli_output_path(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                CoreError::Conflict(format!(
+                    "CLI output already exists and was not overwritten: {}",
+                    destination.display()
+                ))
+            } else {
+                CoreError::Io(error)
+            }
+        })?;
+    let write_result = write(&mut file, &destination, bytes).and_then(|()| file.sync_all());
+    if let Err(error) = write_result {
+        drop(file);
+        let message = format!(
+            "CLI output may be incomplete at {}: {error}",
+            destination.display()
+        );
+        return Err(CoreError::Io(std::io::Error::new(error.kind(), message)));
+    }
+    Ok(destination)
+}
+
+/// Create a CLI output without following or replacing an existing file or symlink.
+fn write_cli_output(path: &std::path::Path, bytes: &[u8]) -> Result<PathBuf, CoreError> {
+    write_cli_output_with(path, bytes, |file, _, bytes| {
+        std::io::Write::write_all(file, bytes)
+    })
+}
 
 /// Write a stored mesh GLB to a caller-selected local path without clobbering
 /// existing data. This is used only by the explicit MCP export tool.
@@ -3110,6 +3255,160 @@ mod tests {
             .unwrap()["error"],
             "invalid request: Both current Pixal3D backends expose only the reviewed 512 geometry profile."
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_output_refuses_existing_files_and_preserves_contents() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-output-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let existing = root.join("existing.glb");
+        let sentinel = b"do not overwrite";
+        std::fs::write(&existing, sentinel).unwrap();
+
+        let preflight = preflight_cli_output_paths(Some(&existing), None).unwrap_err();
+        assert!(matches!(preflight, CoreError::Conflict(_)));
+        let write = write_cli_output(&existing, b"replacement").unwrap_err();
+        assert!(matches!(write, CoreError::Conflict(_)));
+        assert_eq!(std::fs::read(&existing).unwrap(), sentinel);
+
+        let new_path = root.join("new.glb");
+        preflight_cli_output_paths(Some(&new_path), None).unwrap();
+        let written_path = write_cli_output(&new_path, b"new output").unwrap();
+        assert_eq!(
+            written_path,
+            std::fs::canonicalize(&root).unwrap().join("new.glb")
+        );
+        assert_eq!(std::fs::read(&new_path).unwrap(), b"new output");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_output_refuses_symlink_destinations_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-symlink-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("protected.glb");
+        let sentinel = b"protected data";
+        std::fs::write(&target, sentinel).unwrap();
+        let link = root.join("linked.glb");
+        symlink(&target, &link).unwrap();
+
+        let preflight = preflight_cli_output_paths(Some(&link), None).unwrap_err();
+        assert!(matches!(preflight, CoreError::Conflict(_)));
+        let write = write_cli_output(&link, b"replacement").unwrap_err();
+        assert!(matches!(write, CoreError::Conflict(_)));
+        assert_eq!(std::fs::read(&target).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&link).unwrap(), sentinel);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_mesh_output_paths_reject_lexical_aliases_before_processing() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-pair-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let output = nested.join("../same.glb");
+        let quad_output = root.join("same.glb");
+
+        let error = preflight_cli_output_paths(Some(&output), Some(&quad_output)).unwrap_err();
+        assert!(matches!(error, CoreError::InvalidInput(_)));
+        assert!(!root.join("same.glb").exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_output_failure_preserves_a_replacement_destination() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-failure-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let destination = root.join("failed.glb");
+        let moved = root.join("original.partial");
+        let replacement = b"replacement from a competing writer";
+
+        let error = write_cli_output_with(&destination, b"original output", |file, path, bytes| {
+            std::io::Write::write_all(file, &bytes[..8])?;
+            std::fs::rename(path, &moved)?;
+            std::fs::write(path, replacement)?;
+            Err(std::io::Error::other("injected write failure"))
+        })
+        .unwrap_err();
+        match error {
+            CoreError::Io(error) => assert!(error.to_string().contains("may be incomplete")),
+            other => panic!("expected an I/O error, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&destination).unwrap(), replacement);
+        assert_eq!(std::fs::read(&moved).unwrap(), b"original");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cli_output_paths_reject_windows_case_only_aliases() {
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-cli-case-alias-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = root.join("mesh.glb");
+        let quad_output = root.join("MESH.GLB");
+
+        let error = preflight_cli_output_paths(Some(&output), Some(&quad_output)).unwrap_err();
+        assert!(matches!(error, CoreError::InvalidInput(_)));
+        assert!(!output.exists());
+        assert!(!quad_output.exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_output_creation_is_race_safe() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let destination = root.join("race.glb");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let first_path = destination.clone();
+        let first_barrier = Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            match write_cli_output(&first_path, b"first") {
+                Ok(_) => Ok(true),
+                Err(CoreError::Conflict(_)) => Ok(false),
+                Err(error) => Err(error.to_string()),
+            }
+        });
+        let second_path = destination.clone();
+        let second_barrier = Arc::clone(&barrier);
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            match write_cli_output(&second_path, b"second") {
+                Ok(_) => Ok(true),
+                Err(CoreError::Conflict(_)) => Ok(false),
+                Err(error) => Err(error.to_string()),
+            }
+        });
+
+        barrier.wait();
+        let results = [
+            first.join().unwrap().unwrap(),
+            second.join().unwrap().unwrap(),
+        ];
+        assert_eq!(results.iter().filter(|written| **written).count(), 1);
+        let written = std::fs::read(&destination).unwrap();
+        assert!(written == b"first" || written == b"second");
+
         std::fs::remove_dir_all(root).unwrap();
     }
 

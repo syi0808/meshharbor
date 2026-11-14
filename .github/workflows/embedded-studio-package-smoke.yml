@@ -93,6 +93,12 @@ jobs:
           CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
         run: cargo test --locked --release --package meshharbor --bin meshharbor data_dir_lock::tests
 
+      - name: Test Windows case-only CLI output aliases
+        if: runner.os == 'Windows'
+        env:
+          CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
+        run: cargo test --locked --release --package meshharbor --bin meshharbor cli_output_paths_reject_windows_case_only_aliases
+
       - name: Launch binary and verify embedded Studio assets
         shell: bash
         env:
