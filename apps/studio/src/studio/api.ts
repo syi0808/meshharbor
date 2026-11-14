@@ -4,6 +4,80 @@ export function quadTopologyArtifact(asset: Asset | null): Artifact | undefined 
   return asset?.artifacts.find((entry) => entry.kind === 'quad_topology' || entry.kind === 'quad_obj');
 }
 
+export interface AssetComparisonPair {
+  inputAssetId: string;
+  resultAssetId: string;
+}
+
+export type AssetComparisonSide = 'source' | 'result';
+
+export function assetComparisonPairFromJob(
+  job: Job,
+  resultAsset: Asset | null,
+): AssetComparisonPair | null {
+  const inputAssetId = job.input_asset_id;
+  const resultAssetId = job.result?.asset_id;
+  if (!inputAssetId || !resultAssetId || !resultAsset || resultAsset.id !== resultAssetId
+    || resultAssetId === inputAssetId
+    || resultAsset.source_asset_id !== inputAssetId) {
+    return null;
+  }
+  return { inputAssetId, resultAssetId };
+}
+
+export function assetComparisonPairForSelection(
+  assets: readonly Asset[],
+  selectedAssetId: string | null,
+  pinnedPair: AssetComparisonPair | null,
+  activeJobInputAssetId: string | null = null,
+): AssetComparisonPair | null {
+  if (!selectedAssetId || selectedAssetId === activeJobInputAssetId) return null;
+  if (pinnedPair
+    && (pinnedPair.inputAssetId === selectedAssetId || pinnedPair.resultAssetId === selectedAssetId)) {
+    return pinnedPair;
+  }
+
+  const selected = assets.find((asset) => asset.id === selectedAssetId);
+  if (!selected) return null;
+  if (selected.source_asset_id) {
+    return { inputAssetId: selected.source_asset_id, resultAssetId: selected.id };
+  }
+
+  const result = assets.find((asset) => asset.id !== selected.id && asset.source_asset_id === selected.id);
+  return result ? { inputAssetId: selected.id, resultAssetId: result.id } : null;
+}
+
+export function assetComparisonTarget(
+  pair: AssetComparisonPair,
+  side: AssetComparisonSide,
+): string {
+  return side === 'source' ? pair.inputAssetId : pair.resultAssetId;
+}
+
+export function shouldAutoSelectComparisonResult(
+  pair: AssetComparisonPair | null,
+  selectedAssetId: string | null,
+): boolean {
+  return pair !== null && selectedAssetId === pair.inputAssetId;
+}
+
+export async function resolveComparisonAsset(
+  pair: AssetComparisonPair,
+  side: AssetComparisonSide,
+  assets: readonly Asset[],
+  loadAsset: (assetId: string) => Promise<Asset>,
+): Promise<Asset> {
+  const assetId = assetComparisonTarget(pair, side);
+  const asset = assets.find((candidate) => candidate.id === assetId) ?? await loadAsset(assetId);
+  if (asset.id !== assetId) {
+    throw new Error('The comparison asset response did not match the requested asset.');
+  }
+  if (side === 'result' && asset.source_asset_id !== pair.inputAssetId) {
+    throw new Error('The saved result does not match this comparison source.');
+  }
+  return asset;
+}
+
 export function cancelJobNotice(job: Job): string {
   if (job.state === 'cancelled') return 'The queued job was cancelled.';
   if (job.state === 'queued') return 'This job is still queued. Try cancelling it again.';

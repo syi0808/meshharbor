@@ -4,17 +4,17 @@ import { readFile } from 'node:fs/promises';
 
 // Use the project's TypeScript compiler when installed (Node 20+), with a
 // native type-stripping fallback for minimal Node 24 test environments.
-let MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay;
+let MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay;
 try {
   const ts = await import('typescript');
   const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay } = await import('./api.ts'));
+  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay } = await import('./api.ts'));
 }
 
 test('Studio offers cancellation only before a job leaves the queue', () => {
@@ -57,6 +57,84 @@ test('latest-request guard discards superseded and invalidated results', () => {
   assert.equal(guard.isCurrent(second), true);
   guard.invalidate();
   assert.equal(guard.isCurrent(second), false);
+});
+
+test('comparison controls stay pinned to the selected asset lineage', () => {
+  const assets = [
+    { id: 'input-a', source_asset_id: null },
+    { id: 'result-a1', source_asset_id: 'input-a' },
+    { id: 'result-a2', source_asset_id: 'input-a' },
+    { id: 'unrelated-c', source_asset_id: null },
+  ];
+  const pinned = { inputAssetId: 'input-a', resultAssetId: 'result-a1' };
+
+  assert.deepEqual(assetComparisonPairForSelection(assets, 'input-a', pinned), pinned);
+  assert.deepEqual(assetComparisonPairForSelection(assets, 'result-a1', pinned), pinned);
+  assert.deepEqual(assetComparisonPairForSelection(assets, 'result-a2', pinned), {
+    inputAssetId: 'input-a',
+    resultAssetId: 'result-a2',
+  });
+  assert.equal(assetComparisonPairForSelection(assets, 'unrelated-c', pinned), null);
+  assert.equal(assetComparisonPairForSelection(assets, 'input-a', pinned, 'input-a'), null);
+  assert.equal(assetComparisonPairForSelection(assets, null, pinned), null);
+  assert.equal(assetComparisonTarget(pinned, 'source'), 'input-a');
+  assert.equal(assetComparisonTarget(pinned, 'result'), 'result-a1');
+});
+
+test('a completed job selects its result only if its input is still selected', () => {
+  const pair = { inputAssetId: 'input-a', resultAssetId: 'result-a' };
+  assert.equal(shouldAutoSelectComparisonResult(pair, 'input-a'), true);
+  assert.equal(shouldAutoSelectComparisonResult(pair, 'result-a'), false);
+  assert.equal(shouldAutoSelectComparisonResult(pair, 'unrelated-c'), false);
+  assert.equal(shouldAutoSelectComparisonResult(null, 'input-a'), false);
+});
+
+test('saved job comparison pairs require its exact result and direct input lineage', () => {
+  const job = { input_asset_id: 'input-a', result: { asset_id: 'result-a1' } };
+  const result = { id: 'result-a1', source_asset_id: 'input-a' };
+  assert.deepEqual(assetComparisonPairFromJob(job, result), {
+    inputAssetId: 'input-a',
+    resultAssetId: 'result-a1',
+  });
+  assert.equal(assetComparisonPairFromJob(job, { ...result, id: 'other-result' }), null);
+  assert.equal(assetComparisonPairFromJob(job, { ...result, source_asset_id: 'other-input' }), null);
+  assert.equal(assetComparisonPairFromJob(job, { ...result, source_asset_id: null }), null);
+  assert.equal(assetComparisonPairFromJob(job, { id: result.id }), null);
+  assert.equal(assetComparisonPairFromJob({ result: job.result }, result), null);
+});
+
+test('comparison side loader fetches only missing assets and validates identity', async () => {
+  const pair = { inputAssetId: 'input-a', resultAssetId: 'result-a1' };
+  const input = { id: 'input-a', source_asset_id: null };
+  const result = { id: 'result-a1', source_asset_id: 'input-a' };
+  const cached = await resolveComparisonAsset(pair, 'source', [input], async () => {
+    throw new Error('cached comparison side should not be fetched');
+  });
+  assert.equal(cached, input);
+
+  const requested = [];
+  const fetched = await resolveComparisonAsset(pair, 'source', [], async (assetId) => {
+    requested.push(assetId);
+    return input;
+  });
+  assert.equal(fetched, input);
+  assert.deepEqual(requested, ['input-a']);
+  await assert.rejects(
+    resolveComparisonAsset(pair, 'source', [], async () => ({ id: 'wrong-id' })),
+    /did not match the requested asset/,
+  );
+  await assert.rejects(
+    resolveComparisonAsset(pair, 'result', [], async () => ({ ...result, source_asset_id: 'other-input' })),
+    /does not match this comparison source/,
+  );
+  await assert.rejects(
+    resolveComparisonAsset(pair, 'result', [], async () => ({ id: result.id, source_asset_id: null })),
+    /does not match this comparison source/,
+  );
+  await assert.rejects(
+    resolveComparisonAsset(pair, 'result', [], async () => ({ id: result.id })),
+    /does not match this comparison source/,
+  );
 });
 
 test('job polling retries use capped exponential backoff', () => {
