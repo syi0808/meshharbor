@@ -1842,8 +1842,6 @@ async fn api_read_artifact(
 
 const MAX_MCP_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Write a stored mesh GLB to a caller-selected local path without clobbering
-/// existing data. This is used only by the explicit MCP export tool.
 fn canonical_cli_output_path(path: &std::path::Path) -> Result<PathBuf, CoreError> {
     let file_name = path
         .file_name()
@@ -1900,8 +1898,14 @@ fn preflight_cli_output_paths(
     Ok(())
 }
 
-/// Create a CLI output without following or replacing an existing file or symlink.
-fn write_cli_output(path: &std::path::Path, bytes: &[u8]) -> Result<PathBuf, CoreError> {
+fn write_cli_output_with<F>(
+    path: &std::path::Path,
+    bytes: &[u8],
+    write: F,
+) -> Result<PathBuf, CoreError>
+where
+    F: FnOnce(&mut std::fs::File, &std::path::Path, &[u8]) -> std::io::Result<()>,
+{
     let destination = canonical_cli_output_path(path)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -1917,16 +1921,27 @@ fn write_cli_output(path: &std::path::Path, bytes: &[u8]) -> Result<PathBuf, Cor
                 CoreError::Io(error)
             }
         })?;
-    let write_result =
-        std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all());
+    let write_result = write(&mut file, &destination, bytes).and_then(|()| file.sync_all());
     if let Err(error) = write_result {
         drop(file);
-        let _ = std::fs::remove_file(&destination);
-        return Err(CoreError::Io(error));
+        let message = format!(
+            "CLI output may be incomplete at {}: {error}",
+            destination.display()
+        );
+        return Err(CoreError::Io(std::io::Error::new(error.kind(), message)));
     }
     Ok(destination)
 }
 
+/// Create a CLI output without following or replacing an existing file or symlink.
+fn write_cli_output(path: &std::path::Path, bytes: &[u8]) -> Result<PathBuf, CoreError> {
+    write_cli_output_with(path, bytes, |file, _, bytes| {
+        std::io::Write::write_all(file, bytes)
+    })
+}
+
+/// Write a stored mesh GLB to a caller-selected local path without clobbering
+/// existing data. This is used only by the explicit MCP export tool.
 fn export_glb_file(
     core: &OperationCore,
     asset_id: &str,
@@ -3203,7 +3218,8 @@ mod tests {
 
     #[test]
     fn cli_output_refuses_existing_files_and_preserves_contents() {
-        let root = std::env::temp_dir().join(format!("meshharbor-cli-output-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-output-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let existing = root.join("existing.glb");
         let sentinel = b"do not overwrite";
@@ -3232,7 +3248,8 @@ mod tests {
     fn cli_output_refuses_symlink_destinations_without_touching_targets() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join(format!("meshharbor-cli-symlink-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-symlink-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let target = root.join("protected.glb");
         let sentinel = b"protected data";
@@ -3252,7 +3269,8 @@ mod tests {
 
     #[test]
     fn cli_mesh_output_paths_reject_lexical_aliases_before_processing() {
-        let root = std::env::temp_dir().join(format!("meshharbor-cli-pair-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-pair-{}", uuid::Uuid::new_v4()));
         let nested = root.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         let output = nested.join("../same.glb");
@@ -3265,9 +3283,41 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cli_output_failure_preserves_a_replacement_destination() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-failure-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let destination = root.join("failed.glb");
+        let moved = root.join("original.partial");
+        let replacement = b"replacement from a competing writer";
+
+        let error = write_cli_output_with(
+            &destination,
+            b"original output",
+            |file, path, bytes| {
+                std::io::Write::write_all(file, &bytes[..8])?;
+                std::fs::rename(path, &moved)?;
+                std::fs::write(path, replacement)?;
+                Err(std::io::Error::other("injected write failure"))
+            },
+        )
+        .unwrap_err();
+        match error {
+            CoreError::Io(error) => assert!(error.to_string().contains("may be incomplete")),
+            other => panic!("expected an I/O error, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&destination).unwrap(), replacement);
+        assert_eq!(std::fs::read(&moved).unwrap(), b"original");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cli_output_creation_is_race_safe() {
-        let root = std::env::temp_dir().join(format!("meshharbor-cli-race-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-race-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let destination = root.join("race.glb");
         let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -3294,7 +3344,10 @@ mod tests {
         });
 
         barrier.wait();
-        let results = [first.join().unwrap().unwrap(), second.join().unwrap().unwrap()];
+        let results = [
+            first.join().unwrap().unwrap(),
+            second.join().unwrap().unwrap(),
+        ];
         assert_eq!(results.iter().filter(|written| **written).count(), 1);
         let written = std::fs::read(&destination).unwrap();
         assert!(written == b"first" || written == b"second");
