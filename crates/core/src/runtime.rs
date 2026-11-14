@@ -661,7 +661,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-
     fn write_test_script(path: &Path, contents: &str) {
         fs::write(path, contents).unwrap();
         let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -736,14 +735,20 @@ esac
         );
         uv_script = uv_script.replace(
             "FAKE_PYTHON_PLACEHOLDER",
-            &format!("FAKE_PYTHON={}", shell_quote(&fake_python.to_string_lossy())),
+            &format!(
+                "FAKE_PYTHON={}",
+                shell_quote(&fake_python.to_string_lossy())
+            ),
         );
         write_test_script(&fake_uv, &uv_script);
 
         assert!(manager.setup_environment_with_uv(&fake_uv).is_err());
         let report = manager.setup_environment_with_uv(&fake_uv).unwrap();
         assert_eq!(report.backend_id, "pixal3d-mlx");
-        assert_eq!(report.status, "python_environment_ready_models_not_installed");
+        assert_eq!(
+            report.status,
+            "python_environment_ready_models_not_installed"
+        );
         assert!(report.runtime_root.starts_with(&data_root));
         assert!(report.python.starts_with(&runtime_root));
         assert!(report.lockfile.is_file());
@@ -777,7 +782,8 @@ esac
 
     #[test]
     fn model_download_retry_keeps_partial_cache_and_reaches_checkpoint_validation() {
-        let root = env::temp_dir().join(format!("meshharbor-mlx-download-retry-{}", Uuid::new_v4()));
+        let root =
+            env::temp_dir().join(format!("meshharbor-mlx-download-retry-{}", Uuid::new_v4()));
         let data_root = root.join("app-data");
         let runtime_root = data_root.join("runtimes/pixal3d-mlx");
         fs::create_dir_all(&data_root).unwrap();
@@ -825,12 +831,18 @@ exit 0
 
         let first = manager.install_models_with_tools(&unused_uv, &fake_python);
         assert!(first.is_err());
-        assert_eq!(fs::read_to_string(&partial).unwrap(), "partial checkpoint bytes");
+        assert_eq!(
+            fs::read_to_string(&partial).unwrap(),
+            "partial checkpoint bytes"
+        );
 
         let second = manager.install_models_with_tools(&unused_uv, &fake_python);
         let error = second.expect_err("fake fixture must reach the pinned checkpoint hash check");
         assert!(error.to_string().contains("checksum mismatch"));
-        assert_eq!(fs::read_to_string(&partial).unwrap(), "partial checkpoint bytes");
+        assert_eq!(
+            fs::read_to_string(&partial).unwrap(),
+            "partial checkpoint bytes"
+        );
         assert_eq!(
             fs::read_to_string(runtime_root.join("weights/naf_release.pth")).unwrap(),
             "invalid fixture bytes"
@@ -857,5 +869,4 @@ exit 0
         );
         fs::remove_dir_all(root).unwrap();
     }
-
 }
