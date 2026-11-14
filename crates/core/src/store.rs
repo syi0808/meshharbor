@@ -582,6 +582,46 @@ impl Store {
         }
     }
 
+    /// Mark persisted nonterminal jobs as failed after an unclean exit.
+    ///
+    /// The caller must ensure that no other MeshHarbor process is using this
+    /// store. This deliberately does not resume work or delete partial assets.
+    pub fn recover_interrupted_jobs(&self) -> CoreResult<Vec<Job>> {
+        let unfinished_jobs = {
+            let conn = self.connection.lock().expect("SQLite mutex poisoned");
+            let mut statement = conn.prepare(
+                "SELECT id, state FROM jobs
+                 WHERE state IN ('queued', 'running', 'validating', 'cancelling')
+                 ORDER BY created_at ASC, rowid ASC",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut recovered = Vec::with_capacity(unfinished_jobs.len());
+        for (id, state) in unfinished_jobs {
+            let previous_state = JobState::parse(&state)?;
+            if previous_state.is_terminal() {
+                continue;
+            }
+            let error = serde_json::json!({
+                "code": "interrupted",
+                "message": "This job was unfinished when MeshHarbor last exited. It was not resumed; inspect existing assets before retrying.",
+                "previous_state": previous_state.as_str(),
+            });
+            recovered.push(self.update_job(
+                &id,
+                JobState::Failed,
+                100,
+                None,
+                Some(error),
+            )?);
+        }
+        Ok(recovered)
+    }
+
     fn artifact_path_for_hash(&self, hash: &str) -> PathBuf {
         self.artifact_root.join(&hash[..2]).join(hash)
     }
@@ -626,7 +666,7 @@ fn job_state_from_transaction(transaction: &Transaction<'_>, id: &str) -> CoreRe
 fn valid_transition(current: &JobState, next: &JobState) -> bool {
     matches!(
         (current, next),
-        (JobState::Queued, JobState::Running | JobState::Cancelled)
+        (JobState::Queued, JobState::Running | JobState::Cancelled | JobState::Failed)
             | (
                 JobState::Running,
                 JobState::Validating
@@ -762,6 +802,103 @@ mod tests {
                 .update_job(&job.id, JobState::Failed, 100, None, None)
                 .is_err()
         );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recovery_marks_only_interrupted_jobs_failed_and_is_idempotent() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+
+        let queued = store.create_job("mesh.simplify", None, &json!({})).unwrap();
+        let running = store.create_job("mesh.cleanup", None, &json!({})).unwrap();
+        store
+            .update_job(&running.id, JobState::Running, 25, None, None)
+            .unwrap();
+        let validating = store.create_job("uv.unwrap", None, &json!({})).unwrap();
+        store
+            .update_job(&validating.id, JobState::Running, 75, None, None)
+            .unwrap();
+        store
+            .update_job(&validating.id, JobState::Validating, 90, None, None)
+            .unwrap();
+
+        let cancelled = store
+            .create_job("mesh.separate_parts", None, &json!({}))
+            .unwrap();
+        store.cancel_job(&cancelled.id).unwrap();
+        let succeeded = store.create_job("mesh.compress", None, &json!({})).unwrap();
+        store
+            .update_job(&succeeded.id, JobState::Running, 80, None, None)
+            .unwrap();
+        store
+            .update_job(&succeeded.id, JobState::Validating, 90, None, None)
+            .unwrap();
+        store
+            .update_job(
+                &succeeded.id,
+                JobState::Succeeded,
+                100,
+                Some(json!({"asset_id":"asset-existing"})),
+                None,
+            )
+            .unwrap();
+        let failed = store.create_job("image.generate", None, &json!({})).unwrap();
+        store
+            .update_job(&failed.id, JobState::Running, 30, None, None)
+            .unwrap();
+        store
+            .update_job(
+                &failed.id,
+                JobState::Failed,
+                100,
+                None,
+                Some(json!({"message":"known failure"})),
+            )
+            .unwrap();
+        drop(store);
+
+        // Recovery is an explicit operator action after the prior process exits.
+        let store = Store::open(&dir).unwrap();
+        let recovered = store.recover_interrupted_jobs().unwrap();
+        assert_eq!(recovered.len(), 3);
+
+        for (id, previous_state) in [
+            (&queued.id, "queued"),
+            (&running.id, "running"),
+            (&validating.id, "validating"),
+        ] {
+            let job = store.get_job(id).unwrap().unwrap();
+            assert_eq!(job.state, JobState::Failed);
+            assert_eq!(job.progress, 100);
+            let error = job.error.unwrap();
+            assert_eq!(error["code"], "interrupted");
+            assert_eq!(error["previous_state"], previous_state);
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("inspect existing assets")
+            );
+        }
+
+        assert_eq!(
+            store.get_job(&cancelled.id).unwrap().unwrap().state,
+            JobState::Cancelled
+        );
+        let succeeded = store.get_job(&succeeded.id).unwrap().unwrap();
+        assert_eq!(succeeded.state, JobState::Succeeded);
+        assert_eq!(
+            succeeded.result,
+            Some(json!({"asset_id":"asset-existing"}))
+        );
+        let failed = store.get_job(&failed.id).unwrap().unwrap();
+        assert_eq!(failed.state, JobState::Failed);
+        assert_eq!(failed.error, Some(json!({"message":"known failure"})));
+        assert!(store.recover_interrupted_jobs().unwrap().is_empty());
+        assert!(store.list_assets(10).unwrap().is_empty());
+
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }

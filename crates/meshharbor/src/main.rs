@@ -94,10 +94,29 @@ enum Command {
     },
     /// Show implemented operations and detected runtime capabilities.
     Doctor,
+    /// Reconcile background jobs left unfinished by an earlier exit.
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
     /// Manage the optional local Pixal3D MLX runtime.
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum JobsCommand {
+    /// Mark unfinished jobs as failed after stopping every MeshHarbor process using this data directory.
+    RecoverInterrupted {
+        #[arg(
+            long,
+            required = true,
+            action = clap::ArgAction::SetTrue,
+            help = "Acknowledge that no MeshHarbor serve or mcp process is using this data directory."
+        )]
+        confirm_no_running_meshharbor: bool,
     },
 }
 
@@ -651,6 +670,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             serde_json::to_string_pretty(&OperationCore::open(&root)?.runtime_doctor())?
         ),
+        Command::Jobs { command } => match command {
+            JobsCommand::RecoverInterrupted { .. } => {
+                let core = OperationCore::open(&root)?;
+                let recovered = core.store().recover_interrupted_jobs()?;
+                eprintln!(
+                    "Marked {} interrupted job(s) as failed. Existing assets and download caches were left untouched; inspect them before retrying.",
+                    recovered.len()
+                );
+                println!("{}", serde_json::to_string_pretty(&recovered)?);
+            }
+        },
         Command::Runtime { command } => {
             let core = OperationCore::open(&root)?;
             match command {
@@ -1853,6 +1883,20 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn interrupted_job_recovery_requires_an_explicit_stopped_process_acknowledgement() {
+        assert!(Cli::try_parse_from(["meshharbor", "jobs", "recover-interrupted"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "meshharbor",
+                "jobs",
+                "recover-interrupted",
+                "--confirm-no-running-meshharbor",
+            ])
+            .is_ok()
+        );
+    }
 
     #[test]
     fn validates_base64_padding() {

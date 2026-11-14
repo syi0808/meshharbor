@@ -52,6 +52,9 @@ meshharbor process-mesh asset_<id> --operation render.optimize --output ./scene-
 meshharbor process-mesh asset_<id> --operation mesh.compress --output ./scene-compressed.glb
 
 
+# If MeshHarbor exited unexpectedly, first stop every REST/MCP process using this data directory
+meshharbor jobs recover-interrupted --confirm-no-running-meshharbor
+
 # Optional Apple Silicon MLX runtime setup (uv is installed automatically if missing)
 meshharbor runtime setup
 meshharbor runtime hf-login
@@ -85,7 +88,7 @@ A temporary bearer token is printed to stderr for non-dashboard API clients. The
 - `POST /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`, `POST /api/v1/jobs/{job_id}/cancel`
 - `GET /api/v1/artifacts/{artifact_id}`
 
-Job requests support `mesh.simplify`, `mesh.cleanup`, `mesh.separate_parts`, `uv.unwrap`, `render.optimize`, `mesh.compress`, `image.generate` (with optional `backend_id: "auto" | "pixal3d-mlx" | "pixal3d-cuda"`), and explicit runtime jobs. `uv.unwrap` accepts optional `resolution` (64–4096, default 1024) and `padding` (0–64, default 8); `render.optimize` accepts `overdraw_threshold` (1.0–1.5, default 1.05). Generic texture bake and retopology jobs are not available. Model-install endpoints require explicit large-download and gated-access confirmation. The single operation slot serializes local work. Queued jobs can be cancelled; native simplification, runtime installation, downloads, and model inference cannot currently be interrupted safely after starting. Job state is persisted, but automatic recovery of queued/running work after a process restart is not implemented. Image generation requires a ready backend and local model files; readiness does not prove quality or general GPU-memory fit.
+Job requests support `mesh.simplify`, `mesh.cleanup`, `mesh.separate_parts`, `uv.unwrap`, `render.optimize`, `mesh.compress`, `image.generate` (with optional `backend_id: "auto" | "pixal3d-mlx" | "pixal3d-cuda"`), and explicit runtime jobs. `uv.unwrap` accepts optional `resolution` (64–4096, default 1024) and `padding` (0–64, default 8); `render.optimize` accepts `overdraw_threshold` (1.0–1.5, default 1.05). Generic texture bake and retopology jobs are not available. Model-install endpoints require explicit large-download and gated-access confirmation. The single operation slot serializes local work. Queued jobs can be cancelled; native simplification, runtime installation, downloads, and model inference cannot currently be interrupted safely after starting. Job state is persisted. After an unexpected exit, stop every REST/MCP process using the same data directory and run `meshharbor jobs recover-interrupted --confirm-no-running-meshharbor` to mark unfinished jobs as failed. The command does not resume work or delete assets/download caches; inspect existing assets before retrying. The flag is an operator acknowledgement and MeshHarbor cannot verify that other processes are stopped. Image generation requires a ready backend and local model files; readiness does not prove quality or general GPU-memory fit.
 
 ## MCP
 
