@@ -16,10 +16,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support/studio_assets.rs");
     for path in ["package.json", "package-lock.json", "vite.config.ts"] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            studio_dir.join(path).display()
-        );
+        emit_rerun_if_changed(&manifest_dir, &studio_dir.join(path));
     }
 
     let prepared = studio_assets::prepare_studio_assets(&dist_dir, &out_dir)
@@ -36,13 +33,7 @@ fn main() {
 }
 
 fn emit_rerun_if_changed(manifest_dir: &Path, path: &Path) {
-    let relative = path
-        .strip_prefix(manifest_dir)
-        .expect("Studio watch path is under the workspace")
-        .to_str()
-        .expect("Studio watch path must be UTF-8");
-    if relative.chars().any(char::is_control) {
-        panic!("Studio watch path contains a control character");
-    }
+    let relative = studio_assets::safe_rerun_path(manifest_dir, path)
+        .unwrap_or_else(|error| panic!("Invalid Cargo watch path: {error}"));
     println!("cargo:rerun-if-changed={relative}");
 }

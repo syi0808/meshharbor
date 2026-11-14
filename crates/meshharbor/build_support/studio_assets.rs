@@ -16,6 +16,33 @@ pub struct PreparedStudioAssets {
     pub watched_directories: Vec<PathBuf>,
 }
 
+pub fn safe_rerun_path(base: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
+        .strip_prefix(base)
+        .map_err(|_| "Cargo watch path is outside the package root.".to_owned())?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(value) => {
+                let value = value
+                    .to_str()
+                    .ok_or_else(|| "Cargo watch path must be valid UTF-8.".to_owned())?;
+                if value.contains('\\') || value.chars().any(char::is_control) {
+                    return Err("Cargo watch path contains a non-portable component.".into());
+                }
+                components.push(value.to_owned());
+            }
+            Component::ParentDir => components.push("..".to_owned()),
+            Component::CurDir => {}
+            _ => return Err("Cargo watch path must remain relative.".into()),
+        }
+    }
+    if components.is_empty() {
+        return Err("Cargo watch path must not be empty.".into());
+    }
+    Ok(components.join("/"))
+}
+
 pub fn prepare_studio_assets(
     dist_dir: &Path,
     out_dir: &Path,
@@ -85,9 +112,13 @@ pub fn prepare_studio_assets(
         let expected_size = bytes.len() as u64;
         stage_verified_asset(&stage_root, &relative, &bytes)?;
         let staged_path = stage_root.join(&relative);
-        let staged_bytes = read_regular_file(&staged_path, &format!("staged Studio asset {relative}"))?;
-        if staged_bytes.len() as u64 != expected_size || sha256_hex(&staged_bytes) != expected_hash {
-            return Err(format!("Staged Studio asset failed integrity verification: {relative}."));
+        let staged_bytes =
+            read_regular_file(&staged_path, &format!("staged Studio asset {relative}"))?;
+        if staged_bytes.len() as u64 != expected_size || sha256_hex(&staged_bytes) != expected_hash
+        {
+            return Err(format!(
+                "Staged Studio asset failed integrity verification: {relative}."
+            ));
         }
         let embedded_path = format!("/{STAGED_ROOT}/{relative}");
         generated_source.push_str(&format!(
@@ -123,7 +154,9 @@ fn manifest_asset_paths(manifest: &serde_json::Value) -> Result<BTreeSet<String>
     let mut paths = BTreeSet::from(["index.html".to_owned()]);
     for (entry_name, entry) in entries {
         if !entry.is_object() {
-            return Err(format!("Vite manifest entry {entry_name:?} must be an object."));
+            return Err(format!(
+                "Vite manifest entry {entry_name:?} must be an object."
+            ));
         }
         let file = entry
             .get("file")
@@ -203,7 +236,10 @@ fn scan_dist(
     let metadata = fs::symlink_metadata(directory)
         .map_err(|error| format!("Could not inspect Studio output directory: {error}"))?;
     if !metadata.file_type().is_dir() {
-        return Err(format!("Studio output directory is not a regular directory: {}.", directory.display()));
+        return Err(format!(
+            "Studio output directory is not a regular directory: {}.",
+            directory.display()
+        ));
     }
     watched_directories.insert(directory.to_path_buf());
     let mut entries: Vec<_> = fs::read_dir(directory)
@@ -224,7 +260,14 @@ fn scan_dist(
         if metadata.file_type().is_dir() {
             let relative = relative_path(root, &path)?;
             record_portable_path(&relative, folded_paths)?;
-            scan_dist(root, &path, files, folded_paths, watched_files, watched_directories)?;
+            scan_dist(
+                root,
+                &path,
+                files,
+                folded_paths,
+                watched_files,
+                watched_directories,
+            )?;
         } else if metadata.file_type().is_file() {
             let relative = relative_path(root, &path)?;
             record_portable_path(&relative, folded_paths)?;
@@ -243,7 +286,9 @@ fn scan_dist(
 fn record_portable_path(path: &str, folded_paths: &mut HashSet<String>) -> Result<(), String> {
     validate_asset_path(path)?;
     if !folded_paths.insert(path.to_lowercase()) {
-        return Err(format!("Studio output contains a case-insensitive path collision: {path:?}."));
+        return Err(format!(
+            "Studio output contains a case-insensitive path collision: {path:?}."
+        ));
     }
     Ok(())
 }
@@ -278,7 +323,9 @@ fn read_regular_file(path: &Path, description: &str) -> Result<Vec<u8>, String> 
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("Could not inspect {description}: {error}"))?;
     if !metadata.file_type().is_file() {
-        return Err(format!("{description} must be a regular file, not a symlink or special file."));
+        return Err(format!(
+            "{description} must be a regular file, not a symlink or special file."
+        ));
     }
     fs::read(path).map_err(|error| format!("Could not read {description}: {error}"))
 }
@@ -302,7 +349,12 @@ fn stage_verified_asset(stage_root: &Path, relative: &str, bytes: &[u8]) -> Resu
             fs::remove_file(&target)
                 .map_err(|error| format!("Could not replace staged Studio asset: {error}"))?;
         }
-        Ok(_) => return Err(format!("Staged Studio asset path is not a regular file: {}.", target.display())),
+        Ok(_) => {
+            return Err(format!(
+                "Staged Studio asset path is not a regular file: {}.",
+                target.display()
+            ));
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("Could not inspect staged Studio asset: {error}")),
     }
@@ -318,10 +370,15 @@ fn stage_verified_asset(stage_root: &Path, relative: &str, bytes: &[u8]) -> Resu
 fn ensure_directory(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
-        Ok(_) => Err(format!("Studio staging path must be a regular directory: {}.", path.display())),
+        Ok(_) => Err(format!(
+            "Studio staging path must be a regular directory: {}.",
+            path.display()
+        )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(path)
             .map_err(|error| format!("Could not create Studio staging directory: {error}")),
-        Err(error) => Err(format!("Could not inspect Studio staging directory: {error}")),
+        Err(error) => Err(format!(
+            "Could not inspect Studio staging directory: {error}"
+        )),
     }
 }
 
@@ -333,7 +390,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn content_type(path: &str) -> &'static str {
-    match Path::new(path).extension().and_then(|extension| extension.to_str()) {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
         Some("html") => "text/html; charset=utf-8",
         Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
@@ -384,12 +444,29 @@ mod tests {
     }
 
     #[test]
+    fn cargo_watch_paths_do_not_include_a_controlled_checkout_prefix() {
+        let package = PathBuf::from("checkout\nworkspace").join("crates/meshharbor");
+        let watch = package.join("../../apps/studio/package.json");
+        let relative = safe_rerun_path(&package, &watch).unwrap();
+        assert_eq!(relative, "../../apps/studio/package.json");
+        assert!(!relative.chars().any(char::is_control));
+    }
+
+    #[test]
     fn manifest_assets_are_staged_and_unlisted_files_are_rejected() {
         let (root, dist, out) = fixture("manifest");
         let prepared = prepare_studio_assets(&dist, &out).unwrap();
         assert!(prepared.generated_source.contains("path: \"/index.html\""));
-        assert!(prepared.generated_source.contains("path: \"/assets/app.js\""));
-        assert!(prepared.generated_source.contains("path: \"/assets/app.css\""));
+        assert!(
+            prepared
+                .generated_source
+                .contains("path: \"/assets/app.js\"")
+        );
+        assert!(
+            prepared
+                .generated_source
+                .contains("path: \"/assets/app.css\"")
+        );
         assert!(!prepared.generated_source.contains(".vite/manifest.json"));
         assert!(prepared.watched_files.contains(&dist.join("assets/app.js")));
         assert!(prepared.watched_directories.contains(&dist));
@@ -474,7 +551,11 @@ mod tests {
         let out = root.join("out");
         fs::create_dir_all(&out).unwrap();
         let prepared = prepare_studio_assets(&dist, &out).unwrap();
-        assert!(prepared.generated_source.contains("STUDIO_ASSETS: &[StudioAsset] = &[]"));
+        assert!(
+            prepared
+                .generated_source
+                .contains("STUDIO_ASSETS: &[StudioAsset] = &[]")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
