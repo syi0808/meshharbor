@@ -33,7 +33,7 @@ include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
     about = "Local-first 3D asset processing core"
 )]
 struct Cli {
-    #[arg(long, env = "MESHHARBOR_HOME", default_value_os_t = default_data_dir())]
+    #[arg(long, default_value_os_t = default_data_dir())]
     data_dir: PathBuf,
     #[command(subcommand)]
     command: Command,
