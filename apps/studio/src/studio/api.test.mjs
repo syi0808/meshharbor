@@ -11,7 +11,7 @@ try {
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
   ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion } = await import('./api.ts'));
@@ -74,6 +74,19 @@ test('multi-file import caps work to the first ten entries and does not retry a 
   assert.deepEqual(result.failures.map((failure) => failure.fileName), ['model-4.glb']);
   assert.equal(result.skippedCount, 2);
   assert.equal(result.attemptedCount, MAX_ASSET_IMPORT_FILES);
+});
+
+test('multi-file import reports attempted failures without retrying them', async () => {
+  let calls = 0;
+  const result = await importAssetBatch([{ name: 'unconfirmed.glb', size: 1 }], async () => {
+    calls += 1;
+    throw new Error('The response was lost after the server write.');
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.attemptedCount, 1);
+  assert.deepEqual(result.assets, []);
+  assert.deepEqual(result.failures.map((failure) => failure.fileName), ['unconfirmed.glb']);
 });
 
 test('multi-file import refuses empty and oversized assets before calling the uploader', async () => {

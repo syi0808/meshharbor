@@ -686,6 +686,7 @@ export function App() {
         setNotice(`Importing ${progress.current} of ${progress.total}: ${progress.fileName}`);
       });
       let refreshError: string | null = null;
+      let filtersToRefresh = assetFiltersRef.current;
       if (result.assets.length > 0) {
         setAssets((current) => {
           const importedIds = new Set(result.assets.map((asset) => asset.id));
@@ -709,12 +710,15 @@ export function App() {
           setReport(null);
         }
 
-        let filtersToRefresh = assetFiltersRef.current;
         if (plan.resetFilters) {
           filtersToRefresh = EMPTY_ASSET_BROWSER_FILTERS;
           assetSearchInputRef.current = '';
           setAssetSearchInput('');
         }
+      }
+      if (result.attemptedCount > 0) {
+        // Reconcile ambiguous failures where the server may have stored an asset
+        // before the response was lost, without ever replaying the upload.
         refreshError = await requestAssetPage(api, filtersToRefresh, false);
       }
 
