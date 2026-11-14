@@ -2,7 +2,7 @@
 
 MeshHarbor is an early Rust-first, local 3D asset processing application. Its shared Rust operation core is exposed through a CLI, a loopback REST API, and the official Rust MCP SDK. It supports importing PNG/JPEG/GLB files; simplifying, cleaning, and separating a bounded class of static GLB meshes; xatlas-based UV atlas generation with same-mesh embedded PBR rebaking; meshoptimizer render-order optimization and KHR_meshopt_compression; and opt-in Pixal3D image-to-GLB generation through MLX on Apple Silicon or CUDA on Linux/NVIDIA. An experimental QuadriFlow quad-remeshing path is wired through the operation core but unavailable in the current product build. CLI, REST, MCP, and Studio expose backend status and an install request. Runtime code ignores adjacent executables; a managed sidecar can be resolved only after an in-process verifier accepts its release attestation and the executable hash matches the trusted manifest. The in-process verifier is integrated, but the checked-in manifest is empty, so status reports the backend unavailable and install/rollback requests fail closed without downloads or backend-directory writes. Unsigned temporary Actions artifacts are never installed. For its narrowly supported textured inputs, base-color and metallic/roughness maps are projected only onto the triangulated GLB preview, with strict fail-closed gates; the editable quad OBJ remains geometry-only. Generic high-to-low texture baking remains unimplemented.
 
-This is **not yet a complete M1 product or release build**. A React/TypeScript/Three.js Studio client exists under `apps/studio`, and the Rust server can embed a built client bundle, but its npm dependencies and browser QA have not been verified here. Neither image-to-3D backend has been exercised end-to-end in this environment, and the CUDA route still needs a fresh supported-GPU acceptance run. Model weights are not bundled. Windows/macOS release validation and production packaging are not implemented. MeshHarbor's project license has not been selected; this repository deliberately has no root `LICENSE`.
+This is **not yet a complete M1 product or release build**. A React/TypeScript/Three.js Studio client exists under `apps/studio`. GitHub Actions now validates the locked Studio build and launches a release-mode CLI with the bundle embedded on pinned Linux, macOS, and Windows runners. This is a startup smoke only: there is no browser/visual QA, desktop shell, installer, code signing, or published release package. Neither image-to-3D backend has been exercised end-to-end in this environment, and the CUDA route still needs a fresh supported-GPU acceptance run. Model weights are not bundled. MeshHarbor's project license has not been selected; this repository deliberately has no root `LICENSE`.
 
 ## Implemented now
 
@@ -25,7 +25,7 @@ See [architecture status](docs/architecture.md), [license/dependency status](doc
 
 ## Build and test
 
-Requirements: Rust/Cargo 1.88 or later and a C++ toolchain for meshoptimizer and the vendored xatlas wrapper.
+Requirements: Rust/Cargo 1.88 and a C++ toolchain for meshoptimizer and the vendored xatlas wrapper. To build the embedded Studio bundle, use Node.js 24.22.3. Windows source builds also need the MSVC C++ toolchain, NASM 3.02 on `PATH`, and `CFLAGS=/std:c11` for the AWS-LC MSVC feature probe. See [the embedded Studio build/smoke guide](docs/embedded-studio-package-smoke.md).
 
 ```sh
 cargo fmt --all -- --check
@@ -34,9 +34,9 @@ cargo run --bin meshharbor -- --help
 cargo run --bin meshharbor -- doctor
 ```
 
-Most tests cover synthetic GLB fixtures and the Rust API/core contracts. A separate QuadriFlow source-build smoke uses only a synthetic cube on selected OS runners; it is not a full cross-platform MeshHarbor build/package test, real-asset or visual-quality evaluation, or model-inference acceptance suite. See [the retopology candidate notes](docs/retopology-candidate.md) for exact platform results.
+Most tests cover synthetic GLB fixtures and the Rust API/core contracts. CI also builds and launches a release-mode MeshHarbor binary with its Studio bundle on Ubuntu 24.04, macOS 15, and Windows Server 2022; the smoke checks the local health endpoint and embedded HTML/JS/CSS assets. It is not an installer, signed release package, browser/visual QA, real-asset evaluation, or model-inference acceptance suite. The separate QuadriFlow source-build smoke uses only a synthetic cube; see [the retopology candidate notes](docs/retopology-candidate.md) for its platform limits.
 
-The Studio client source is not part of the Rust test suite. Its npm dependencies must be installed before `npm run build` can create the bundle embedded by the Rust build. The client build and browser workflow were not verified in this environment because the required npm packages were not available in the offline cache.
+The Studio client source is not part of the Rust unit tests. Run `npm ci --ignore-scripts --no-audit --no-fund` and `npm run build` in `apps/studio` before compiling MeshHarbor to embed the client. The committed npm lockfile keeps this install resolution deterministic.
 
 ## CLI
 
