@@ -104,3 +104,14 @@ Job requests support `mesh.simplify`, `mesh.cleanup`, `mesh.separate_parts`, `uv
 Run `meshharbor mcp` to start the stdio MCP server. Its output is the MCP protocol stream; diagnostics go to stderr. Tools include `list_operations`, `list_assets`, `import_asset`, `start_simplification`, `start_mesh_processing`, `start_image_generation`, MLX and CUDA runtime setup/model-download actions, `get_job`, `cancel_job`, `runtime_doctor`, `export_glb`, and `export_quad_obj`. `mesh.retopology` requires a signature-verified, manifest-matched managed QuadriFlow sidecar, which is unavailable in this build; adjacent executables are ignored; its OBJ export writes only inside the configured export directory and refuses existing files. MCP asset import accepts base64-encoded local file bytes and does not fetch files or weights. Model tools require explicit large-download and gated-access confirmations. Hugging Face credentials are never accepted by MCP; authenticate through the corresponding `meshharbor runtime *-hf-login` command in a local terminal. `export_glb` writes only inside the configured export directory (defaulting to the app data `exports` folder), refuses existing files, and does not transmit the GLB to the MCP client. See [the MCP workflow guide](docs/mcp-workflow.md).
 
 
+## Help benchmark MeshHarbor
+
+MeshHarbor is early and has not been benchmarked across a broad range of hardware. If you can test it with a public sample or an asset you are allowed to process, share a report in a GitHub issue with:
+
+- MeshHarbor commit or revision
+- OS and version; CPU; GPU and VRAM; system RAM
+- Backend and relevant settings
+- Cold-start time, warm-run time, and peak RAM/VRAM, if available
+- Whether the run completed, plus a brief output-quality observation
+
+Please do not attach private or confidential assets, model weights, access tokens, or logs containing secrets. A successful setup or preflight only means those checks passed; it does not establish end-to-end generation success, output quality, or general hardware readiness.
