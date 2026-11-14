@@ -136,6 +136,7 @@ fn lock_file(_file: &File, _mode: LockMode) -> io::Result<()> {
     ))
 }
 
+#[cfg(unix)]
 fn map_lock_error(error: io::Error) -> io::Result<()> {
     if error.kind() == io::ErrorKind::WouldBlock {
         Err(in_use_error())
@@ -144,6 +145,7 @@ fn map_lock_error(error: io::Error) -> io::Result<()> {
     }
 }
 
+#[cfg(any(unix, windows))]
 fn in_use_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::WouldBlock,
