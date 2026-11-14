@@ -1,0 +1,101 @@
+name: Build unprivileged pinned QuadriFlow candidate
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub-hosted runner label for the target platform
+        required: true
+        type: string
+      platform:
+        description: Fixed MeshHarbor platform key
+        required: true
+        type: string
+      replica:
+        description: Independent build replica label
+        required: true
+        type: string
+      source_commit:
+        description: Exact MeshHarbor source commit from the manual caller
+        required: true
+        type: string
+      workflow_commit:
+        description: Exact candidate workflow commit from the manual caller
+        required: true
+        type: string
+      build_trigger:
+        description: Original manual workflow event name
+        required: true
+        type: string
+    outputs:
+      artifact_id:
+        description: Immutable artifact ID produced by this exact build job
+        value: ${{ jobs.build.outputs.artifact_id }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ inputs.platform }} ${{ inputs.replica }} unprivileged pinned-source build
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      artifact_id: ${{ steps.upload_candidate.outputs.artifact-id }}
+    steps:
+      - name: Check out the exact caller source commit without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+
+      - name: Install native build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cmake g++ libeigen3-dev libboost-dev
+
+      - name: Install native build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install eigen boost
+
+      - name: Install native build dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $root) { $root = 'C:\vcpkg' }
+          if (-not (Test-Path "$root\vcpkg.exe")) { throw "vcpkg not found at $root" }
+          & "$root\vcpkg.exe" install eigen3:x64-windows-static boost:x64-windows-static
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed with exit code $LASTEXITCODE" }
+          "VCPKG_INSTALLATION_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Set up pinned Python runtime
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12.8"
+          cache: false
+
+      - name: Build pinned QuadriFlow source without running the executable
+        env:
+          MESHHARBOR_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          MESHHARBOR_WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          MESHHARBOR_WORKFLOW_PATH: .github/workflows/quadriflow-candidate-build.yml
+          MESHHARBOR_BUILD_TRIGGER: ${{ inputs.build_trigger }}
+          MESHHARBOR_PLATFORM: ${{ inputs.platform }}
+          MESHHARBOR_BUILD_REPLICA: ${{ inputs.replica }}
+        run: python scripts/quadriflow-platform-smoke.py --build-only
+
+      - name: Upload this replica's unverified candidate
+        id: upload_candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: quadriflow-unverified-${{ inputs.platform }}-${{ inputs.replica }}
+          path: ${{ runner.temp }}/quadriflow-platform-smoke/artifact/
+          if-no-files-found: error
+          retention-days: 1

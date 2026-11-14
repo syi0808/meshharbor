@@ -14,6 +14,17 @@ pub struct AtlasResult {
     pub metallic_roughness_png: Vec<u8>,
     pub covered_texels: u64,
     pub gutter_texels: u64,
+    pub projection: Option<ProjectionStats>,
+}
+
+/// Coverage and distance bounds for a geometry-to-geometry texture projection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectionStats {
+    pub attempted_texels: u64,
+    pub projected_texels: u64,
+    pub ambiguous_texels: u64,
+    pub maximum_distance: f32,
+    pub distance_limit: f32,
 }
 
 #[repr(C)]
@@ -32,6 +43,11 @@ struct RawResult {
     mr_png_len: usize,
     covered_texels: u64,
     gutter_texels: u64,
+    projection_attempted: u64,
+    projection_projected: u64,
+    projection_ambiguous: u64,
+    projection_max_distance: f32,
+    projection_distance_limit: f32,
 }
 
 impl Default for RawResult {
@@ -51,6 +67,11 @@ impl Default for RawResult {
             mr_png_len: 0,
             covered_texels: 0,
             gutter_texels: 0,
+            projection_attempted: 0,
+            projection_projected: 0,
+            projection_ambiguous: 0,
+            projection_max_distance: 0.0,
+            projection_distance_limit: 0.0,
         }
     }
 }
@@ -69,6 +90,13 @@ unsafe extern "C" {
         mr_png_len: usize,
         resolution: u32,
         padding: u32,
+        source_positions: *const f32,
+        source_uv: *const f32,
+        source_vertex_count: u32,
+        source_indices: *const u32,
+        source_index_count: u32,
+        max_distance_ratio: f32,
+        min_coverage: f32,
         output: *mut RawResult,
         error: *mut c_char,
         error_capacity: usize,
@@ -92,11 +120,45 @@ pub struct AtlasSettings {
     pub padding: u32,
 }
 
+/// Source geometry and UVs used to project a remeshed target onto original
+/// appearance. The source image inputs remain the same embedded PNG pair.
+pub struct ProjectionSource<'a> {
+    pub positions: &'a [[f32; 3]],
+    pub uv: &'a [[f32; 2]],
+    pub indices: &'a [u32],
+}
+
 /// Generate an xatlas UV set and rebake an embedded glTF base-color and
 /// metallic/roughness PNG pair. Geometry is not simplified by this crate.
 pub fn unwrap_and_bake(
     input: AtlasInput<'_>,
     settings: AtlasSettings,
+) -> Result<AtlasResult, String> {
+    unwrap_and_bake_internal(input, settings, None)
+}
+
+/// Generate target atlas UVs and transfer embedded PBR textures from a source
+/// surface. This is deliberately limited to bounded, close, similarly-facing
+/// projections; it rejects ambiguous thin-shell samples and insufficient
+/// texel coverage.
+pub fn unwrap_and_bake_projected(
+    input: AtlasInput<'_>,
+    settings: AtlasSettings,
+    source: ProjectionSource<'_>,
+    max_distance_ratio: f32,
+    min_coverage: f32,
+) -> Result<AtlasResult, String> {
+    unwrap_and_bake_internal(
+        input,
+        settings,
+        Some((source, max_distance_ratio, min_coverage)),
+    )
+}
+
+fn unwrap_and_bake_internal(
+    input: AtlasInput<'_>,
+    settings: AtlasSettings,
+    projection: Option<(ProjectionSource<'_>, f32, f32)>,
 ) -> Result<AtlasResult, String> {
     let AtlasInput {
         positions,
@@ -110,8 +172,14 @@ pub fn unwrap_and_bake(
         resolution,
         padding,
     } = settings;
-    if positions.is_empty() || positions.len() != original_uv.len() {
-        return Err("positions and TEXCOORD_0 must have the same non-zero vertex count".into());
+    if positions.is_empty()
+        || projection.is_none() && positions.len() != original_uv.len()
+        || projection.is_some() && !original_uv.is_empty()
+    {
+        return Err(
+            "target positions must be non-empty; source UVs are only accepted for same-mesh baking"
+                .into(),
+        );
     }
     if positions.len() > 5_000_000 || indices.len() > 15_000_000 {
         return Err("mesh exceeds the native atlas safety limits".into());
@@ -129,6 +197,11 @@ pub fn unwrap_and_bake(
             return Err("NORMAL must contain only finite values".into());
         }
     }
+    if projection.is_some() && normals.is_none() {
+        return Err(
+            "projected rebaking requires target normals for the facing-direction gate".into(),
+        );
+    }
     if indices.is_empty() || !indices.len().is_multiple_of(3) {
         return Err("indices must contain one or more complete triangles".into());
     }
@@ -137,6 +210,40 @@ pub fn unwrap_and_bake(
         .any(|index| *index as usize >= positions.len())
     {
         return Err("an index points outside the POSITION array".into());
+    }
+    if let Some((source, max_distance_ratio, min_coverage)) = &projection {
+        if source.positions.is_empty()
+            || source.positions.len() != source.uv.len()
+            || source.indices.is_empty()
+            || !source.indices.len().is_multiple_of(3)
+            || source.indices.len() > 1_500_000
+            || source.positions.len() > 5_000_000
+            || source
+                .positions
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+            || source.uv.iter().flatten().any(|value| !value.is_finite())
+            || source
+                .indices
+                .iter()
+                .any(|index| *index as usize >= source.positions.len())
+        {
+            return Err(
+                "source projection mesh must have finite positions/UVs and bounded valid triangles"
+                    .into(),
+            );
+        }
+        if !max_distance_ratio.is_finite()
+            || !(0.0001..=0.05).contains(max_distance_ratio)
+            || !min_coverage.is_finite()
+            || !(0.95..=1.0).contains(min_coverage)
+        {
+            return Err(
+                "projection distance ratio must be 0.0001..0.05 and minimum coverage 0.95..1.0"
+                    .into(),
+            );
+        }
     }
     if !(64..=4096).contains(&resolution)
         || padding > 64
@@ -159,6 +266,18 @@ pub fn unwrap_and_bake(
         .map(|values| values.iter().flatten().copied().collect())
         .unwrap_or_default();
     let flat_uv: Vec<f32> = original_uv.iter().flatten().copied().collect();
+    let flat_source_positions: Vec<f32> = projection
+        .as_ref()
+        .map(|(source, _, _)| source.positions.iter().flatten().copied().collect())
+        .unwrap_or_default();
+    let flat_source_uv: Vec<f32> = projection
+        .as_ref()
+        .map(|(source, _, _)| source.uv.iter().flatten().copied().collect())
+        .unwrap_or_default();
+    let (source_indices, max_distance_ratio, min_coverage) = projection
+        .as_ref()
+        .map(|(source, distance, coverage)| (source.indices, *distance, *coverage))
+        .unwrap_or((&[][..], 0.0, 0.0));
     let mut raw = RawResult::default();
     let mut error = [0_i8; 1024];
     // SAFETY: all slices remain alive for the duration of the synchronous C++ call;
@@ -171,7 +290,11 @@ pub fn unwrap_and_bake(
             } else {
                 flat_normals.as_ptr()
             },
-            flat_uv.as_ptr(),
+            if flat_uv.is_empty() {
+                ptr::null()
+            } else {
+                flat_uv.as_ptr()
+            },
             vertex_count,
             indices.as_ptr(),
             index_count,
@@ -181,6 +304,26 @@ pub fn unwrap_and_bake(
             mr_png.len(),
             resolution,
             padding,
+            if flat_source_positions.is_empty() {
+                ptr::null()
+            } else {
+                flat_source_positions.as_ptr()
+            },
+            if flat_source_uv.is_empty() {
+                ptr::null()
+            } else {
+                flat_source_uv.as_ptr()
+            },
+            u32::try_from(flat_source_positions.len() / 3)
+                .map_err(|_| "too many source vertices")?,
+            if source_indices.is_empty() {
+                ptr::null()
+            } else {
+                source_indices.as_ptr()
+            },
+            u32::try_from(source_indices.len()).map_err(|_| "too many source indices")?,
+            max_distance_ratio,
+            min_coverage,
             &mut raw,
             error.as_mut_ptr(),
             error.len(),
@@ -232,6 +375,13 @@ pub fn unwrap_and_bake(
             metallic_roughness_png,
             covered_texels: raw.covered_texels,
             gutter_texels: raw.gutter_texels,
+            projection: projection.as_ref().map(|_| ProjectionStats {
+                attempted_texels: raw.projection_attempted,
+                projected_texels: raw.projection_projected,
+                ambiguous_texels: raw.projection_ambiguous,
+                maximum_distance: raw.projection_max_distance,
+                distance_limit: raw.projection_distance_limit,
+            }),
         }
     };
     unsafe { meshharbor_atlas_free(&mut raw) };

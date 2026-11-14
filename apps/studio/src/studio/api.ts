@@ -1,4 +1,8 @@
-import type { ApiErrorBody, Asset, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
+
+export function quadTopologyArtifact(asset: Asset | null): Artifact | undefined {
+  return asset?.artifacts.find((entry) => entry.kind === 'quad_topology' || entry.kind === 'quad_obj');
+}
 
 export class MeshHarborApi {
   private readonly dashboardHeaders = { 'X-MeshHarbor-Dashboard': 'local-ui-v1' };
@@ -34,6 +38,10 @@ export class MeshHarborApi {
 
   runtime(): Promise<RuntimeInfo> {
     return this.request('/api/v1/runtime');
+  }
+
+  installQuadriflowBackend(): Promise<{ release_tag: string; executable: string; already_installed: boolean }> {
+    return this.request('/api/v1/backends/quadriflow/install', { method: 'POST' });
   }
 
   setupPixal3dRuntime(): Promise<Job> {
@@ -89,8 +97,15 @@ export class MeshHarborApi {
   }
 
   artifact(asset: Asset): Promise<Blob> {
-    const artifact = asset.artifacts.find((entry) => entry.kind === 'source') ?? asset.artifacts[0];
+    // Quad OBJ is an editing artifact, never an image or GLB preview fallback.
+    const candidates = asset.artifacts.filter((entry) => entry.kind !== 'quad_topology' && entry.kind !== 'quad_obj');
+    const artifact = candidates.find((entry) => entry.mime_type === asset.mime_type)
+      ?? candidates.find((entry) => entry.kind === 'source') ?? candidates[0];
     if (!artifact) throw new Error('This asset has no downloadable artifact.');
+    return this.downloadArtifact(artifact);
+  }
+
+  downloadArtifact(artifact: Artifact): Promise<Blob> {
     return this.requestBlob(`/api/v1/artifacts/${encodeURIComponent(artifact.id)}`);
   }
 

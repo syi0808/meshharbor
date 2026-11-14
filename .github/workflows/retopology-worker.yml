@@ -1,0 +1,44 @@
+name: Experimental retopology worker
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          components: clippy, rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run strict Clippy with optional remesher
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::chunks-exact-to-as-chunks
+      - name: Run workspace tests with optional remesher and committed lockfile
+        run: cargo test --workspace --all-features --locked
+      - name: Test QuadriFlow notice and SBOM evidence helper
+        run: python3 -m unittest discover -s scripts -p 'test_quadriflow_*.py'
+      - name: Install declared minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759
+      - name: Run workspace tests on minimum Rust version
+        run: cargo test --workspace --all-features --locked
+      - name: Export resolved lockfile for review
+        run: |
+          echo "MESHHARBOR_LOCKFILE_B64_BEGIN"
+          base64 < Cargo.lock | tr -d '\n'
+          echo
+          echo "MESHHARBOR_LOCKFILE_B64_END"
+      - name: Upload resolved lockfile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: retopology-candidate-cargo-lock
+          path: Cargo.lock
+          if-no-files-found: error

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "backend": "quadriflow",
+  "source": {
+    "repository": "https://github.com/hjwdzh/QuadriFlow",
+    "commit": "810b7a0967c35b0dc85b4464e3835e26a756c967"
+  },
+  "release_tag": null,
+  "artifacts": []
+}

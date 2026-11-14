@@ -69,14 +69,21 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Run a supported local mesh operation and optionally write its derived GLB.
+    /// Run a supported local mesh operation. For retopology, --output writes the triangle GLB preview and --quad-output preserves the editable OBJ quads.
     /// Part separation limits: 64 MiB GLB, 4 MiB JSON, 1,000,000 vertices, 3,000,000 indices, and 256 output parts.
     ProcessMesh {
         asset_id: String,
-        #[arg(long, value_parser = ["mesh.cleanup", "mesh.separate_parts", "uv.unwrap", "render.optimize", "mesh.compress"])]
+        #[arg(long, value_parser = ["mesh.cleanup", "mesh.separate_parts", "uv.unwrap", "render.optimize", "mesh.compress", "mesh.retopology"])]
         operation: String,
+        /// Requested approximate quad count for mesh.retopology (4 to 50,000).
+        #[arg(long)]
+        target_quads: Option<u32>,
+        /// Optional path for a derived GLB or the triangulated retopology preview.
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Optional path for the original editable quad OBJ from mesh.retopology.
+        #[arg(long)]
+        quad_output: Option<PathBuf>,
     },
     /// Generate a textured GLB from a previously imported image using a ready local Pixal3D backend.
     Generate {
@@ -96,6 +103,11 @@ enum Command {
     },
     /// Show implemented operations and detected runtime capabilities.
     Doctor,
+    /// Inspect or request installation of a local mesh backend.
+    Backend {
+        #[command(subcommand)]
+        command: BackendCommand,
+    },
     /// Reconcile background jobs left unfinished by an earlier exit.
     Jobs {
         #[command(subcommand)]
@@ -105,6 +117,17 @@ enum Command {
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackendCommand {
+    /// Show QuadriFlow availability and the next supported action.
+    Status,
+    /// Request the guarded installation for the named backend.
+    Install {
+        #[arg(value_parser = ["quadriflow"])]
+        backend_id: String,
     },
 }
 
@@ -175,7 +198,7 @@ struct SimplifyArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct MeshProcessArgs {
     asset_id: String,
-    /// One of mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, or mesh.compress.
+    /// One of mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology.
     operation: String,
     /// Optional operation parameters, such as resolution/padding for uv.unwrap.
     #[serde(default)]
@@ -220,6 +243,13 @@ struct ExportGlbArgs {
     asset_id: String,
     /// Absolute destination path on the computer running the local MCP server.
     /// The file must not already exist; MeshHarbor never overwrites exports.
+    output_path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExportQuadObjArgs {
+    asset_id: String,
+    /// Absolute .obj destination path inside the MeshHarbor export directory; must not already exist.
     output_path: String,
 }
 
@@ -290,6 +320,29 @@ impl McpServer {
             .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
 
+    #[tool(
+        description = "Report QuadriFlow sidecar availability and the next step. A managed sidecar is verified using its activation marker and binary digest without being executed."
+    )]
+    async fn quadriflow_backend_status(&self) -> String {
+        serde_json::to_string_pretty(&self.core.quadriflow_backend_status())
+            .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}"))
+    }
+
+    #[tool(
+        description = "Request a guarded installation of the pinned QuadriFlow backend. An in-process verifier checks Sigstore signature/provenance and the executable digest against the trusted manifest before any download or installation; the current manifest is empty, so this request fails closed without network or backend-directory writes. Unsigned temporary Actions artifacts are never installed."
+    )]
+    async fn install_quadriflow_backend(&self) -> String {
+        let core = self.core.clone();
+        match task::spawn_blocking(move || core.install_quadriflow_backend()).await {
+            Ok(Ok(installed)) => serde_json::to_string_pretty(&installed)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
+            Err(error) => {
+                json!({"error": format!("QuadriFlow installer worker failed: {error}")}).to_string()
+            }
+        }
+    }
+
     #[tool(description = "List local assets in the MeshHarbor asset store.")]
     async fn list_assets(&self, params: Parameters<AssetListArgs>) -> String {
         let limit = params.0.limit.clamp(1, 200);
@@ -339,7 +392,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, or mesh.compress. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits connected-component primitives in one mesh. uv.unwrap uses xatlas and only rebakes supported embedded same-mesh base-color and metallic/roughness maps; it is not high-to-low projection. Compression emits a GLB requiring KHR_meshopt_compression support."
+        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits connected-component primitives in one mesh. uv.unwrap is same-mesh rebaking, not high-to-low projection. Quad retopology requires a compatible managed or adjacent QuadriFlow sidecar and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
     )]
     async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
         let args = params.0;
@@ -397,6 +450,25 @@ impl McpServer {
             Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
             Err(error) => {
                 json!({"error": format!("GLB export worker failed: {error}")}).to_string()
+            }
+        }
+    }
+
+    #[tool(
+        description = "Export a completed QuadriFlow retopology result's editable quad OBJ artifact to an absolute path inside MESHHARBOR_EXPORT_DIR (defaults to the MeshHarbor data directory's exports folder) on the local MCP host. The destination must not exist; existing files are never overwritten. Maximum export size is 64 MiB."
+    )]
+    async fn export_quad_obj(&self, params: Parameters<ExportQuadObjArgs>) -> String {
+        let core = self.core.clone();
+        let asset_id = params.0.asset_id;
+        let output_path = PathBuf::from(params.0.output_path);
+        match task::spawn_blocking(move || export_quad_obj_file(&core, &asset_id, &output_path))
+            .await
+        {
+            Ok(Ok(result)) => serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
+            Err(error) => {
+                json!({"error": format!("OBJ export worker failed: {error}")}).to_string()
             }
         }
     }
@@ -622,10 +694,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::ProcessMesh {
             asset_id,
             operation,
+            target_quads,
             output,
+            quad_output,
         } => {
             let core = OperationCore::open(&root)?;
-            let result = core.process_mesh_asset(&asset_id, &operation, json!({}))?;
+            if operation != "mesh.retopology" && (target_quads.is_some() || quad_output.is_some()) {
+                return Err("--target-quads and --quad-output require mesh.retopology.".into());
+            }
+            let parameters = if operation == "mesh.retopology" {
+                json!({ "target_quads": target_quads.unwrap_or(10_000) })
+            } else {
+                json!({})
+            };
+            let result = core.process_mesh_asset(&asset_id, &operation, parameters)?;
             if let Some(path) = output {
                 let artifact = result
                     .asset
@@ -633,6 +715,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .iter()
                     .find(|artifact| artifact.kind == "derived")
                     .ok_or("Mesh processing output artifact was not found.")?;
+                let bytes = core.store().read_artifact(&artifact.id)?.bytes;
+                fs::write(path, bytes).await?;
+            }
+            if let Some(path) = quad_output {
+                let artifact = result
+                    .asset
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.kind == "quad_topology")
+                    .ok_or("Quad retopology OBJ artifact was not found.")?;
                 let bytes = core.store().read_artifact(&artifact.id)?.bytes;
                 fs::write(path, bytes).await?;
             }
@@ -674,6 +766,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             serde_json::to_string_pretty(&OperationCore::open(&root)?.runtime_doctor())?
         ),
+        Command::Backend { command } => {
+            let core = OperationCore::open(&root)?;
+            match command {
+                BackendCommand::Status => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&core.quadriflow_backend_status())?
+                    );
+                }
+                BackendCommand::Install { backend_id: _ } => {
+                    let installed = core.install_quadriflow_backend()?;
+                    println!("{}", serde_json::to_string_pretty(&installed)?);
+                }
+            }
+        }
         Command::Jobs { command } => match command {
             JobsCommand::RecoverInterrupted { .. } => {
                 let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_recovery(&root)?;
@@ -741,6 +848,14 @@ fn api_router(state: AppState, token: String) -> Router {
     Router::new()
         .route("/api/v1/health", get(api_health))
         .route("/api/v1/runtime", get(api_runtime))
+        .route(
+            "/api/v1/backends/quadriflow",
+            get(api_quadriflow_backend_status),
+        )
+        .route(
+            "/api/v1/backends/quadriflow/install",
+            post(api_install_quadriflow_backend),
+        )
         .route(
             "/api/v1/runtime/pixal3d-mlx/setup",
             post(api_start_runtime_setup),
@@ -954,6 +1069,26 @@ async fn api_runtime(State(state): State<AppState>) -> Json<meshharbor_core::Run
     Json(state.core.runtime_doctor())
 }
 
+async fn api_quadriflow_backend_status(
+    State(state): State<AppState>,
+) -> Json<meshharbor_core::QuadriFlowBackendStatus> {
+    Json(state.core.quadriflow_backend_status())
+}
+
+async fn api_install_quadriflow_backend(
+    State(state): State<AppState>,
+) -> Result<Json<meshharbor_core::QuadriFlowInstallResult>, ApiError> {
+    let core = state.core;
+    let installed = task::spawn_blocking(move || core.install_quadriflow_backend())
+        .await
+        .map_err(|error| {
+            ApiError(CoreError::OperationUnavailable(format!(
+                "QuadriFlow installer worker failed: {error}"
+            )))
+        })??;
+    Ok(Json(installed))
+}
+
 async fn api_start_runtime_setup(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
@@ -1114,7 +1249,8 @@ async fn api_create_job(
         | "mesh.separate_parts"
         | "uv.unwrap"
         | "render.optimize"
-        | "mesh.compress" => {
+        | "mesh.compress"
+        | "mesh.retopology" => {
             start_mesh_operation_job(
                 state.core,
                 state.scheduler,
@@ -1753,6 +1889,114 @@ fn export_glb_file(
     }))
 }
 
+fn export_quad_obj_file(
+    core: &OperationCore,
+    asset_id: &str,
+    output_path: &std::path::Path,
+) -> Result<Value, CoreError> {
+    const MAX_QUAD_OBJ_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
+    if !output_path.is_absolute() {
+        return Err(CoreError::InvalidInput(
+            "Export path must be absolute on the local MCP host.".into(),
+        ));
+    }
+    if !output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("obj"))
+    {
+        return Err(CoreError::InvalidInput(
+            "Quad topology exports must use a .obj filename.".into(),
+        ));
+    }
+    let asset = core
+        .store()
+        .get_asset(asset_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' was not found.")))?;
+    if asset.kind != meshharbor_core::AssetKind::Mesh {
+        return Err(CoreError::InvalidInput(
+            "Only mesh assets can contain a quad topology artifact.".into(),
+        ));
+    }
+    let artifact = asset
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "quad_topology")
+        .ok_or_else(|| {
+            CoreError::NotFound("Mesh asset has no QuadriFlow quad topology OBJ artifact.".into())
+        })?;
+    if artifact.mime_type != "model/obj" || artifact.byte_size > MAX_QUAD_OBJ_EXPORT_BYTES {
+        return Err(CoreError::InvalidInput(
+            "Artifact is not a supported OBJ or exceeds the 64 MiB export limit.".into(),
+        ));
+    }
+
+    let file_name = output_path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CoreError::InvalidInput("Export path must name a file.".into()))?;
+    let requested_parent = output_path.parent().ok_or_else(|| {
+        CoreError::InvalidInput("Export path must include a parent directory.".into())
+    })?;
+    let configured_export_root = std::env::var_os("MESHHARBOR_EXPORT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| core.store().root().join("exports"));
+    std::fs::create_dir_all(&configured_export_root)?;
+    let canonical_export_root = std::fs::canonicalize(&configured_export_root)?;
+    let canonical_parent = std::fs::canonicalize(requested_parent)?;
+    if !canonical_parent.is_dir() {
+        return Err(CoreError::InvalidInput(
+            "Export destination parent must be an existing directory.".into(),
+        ));
+    }
+    if !canonical_parent.starts_with(&canonical_export_root) {
+        return Err(CoreError::InvalidInput(format!(
+            "MCP exports must stay inside the configured export directory: {}",
+            canonical_export_root.display()
+        )));
+    }
+    let destination = canonical_parent.join(file_name);
+    let content = core.store().read_artifact(&artifact.id)?;
+    if content.bytes.len() as u64 > MAX_QUAD_OBJ_EXPORT_BYTES
+        || std::str::from_utf8(&content.bytes).is_err()
+    {
+        return Err(CoreError::InvalidInput(
+            "Stored quad topology artifact is not a valid-size UTF-8 OBJ.".into(),
+        ));
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                CoreError::Conflict(format!(
+                    "Export destination already exists and was not overwritten: {}",
+                    destination.display()
+                ))
+            } else {
+                CoreError::Io(error)
+            }
+        })?;
+    let write_result =
+        std::io::Write::write_all(&mut file, &content.bytes).and_then(|()| file.sync_all());
+    if let Err(error) = write_result {
+        drop(file);
+        let _ = std::fs::remove_file(&destination);
+        return Err(CoreError::Io(error));
+    }
+
+    Ok(json!({
+        "asset_id": asset.id,
+        "artifact_id": artifact.id,
+        "output_path": destination,
+        "byte_size": content.bytes.len(),
+        "sha256": artifact.sha256,
+        "overwritten": false
+    }))
+}
+
 fn default_data_dir() -> PathBuf {
     default_data_dir_for(
         std::env::consts::OS,
@@ -1924,6 +2168,44 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn mcp_backend_tools_report_unavailable_without_side_effects() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-mcp-backend-{}", uuid::Uuid::new_v4()));
+        let server = McpServer::new(
+            OperationCore::open(&root).unwrap(),
+            Arc::new(Semaphore::new(1)),
+        );
+        let status: Value =
+            serde_json::from_str(&server.quadriflow_backend_status().await).unwrap();
+        assert_eq!(status["backend_id"], "quadriflow");
+        assert_eq!(status["install_available"], false);
+        let install: Value =
+            serde_json::from_str(&server.install_quadriflow_backend().await).unwrap();
+        assert!(install["error"].as_str().unwrap().contains("QuadriFlow"));
+        assert!(!root.join("backends").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backend_cli_exposes_status_and_guarded_install_commands() {
+        let status = Cli::try_parse_from(["meshharbor", "backend", "status"]).unwrap();
+        assert!(matches!(
+            status.command,
+            Command::Backend {
+                command: BackendCommand::Status
+            }
+        ));
+        let install =
+            Cli::try_parse_from(["meshharbor", "backend", "install", "quadriflow"]).unwrap();
+        assert!(matches!(
+            install.command,
+            Command::Backend {
+                command: BackendCommand::Install { backend_id }
+            } if backend_id == "quadriflow"
+        ));
+    }
 
     fn data_dir_for_test(os: &str, vars: &[(&str, &str)]) -> PathBuf {
         use std::{collections::HashMap, ffi::OsString};
@@ -2130,6 +2412,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dashboard.status(), StatusCode::OK);
+
+        let backend_status = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/backends/quadriflow")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:7432")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(backend_status.status(), StatusCode::OK);
+        let backend_body = backend_status
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let backend_json: Value = serde_json::from_slice(&backend_body).unwrap();
+        assert_eq!(backend_json["backend_id"], "quadriflow");
+        assert_eq!(backend_json["install_available"], false);
+
+        let backend_install = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/backends/quadriflow/install")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::ORIGIN, "http://localhost:7432")
+                    .header("x-meshharbor-dashboard", "local-ui-v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(backend_install.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let error_body = backend_install
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let error_json: Value = serde_json::from_slice(&error_body).unwrap();
+        assert!(error_json["error"].as_str().unwrap().contains("QuadriFlow"));
+        assert!(!root.join("backends").exists());
 
         let missing_marker = app
             .clone()
@@ -2631,6 +2962,45 @@ mod tests {
             assert!(matches!(through_symlink, CoreError::InvalidInput(_)));
             assert!(!outside_dir.join("symlink-escape.glb").exists());
         }
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_quad_obj_export_preserves_topology_bytes_and_never_overwrites() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-quad-export-{}", uuid::Uuid::new_v4()));
+        let output_dir = root.join("store/exports");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let core = OperationCore::open(root.join("store")).unwrap();
+        let asset = core
+            .import_asset("result.glb", &minimal_triangle_glb())
+            .unwrap();
+        let obj = b"v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n";
+        core.store()
+            .add_artifact(&asset.id, "quad_topology", "model/obj", obj)
+            .unwrap();
+
+        let destination = output_dir.join("result.obj");
+        let exported = export_quad_obj_file(&core, &asset.id, &destination).unwrap();
+        assert_eq!(exported["overwritten"], false);
+        assert_eq!(std::fs::read(&destination).unwrap(), obj);
+
+        let conflict = export_quad_obj_file(&core, &asset.id, &destination).unwrap_err();
+        assert!(matches!(conflict, CoreError::Conflict(_)));
+        assert_eq!(std::fs::read(&destination).unwrap(), obj);
+
+        let wrong_extension =
+            export_quad_obj_file(&core, &asset.id, &output_dir.join("result.glb")).unwrap_err();
+        assert!(matches!(wrong_extension, CoreError::InvalidInput(_)));
+
+        let outside_dir = root.join("outside");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let escaped =
+            export_quad_obj_file(&core, &asset.id, &outside_dir.join("escape.obj")).unwrap_err();
+        assert!(matches!(escaped, CoreError::InvalidInput(_)));
+        assert!(!outside_dir.join("escape.obj").exists());
+
         drop(core);
         std::fs::remove_dir_all(root).unwrap();
     }
