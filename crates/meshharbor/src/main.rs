@@ -1732,17 +1732,17 @@ async fn start_runtime_job(
             let _runtime_lock = acquire_runtime_write_lock(&worker_data_dir)?;
             match kind {
                 RuntimeJobKind::Setup => worker_core
-                .setup_pixal3d_mlx_environment()
-                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-            RuntimeJobKind::InstallModels => worker_core
-                .install_pixal3d_mlx_models(true, true)
-                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-            RuntimeJobKind::ConvertNaf => worker_core
-                .convert_pixal3d_mlx_naf()
-                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-            RuntimeJobKind::CudaSetup => worker_core
-                .setup_pixal3d_cuda_environment()
-                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+                    .setup_pixal3d_mlx_environment()
+                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+                RuntimeJobKind::InstallModels => worker_core
+                    .install_pixal3d_mlx_models(true, true)
+                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+                RuntimeJobKind::ConvertNaf => worker_core
+                    .convert_pixal3d_mlx_naf()
+                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+                RuntimeJobKind::CudaSetup => worker_core
+                    .setup_pixal3d_cuda_environment()
+                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
                 RuntimeJobKind::CudaInstallModels => worker_core
                     .install_pixal3d_cuda_models(true, true)
                     .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
