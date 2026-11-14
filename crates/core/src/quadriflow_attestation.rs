@@ -769,6 +769,78 @@ mod tests {
     }
 
     #[test]
+    fn certificate_policy_rejects_mismatched_required_identity_claims() {
+        let (_, result) = verify_sigstore_bundle(
+            CONDA_BUNDLE,
+            &sha256_hex(CONDA_ARTIFACT),
+            CONDA_IDENTITY,
+            OIDC_ISSUER,
+            SigstoreInstance::PublicGood,
+        )
+        .expect("upstream fixture should verify before claim-policy checks");
+        let policy = fixture_certificate_policy();
+        let mismatches = [
+            CertificatePolicy {
+                identity: "https://example.invalid/workflow",
+                ..policy
+            },
+            CertificatePolicy {
+                issuer: "https://example.invalid/issuer",
+                ..policy
+            },
+            CertificatePolicy {
+                repository_uri: "https://example.invalid/repository",
+                ..policy
+            },
+            CertificatePolicy {
+                repository_id: "0",
+                ..policy
+            },
+            CertificatePolicy {
+                owner_uri: "https://example.invalid/owner",
+                ..policy
+            },
+            CertificatePolicy {
+                owner_id: "0",
+                ..policy
+            },
+            CertificatePolicy {
+                source_ref: "refs/heads/untrusted",
+                ..policy
+            },
+            CertificatePolicy {
+                workflow_commit: "0000000000000000000000000000000000000000",
+                ..policy
+            },
+            CertificatePolicy {
+                run_id: policy.run_id + 1,
+                ..policy
+            },
+            CertificatePolicy {
+                run_attempt: policy.run_attempt + 1,
+                ..policy
+            },
+            CertificatePolicy {
+                trigger: "workflow_dispatch",
+                ..policy
+            },
+            CertificatePolicy {
+                token_subject: TokenSubjectPolicy::Required(
+                    "repo:prefix-dev/sigstore-example:ref:refs/heads/main",
+                ),
+                ..policy
+            },
+        ];
+
+        for mismatch in mismatches {
+            assert!(
+                validate_certificate_claims(&result, &mismatch).is_err(),
+                "a certificate claim that differs from policy must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn signed_digest_mismatch_is_rejected() {
         assert!(
             verify_sigstore_bundle(
