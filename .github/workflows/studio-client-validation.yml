@@ -1,0 +1,38 @@
+name: Studio client validation
+
+on:
+  push:
+    branches:
+      - feat/runtime-queued-cancellation-ui
+    paths:
+      - "apps/studio/**"
+      - ".github/workflows/studio-client-validation.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "apps/studio/**"
+      - ".github/workflows/studio-client-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-studio:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Install Studio dependencies
+        run: npm install --no-package-lock --no-audit --no-fund
+        working-directory: apps/studio
+      - name: Run Studio API and security tests
+        run: npm test
+        working-directory: apps/studio
+      - name: Build Studio bundle
+        run: npm run build
+        working-directory: apps/studio
