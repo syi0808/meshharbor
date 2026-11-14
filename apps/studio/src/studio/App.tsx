@@ -10,6 +10,8 @@ import {
   canInspectJobHistoryRecord,
   isActiveJob,
   isQueuedJobCancellable,
+  jobReportMatchesAsset,
+  jobResultCardModel,
   jobPollRetryDelay,
   LatestRequestGuard,
   preferTrackedTerminalJob,
@@ -20,9 +22,10 @@ import {
   type AssetComparisonPair,
   type AssetComparisonSide,
   type AssetPageFilters,
+  type JobReportCardModel,
 } from './api';
 import { ModelPreview } from './ModelPreview';
-import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
+import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
 
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
@@ -134,7 +137,7 @@ export function App() {
     jobRef.current = next;
     setJobState(next);
   }, []);
-  const [report, setReport] = useState<SimplificationReport | null>(null);
+  const [reportJob, setReportJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const downloadInFlight = useRef(false);
@@ -147,6 +150,10 @@ export function App() {
   const importBatchInFlight = useRef(false);
   const api = useMemo(() => new MeshHarborApi(), []);
   const selectedAsset = assets.find((asset) => asset.id === selectedId) ?? null;
+  const reportCard: JobReportCardModel | null = useMemo(() => {
+    if (!jobReportMatchesAsset(reportJob, selectedId)) return null;
+    return jobResultCardModel(reportJob);
+  }, [reportJob, selectedId]);
   const activeJobInputAssetId = job && isActiveJob(job) ? job.input_asset_id ?? null : null;
   const selectedComparisonPair = assetComparisonPairForSelection(
     assets,
@@ -256,6 +263,7 @@ export function App() {
   async function openRecentJob(jobId: string) {
     const requestId = historySelectionGuard.current.begin();
     setComparisonLoadingSide(null);
+    setReportJob(null);
     setError(null);
     setNotice(null);
     try {
@@ -320,9 +328,7 @@ export function App() {
       }
 
       setJob(latest);
-      setReport(latest.operation === 'mesh.simplify' && latest.result?.report
-        ? latest.result.report as unknown as SimplificationReport
-        : null);
+      setReportJob(latest.state === 'succeeded' ? latest : null);
       setComparisonPair(null);
       if (inputAsset) {
         const loadedInputAsset = inputAsset;
@@ -472,6 +478,7 @@ export function App() {
             if (stopped || !refreshed) return;
             const [runtimeInfo, operationList] = refreshed;
             setJob(latest);
+            setReportJob(null);
             setRuntime(runtimeInfo);
             setOperations(operationList);
             setModelDownloadAcknowledged(false);
@@ -487,16 +494,13 @@ export function App() {
                     : 'The NAF checkpoint is converted and the Pixal3D runtime is ready.');
             return;
           }
-          const jobReport = latest.result?.report;
-          setReport(latest.operation === 'mesh.simplify' && jobReport
-            ? jobReport as unknown as SimplificationReport
-            : null);
           let derived: Asset | null = null;
           if (latest.result?.asset_id) {
             derived = await api.derivedAsset(latest.result.asset_id);
           }
           if (stopped) return;
           setJob(latest);
+          setReportJob(latest);
           if (derived) {
             const completedAsset = derived;
             const pair = assetComparisonPairFromJob(latest, completedAsset);
@@ -627,7 +631,7 @@ export function App() {
     setComparisonPair(pair);
     selectAssetId(asset.id);
     setActiveView(pair?.resultAssetId === asset.id ? 'result' : 'source');
-    setReport(null);
+    setReportJob(null);
   }
 
   async function selectComparisonSide(side: AssetComparisonSide) {
@@ -707,7 +711,7 @@ export function App() {
           setComparisonPair(null);
           selectAssetId(result.assets[0].id);
           setActiveView('source');
-          setReport(null);
+          setReportJob(null);
         }
 
         if (plan.resetFilters) {
@@ -762,7 +766,7 @@ export function App() {
     setError(null);
     setNotice(null);
     setBusy(true);
-    setReport(null);
+    setReportJob(null);
     setComparisonPair(null);
     setActiveView('source');
     try {
@@ -781,7 +785,7 @@ export function App() {
     setError(null);
     setNotice(null);
     setBusy(true);
-    setReport(null);
+    setReportJob(null);
     setComparisonPair(null);
     setActiveView('source');
     try {
@@ -803,7 +807,7 @@ export function App() {
     setError(null);
     setNotice(null);
     setBusy(true);
-    setReport(null);
+    setReportJob(null);
     setComparisonPair(null);
     setActiveView('source');
     try {
@@ -1031,7 +1035,44 @@ export function App() {
                 )}
               </div>
 
-              {report && <div className="result-card"><div className="result-heading"><div><span className="result-icon">✓</span><strong>Simplification complete</strong></div><span className="result-delta">−{triangleReduction(report)}%</span></div><div className="result-stats"><div><span>Before</span><strong>{report.triangles_before.toLocaleString()}</strong></div><div className="result-arrow">→</div><div><span>After</span><strong>{report.triangles_after.toLocaleString()}</strong></div><div><span>Target</span><strong>{report.target_triangles.toLocaleString()}</strong></div><div><span>Error</span><strong>{report.geometric_error.toFixed(4)}</strong></div></div>{report.warnings.length > 0 && <p className="result-warning">{report.warnings[0]}</p>}</div>}
+              {reportCard && (
+                <section className="result-card" aria-label={`${reportCard.title} result`}>
+                  <div className="result-heading">
+                    <div><span className="result-icon">✓</span><strong>{reportCard.title} complete</strong></div>
+                    <span className="report-job-id" title={reportCard.jobId}>Job {reportCard.jobId}</span>
+                  </div>
+                  <div className="report-lineage">
+                    <span>Input <code title={reportCard.inputAssetId ?? 'Not reported'}>{reportCard.inputAssetId ?? 'Not reported'}</code></span>
+                    <span>Result <code title={reportCard.resultAssetId ?? 'Not reported'}>{reportCard.resultAssetId ?? 'Not reported'}</code></span>
+                  </div>
+                  {!reportCard.reportAvailable && <p className="report-unavailable">The operation completed, but its report payload is missing or unreadable.</p>}
+                  <div className="report-metrics">
+                    {reportCard.metrics.map((metric) => (
+                      <div className="report-metric" key={metric.label}>
+                        <span>{metric.label}</span>
+                        <strong>{metric.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                  {reportCard.lists.map((list) => (
+                    <div className="report-list" key={list.label}>
+                      <strong>{list.label}</strong>
+                      {list.state === 'unavailable' && <p>Not reported.</p>}
+                      {list.state === 'empty' && <p>None reported.</p>}
+                      {list.state === 'partial' && <p>Some entries were invalid or omitted.</p>}
+                      {list.values.length > 0 && <ul>{list.values.map((value, index) => <li key={`${index}-${value}`}>{value}</li>)}</ul>}
+                      {list.omittedCount > 0 && <p>{list.omittedCount.toLocaleString()} additional entries are not shown.</p>}
+                    </div>
+                  ))}
+                  <section className="report-warnings" aria-label="Warnings">
+                    <strong>Warnings</strong>
+                    {reportCard.warningsState === 'unavailable' && <p>{reportCard.warningsMessage}</p>}
+                    {reportCard.warningsState === 'empty' && <p>No warnings reported.</p>}
+                    {reportCard.warningFormatIssue && <p>Some warning data was missing or invalid; all readable warning text is listed below.</p>}
+                    {reportCard.warnings.length > 0 && <ul>{reportCard.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>}
+                  </section>
+                </section>
+              )}
 
               <div className="library-section" id="asset-library">
                 <div className="section-heading">
@@ -1268,11 +1309,6 @@ export function App() {
 function formatJobTime(timestamp: string): string {
   const date = new Date(Number(timestamp));
   return Number.isNaN(date.getTime()) ? 'time unavailable' : date.toLocaleString();
-}
-
-function triangleReduction(report: SimplificationReport): number {
-  if (!report.triangles_before) return 0;
-  return Math.max(0, Math.round((1 - report.triangles_after / report.triangles_before) * 100));
 }
 
 function DownloadIcon() { return <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.8v9.1m0 0 3.3-3.3M10 11.9 6.7 8.6M3.5 13.6v2.2c0 .7.5 1.2 1.2 1.2h10.6c.7 0 1.2-.5 1.2-1.2v-2.2" /></svg>; }

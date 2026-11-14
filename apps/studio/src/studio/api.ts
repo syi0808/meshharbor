@@ -271,6 +271,329 @@ export function jobPollRetryDelay(failures: number): number {
   return Math.min(10_000, 500 * 2 ** exponent);
 }
 
+export type JobReportListState = 'available' | 'empty' | 'partial' | 'unavailable';
+
+export interface JobReportMetric {
+  label: string;
+  value: string;
+}
+
+export interface JobReportList {
+  label: string;
+  state: JobReportListState;
+  values: string[];
+  omittedCount: number;
+}
+
+export interface JobReportCardModel {
+  title: string;
+  jobId: string;
+  inputAssetId: string | null;
+  resultAssetId: string | null;
+  reportAvailable: boolean;
+  metrics: JobReportMetric[];
+  lists: JobReportList[];
+  warnings: string[];
+  warningsState: 'available' | 'empty' | 'unavailable';
+  warningsMessage: string;
+  warningFormatIssue: boolean;
+}
+
+type JobReportFormatter = 'count' | 'bytes' | 'milliseconds' | 'decimal' | 'percent' | 'text' | 'boolean';
+
+interface JobReportField {
+  key: string;
+  label: string;
+  formatter: JobReportFormatter;
+}
+
+interface JobReportListField {
+  key: string;
+  label: string;
+  formatter: 'text-list' | 'count-list';
+}
+
+interface JobReportSchema {
+  title: string;
+  metrics: JobReportField[];
+  lists?: JobReportListField[];
+}
+
+const MAX_REPORT_LIST_ITEMS = 256;
+
+const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
+  'image.generate': {
+    title: 'Image-to-3D generation',
+    metrics: [
+      { key: 'backend_id', label: 'Backend', formatter: 'text' },
+      { key: 'seed', label: 'Seed', formatter: 'count' },
+      { key: 'resolution', label: 'Resolution', formatter: 'count' },
+      { key: 'texture_size', label: 'Texture size', formatter: 'count' },
+      { key: 'target_faces', label: 'Target faces', formatter: 'count' },
+      { key: 'elapsed_ms', label: 'Elapsed time', formatter: 'milliseconds' },
+    ],
+  },
+  'mesh.simplify': {
+    title: 'Simplification',
+    metrics: [
+      { key: 'triangles_before', label: 'Triangles before', formatter: 'count' },
+      { key: 'triangles_after', label: 'Triangles after', formatter: 'count' },
+      { key: 'target_triangles', label: 'Target triangles', formatter: 'count' },
+      { key: 'geometric_error', label: 'Geometric error', formatter: 'decimal' },
+      { key: 'optimized_primitives', label: 'Optimized primitives', formatter: 'count' },
+    ],
+    lists: [{ key: 'preserved', label: 'Preserved data', formatter: 'text-list' }],
+  },
+  'mesh.cleanup': {
+    title: 'Mesh cleanup',
+    metrics: [
+      { key: 'triangles_before', label: 'Triangles before', formatter: 'count' },
+      { key: 'triangles_after', label: 'Triangles after', formatter: 'count' },
+      { key: 'repeated_index_triangles_removed', label: 'Repeated-index triangles removed', formatter: 'count' },
+      { key: 'zero_area_triangles_removed', label: 'Zero-area triangles removed', formatter: 'count' },
+      { key: 'duplicate_triangles_removed', label: 'Duplicate triangles removed', formatter: 'count' },
+      { key: 'modified_primitives', label: 'Modified primitives', formatter: 'count' },
+    ],
+    lists: [{ key: 'preserved', label: 'Preserved data', formatter: 'text-list' }],
+  },
+  'render.optimize': {
+    title: 'Render optimization',
+    metrics: [
+      { key: 'triangles', label: 'Triangles', formatter: 'count' },
+      { key: 'processed_primitives', label: 'Processed primitives', formatter: 'count' },
+      { key: 'reordered_primitives', label: 'Reordered primitives', formatter: 'count' },
+      { key: 'skipped_translucent_primitives', label: 'Translucent primitives skipped', formatter: 'count' },
+      { key: 'vertex_cache_size', label: 'Vertex cache size', formatter: 'count' },
+      { key: 'vertex_cache_misses_before', label: 'Cache misses before', formatter: 'count' },
+      { key: 'vertex_cache_misses_after', label: 'Cache misses after', formatter: 'count' },
+      { key: 'overdraw_threshold', label: 'Overdraw threshold', formatter: 'decimal' },
+    ],
+    lists: [{ key: 'preserved', label: 'Preserved data', formatter: 'text-list' }],
+  },
+  'mesh.compress': {
+    title: 'Mesh compression',
+    metrics: [
+      { key: 'input_bytes', label: 'Input size', formatter: 'bytes' },
+      { key: 'output_bytes', label: 'Output size', formatter: 'bytes' },
+      { key: 'bytes_saved', label: 'Bytes saved', formatter: 'bytes' },
+      { key: 'compressed_buffer_views', label: 'Compressed buffer views', formatter: 'count' },
+      { key: 'uncompressed_buffer_views', label: 'Uncompressed buffer views', formatter: 'count' },
+      { key: 'extension', label: 'Required extension', formatter: 'text' },
+      { key: 'extension_required', label: 'Extension required', formatter: 'boolean' },
+    ],
+  },
+  'mesh.separate_parts': {
+    title: 'Connected parts',
+    metrics: [
+      { key: 'triangles_before', label: 'Triangles before', formatter: 'count' },
+      { key: 'connected_parts', label: 'Connected parts', formatter: 'count' },
+      { key: 'method', label: 'Method', formatter: 'text' },
+    ],
+    lists: [{ key: 'triangles_per_part', label: 'Triangles per part', formatter: 'count-list' }],
+  },
+  'uv.unwrap': {
+    title: 'UV unwrap',
+    metrics: [
+      { key: 'source_triangles', label: 'Source triangles', formatter: 'count' },
+      { key: 'output_triangles', label: 'Output triangles', formatter: 'count' },
+      { key: 'source_vertices', label: 'Source vertices', formatter: 'count' },
+      { key: 'output_vertices', label: 'Output vertices', formatter: 'count' },
+      { key: 'atlas_width', label: 'Atlas width', formatter: 'count' },
+      { key: 'atlas_height', label: 'Atlas height', formatter: 'count' },
+      { key: 'chart_count', label: 'Charts', formatter: 'count' },
+      { key: 'covered_texels', label: 'Covered texels', formatter: 'count' },
+      { key: 'gutter_texels', label: 'Gutter texels', formatter: 'count' },
+    ],
+    lists: [
+      { key: 'preserved_attributes', label: 'Preserved attributes', formatter: 'text-list' },
+      { key: 'rebaked_maps', label: 'Rebaked maps', formatter: 'text-list' },
+    ],
+  },
+  'mesh.retopology': {
+    title: 'Quad retopology',
+    metrics: [
+      { key: 'input_vertices', label: 'Input vertices', formatter: 'count' },
+      { key: 'input_triangles', label: 'Input triangles', formatter: 'count' },
+      { key: 'requested_quads', label: 'Requested quads', formatter: 'count' },
+      { key: 'output_vertices', label: 'Output vertices', formatter: 'count' },
+      { key: 'output_quads', label: 'Output quads', formatter: 'count' },
+      { key: 'preview_triangles', label: 'Preview triangles', formatter: 'count' },
+      { key: 'algorithm', label: 'Algorithm', formatter: 'text' },
+    ],
+  },
+};
+
+function reportObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function formatReportField(value: unknown, formatter: JobReportFormatter): string {
+  if (formatter === 'text') {
+    return typeof value === 'string' && value.trim() ? value : 'Not reported';
+  }
+  if (formatter === 'boolean') {
+    return typeof value === 'boolean' ? (value ? 'Required' : 'Not required') : 'Not reported';
+  }
+  if (formatter === 'decimal') {
+    return typeof value === 'number'
+      && Number.isFinite(value)
+      && value >= 0
+      && value <= Number.MAX_SAFE_INTEGER
+      ? value.toLocaleString(undefined, { maximumSignificantDigits: 6 })
+      : 'Not reported';
+  }
+  if (formatter === 'percent') {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+      ? `${(value * 100).toFixed(1)}%`
+      : 'Not reported';
+  }
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return 'Not reported';
+  const formatted = value.toLocaleString();
+  if (formatter === 'bytes') return `${formatted} B`;
+  return formatter === 'milliseconds' ? `${formatted} ms` : formatted;
+}
+
+function reportList(
+  object: Record<string, unknown> | null,
+  field: JobReportListField,
+  labelPrefix = '',
+): JobReportList {
+  const raw = object?.[field.key];
+  if (!Array.isArray(raw)) {
+    return { label: `${labelPrefix}${field.label}`, state: 'unavailable', values: [], omittedCount: 0 };
+  }
+  if (raw.length === 0) {
+    return { label: `${labelPrefix}${field.label}`, state: 'empty', values: [], omittedCount: 0 };
+  }
+
+  let invalidEntry = false;
+  const displayed = raw.slice(0, MAX_REPORT_LIST_ITEMS);
+  const omittedCount = raw.length - displayed.length;
+  const values = displayed.map((entry, index) => {
+    if (field.formatter === 'count-list') {
+      const value = formatReportField(entry, 'count');
+      if (value === 'Not reported') invalidEntry = true;
+      return `Part ${index + 1}: ${value}`;
+    }
+    if (typeof entry !== 'string' || !entry.trim()) {
+      invalidEntry = true;
+      return null;
+    }
+    return entry;
+  }).filter((entry): entry is string => entry !== null);
+
+  return {
+    label: `${labelPrefix}${field.label}`,
+    state: invalidEntry || omittedCount > 0 ? 'partial' : 'available',
+    values,
+    omittedCount,
+  };
+}
+
+interface ReportWarnings {
+  available: boolean;
+  formatIssue: boolean;
+  values: string[];
+}
+
+function readReportWarnings(object: Record<string, unknown> | null, prefix = ''): ReportWarnings {
+  const raw = object?.warnings;
+  if (!Array.isArray(raw)) return { available: false, formatIssue: false, values: [] };
+  let formatIssue = false;
+  const values: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') {
+      formatIssue = true;
+      continue;
+    }
+    values.push(`${prefix}${entry}`);
+  }
+  return { available: true, formatIssue, values };
+}
+
+/** Turn known operation reports into a curated, text-only card model. */
+export function jobResultCardModel(job: Job | null | undefined): JobReportCardModel | null {
+  if (!job || job.state !== 'succeeded') return null;
+  const schema = JOB_REPORT_SCHEMAS[job.operation];
+  if (!schema) return null;
+
+  const resultObject = reportObject(job.result);
+  const report = job.operation === 'image.generate' ? resultObject : reportObject(resultObject?.report);
+  const metrics = schema.metrics.map((field) => ({
+    label: field.label,
+    value: formatReportField(report?.[field.key], field.formatter),
+  }));
+  const lists = (schema.lists ?? []).map((field) => reportList(report, field));
+  let warnings = readReportWarnings(report);
+  let warningsState: JobReportCardModel['warningsState'] = warnings.available ? 'empty' : 'unavailable';
+  if (warnings.values.length > 0) warningsState = 'available';
+  let warningFormatIssue = warnings.formatIssue;
+  const warningValues = [...warnings.values];
+
+  if (job.operation === 'mesh.retopology') {
+    const projection = reportObject(report?.appearance_projection);
+    if (projection) {
+      const projectedMetrics: JobReportField[] = [
+        { key: 'source_triangles', label: 'Source triangles', formatter: 'count' },
+        { key: 'target_triangles', label: 'Target triangles', formatter: 'count' },
+        { key: 'output_triangles', label: 'Output triangles', formatter: 'count' },
+        { key: 'output_vertices', label: 'Output vertices', formatter: 'count' },
+        { key: 'atlas_width', label: 'Atlas width', formatter: 'count' },
+        { key: 'atlas_height', label: 'Atlas height', formatter: 'count' },
+        { key: 'chart_count', label: 'Charts', formatter: 'count' },
+        { key: 'covered_texels', label: 'Covered texels', formatter: 'count' },
+        { key: 'gutter_texels', label: 'Gutter texels', formatter: 'count' },
+        { key: 'projection_attempted_texels', label: 'Projection texels attempted', formatter: 'count' },
+        { key: 'projection_covered_texels', label: 'Projection texels covered', formatter: 'count' },
+        { key: 'projection_coverage', label: 'Projection coverage', formatter: 'percent' },
+        { key: 'ambiguous_texels', label: 'Ambiguous texels', formatter: 'count' },
+        { key: 'maximum_projection_distance', label: 'Maximum projection distance', formatter: 'decimal' },
+        { key: 'projection_distance_limit', label: 'Projection distance limit', formatter: 'decimal' },
+      ];
+      metrics.push(...projectedMetrics.map((field) => ({
+        label: `Appearance · ${field.label}`,
+        value: formatReportField(projection[field.key], field.formatter),
+      })));
+      lists.push(reportList(projection, { key: 'rebaked_maps', label: 'Rebaked maps', formatter: 'text-list' }, 'Appearance · '));
+
+      const projectionWarnings = readReportWarnings(projection, 'Appearance projection: ');
+      warningFormatIssue ||= !projectionWarnings.available || projectionWarnings.formatIssue;
+      if (projectionWarnings.values.length > 0) {
+        warningValues.push(...projectionWarnings.values);
+        warningsState = 'available';
+      }
+    }
+  }
+  if (warningFormatIssue && warningValues.length === 0) warningsState = 'unavailable';
+
+  return {
+    title: schema.title,
+    jobId: typeof job.id === 'string' && job.id ? job.id : 'Not reported',
+    inputAssetId: typeof job.input_asset_id === 'string' && job.input_asset_id ? job.input_asset_id : null,
+    resultAssetId: typeof job.result?.asset_id === 'string' && job.result.asset_id ? job.result.asset_id : null,
+    reportAvailable: report !== null,
+    metrics,
+    lists,
+    warnings: warningValues,
+    warningsState,
+    warningsMessage: job.operation === 'image.generate'
+      ? 'Image generation does not include a warning list in its saved result.'
+      : warningFormatIssue
+        ? 'Warning details are missing or malformed in this saved result.'
+        : 'Warning list unavailable in this report.',
+    warningFormatIssue,
+  };
+}
+
+export function jobReportMatchesAsset(job: Job | null, assetId: string | null): boolean {
+  return job?.state === 'succeeded'
+    && typeof assetId === 'string'
+    && assetId.length > 0
+    && (assetId === job.input_asset_id || assetId === job.result?.asset_id);
+}
+
 export class MeshHarborApi {
   private readonly dashboardHeaders = { 'X-MeshHarbor-Dashboard': 'local-ui-v1' };
 
