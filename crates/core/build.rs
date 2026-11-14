@@ -3,66 +3,54 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "build_support/runtime_bundle.rs"]
+mod runtime_bundle;
+
+const EXPECTED_RUNTIME_BUNDLE_MANIFEST_SHA256: &str =
+    "4cacde8e03f4dcf31fd4a2d6d9614eda9b599b8be8f0d646c7f98f954db869a1";
+const EXPECTED_RUNTIME_BUNDLE_FILE_COUNT: usize = 209;
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let workspace_root = manifest_dir.join("../..");
-    let mlx_root = workspace_root.join("runtimes/pixal3d/mlx");
-    let cuda_root = workspace_root.join("runtimes/pixal3d/cuda");
-    let mut generated = String::new();
-    for (backend, root, symbol) in [
-        ("mlx", mlx_root, "PIXAL3D_MLX_FILES"),
-        ("cuda", cuda_root, "PIXAL3D_CUDA_FILES"),
-    ] {
-        let mut files = Vec::new();
-        for directory in [root.join("upstream"), root.join("managed")] {
-            collect_files(&directory, &mut files);
-        }
-        files.sort();
-        generated.push_str(&format!(
-            "pub(super) static {symbol}: &[(&str, &[u8])] = &[\n"
-        ));
-        for file in files {
-            let relative = file
-                .strip_prefix(&root)
-                .expect("runtime files are under the backend root")
-                .to_str()
-                .expect("runtime asset paths must be UTF-8")
-                .replace('\\', "/");
-            println!("cargo:rerun-if-changed={}", file.display());
-            generated.push_str(&format!(
-                "    ({relative:?}, include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../runtimes/pixal3d/{backend}/{relative}\"))),\n"
-            ));
-        }
-        generated.push_str("];\n");
-        println!("cargo:rerun-if-changed={}", root.display());
+    let manifest_path = manifest_dir.join("runtime_bundle_manifest.json");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build_support/runtime_bundle.rs");
+
+    let prepared = runtime_bundle::prepare_bundle(
+        &workspace_root,
+        &manifest_path,
+        &out_dir,
+        Some(EXPECTED_RUNTIME_BUNDLE_MANIFEST_SHA256),
+        Some(EXPECTED_RUNTIME_BUNDLE_FILE_COUNT),
+    )
+    .unwrap_or_else(|error| panic!("runtime bundle verification failed: {error}"));
+
+    for directory in prepared.watched_directories {
+        emit_rerun_if_changed(&manifest_dir, &directory);
+    }
+    for file in prepared.watched_files {
+        emit_rerun_if_changed(&manifest_dir, &file);
     }
 
-    let output =
-        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("pixal3d_runtime_bundle.rs");
-    fs::write(output, generated).expect("write embedded runtime manifest");
+    fs::write(
+        out_dir.join("pixal3d_runtime_bundle.rs"),
+        prepared.generated_source,
+    )
+    .expect("write verified embedded runtime manifest");
 }
 
-fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) {
-    let entries = fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("could not read {}: {error}", directory.display()));
-    for entry in entries {
-        let entry = entry.expect("read runtime directory entry");
-        let path = entry.path();
-        let file_type = entry.file_type().expect("inspect runtime asset type");
-        if file_type.is_dir() && entry.file_name().to_str() == Some("__pycache__") {
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_files(&path, files);
-        } else if file_type.is_file()
-            && path.extension().and_then(|extension| extension.to_str()) != Some("pyc")
-        {
-            files.push(path);
-        } else {
-            panic!(
-                "unsupported symlink or special runtime asset: {}",
-                path.display()
-            );
-        }
+fn emit_rerun_if_changed(manifest_dir: &Path, path: &Path) {
+    let relative = path
+        .strip_prefix(manifest_dir)
+        .expect("runtime bundle watch path is under the crate manifest directory");
+    let relative = relative
+        .to_str()
+        .expect("runtime bundle watch paths must be UTF-8");
+    if relative.chars().any(char::is_control) {
+        panic!("runtime bundle watch path contains a control character");
     }
+    println!("cargo:rerun-if-changed={relative}");
 }
