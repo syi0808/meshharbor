@@ -5,7 +5,9 @@
 //! application-data directory. No shell is used for download or extraction.
 
 use std::{
-    env, ffi::OsStr, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -454,7 +456,6 @@ mod tests {
         assert!(!verify_archive_bytes(BLOB, &"0".repeat(64)));
     }
 
-
     #[cfg(unix)]
     #[test]
     fn failed_curl_download_drops_partial_archive_and_hf_tokens() {
@@ -482,8 +483,12 @@ exit 28
         fs::set_permissions(&fake_curl, permissions).unwrap();
 
         let destination = root.join("uv.tar.gz");
-        let error = download_https_with(&fake_curl, "https://example.invalid/uv.tar.gz", &destination)
-            .expect_err("the fake curl deliberately simulates a timeout");
+        let error = download_https_with(
+            &fake_curl,
+            "https://example.invalid/uv.tar.gz",
+            &destination,
+        )
+        .expect_err("the fake curl deliberately simulates a timeout");
         assert!(error.to_string().contains("curl exit 28"));
         assert!(!destination.exists());
         assert_eq!(
@@ -492,5 +497,4 @@ exit 28
         );
         fs::remove_dir_all(root).unwrap();
     }
-
 }
