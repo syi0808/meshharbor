@@ -4,11 +4,12 @@ use std::{
     path::Path,
 };
 
-/// Coordinates service and recovery processes that use the same data directory.
+/// Coordinates service, recovery, generation, and runtime-install processes using one data directory.
 ///
-/// Services take shared locks so REST and MCP can run together. Recovery takes an exclusive lock,
-/// so it cannot mark jobs failed while a service is active. The persistent lock file is harmless:
-/// the operating system releases its advisory lock when the owning process exits or crashes.
+/// REST/MCP services share the service lock; recovery takes it exclusively. Generation obtains a
+/// shared runtime lock, while runtime setup, download, login, and conversion obtain that same lock
+/// exclusively. The independent runtime lock file is advisory; the OS releases it if a process exits
+/// or crashes.
 #[derive(Debug)]
 pub struct DataDirLock {
     _file: File,
@@ -22,21 +23,31 @@ enum LockMode {
 
 impl DataDirLock {
     pub fn try_acquire_for_service(root: &Path) -> io::Result<Self> {
-        Self::try_acquire(root, LockMode::Shared)
+        Self::try_acquire(root, ".meshharbor.lock", LockMode::Shared)
     }
 
     pub fn try_acquire_for_recovery(root: &Path) -> io::Result<Self> {
-        Self::try_acquire(root, LockMode::Exclusive)
+        Self::try_acquire(root, ".meshharbor.lock", LockMode::Exclusive)
     }
 
-    fn try_acquire(root: &Path, mode: LockMode) -> io::Result<Self> {
+    /// Acquire exclusive access to app-managed runtime state and shared Python caches.
+    pub fn try_acquire_for_runtime(root: &Path) -> io::Result<Self> {
+        Self::try_acquire(root, ".meshharbor.runtime.lock", LockMode::Exclusive)
+    }
+
+    /// Acquire read access for model inference, excluding installs and cache mutation.
+    pub fn try_acquire_for_generation(root: &Path) -> io::Result<Self> {
+        Self::try_acquire(root, ".meshharbor.runtime.lock", LockMode::Shared)
+    }
+
+    fn try_acquire(root: &Path, lock_file_name: &str, mode: LockMode) -> io::Result<Self> {
         fs::create_dir_all(root)?;
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(root.join(".meshharbor.lock"))?;
+            .open(root.join(lock_file_name))?;
         lock_file(&file, mode)?;
         Ok(Self { _file: file })
     }
@@ -149,7 +160,7 @@ fn map_lock_error(error: io::Error) -> io::Result<()> {
 fn in_use_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::WouldBlock,
-        "a MeshHarbor service or recovery command is using this data directory",
+        "another MeshHarbor process holds an incompatible lock for this data directory",
     )
 }
 
@@ -199,4 +210,48 @@ mod tests {
         drop(released);
         fs::remove_dir_all(root).unwrap();
     }
+
+
+    #[test]
+    fn runtime_install_lock_excludes_generation_but_allows_concurrent_readers() {
+        let root = temp_dir();
+        let other_root = root.with_extension("other");
+
+        let service = DataDirLock::try_acquire_for_service(&root).unwrap();
+        let installer = DataDirLock::try_acquire_for_runtime(&root).unwrap();
+        assert_eq!(
+            DataDirLock::try_acquire_for_generation(&root)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            DataDirLock::try_acquire_for_runtime(&root)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        // Runtime actions on independent MeshHarbor data roots do not block one another.
+        let independent_reader = DataDirLock::try_acquire_for_generation(&other_root).unwrap();
+        drop(independent_reader);
+        drop(installer);
+
+        let first_reader = DataDirLock::try_acquire_for_generation(&root).unwrap();
+        let second_reader = DataDirLock::try_acquire_for_generation(&root).unwrap();
+        assert_eq!(
+            DataDirLock::try_acquire_for_runtime(&root)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(first_reader);
+        drop(second_reader);
+        let installer_after_readers = DataDirLock::try_acquire_for_runtime(&root).unwrap();
+        drop(installer_after_readers);
+        drop(service);
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(other_root).unwrap();
+    }
+
 }
