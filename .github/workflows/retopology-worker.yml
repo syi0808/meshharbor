@@ -24,7 +24,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Regenerate Cargo lockfile for resolver review
-        run: cargo update --workspace
+        run: |
+          rm Cargo.lock
+          cargo generate-lockfile
       - name: Upload resolver-generated lockfile for review
         if: always()
         uses: actions/upload-artifact@v4
