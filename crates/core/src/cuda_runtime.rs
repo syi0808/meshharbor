@@ -6,11 +6,13 @@
 
 use std::{
     env,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::{
     CoreError, CoreResult, generation::RuntimeReadiness, runtime::RuntimeSetupReport,
@@ -32,6 +34,7 @@ const PIXAL_CHECKPOINTS: &[&str] = &[
     "tex_dec_next_dc_f16c32_fp16.safetensors",
 ];
 const MAX_GENERATED_GLB_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_CUDA_PREFLIGHT_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Pixal3dCudaRuntimeManager {
@@ -118,6 +121,7 @@ impl Pixal3dCudaRuntimeManager {
     /// explicit setup resolves and stores a per-install uv.lock in app data.
     pub fn setup_environment(&self) -> CoreResult<RuntimeSetupReport> {
         self.ensure_supported_host()?;
+        self.invalidate_preflight_marker()?;
         self.ensure_source()?;
         let device = self.detect_gpu()?;
         let uv = ensure_uv(&self.runtime_root)?;
@@ -129,6 +133,7 @@ impl Pixal3dCudaRuntimeManager {
         uv: &Path,
         device: &str,
     ) -> CoreResult<RuntimeSetupReport> {
+        self.invalidate_preflight_marker()?;
         let python_dir = self.runtime_root.join("python");
         let venv_dir = self.runtime_root.join(".venv");
         let home = self.home_path();
@@ -193,8 +198,7 @@ impl Pixal3dCudaRuntimeManager {
         // executes its FP16/FP32 SDPA finite-value smoke test. Reject CPU-only
         // or incompatible driver environments before making the backend ready.
         let report = self.verify_cuda_environment(&python)?;
-        let marker = self.runtime_root.join("cuda-preflight.json");
-        std::fs::write(&marker, serde_json::to_vec_pretty(&report)?)?;
+        self.publish_preflight_marker(&report)?;
 
         Ok(RuntimeSetupReport {
             backend_id: "pixal3d-cuda".into(),
@@ -204,6 +208,51 @@ impl Pixal3dCudaRuntimeManager {
             lockfile,
             message: "The isolated Python environment and CUDA preflight succeeded. Model weights remain a separate, explicitly confirmed 25–30 GB download. Upstream has no committed lock; this install resolved one locally. Gated DINOv3 access and upstream model terms remain separate from MeshHarbor's MIT license.".into(),
         })
+    }
+
+    fn invalidate_preflight_marker(&self) -> CoreResult<()> {
+        let marker = self.runtime_root.join("cuda-preflight.json");
+        match std::fs::remove_file(marker) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn publish_preflight_marker(&self, report: &Value) -> CoreResult<()> {
+        if !cuda_preflight_report_matches_profile(report) {
+            return Err(CoreError::OperationUnavailable(
+                "CUDA preflight returned a report outside the reviewed runtime profile.".into(),
+            ));
+        }
+        let contents = serde_json::to_vec_pretty(report)?;
+        if contents.is_empty() || contents.len() as u64 > MAX_CUDA_PREFLIGHT_BYTES {
+            return Err(CoreError::OperationUnavailable(
+                "CUDA preflight report exceeds the supported marker size.".into(),
+            ));
+        }
+
+        let marker = self.runtime_root.join("cuda-preflight.json");
+        let temporary = self
+            .runtime_root
+            .join(format!(".cuda-preflight-{}.tmp", Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        let write_result = file.write_all(&contents).and_then(|()| file.sync_all());
+        if let Err(error) = write_result {
+            drop(file);
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+        drop(file);
+
+        if let Err(error) = std::fs::rename(&temporary, &marker) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     /// Sign in through Hugging Face's own terminal prompt inside the isolated
@@ -329,10 +378,12 @@ impl Pixal3dCudaRuntimeManager {
         if let Err(error) = self.detect_gpu() {
             missing.push(error.to_string());
         }
-        let environment_ready = self.python_path().is_file()
-            && self.managed_root.join("uv.lock").is_file()
-            && self.upstream_root.join("pixalcuda/cli.py").is_file()
-            && self.runtime_root.join("cuda-preflight.json").is_file();
+        let environment_ready = cuda_environment_is_ready(
+            &self.python_path(),
+            &self.managed_root.join("uv.lock"),
+            &self.upstream_root.join("pixalcuda/cli.py"),
+            &self.runtime_root.join("cuda-preflight.json"),
+        );
         if !environment_ready {
             missing.push(format!(
                 "Managed CUDA Python environment is missing or incomplete at {}; run `meshharbor runtime cuda-setup`.",
@@ -534,19 +585,7 @@ impl Pixal3dCudaRuntimeManager {
                 "Pixal3D CUDA doctor returned invalid JSON: {error}"
             ))
         })?;
-        let torch = report.get("torch").and_then(Value::as_str).unwrap_or("");
-        let cuda_runtime = report
-            .get("cuda_runtime")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let sdpa_fp16 = report.get("sdpa_torch.float16").and_then(Value::as_bool) == Some(true);
-        let sdpa_fp32 = report.get("sdpa_torch.float32").and_then(Value::as_bool) == Some(true);
-        if report.get("cuda_available").and_then(Value::as_bool) != Some(true)
-            || !torch.starts_with("2.6.0")
-            || !cuda_runtime.starts_with("12.4")
-            || !sdpa_fp16
-            || !sdpa_fp32
-        {
+        if !cuda_preflight_report_matches_profile(&report) {
             return Err(CoreError::OperationUnavailable(format!(
                 "PyTorch/CUDA preflight did not meet the reviewed profile (requires torch 2.6.0, CUDA 12.4, CUDA available, and finite FP16/FP32 SDPA): {}",
                 output.trim()
@@ -603,6 +642,55 @@ impl Pixal3dCudaRuntimeManager {
         }
         Ok(PathBuf::from(path))
     }
+}
+
+fn cuda_preflight_report_matches_profile(report: &Value) -> bool {
+    report.get("cuda_available").and_then(Value::as_bool) == Some(true)
+        && report
+            .get("torch")
+            .and_then(Value::as_str)
+            .is_some_and(|version| version.starts_with("2.6.0"))
+        && report
+            .get("cuda_runtime")
+            .and_then(Value::as_str)
+            .is_some_and(|version| version.starts_with("12.4"))
+        && report.get("sdpa_torch.float16").and_then(Value::as_bool) == Some(true)
+        && report.get("sdpa_torch.float32").and_then(Value::as_bool) == Some(true)
+}
+
+fn read_valid_cuda_preflight_marker(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if metadata.len() > MAX_CUDA_PREFLIGHT_BYTES {
+        return false;
+    }
+
+    let mut contents = Vec::new();
+    let mut bounded_file = file.take(MAX_CUDA_PREFLIGHT_BYTES + 1);
+    if bounded_file.read_to_end(&mut contents).is_err()
+        || contents.is_empty()
+        || contents.len() as u64 > MAX_CUDA_PREFLIGHT_BYTES
+    {
+        return false;
+    }
+    serde_json::from_slice::<Value>(&contents)
+        .is_ok_and(|report| cuda_preflight_report_matches_profile(&report))
+}
+
+fn cuda_environment_is_ready(
+    python: &Path,
+    lockfile: &Path,
+    entrypoint: &Path,
+    marker: &Path,
+) -> bool {
+    python.is_file()
+        && lockfile.is_file()
+        && entrypoint.is_file()
+        && read_valid_cuda_preflight_marker(marker)
 }
 
 fn validate_generation_options(options: &crate::GenerationOptions) -> CoreResult<()> {
@@ -726,6 +814,60 @@ mod tests {
         )
     }
 
+    #[test]
+    fn cuda_environment_readiness_requires_bounded_profile_matched_marker() {
+        let root = env::temp_dir().join(format!("meshharbor-cuda-marker-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let python = root.join("python");
+        let lockfile = root.join("uv.lock");
+        let entrypoint = root.join("pixalcuda/cli.py");
+        let marker = root.join("cuda-preflight.json");
+        std::fs::create_dir_all(entrypoint.parent().unwrap()).unwrap();
+        std::fs::write(&python, "test interpreter").unwrap();
+        std::fs::write(&lockfile, "test lock").unwrap();
+        std::fs::write(&entrypoint, "test entrypoint").unwrap();
+
+        assert!(!cuda_environment_is_ready(
+            &python,
+            &lockfile,
+            &entrypoint,
+            &marker
+        ));
+        std::fs::write(&marker, "{").unwrap();
+        assert!(!cuda_environment_is_ready(
+            &python,
+            &lockfile,
+            &entrypoint,
+            &marker
+        ));
+
+        let valid = r#"{"cuda_available":true,"torch":"2.6.0+cu124","cuda_runtime":"12.4","sdpa_torch.float16":true,"sdpa_torch.float32":true}"#;
+        let wrong_profile = valid.replace(r#""cuda_runtime":"12.4""#, r#""cuda_runtime":"12.5""#);
+        std::fs::write(&marker, wrong_profile).unwrap();
+        assert!(!cuda_environment_is_ready(
+            &python,
+            &lockfile,
+            &entrypoint,
+            &marker
+        ));
+
+        std::fs::write(&marker, valid).unwrap();
+        assert!(cuda_environment_is_ready(
+            &python,
+            &lockfile,
+            &entrypoint,
+            &marker
+        ));
+        std::fs::write(&marker, vec![b' '; (MAX_CUDA_PREFLIGHT_BYTES + 1) as usize]).unwrap();
+        assert!(!cuda_environment_is_ready(
+            &python,
+            &lockfile,
+            &entrypoint,
+            &marker
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn managed_cuda_setup_uses_app_private_tools_and_clears_credentials() {
@@ -733,6 +875,9 @@ mod tests {
         let (manager, data_root) = isolated_manager(&root);
         let runtime_root = manager.runtime_root.clone();
         std::fs::write(data_root.join("owner-sentinel"), "preserve me").unwrap();
+        let cached_model = manager.hf_home().join("hub/sentinel/model.safetensors");
+        std::fs::create_dir_all(cached_model.parent().unwrap()).unwrap();
+        std::fs::write(&cached_model, "preserve cached model").unwrap();
         manager.ensure_source().unwrap();
 
         let fake_python = root.join("fake-python");
@@ -744,7 +889,11 @@ case "$1" in
   --version) echo "Python 3.12.9" ;;
   -m)
     if [ "$2" = "pixalcuda.cli" ] && [ "$3" = "doctor" ]; then
-      echo '{"cuda_available":true,"torch":"2.6.0+cu124","cuda_runtime":"12.4","sdpa_torch.float16":true,"sdpa_torch.float32":true}'
+      if [ -f "$HOME/fail-doctor" ]; then
+        echo '{"cuda_available":false,"torch":"2.6.0+cu124","cuda_runtime":"12.4","sdpa_torch.float16":true,"sdpa_torch.float32":true}'
+      else
+        echo '{"cuda_available":true,"torch":"2.6.0+cu124","cuda_runtime":"12.4","sdpa_torch.float16":true,"sdpa_torch.float32":true}'
+      fi
     fi
     ;;
   -c) exit 0 ;;
@@ -777,7 +926,9 @@ case "$1:$2" in
   lock:*)
     : > uv.lock
     ;;
-  sync:*) ;;
+  sync:*)
+    if [ -f "$HOME/fail-sync" ]; then exit 23; fi
+    ;;
   *)
     echo "unexpected fake uv arguments: $*" >&2
     exit 81
@@ -803,8 +954,61 @@ esac
         assert!(report.runtime_root.starts_with(&data_root));
         assert!(report.python.starts_with(&runtime_root));
         assert!(report.lockfile.is_file());
-        assert!(runtime_root.join("cuda-preflight.json").is_file());
+        let preflight_marker = runtime_root.join("cuda-preflight.json");
+        let environment_ready = || {
+            cuda_environment_is_ready(
+                &manager.python_path(),
+                &manager.managed_root.join("uv.lock"),
+                &manager.upstream_root.join("pixalcuda/cli.py"),
+                &preflight_marker,
+            )
+        };
+        assert!(read_valid_cuda_preflight_marker(&preflight_marker));
+        assert!(environment_ready());
         assert!(!runtime_root.join("weights").exists());
+
+        let fail_sync = manager.home_path().join("fail-sync");
+        std::fs::write(&fail_sync, "fail this retry").unwrap();
+        assert!(
+            manager
+                .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU")
+                .is_err()
+        );
+        assert!(!preflight_marker.exists());
+        assert!(!environment_ready());
+        std::fs::remove_file(&fail_sync).unwrap();
+
+        let fail_doctor = manager.home_path().join("fail-doctor");
+        std::fs::write(&fail_doctor, "fail the CUDA doctor").unwrap();
+        assert!(
+            manager
+                .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU")
+                .is_err()
+        );
+        assert!(!preflight_marker.exists());
+        assert!(!environment_ready());
+        std::fs::remove_file(&fail_doctor).unwrap();
+
+        let retry = manager
+            .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU")
+            .unwrap();
+        assert_eq!(
+            retry.status,
+            "python_environment_ready_models_not_installed"
+        );
+        assert!(read_valid_cuda_preflight_marker(&preflight_marker));
+        assert!(environment_ready());
+        assert_eq!(
+            std::fs::read_to_string(cached_model).unwrap(),
+            "preserve cached model"
+        );
+        assert!(std::fs::read_dir(&runtime_root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".cuda-preflight-")
+        }));
 
         let uv_log = std::fs::read_to_string(manager.cache_path().join("uv.log")).unwrap();
         assert!(uv_log.lines().all(|line| {

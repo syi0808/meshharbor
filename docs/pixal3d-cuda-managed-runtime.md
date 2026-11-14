@@ -37,6 +37,15 @@ repository-committed, cross-machine dependency lock. The optional `preprocess`
 and `camera` extras are omitted: inference uses `--no-rembg` and a fixed camera,
 so it does not install the extra MoGe model.
 
+After host validation, each setup attempt removes any previous CUDA
+preflight marker before changing the managed runtime. A new marker is
+published atomically only after dependency sync, the PyTorch/CUDA doctor check,
+and package-version verification succeed. If any later setup step fails or is
+interrupted before successful publication, readiness stays false until a
+successful retry; model files in the isolated Hugging Face cache are not
+removed. Readiness accepts only a bounded JSON marker matching the reviewed
+CUDA profile. It does not re-run the doctor or re-check the current driver.
+
 Hugging Face login is the official interactive `hf auth login` command inside
 MeshHarbor's isolated `HF_HOME`. Neither REST nor MCP accepts credentials. The
 large model action first queries gated DINOv3 metadata through that isolated
