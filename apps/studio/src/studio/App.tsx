@@ -116,17 +116,22 @@ export function App() {
     : runtime?.model_backends.find((backend) => backend.id === generationBackend);
 
   const refreshAssets = useCallback(async (client: MeshHarborApi) => {
-    historySelectionGuard.current.invalidate();
+    const requestId = historySelectionGuard.current.begin();
     setComparisonLoadingSide(null);
     const items = await client.assets();
-    const pinnedIds = [comparisonPair?.inputAssetId, comparisonPair?.resultAssetId];
+    if (!historySelectionGuard.current.isCurrent(requestId)) return;
+    const preservedIds = [
+      comparisonPair?.inputAssetId,
+      comparisonPair?.resultAssetId,
+      selectedIdRef.current,
+    ];
     setAssets((current) => [
       ...items,
-      ...current.filter((asset) => pinnedIds.includes(asset.id) && !items.some((item) => item.id === asset.id)),
+      ...current.filter((asset) => preservedIds.includes(asset.id) && !items.some((item) => item.id === asset.id)),
     ]);
     setSelectedId((current) => {
       const next = current && (
-        items.some((item) => item.id === current) || pinnedIds.includes(current)
+        items.some((item) => item.id === current) || preservedIds.includes(current)
       ) ? current : items.find((item) => item.kind === 'mesh')?.id ?? null;
       selectedIdRef.current = next;
       return next;

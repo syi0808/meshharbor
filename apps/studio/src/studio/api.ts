@@ -19,7 +19,7 @@ export function assetComparisonPairFromJob(
   const resultAssetId = job.result?.asset_id;
   if (!inputAssetId || !resultAssetId || !resultAsset || resultAsset.id !== resultAssetId
     || resultAssetId === inputAssetId
-    || (resultAsset.source_asset_id && resultAsset.source_asset_id !== inputAssetId)) {
+    || resultAsset.source_asset_id !== inputAssetId) {
     return null;
   }
   return { inputAssetId, resultAssetId };
@@ -72,7 +72,7 @@ export async function resolveComparisonAsset(
   if (asset.id !== assetId) {
     throw new Error('The comparison asset response did not match the requested asset.');
   }
-  if (side === 'result' && asset.source_asset_id && asset.source_asset_id !== pair.inputAssetId) {
+  if (side === 'result' && asset.source_asset_id !== pair.inputAssetId) {
     throw new Error('The saved result does not match this comparison source.');
   }
   return asset;

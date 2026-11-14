@@ -98,6 +98,8 @@ test('saved job comparison pairs require its exact result and direct input linea
   });
   assert.equal(assetComparisonPairFromJob(job, { ...result, id: 'other-result' }), null);
   assert.equal(assetComparisonPairFromJob(job, { ...result, source_asset_id: 'other-input' }), null);
+  assert.equal(assetComparisonPairFromJob(job, { ...result, source_asset_id: null }), null);
+  assert.equal(assetComparisonPairFromJob(job, { id: result.id }), null);
   assert.equal(assetComparisonPairFromJob({ result: job.result }, result), null);
 });
 
@@ -123,6 +125,14 @@ test('comparison side loader fetches only missing assets and validates identity'
   );
   await assert.rejects(
     resolveComparisonAsset(pair, 'result', [], async () => ({ ...result, source_asset_id: 'other-input' })),
+    /does not match this comparison source/,
+  );
+  await assert.rejects(
+    resolveComparisonAsset(pair, 'result', [], async () => ({ id: result.id, source_asset_id: null })),
+    /does not match this comparison source/,
+  );
+  await assert.rejects(
+    resolveComparisonAsset(pair, 'result', [], async () => ({ id: result.id })),
     /does not match this comparison source/,
   );
 });
