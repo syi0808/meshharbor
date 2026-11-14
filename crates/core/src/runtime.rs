@@ -91,7 +91,10 @@ impl Pixal3dRuntimeManager {
         self.ensure_source()?;
         self.validate_source()?;
         let uv = ensure_uv(&self.runtime_root)?;
+        self.setup_environment_with_uv(&uv)
+    }
 
+    fn setup_environment_with_uv(&self, uv: &Path) -> CoreResult<RuntimeSetupReport> {
         let python_dir = self.runtime_root.join("python");
         let cache_dir = self.runtime_root.join("uv-cache");
         let home_dir = self.home_path();
@@ -109,8 +112,10 @@ impl Pixal3dRuntimeManager {
 
         eprintln!("[2/4] Locating the managed Python interpreter…");
         let python = self.find_managed_python(&uv, &home_dir, &cache_dir)?;
+        let mut version_check = self.python_command(&python);
+        version_check.arg("--version");
         let python_version = run_capture(
-            Command::new(&python).arg("--version"),
+            &mut version_check,
             "Could not verify the managed Python interpreter",
         )?;
         if !python_version.starts_with("Python 3.12.") {
@@ -142,8 +147,10 @@ impl Pixal3dRuntimeManager {
             .args(["--locked", "--no-dev", "--no-editable"]);
         run_visible(sync, "uv could not install the pinned MLX dependencies")?;
 
+        let mut version_check = self.python_command(&venv_python);
+        version_check.arg("--version");
         let verified_version = run_capture(
-            Command::new(&venv_python).arg("--version"),
+            &mut version_check,
             "Could not verify the created MLX environment",
         )?;
         if !verified_version.starts_with("Python 3.12.") {
@@ -151,11 +158,13 @@ impl Pixal3dRuntimeManager {
                 "The managed environment uses unexpected interpreter {verified_version}."
             )));
         }
+        let mut import_check = self.python_command(&venv_python);
+        import_check.args([
+            "-c",
+            "import mlx, huggingface_hub, safetensors; print('MLX runtime imports are available')",
+        ]);
         run_capture(
-            Command::new(&venv_python).args([
-                "-c",
-                "import mlx, huggingface_hub, safetensors; print('MLX runtime imports are available')",
-            ]),
+            &mut import_check,
             "The locked Python environment was created, but MLX imports failed",
         )?;
         Ok(RuntimeSetupReport {
@@ -190,6 +199,15 @@ impl Pixal3dRuntimeManager {
                 python.display()
             )));
         }
+        let uv = ensure_uv(&self.runtime_root)?;
+        self.install_models_with_tools(&uv, &python)
+    }
+
+    fn install_models_with_tools(
+        &self,
+        uv: &Path,
+        python: &Path,
+    ) -> CoreResult<RuntimeSetupReport> {
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
         let weights = self.runtime_root.join("weights");
@@ -199,7 +217,7 @@ impl Pixal3dRuntimeManager {
         eprintln!(
             "[1/3] Checking access to the gated DINOv3 model before downloading large checkpoints…"
         );
-        let mut preflight = Command::new(&python);
+        let mut preflight = self.python_command(python);
         preflight
             .current_dir(&self.source_root)
             .env_clear()
@@ -224,7 +242,7 @@ impl Pixal3dRuntimeManager {
         eprintln!(
             "[2/3] Downloading pinned model files. Large files can take time; progress is shown below…"
         );
-        let mut download = Command::new(&python);
+        let mut download = self.python_command(python);
         download
             .current_dir(&self.source_root)
             .env_clear()
@@ -247,12 +265,12 @@ impl Pixal3dRuntimeManager {
         eprintln!(
             "[3/3] Preparing an isolated CPU-only conversion environment for the NAF checkpoint…"
         );
-        self.convert_naf_checkpoint(&uv, &home, &self.runtime_root.join("uv-cache"), &weights)?;
+        self.convert_naf_checkpoint(uv, &home, &self.runtime_root.join("uv-cache"), &weights)?;
         Ok(RuntimeSetupReport {
             backend_id: "pixal3d-mlx".into(),
             status: "model_files_ready".into(),
             runtime_root: self.runtime_root.clone(),
-            python,
+            python: python.to_path_buf(),
             lockfile: self.source_root.join("uv.lock"),
             message: "Pinned Pixal3D and gated DINOv3 snapshots were downloaded; Pixal3D/NAF hashes were verified, and NAF was converted in an isolated CPU-only environment.".into(),
         })
@@ -441,6 +459,23 @@ impl Pixal3dRuntimeManager {
         command
     }
 
+    fn python_command(&self, python: &Path) -> Command {
+        let home = self.home_path();
+        let mut command = Command::new(python);
+        command
+            .env_clear()
+            .env("HOME", &home)
+            .env("HF_HOME", home.join(".cache/huggingface"))
+            .env("PATH", managed_path(&self.runtime_root))
+            .env("PYTHONNOUSERSITE", "1");
+        for temporary_key in ["TMPDIR", "TEMP", "TMP"] {
+            if let Some(value) = env::var_os(temporary_key) {
+                command.env(temporary_key, value);
+            }
+        }
+        command
+    }
+
     fn find_managed_python(&self, uv: &Path, home: &Path, cache: &Path) -> CoreResult<PathBuf> {
         let mut command = self.uv_command(uv, home, cache);
         let output = command
@@ -501,7 +536,8 @@ fn huggingface_login_command(executable: &Path, runtime_root: &Path, home: &Path
         .env("HOME", home)
         .env("HF_HOME", home.join(".cache/huggingface"))
         .env("PATH", managed_path(runtime_root))
-        .env("HF_HUB_DISABLE_TELEMETRY", "1");
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .env("PYTHONNOUSERSITE", "1");
     command
 }
 
