@@ -20,3 +20,26 @@
 .mesh-tool-item .job-progress{margin-top:8px;padding-top:8px}
 .mesh-tools-card .operation-description{margin-bottom:5px}
 
+
+.job-history{margin-top:22px;padding-top:16px;border-top:1px solid #edf0ed}
+.job-history .section-heading{margin-bottom:10px}
+.job-history .section-heading h2{font-family:var(--heading);font-size:12px;letter-spacing:-.25px;color:#45544a;margin:0}
+.job-history .section-heading span{display:block;color:#98a29b;font-size:8px;margin-top:3px}
+.job-history-note{font-size:8px;line-height:1.6;color:#8a764f;background:#fff8eb;border:1px solid #f3e8d0;border-radius:5px;padding:8px;margin:0 0 9px}
+.job-history-list{display:grid;gap:7px}
+.job-history-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:8px;border:1px solid #edf0ed;border-radius:6px;background:#fff}
+.job-history-row.selected{border-color:#b9d9c4;background:#f8fbf8}
+.job-history-copy{display:grid;gap:3px;min-width:0}
+.job-history-copy strong{font-size:9px;font-weight:600;color:#55635a;overflow-wrap:anywhere}
+.job-history-copy small{font-size:8px;color:#98a29b}
+.job-history-status{display:grid;gap:3px;text-align:right;font-family:var(--mono);font-size:8px;color:#738279}
+.job-history-status strong{font-weight:500}
+.job-history-status span{color:#98a29b}
+.job-history-status[data-state="succeeded"]{color:#398864}
+.job-history-status[data-state="failed"]{color:#ac5748}
+.job-history-status[data-state="running"],.job-history-status[data-state="validating"],.job-history-status[data-state="queued"]{color:#9b7a43}
+.job-history-open{border:1px solid #e2e9e2;background:#f8faf8;border-radius:5px;padding:5px 8px;font-size:8px;color:#4e725e;cursor:pointer}
+.job-history-open:hover:not(:disabled){background:#eff5ef}
+.job-history-open:disabled{opacity:.5;cursor:not-allowed}
+.job-history-empty{padding:11px;border:1px dashed #e5ebe5;border-radius:6px;color:#9aa39e;font-size:9px;text-align:center}
+@media (max-width:600px){.job-history-row{grid-template-columns:minmax(0,1fr) auto}.job-history-open{grid-column:2}}

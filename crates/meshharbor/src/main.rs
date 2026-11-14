@@ -891,7 +891,7 @@ fn api_router(state: AppState, token: String) -> Router {
         )
         .route("/api/v1/assets/{asset_id}", get(api_get_asset))
         .route("/api/v1/assets/{asset_id}/simplify", post(api_simplify))
-        .route("/api/v1/jobs", post(api_create_job))
+        .route("/api/v1/jobs", get(api_list_jobs).post(api_create_job))
         .route("/api/v1/jobs/{job_id}", get(api_get_job))
         .route("/api/v1/jobs/{job_id}/cancel", post(api_cancel_job))
         .route("/api/v1/artifacts/{artifact_id}", get(api_read_artifact))
@@ -1290,6 +1290,15 @@ async fn api_create_job(
         }
     };
     Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn api_list_jobs(
+    State(state): State<AppState>,
+    Query(query): Query<LimitQuery>,
+) -> Result<Json<Vec<meshharbor_core::Job>>, ApiError> {
+    Ok(Json(
+        state.core.store().list_jobs(query.limit.unwrap_or(50))?,
+    ))
 }
 
 async fn api_get_job(
@@ -2985,6 +2994,7 @@ mod tests {
         })
         .to_string();
         let response = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
@@ -3023,6 +3033,36 @@ mod tests {
                 .is_some()
         );
         assert_eq!(core.store().list_assets(10).unwrap().len(), 2);
+
+        let listed_response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/jobs?limit=20")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::AUTHORIZATION, "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed_response.status(), StatusCode::OK);
+        let listed: Vec<meshharbor_core::Job> = serde_json::from_slice(
+            &listed_response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, final_job.id);
+        assert_eq!(listed[0].state, meshharbor_core::JobState::Succeeded);
+        assert_eq!(
+            core.store().get_job(&final_job.id).unwrap().unwrap().state,
+            meshharbor_core::JobState::Succeeded,
+            "listing jobs must not mutate their persisted state"
+        );
         drop(core);
         std::fs::remove_dir_all(root).unwrap();
     }

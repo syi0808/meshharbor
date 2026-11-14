@@ -17,6 +17,54 @@ export function isQueuedJobCancellable(job: Job | null): job is Job & { state: '
   return job?.state === 'queued';
 }
 
+export function isActiveJob(
+  job: Job | null,
+): job is Job & { state: 'queued' | 'running' | 'validating' | 'cancelling' } {
+  return job !== null && ['queued', 'running', 'validating', 'cancelling'].includes(job.state);
+}
+
+export function canInspectJobHistoryRecord(
+  trackedJob: Job | null,
+  historyJob: Job,
+): boolean {
+  return !isActiveJob(trackedJob) || trackedJob.id === historyJob.id;
+}
+
+export function preferTrackedTerminalJob(trackedJob: Job | null, historyJob: Job): Job {
+  return trackedJob?.id === historyJob.id && !isActiveJob(trackedJob)
+    ? trackedJob
+    : historyJob;
+}
+
+export function shouldDeferTrackedJobCompletion(trackedJob: Job | null, historyJob: Job): boolean {
+  return isActiveJob(trackedJob)
+    && trackedJob.id === historyJob.id
+    && !isActiveJob(historyJob);
+}
+
+export class LatestRequestGuard {
+  private sequence = 0;
+
+  begin(): number {
+    this.sequence += 1;
+    return this.sequence;
+  }
+
+  isCurrent(requestId: number): boolean {
+    return requestId === this.sequence;
+  }
+
+  invalidate(): void {
+    this.sequence += 1;
+  }
+}
+
+export function jobPollRetryDelay(failures: number): number {
+  const failureCount = Number.isFinite(failures) ? Math.max(1, Math.floor(failures)) : 1;
+  const exponent = Math.min(5, failureCount - 1);
+  return Math.min(10_000, 500 * 2 ** exponent);
+}
+
 export class MeshHarborApi {
   private readonly dashboardHeaders = { 'X-MeshHarbor-Dashboard': 'local-ui-v1' };
 
@@ -89,6 +137,11 @@ export class MeshHarborApi {
 
   assets(): Promise<Asset[]> {
     return this.request('/api/v1/assets?limit=100');
+  }
+
+  jobs(limit = 20): Promise<Job[]> {
+    const boundedLimit = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 20;
+    return this.request(`/api/v1/jobs?limit=${boundedLimit}`);
   }
 
   importGlb(file: File): Promise<Asset> {
