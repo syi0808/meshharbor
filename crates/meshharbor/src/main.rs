@@ -1682,7 +1682,7 @@ fn acquire_runtime_write_lock(
     data_dir_lock::DataDirLock::try_acquire_for_runtime(root).map_err(|error| {
         map_runtime_lock_error(
             error,
-            "Another MeshHarbor process is changing managed runtime files in this data directory. Wait for it to finish and retry.",
+            "Another MeshHarbor operation is using managed runtime files or shared caches in this data directory. Wait for it to finish and retry.",
         )
     })
 }
