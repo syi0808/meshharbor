@@ -19,10 +19,7 @@ use sigstore_verify::{
 };
 use thiserror::Error;
 
-use crate::{
-    QuadriFlowPlatform, QuadriFlowReleaseArtifact, QuadriFlowWorkflowEvidence,
-    quadriflow_manifest::PINNED_SOURCE_COMMIT,
-};
+use crate::{QuadriFlowReleaseArtifact, QuadriFlowWorkflowEvidence};
 
 const MESH_HARBOR_REPOSITORY_URI: &str = "https://github.com/syi0808/meshharbor";
 const MESH_HARBOR_REPOSITORY_NAME: &str = "syi0808/meshharbor";
@@ -567,6 +564,8 @@ fn parse_unique_json(bytes: &[u8]) -> VerifyResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::QuadriFlowPlatform;
+    use crate::quadriflow_manifest::PINNED_SOURCE_COMMIT;
 
     const CONDA_BUNDLE: &[u8] =
         include_bytes!("../tests/fixtures/sigstore-conda-attestation.sigstore.json");

@@ -23,21 +23,6 @@ jobs:
           components: clippy, rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Regenerate Cargo lockfile for resolver review
-        run: |
-          cp Cargo.lock Cargo.lock.before-resolve
-          test "$(git hash-object Cargo.lock.before-resolve)" = "620204155a3acddef37d2de94cc7d9ff052fa4a9"
-          rm Cargo.lock
-          cargo generate-lockfile
-      - name: Upload resolver-generated lockfile for review
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-lock-resolver-${{ github.sha }}
-          path: |
-            Cargo.lock
-            Cargo.lock.before-resolve
-          if-no-files-found: error
       - name: Run strict Clippy with optional remesher
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::chunks-exact-to-as-chunks
       - name: Run workspace tests with optional remesher and committed lockfile
