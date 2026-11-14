@@ -52,7 +52,8 @@ meshharbor process-mesh asset_<id> --operation render.optimize --output ./scene-
 meshharbor process-mesh asset_<id> --operation mesh.compress --output ./scene-compressed.glb
 
 
-# If MeshHarbor exited unexpectedly, first stop every REST/MCP process using this data directory
+# If MeshHarbor exited unexpectedly, first stop every REST/MCP process using this data directory.
+# The command also refuses to run while a MeshHarbor service holds the data-directory lock.
 meshharbor jobs recover-interrupted --confirm-no-running-meshharbor
 
 # Optional Apple Silicon MLX runtime setup (uv is installed automatically if missing)
@@ -93,4 +94,5 @@ Job requests support `mesh.simplify`, `mesh.cleanup`, `mesh.separate_parts`, `uv
 ## MCP
 
 Run `meshharbor mcp` to start the stdio MCP server. Its output is the MCP protocol stream; diagnostics go to stderr. Tools include `list_operations`, `list_assets`, `import_asset`, `start_simplification`, `start_image_generation`, MLX and CUDA runtime setup/model-download actions, `get_job`, `cancel_job`, `runtime_doctor`, and `export_glb`. MCP asset import accepts base64-encoded local file bytes and does not fetch files or weights. Model tools require explicit large-download and gated-access confirmations. Hugging Face credentials are never accepted by MCP; authenticate through the corresponding `meshharbor runtime *-hf-login` command in a local terminal. `export_glb` writes only inside the configured export directory (defaulting to the app data `exports` folder), refuses existing files, and does not transmit the GLB to the MCP client. See [the MCP workflow guide](docs/mcp-workflow.md).
+
 
