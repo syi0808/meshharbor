@@ -17,6 +17,12 @@ export function isQueuedJobCancellable(job: Job | null): job is Job & { state: '
   return job?.state === 'queued';
 }
 
+export function jobPollRetryDelay(failures: number): number {
+  const failureCount = Number.isFinite(failures) ? Math.max(1, Math.floor(failures)) : 1;
+  const exponent = Math.min(5, failureCount - 1);
+  return Math.min(10_000, 500 * 2 ** exponent);
+}
+
 export class MeshHarborApi {
   private readonly dashboardHeaders = { 'X-MeshHarbor-Dashboard': 'local-ui-v1' };
 
@@ -89,6 +95,11 @@ export class MeshHarborApi {
 
   assets(): Promise<Asset[]> {
     return this.request('/api/v1/assets?limit=100');
+  }
+
+  jobs(limit = 20): Promise<Job[]> {
+    const boundedLimit = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 20;
+    return this.request(`/api/v1/jobs?limit=${boundedLimit}`);
   }
 
   importGlb(file: File): Promise<Asset> {

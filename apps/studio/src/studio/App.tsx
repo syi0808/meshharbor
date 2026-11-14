@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { cancelJobNotice, isQueuedJobCancellable, MeshHarborApi, quadTopologyArtifact } from './api';
+import { cancelJobNotice, isQueuedJobCancellable, jobPollRetryDelay, MeshHarborApi, quadTopologyArtifact } from './api';
 import { ModelPreview } from './ModelPreview';
 import type { Artifact, Asset, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
 
@@ -45,6 +45,7 @@ export function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [operations, setOperations] = useState<Operation[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [recentJobs, setRecentJobs] = useState<Job[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [targetTriangles, setTargetTriangles] = useState(4000);
   const [maxError, setMaxError] = useState(0.02);
@@ -85,6 +86,60 @@ export function App() {
     setSelectedId((current) => current && items.some((item) => item.id === current) ? current : items.find((item) => item.kind === 'mesh')?.id ?? null);
   }, []);
 
+  async function refreshRecentJobs() {
+    try {
+      setRecentJobs(await api.jobs(20));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not refresh recent job records.');
+    }
+  }
+
+  async function openRecentJob(jobId: string) {
+    setError(null);
+    setNotice(null);
+    try {
+      const latest = await api.job(jobId);
+      setRecentJobs((current) => [latest, ...current.filter((record) => record.id !== latest.id)]
+        .sort((left, right) => Number(right.updated_at) - Number(left.updated_at)
+          || right.id.localeCompare(left.id))
+        .slice(0, 20));
+      const active = ['queued', 'running', 'validating', 'cancelling'].includes(latest.state);
+      if (active) {
+        if (job?.id === latest.id) setJob(latest);
+        if (latest.input_asset_id) {
+          setSelectedId(latest.input_asset_id);
+          setActiveView('source');
+        }
+        setNotice(job?.id === latest.id
+          ? `Refreshing the current ${latest.operation} job. Its state is persisted locally.`
+          : `Last saved state: ${latest.state} (${latest.progress}%). This read-only check did not resume work. Refresh to check again. A saved active state may be stale after an unexpected engine exit; stop every REST/MCP process using this data directory and run meshharbor jobs recover-interrupted --confirm-no-running-meshharbor before retrying.`);
+        return;
+      }
+
+      setJob(latest);
+      setReport(latest.operation === 'mesh.simplify' && latest.result?.report
+        ? latest.result.report as unknown as SimplificationReport
+        : null);
+      if (latest.input_asset_id) {
+        setSelectedId(latest.input_asset_id);
+        setActiveView('source');
+      }
+      if (latest.result?.asset_id) {
+        const derived = await api.derivedAsset(latest.result.asset_id);
+        setAssets((current) => [derived, ...current.filter((item) => item.id !== derived.id)]);
+        setSelectedId(derived.id);
+        setActiveView('result');
+      }
+      if (latest.state === 'failed') {
+        setError(latest.error?.message ?? 'This saved job failed.');
+      } else {
+        setNotice(`Loaded the saved ${latest.operation} record. No work was restarted.`);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not load this saved job.');
+    }
+  }
+
   const installQuadriflowBackend = useCallback(async () => {
     if (!quadriflowBackend?.install_available || installingBackend) return;
     setError(null);
@@ -109,12 +164,13 @@ export function App() {
     try {
       const health = await api.health();
       if (health.service !== 'meshharbor' || health.status !== 'ok') throw new Error('This does not look like a MeshHarbor server.');
-      const [runtimeInfo, operationList, assetList] = await Promise.all([
-        api.runtime(), api.operations(), api.assets(),
+      const [runtimeInfo, operationList, assetList, jobList] = await Promise.all([
+        api.runtime(), api.operations(), api.assets(), api.jobs(20),
       ]);
       setRuntime(runtimeInfo);
       setOperations(operationList);
       setAssets(assetList);
+      setRecentJobs(jobList);
       setSelectedId((current) => current && assetList.some((item) => item.id === current) ? current : assetList.find((item) => item.kind === 'mesh')?.id ?? null);
       setConnection('connected');
       setShowConnect(false);
@@ -132,10 +188,13 @@ export function App() {
     if (!job || !['queued', 'running', 'validating', 'cancelling'].includes(job.state)) return;
     let stopped = false;
     let timer = 0;
+    let consecutiveFailures = 0;
     const poll = async () => {
       try {
         const latest = await api.job(job.id);
         if (stopped) return;
+        consecutiveFailures = 0;
+        setError((current) => current?.startsWith('Could not check job status.') ? null : current);
         if (latest.state === 'succeeded') {
           if (latest.operation.startsWith('runtime.')) {
             let refreshed: [RuntimeInfo, Operation[]] | null = null;
@@ -252,7 +311,13 @@ export function App() {
         setJob(latest);
         timer = window.setTimeout(poll, 700);
       } catch (cause) {
-        if (!stopped) setError(cause instanceof Error ? cause.message : 'Could not check job status.');
+        if (!stopped) {
+          consecutiveFailures += 1;
+          const delay = jobPollRetryDelay(consecutiveFailures);
+          const detail = cause instanceof Error ? cause.message : 'The local engine could not be reached.';
+          setError(`Could not check job status. ${detail} Retrying in ${Math.ceil(delay / 1000)}s.`);
+          timer = window.setTimeout(poll, delay);
+        }
       }
     };
     timer = window.setTimeout(poll, 300);
@@ -261,6 +326,16 @@ export function App() {
       window.clearTimeout(timer);
     };
   }, [api, job?.id, job?.state]);
+
+  useEffect(() => {
+    if (!job) return;
+    setRecentJobs((current) => {
+      const next = [job, ...current.filter((record) => record.id !== job.id)];
+      next.sort((left, right) => Number(right.updated_at) - Number(left.updated_at)
+        || right.id.localeCompare(left.id));
+      return next.slice(0, 20);
+    });
+  }, [job]);
 
   useEffect(() => {
     if (!showConnect) return;
@@ -568,6 +643,23 @@ export function App() {
                 <div className="section-heading"><div><h2>Recent assets</h2><span>Files stored locally in your workspace</span></div><button className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <span>↻</span></button></div>
                 {assets.length === 0 ? <div className="library-empty">Your imported models will appear here.</div> : <div className="asset-list">{assets.slice(0, 5).map((asset) => <button key={asset.id} className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`} onClick={() => { setSelectedId(asset.id); setActiveView('source'); setReport(null); }}><span className="asset-row-icon"><MiniCube /></span><span className="asset-row-name"><strong>{asset.name}</strong><small>{asset.source_asset_id ? 'Derived result' : 'Original'} · {formatSize(asset.byte_size)}</small></span><span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>{asset.id === selectedId && <span className="asset-current-dot" />}</button>)}</div>}
               </div>
+
+              <section className="job-history" aria-labelledby="job-history-title">
+                <div className="section-heading">
+                  <div><h2 id="job-history-title">Recent jobs</h2><span>Saved locally by the engine</span></div>
+                  <button className="text-button" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <span>↻</span></button>
+                </div>
+                <p className="job-history-note">Opening a record only checks its saved state; Studio never resumes or restarts work. After an unexpected engine exit, a saved queued/running state may be stale. Stop all REST/MCP processes for this data directory and run meshharbor jobs recover-interrupted --confirm-no-running-meshharbor before retrying.</p>
+                {recentJobs.length === 0
+                  ? <div className="job-history-empty">No saved jobs yet.</div>
+                  : <div className="job-history-list">{recentJobs.slice(0, 8).map((savedJob) => (
+                    <div className={`job-history-row ${savedJob.id === job?.id ? 'selected' : ''}`} key={savedJob.id}>
+                      <div className="job-history-copy"><strong>{savedJob.operation}</strong><small>Updated {formatJobTime(savedJob.updated_at)}</small></div>
+                      <div className="job-history-status" data-state={savedJob.state}><strong>{savedJob.state}</strong><span>{savedJob.progress}%</span></div>
+                      <button className="job-history-open" onClick={() => void openRecentJob(savedJob.id)} disabled={connection !== 'connected'}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</button>
+                    </div>
+                  ))}</div>}
+              </section>
             </section>
 
             <aside className="settings-column">
@@ -675,6 +767,11 @@ export function App() {
       {showConnect && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowConnect(false); }}><section className="connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title"><button className="dialog-close" onClick={() => setShowConnect(false)} aria-label="Close">×</button><div className="connect-brand"><div className="brand-mark"><span /><span /><span /></div></div><div className="dialog-eyebrow">LOCAL ENGINE</div><h2 id="connect-title">Connect to MeshHarbor</h2><p>The Studio connects directly to the local engine. No access token is needed in this dashboard.</p><div className="connect-steps"><code>meshharbor serve</code><span>→</span><span>Keep the engine running on this computer</span></div>{error && <div className="dialog-error" role="alert">{error}</div>}<button className="button button-primary connect-button" onClick={() => void connect()} disabled={connection === 'connecting'}>{connection === 'connecting' ? <><span className="spinner small" /> Connecting…</> : 'Retry connection'} <span className="button-arrow">→</span></button><div className="dialog-security"><span>⌑</span> The engine accepts dashboard requests only from its local origin.</div></section></div>}
     </div>
   );
+}
+
+function formatJobTime(timestamp: string): string {
+  const date = new Date(Number(timestamp));
+  return Number.isNaN(date.getTime()) ? 'time unavailable' : date.toLocaleString();
 }
 
 function triangleReduction(report: SimplificationReport): number {

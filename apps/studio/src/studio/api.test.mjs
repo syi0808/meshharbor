@@ -4,23 +4,56 @@ import { readFile } from 'node:fs/promises';
 
 // Use the project's TypeScript compiler when installed (Node 20+), with a
 // native type-stripping fallback for minimal Node 24 test environments.
-let MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable;
+let MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, jobPollRetryDelay;
 try {
   const ts = await import('typescript');
   const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, jobPollRetryDelay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable } = await import('./api.ts'));
+  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, jobPollRetryDelay } = await import('./api.ts'));
 }
 
 test('Studio offers cancellation only before a job leaves the queue', () => {
   assert.equal(isQueuedJobCancellable({ state: 'queued' }), true);
   for (const state of ['running', 'validating', 'cancelling', 'cancelled', 'succeeded', 'failed']) {
     assert.equal(isQueuedJobCancellable({ state }), false, `${state} jobs must not be cancellable from the UI`);
+  }
+});
+
+test('job polling retries use capped exponential backoff', () => {
+  assert.deepEqual(
+    [1, 2, 3, 4, 5, 6, 7].map(jobPollRetryDelay),
+    [500, 1000, 2000, 4000, 8000, 10000, 10000],
+  );
+  assert.equal(jobPollRetryDelay(Number.NaN), 500);
+});
+
+test('job history uses a bounded read-only dashboard request', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ path: String(input), init });
+    return Response.json([{ id: 'job-history', state: 'succeeded' }]);
+  };
+  try {
+    const api = new MeshHarborApi();
+    assert.equal((await api.jobs(500))[0].id, 'job-history');
+    await api.jobs(-2);
+    await api.jobs(Number.NaN);
+    assert.deepEqual(calls.map(({ path }) => path), [
+      '/api/v1/jobs?limit=100',
+      '/api/v1/jobs?limit=1',
+      '/api/v1/jobs?limit=20',
+    ]);
+    assert.equal(calls[0].init.method, undefined);
+    assert.equal(calls[0].init.body, undefined);
+    assert.equal(new Headers(calls[0].init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

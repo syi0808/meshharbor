@@ -210,7 +210,8 @@ impl Store {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs(created_at DESC);",
+            CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs(created_at DESC);
+            CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at DESC, id DESC);",
         )?;
         Ok(Self {
             root,
@@ -495,6 +496,26 @@ impl Store {
                 Err(error) => Some(Err(error)),
             })
             .collect()
+    }
+
+    /// List persisted job records, newest update first. This does not resume or modify jobs.
+    pub fn list_jobs(&self, limit: usize) -> CoreResult<Vec<Job>> {
+        let ids = {
+            let conn = self.connection.lock().expect("SQLite mutex poisoned");
+            let mut statement = conn.prepare(
+                "SELECT id FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?1",
+            )?;
+            let rows =
+                statement.query_map([limit.clamp(1, 200) as i64], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut jobs = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(job) = self.get_job(&id)? {
+                jobs.push(job);
+            }
+        }
+        Ok(jobs)
     }
 
     pub fn read_artifact(&self, artifact_id: &str) -> CoreResult<ArtifactContent> {
@@ -866,6 +887,56 @@ mod tests {
         assert!(store.import_asset("", b"not a supported asset").is_err());
         assert!(store.import_asset("../", b"not a supported asset").is_err());
         drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lists_persisted_jobs_by_latest_update_with_a_bounded_limit() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let older = store.create_job("mesh.cleanup", None, &json!({})).unwrap();
+        let active = store.create_job("mesh.simplify", None, &json!({})).unwrap();
+        store
+            .update_job(&active.id, JobState::Running, 25, None, None)
+            .unwrap();
+        let middle = store.create_job("mesh.compress", None, &json!({})).unwrap();
+
+        {
+            let connection = store.connection.lock().unwrap();
+            for (id, updated_at) in [
+                (&older.id, "000000000000001"),
+                (&middle.id, "000000000000002"),
+                (&active.id, "000000000000003"),
+            ] {
+                connection
+                    .execute(
+                        "UPDATE jobs SET updated_at=?1 WHERE id=?2",
+                        rusqlite::params![updated_at, id],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let limited = store.list_jobs(2).unwrap();
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].id, active.id);
+        assert_eq!(limited[0].state, JobState::Running);
+        assert_eq!(limited[1].id, middle.id);
+        assert_eq!(store.list_jobs(0).unwrap().len(), 1);
+        assert_eq!(store.list_jobs(500).unwrap().len(), 3);
+        drop(store);
+
+        let reopened = Store::open(&dir).unwrap();
+        let persisted = reopened.list_jobs(10).unwrap();
+        assert_eq!(
+            persisted.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            vec![active.id.as_str(), middle.id.as_str(), older.id.as_str()]
+        );
+        assert_eq!(
+            reopened.get_job(&active.id).unwrap().unwrap().state,
+            JobState::Running
+        );
+        drop(reopened);
         fs::remove_dir_all(dir).unwrap();
     }
 

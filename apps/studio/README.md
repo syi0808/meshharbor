@@ -35,6 +35,10 @@ Run `npm run test:security` to exercise the Vite middleware's anti-framing heade
 
 The preview uses Three.js and the browser's WebGL implementation. No remote fonts, images, or model-viewer scripts are loaded by the Studio page.
 
+## Persisted job history
+
+Studio loads up to 20 recent job records from the local engine on connection. Opening a completed record can restore its derived asset in the preview. Checking a queued/running record is read-only and never resumes or restarts work; use **Refresh** to fetch the newest saved state. If the engine exited unexpectedly, a saved active state may be stale. Stop every REST/MCP process using the same data directory, then run `meshharbor jobs recover-interrupted --confirm-no-running-meshharbor` before retrying. The job history is not a process-liveness check.
+
 ## Operation limits
 
 - `uv.unwrap` is a low-level REST/CLI/MCP operation, not a standalone Studio tool. It accepts one supported static mesh/primitive/material with existing float UVs and embedded PNG base-color and metallic/roughness maps. It creates a new atlas and rebakes those maps from the same mesh's existing UVs. This is not a high-to-low projection or generic texture bake; unsupported maps and layouts are rejected.
