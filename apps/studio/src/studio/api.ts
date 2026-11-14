@@ -1,5 +1,131 @@
 import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
 
+export const MAX_ASSET_IMPORT_FILES = 10;
+export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
+export const MAX_GLB_IMPORT_BYTES = 512 * 1024 * 1024;
+
+export type AssetImportKind = 'mesh' | 'image';
+
+export interface AssetImportFailure {
+  index: number;
+  fileName: string;
+  message: string;
+}
+
+export interface AssetImportProgress {
+  current: number;
+  total: number;
+  fileName: string;
+}
+
+export interface AssetImportBatchResult<TAsset> {
+  assets: TAsset[];
+  failures: AssetImportFailure[];
+  skippedCount: number;
+  attemptedCount: number;
+}
+
+export interface AssetImportUiSnapshot {
+  selectedId: string | null;
+  filters: { query: string; kind: string; origin: string };
+  searchInput: string;
+  browserInteractionRevision: number;
+  selectionInteractionRevision: number;
+}
+
+/** Keep user changes made while sequential uploads are in flight. */
+export function planAssetImportUiCompletion(
+  started: AssetImportUiSnapshot,
+  current: AssetImportUiSnapshot,
+): { resetFilters: boolean; selectFirstImportedAsset: boolean } {
+  const sameFilters = started.filters.query === current.filters.query
+    && started.filters.kind === current.filters.kind
+    && started.filters.origin === current.filters.origin;
+  return {
+    resetFilters: sameFilters
+      && started.searchInput === current.searchInput
+      && started.browserInteractionRevision === current.browserInteractionRevision,
+    selectFirstImportedAsset: started.selectedId === current.selectedId
+      && started.selectionInteractionRevision === current.selectionInteractionRevision,
+  };
+}
+
+/**
+ * Upload a bounded selection in order. Invalid files are reported without a request;
+ * each valid file is attempted once, and one failure never prevents later files.
+ */
+export async function importAssetBatch<TFile extends { name: string; size: number }, TAsset>(
+  files: ArrayLike<TFile>,
+  upload: (file: TFile, kind: AssetImportKind) => Promise<TAsset>,
+  onProgress?: (progress: AssetImportProgress) => void,
+): Promise<AssetImportBatchResult<TAsset>> {
+  const totalFiles = Number.isFinite(files.length) ? Math.max(0, Math.floor(files.length)) : 0;
+  const boundedCount = Math.min(totalFiles, MAX_ASSET_IMPORT_FILES);
+  const candidates: Array<{ file: TFile; kind: AssetImportKind; index: number }> = [];
+  const failures: AssetImportFailure[] = [];
+
+  for (let index = 0; index < boundedCount; index += 1) {
+    const file = files[index];
+    if (!file) continue;
+    const name = file.name.toLowerCase();
+    const kind: AssetImportKind | null = name.endsWith('.glb')
+      ? 'mesh'
+      : /\.(png|jpe?g)$/.test(name) ? 'image' : null;
+    if (!kind) {
+      failures.push({ index, fileName: file.name, message: 'Unsupported file type. Choose a .glb, .png, .jpg, or .jpeg file.' });
+      continue;
+    }
+    if (!Number.isFinite(file.size) || file.size < 0) {
+      failures.push({ index, fileName: file.name, message: 'Could not determine the file size.' });
+      continue;
+    }
+    if (file.size === 0) {
+      failures.push({ index, fileName: file.name, message: 'The file is empty.' });
+      continue;
+    }
+    const sizeLimit = kind === 'image' ? MAX_IMAGE_IMPORT_BYTES : MAX_GLB_IMPORT_BYTES;
+    if (file.size > sizeLimit) {
+      const sizeLimitMiB = sizeLimit / (1024 * 1024);
+      failures.push({
+        index,
+        fileName: file.name,
+        message: `File exceeds the ${sizeLimitMiB} MiB ${kind === 'image' ? 'image' : 'GLB'} limit.`,
+      });
+      continue;
+    }
+    candidates.push({ file, kind, index });
+  }
+
+  const assets: TAsset[] = [];
+  let attemptedCount = 0;
+  for (const candidate of candidates) {
+    attemptedCount += 1;
+    onProgress?.({
+      current: attemptedCount,
+      total: candidates.length,
+      fileName: candidate.file.name,
+    });
+    try {
+      assets.push(await upload(candidate.file, candidate.kind));
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message.trim() : '';
+      failures.push({
+        index: candidate.index,
+        fileName: candidate.file.name,
+        message: message || 'Upload failed.',
+      });
+    }
+  }
+
+  failures.sort((left, right) => left.index - right.index);
+  return {
+    assets,
+    failures,
+    skippedCount: Math.max(0, totalFiles - boundedCount),
+    attemptedCount,
+  };
+}
+
 export interface AssetPageFilters {
   query?: string;
   kind?: AssetKind;
