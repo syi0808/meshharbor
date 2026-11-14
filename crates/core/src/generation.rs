@@ -4,6 +4,7 @@
 //! `runtime.rs`; inference itself remains offline and never authenticates.
 
 use std::{
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Instant,
@@ -294,7 +295,7 @@ impl Pixal3dMlxRuntime {
             }
         }
         let status = command
-            .arg(entrypoint)
+            .arg(entrypoint.path())
             .arg("--image")
             .arg(input)
             .arg("--output")
@@ -349,7 +350,7 @@ impl Pixal3dMlxRuntime {
         })
     }
 
-    fn prepare_entrypoint(&self) -> CoreResult<PathBuf> {
+    fn prepare_entrypoint(&self) -> CoreResult<PreparedEntrypoint> {
         const UPSTREAM_NAF_PATH: &str = "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")";
         const MANAGED_NAF_PATH: &str = concat!(
             "    naf_weights_dir = os.environ.get(\"MESHHARBOR_PIXAL3D_WEIGHTS_DIR\", ",
@@ -367,11 +368,36 @@ impl Pixal3dMlxRuntime {
         let runtime_root = self.home.parent().unwrap_or(self.home.as_path());
         let directory = runtime_root.join("entrypoint");
         std::fs::create_dir_all(&directory)?;
-        let target = directory.join("generate_pixal3d.py");
-        let temporary = directory.join("generate_pixal3d.py.tmp");
-        std::fs::write(&temporary, managed)?;
-        std::fs::rename(&temporary, &target)?;
-        Ok(target)
+
+        // Each inference owns its own immutable script. Generation uses a shared
+        // runtime lock, so a fixed temporary or final path lets concurrent
+        // requests overwrite one another or race while renaming.
+        let target = directory.join(format!("generate_pixal3d-{}.py", Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)?;
+        if let Err(error) = file.write_all(managed.as_bytes()) {
+            drop(file);
+            let _ = std::fs::remove_file(&target);
+            return Err(error.into());
+        }
+        drop(file);
+        Ok(PreparedEntrypoint(target))
+    }
+}
+
+struct PreparedEntrypoint(PathBuf);
+
+impl PreparedEntrypoint {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PreparedEntrypoint {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -576,9 +602,115 @@ mod tests {
         };
 
         let entrypoint = runtime.prepare_entrypoint().unwrap();
-        let patched = std::fs::read_to_string(entrypoint).unwrap();
+        let entrypoint_path = entrypoint.path().to_path_buf();
+        let patched = std::fs::read_to_string(entrypoint.path()).unwrap();
         assert!(patched.contains("MESHHARBOR_PIXAL3D_WEIGHTS_DIR"));
         assert_eq!(std::fs::read_to_string(upstream).unwrap(), source);
+        drop(entrypoint);
+        assert!(!entrypoint_path.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_entrypoints_are_isolated_per_generation_source() {
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-mlx-entrypoints-{}",
+            Uuid::new_v4()
+        ));
+        let runtime_root = root.join("runtime");
+        let source_one = root.join("source-one");
+        let source_two = root.join("source-two");
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        std::fs::create_dir_all(&source_one).unwrap();
+        std::fs::create_dir_all(&source_two).unwrap();
+
+        let naf_path = "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")";
+        let upstream_one = source_one.join("generate_pixal3d.py");
+        let upstream_two = source_two.join("generate_pixal3d.py");
+        let source_one_text = format!("# source-one marker\n{naf_path}\n");
+        let source_two_text = format!("# source-two marker\n{naf_path}\n");
+        std::fs::write(&upstream_one, &source_one_text).unwrap();
+        std::fs::write(&upstream_two, &source_two_text).unwrap();
+
+        let runtime_one = Pixal3dMlxRuntime {
+            python: runtime_root.join(".venv/bin/python"),
+            root: source_one,
+            home: runtime_root.join("home"),
+            weights: runtime_root.join("weights"),
+        };
+        let runtime_two = Pixal3dMlxRuntime {
+            root: source_two,
+            ..runtime_one.clone()
+        };
+
+        let entrypoint_one = runtime_one.prepare_entrypoint().unwrap();
+        let path_one = entrypoint_one.path().to_path_buf();
+        let entrypoint_two = runtime_two.prepare_entrypoint().unwrap();
+        let path_two = entrypoint_two.path().to_path_buf();
+
+        assert_ne!(path_one, path_two);
+        let prepared_one = std::fs::read_to_string(entrypoint_one.path()).unwrap();
+        let prepared_two = std::fs::read_to_string(entrypoint_two.path()).unwrap();
+        assert!(prepared_one.contains("# source-one marker"));
+        assert!(prepared_two.contains("# source-two marker"));
+        assert!(prepared_one.contains("MESHHARBOR_PIXAL3D_WEIGHTS_DIR"));
+        assert!(prepared_two.contains("MESHHARBOR_PIXAL3D_WEIGHTS_DIR"));
+        assert_eq!(std::fs::read_to_string(&upstream_one).unwrap(), source_one_text);
+        assert_eq!(std::fs::read_to_string(&upstream_two).unwrap(), source_two_text);
+
+        drop(entrypoint_one);
+        assert!(!path_one.exists());
+        assert!(path_two.exists());
+        drop(entrypoint_two);
+        assert!(!path_two.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_entrypoint_preparation_uses_independent_complete_files() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Barrier};
+
+        const CONCURRENCY: usize = 8;
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-mlx-entrypoint-race-{}",
+            Uuid::new_v4()
+        ));
+        let runtime_root = root.join("runtime");
+        let source_root = root.join("source");
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        std::fs::create_dir_all(&source_root).unwrap();
+        let source = "# concurrent marker\n    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")\n";
+        std::fs::write(source_root.join("generate_pixal3d.py"), source).unwrap();
+        let runtime = Pixal3dMlxRuntime {
+            python: runtime_root.join(".venv/bin/python"),
+            root: source_root,
+            home: runtime_root.join("home"),
+            weights: runtime_root.join("weights"),
+        };
+        let barrier = Arc::new(Barrier::new(CONCURRENCY));
+        let workers = (0..CONCURRENCY).map(|_| {
+            let runtime = runtime.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                runtime.prepare_entrypoint().unwrap()
+            })
+        });
+        let entries: Vec<_> = workers.map(|worker| worker.join().unwrap()).collect();
+        let paths: HashSet<PathBuf> = entries
+            .iter()
+            .map(|entry| entry.path().to_path_buf())
+            .collect();
+        assert_eq!(paths.len(), CONCURRENCY);
+        for entry in &entries {
+            let prepared = std::fs::read_to_string(entry.path()).unwrap();
+            assert!(prepared.contains("# concurrent marker"));
+            assert!(prepared.contains("MESHHARBOR_PIXAL3D_WEIGHTS_DIR"));
+        }
+        let paths: Vec<_> = entries.iter().map(|entry| entry.path().to_path_buf()).collect();
+        drop(entries);
+        assert!(paths.iter().all(|path| !path.exists()));
         std::fs::remove_dir_all(root).unwrap();
     }
 
