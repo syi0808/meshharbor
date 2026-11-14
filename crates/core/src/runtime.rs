@@ -104,14 +104,14 @@ impl Pixal3dRuntimeManager {
         std::fs::create_dir_all(&home_dir)?;
 
         eprintln!("[1/4] Installing an isolated managed Python {PYTHON_REQUEST} runtime…");
-        let mut install = self.uv_command(&uv, &home_dir, &cache_dir);
+        let mut install = self.uv_command(uv, &home_dir, &cache_dir);
         install
             .args(["python", "install", PYTHON_REQUEST, "--install-dir"])
             .arg(&python_dir);
         run_visible(install, "uv could not install managed Python 3.12")?;
 
         eprintln!("[2/4] Locating the managed Python interpreter…");
-        let python = self.find_managed_python(&uv, &home_dir, &cache_dir)?;
+        let python = self.find_managed_python(uv, &home_dir, &cache_dir)?;
         let mut version_check = self.python_command(&python);
         version_check.arg("--version");
         let python_version = run_capture(
@@ -125,7 +125,7 @@ impl Pixal3dRuntimeManager {
         }
 
         eprintln!("[3/4] Creating the isolated MLX environment…");
-        let mut venv = self.uv_command(&uv, &home_dir, &cache_dir);
+        let mut venv = self.uv_command(uv, &home_dir, &cache_dir);
         venv.args(["venv", "--no-project", "--allow-existing", "--python"])
             .arg(&python)
             .arg(&venv_dir);
@@ -137,7 +137,7 @@ impl Pixal3dRuntimeManager {
         } else {
             venv_dir.join("bin/python")
         };
-        let mut sync = self.uv_command(&uv, &home_dir, &cache_dir);
+        let mut sync = self.uv_command(uv, &home_dir, &cache_dir);
         sync.env("UV_PROJECT_ENVIRONMENT", &venv_dir)
             .arg("sync")
             .arg("--project")
