@@ -159,8 +159,20 @@ export class MeshHarborApi {
     return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
   }
 
-  cancelJob(jobId: string): Promise<Job> {
-    return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+  async cancelJob(jobId: string): Promise<Job> {
+    try {
+      return await this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+    } catch (cancelError) {
+      // The worker may claim the queued job before the cancellation reaches the store.
+      // Refresh once so Studio can show the authoritative state rather than stale "queued" data.
+      try {
+        const current = await this.job(jobId);
+        if (current.state !== 'queued') return current;
+      } catch {
+        // Keep the original cancellation error if the status refresh also fails.
+      }
+      throw cancelError;
+    }
   }
 
   derivedAsset(assetId: string): Promise<Asset> {
