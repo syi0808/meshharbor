@@ -185,6 +185,59 @@ mod tests {
     }
 
     #[test]
+    fn runtime_lock_child_holds_lock_until_process_exit() {
+        let Ok(root) = std::env::var("MESHHARBOR_TEST_RUNTIME_LOCK_CHILD_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let _lock = DataDirLock::try_acquire_for_runtime(&root).unwrap();
+        fs::write(root.join("child-ready"), b"ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn runtime_lock_is_process_wide_and_released_when_child_exits() {
+        let root = temp_dir();
+        let ready = root.join("child-ready");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "data_dir_lock::tests::runtime_lock_child_holds_lock_until_process_exit",
+                "--nocapture",
+            ])
+            .env("MESHHARBOR_TEST_RUNTIME_LOCK_CHILD_ROOT", &root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready.exists() && std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let generation_lock = DataDirLock::try_acquire_for_generation(&root);
+        let generation_error = generation_lock.err().map(|error| error.kind());
+        let _ = child.kill();
+        child.wait().unwrap();
+
+        assert!(ready.exists(), "child process did not acquire its runtime lock");
+        assert_eq!(
+            generation_error,
+            Some(std::io::ErrorKind::WouldBlock),
+            "generation in another process must not race an installer"
+        );
+
+        let installer_after_exit = DataDirLock::try_acquire_for_runtime(&root)
+            .expect("the OS should release the lock when its process exits");
+        drop(installer_after_exit);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn services_share_lock_but_recovery_is_exclusive() {
         let root = temp_dir();
         let first_service = DataDirLock::try_acquire_for_service(&root).unwrap();
