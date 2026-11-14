@@ -25,7 +25,7 @@ See [architecture status](docs/architecture.md), [license/dependency status](doc
 
 ## Build and test
 
-Requirements: Rust/Cargo 1.88 and a C++ toolchain for meshoptimizer and the vendored xatlas wrapper. To build the embedded Studio bundle, use Node.js 24.22.3. Windows source builds also need the MSVC C++ toolchain, NASM 3.02 on `PATH`, and `CFLAGS=/std:c11` for the AWS-LC MSVC feature probe. See [the embedded Studio build/smoke guide](docs/embedded-studio-package-smoke.md).
+Requirements: Rust/Cargo 1.88 or later and a C++ toolchain for meshoptimizer and the vendored xatlas wrapper; CI pins Rust 1.88.0. To build the embedded Studio bundle reproducibly, use Node.js 24.22.3. Windows source builds also need the MSVC C++ toolchain, NASM 3.02 on `PATH`, and `CFLAGS=/std:c11` for the AWS-LC MSVC feature probe. See [the embedded Studio build/smoke guide](docs/embedded-studio-package-smoke.md).
 
 ```sh
 cargo fmt --all -- --check
