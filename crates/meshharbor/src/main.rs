@@ -2361,6 +2361,36 @@ mod tests {
     }
 
     #[test]
+    fn runtime_lock_conflicts_are_retryable_and_services_can_coexist() {
+        let root = std::env::temp_dir()
+            .join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
+        let service = data_dir_lock::DataDirLock::try_acquire_for_service(&root).unwrap();
+        let installer = acquire_runtime_write_lock(&root).unwrap();
+
+        let generation_error = acquire_generation_runtime_lock(&root).unwrap_err();
+        assert!(matches!(
+            generation_error,
+            CoreError::Conflict(message) if message.contains("Retry generation after it finishes")
+        ));
+        drop(installer);
+
+        let first_reader = acquire_generation_runtime_lock(&root).unwrap();
+        let second_reader = acquire_generation_runtime_lock(&root).unwrap();
+        let install_error = acquire_runtime_write_lock(&root).unwrap_err();
+        assert!(matches!(
+            install_error,
+            CoreError::Conflict(message) if message.contains("Wait for it to finish and retry")
+        ));
+        drop(first_reader);
+        drop(second_reader);
+
+        let installer_after_readers = acquire_runtime_write_lock(&root).unwrap();
+        drop(installer_after_readers);
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn interrupted_job_recovery_requires_an_explicit_stopped_process_acknowledgement() {
         assert!(Cli::try_parse_from(["meshharbor", "jobs", "recover-interrupted"]).is_err());
         assert!(
