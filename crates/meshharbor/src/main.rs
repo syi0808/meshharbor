@@ -28,6 +28,10 @@ include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
 
 mod data_dir_lock;
 
+/// Prevents fork/exec lock tests from inheriting another test's live advisory-lock descriptor.
+#[cfg(test)]
+pub(crate) static DATA_DIR_LOCK_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Parser)]
 #[command(
     name = "meshharbor",
@@ -2362,6 +2366,9 @@ mod tests {
 
     #[test]
     fn runtime_lock_conflicts_are_retryable_and_services_can_coexist() {
+        let _lock_test_guard = DATA_DIR_LOCK_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root =
             std::env::temp_dir().join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
         let service = data_dir_lock::DataDirLock::try_acquire_for_service(&root).unwrap();
