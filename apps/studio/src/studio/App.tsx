@@ -16,13 +16,51 @@ import {
   quadTopologyArtifact,
   type AssetComparisonPair,
   type AssetComparisonSide,
+  type AssetPageFilters,
 } from './api';
 import { ModelPreview } from './ModelPreview';
-import type { Artifact, Asset, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
+import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
 
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
 type StudioMeshOperationId = Exclude<MeshOperationId, 'uv.unwrap'>;
+type AssetKindFilter = AssetKind | 'all';
+type AssetOriginFilter = 'all' | 'original' | 'derived';
+interface AssetBrowserFilters {
+  query: string;
+  kind: AssetKindFilter;
+  origin: AssetOriginFilter;
+}
+
+const ASSET_PAGE_SIZE = 50;
+const EMPTY_ASSET_BROWSER_FILTERS: AssetBrowserFilters = { query: '', kind: 'all', origin: 'all' };
+
+function toAssetPageFilters(filters: AssetBrowserFilters): AssetPageFilters {
+  const query = filters.query.trim();
+  return {
+    ...(query ? { query } : {}),
+    ...(filters.kind === 'all' ? {} : { kind: filters.kind }),
+    ...(filters.origin === 'all' ? {} : { derived: filters.origin === 'derived' }),
+  };
+}
+
+function matchesAssetBrowserFilters(asset: Asset, filters: AssetBrowserFilters): boolean {
+  return (!filters.query || asset.name.toLowerCase().includes(filters.query.toLowerCase()))
+    && (filters.kind === 'all' || asset.kind === filters.kind)
+    && (filters.origin === 'all' || Boolean(asset.source_asset_id) === (filters.origin === 'derived'));
+}
+
+function clampAssetSearchQuery(query: string): string {
+  let byteLength = 0;
+  let bounded = '';
+  for (const character of query.trim()) {
+    const characterBytes = new TextEncoder().encode(character).byteLength;
+    if (byteLength + characterBytes > 256) break;
+    bounded += character;
+    byteLength += characterBytes;
+  }
+  return bounded;
+}
 
 function formatSize(size: number) {
   return size < 1024 * 1024 ? `${(size / 1024).toFixed(0)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`;
@@ -62,10 +100,17 @@ export function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [operations, setOperations] = useState<Operation[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [assetSearchInput, setAssetSearchInput] = useState('');
+  const [assetFilters, setAssetFilters] = useState<AssetBrowserFilters>(EMPTY_ASSET_BROWSER_FILTERS);
+  const assetFiltersRef = useRef(assetFilters);
+  const [assetNextCursor, setAssetNextCursor] = useState<string | null>(null);
+  const [assetPageLoading, setAssetPageLoading] = useState(false);
+  const assetPageRequestGuard = useRef(new LatestRequestGuard());
   const [recentJobs, setRecentJobs] = useState<Job[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   const [comparisonPair, setComparisonPair] = useState<AssetComparisonPair | null>(null);
+  const comparisonPairRef = useRef(comparisonPair);
   const [comparisonLoadingSide, setComparisonLoadingSide] = useState<AssetComparisonSide | null>(null);
   const [targetTriangles, setTargetTriangles] = useState(4000);
   const [maxError, setMaxError] = useState(0.02);
@@ -102,6 +147,18 @@ export function App() {
     comparisonPair,
     activeJobInputAssetId,
   );
+  const pinnedAssetIds = new Set([
+    selectedId,
+    comparisonPair?.inputAssetId,
+    comparisonPair?.resultAssetId,
+    selectedComparisonPair?.inputAssetId,
+    selectedComparisonPair?.resultAssetId,
+  ].filter((id): id is string => id !== null && id !== undefined));
+  const visibleAssets = assets.filter((asset) =>
+    matchesAssetBrowserFilters(asset, assetFilters) || pinnedAssetIds.has(asset.id));
+  const hasActiveAssetFilters = assetFilters.query !== ''
+    || assetFilters.kind !== 'all'
+    || assetFilters.origin !== 'all';
   const quadArtifact = quadTopologyArtifact(selectedAsset);
   const retopologyAvailable = operations.find((operation) => operation.id === 'mesh.retopology')?.implemented === true;
   const quadriflowBackend = runtime?.quadriflow_backend;
@@ -115,28 +172,55 @@ export function App() {
     ? automaticBackend
     : runtime?.model_backends.find((backend) => backend.id === generationBackend);
 
-  const refreshAssets = useCallback(async (client: MeshHarborApi) => {
-    const requestId = historySelectionGuard.current.begin();
-    setComparisonLoadingSide(null);
-    const items = await client.assets();
-    if (!historySelectionGuard.current.isCurrent(requestId)) return;
-    const preservedIds = [
-      comparisonPair?.inputAssetId,
-      comparisonPair?.resultAssetId,
-      selectedIdRef.current,
-    ];
-    setAssets((current) => [
-      ...items,
-      ...current.filter((asset) => preservedIds.includes(asset.id) && !items.some((item) => item.id === asset.id)),
-    ]);
-    setSelectedId((current) => {
-      const next = current && (
-        items.some((item) => item.id === current) || preservedIds.includes(current)
-      ) ? current : items.find((item) => item.kind === 'mesh')?.id ?? null;
-      selectedIdRef.current = next;
-      return next;
-    });
-  }, [comparisonPair]);
+  async function requestAssetPage(
+    client: MeshHarborApi,
+    filters: AssetBrowserFilters,
+    append: boolean,
+  ) {
+    if (connection !== 'connected') return;
+    const cursor = append ? assetNextCursor : null;
+    if (append && !cursor) return;
+
+    const requestId = assetPageRequestGuard.current.begin();
+    assetFiltersRef.current = filters;
+    setAssetFilters(filters);
+    setAssetPageLoading(true);
+    setError(null);
+    if (!append) setAssetNextCursor(null);
+    try {
+      const page = await client.assetPage(ASSET_PAGE_SIZE, cursor, toAssetPageFilters(filters));
+      if (!assetPageRequestGuard.current.isCurrent(requestId)) return;
+      const preservedIds = [
+        comparisonPairRef.current?.inputAssetId,
+        comparisonPairRef.current?.resultAssetId,
+        selectedIdRef.current,
+      ];
+      setAssets((current) => {
+        const pageIds = new Set(page.items.map((asset) => asset.id));
+        const retained = current.filter((asset) =>
+          !pageIds.has(asset.id) && (append || preservedIds.includes(asset.id)));
+        return [...page.items, ...retained];
+      });
+      setAssetNextCursor(page.next_cursor);
+    } catch (cause) {
+      if (!assetPageRequestGuard.current.isCurrent(requestId)) return;
+      setError(cause instanceof Error
+        ? 'Could not load the asset library. ' + cause.message
+        : 'Could not load the asset library.');
+    } finally {
+      if (assetPageRequestGuard.current.isCurrent(requestId)) setAssetPageLoading(false);
+    }
+  }
+
+  async function refreshAssets(client: MeshHarborApi) {
+    await requestAssetPage(client, assetFilters, false);
+  }
+
+  function applyAssetBrowserFilters(filters: AssetBrowserFilters) {
+    const normalized = { ...filters, query: clampAssetSearchQuery(filters.query) };
+    setAssetSearchInput(normalized.query);
+    void requestAssetPage(api, normalized, false);
+  }
 
   function invalidateHistoryRequests() {
     historySelectionGuard.current.invalidate();
@@ -273,6 +357,8 @@ export function App() {
 
   const connect = useCallback(async () => {
     historySelectionGuard.current.invalidate();
+    assetPageRequestGuard.current.invalidate();
+    setAssetPageLoading(true);
     setComparisonLoadingSide(null);
     setComparisonPair(null);
     setActiveView('source');
@@ -281,24 +367,39 @@ export function App() {
     try {
       const health = await api.health();
       if (health.service !== 'meshharbor' || health.status !== 'ok') throw new Error('This does not look like a MeshHarbor server.');
-      const [runtimeInfo, operationList, assetList, jobList] = await Promise.all([
-        api.runtime(), api.operations(), api.assets(), api.jobs(20),
+      const [runtimeInfo, operationList, assetPage, jobList] = await Promise.all([
+        api.runtime(), api.operations(), api.assetPage(ASSET_PAGE_SIZE, null, toAssetPageFilters(assetFiltersRef.current)), api.jobs(20),
       ]);
       setRuntime(runtimeInfo);
       setOperations(operationList);
-      setAssets(assetList);
+      setAssets((current) => {
+        const pageIds = new Set(assetPage.items.map((asset) => asset.id));
+        const preservedIds = new Set([
+          comparisonPairRef.current?.inputAssetId,
+          comparisonPairRef.current?.resultAssetId,
+          selectedIdRef.current,
+        ]);
+        return [
+          ...assetPage.items,
+          ...current.filter((asset) => preservedIds.has(asset.id) && !pageIds.has(asset.id)),
+        ];
+      });
+      setAssetNextCursor(assetPage.next_cursor);
       setRecentJobs(jobList);
       setSelectedId((current) => {
-        const next = current && assetList.some((item) => item.id === current)
+        const next = current && (assetPage.items.some((item) => item.id === current)
+          || current === selectedIdRef.current)
           ? current
-          : assetList.find((item) => item.kind === 'mesh')?.id ?? null;
+          : assetPage.items.find((item) => item.kind === 'mesh')?.id ?? null;
         selectedIdRef.current = next;
         return next;
       });
+      setAssetPageLoading(false);
       setConnection('connected');
       setShowConnect(false);
       setNotice('Connected to your local MeshHarbor engine.');
     } catch (cause) {
+      setAssetPageLoading(false);
       setConnection('disconnected');
       const message = cause instanceof Error ? cause.message : 'Could not connect to MeshHarbor.';
       setError(`Could not reach the local MeshHarbor engine. Start "meshharbor serve", then retry. ${message}`);
@@ -310,6 +411,14 @@ export function App() {
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    assetFiltersRef.current = assetFilters;
+  }, [assetFilters]);
+
+  useEffect(() => {
+    comparisonPairRef.current = comparisonPair;
+  }, [comparisonPair]);
 
   function selectAssetId(assetId: string | null) {
     selectedIdRef.current = assetId;
@@ -546,8 +655,12 @@ export function App() {
     try {
       const isImage = /\.(png|jpe?g)$/i.test(file.name);
       const imported = isImage ? await api.importImage(file) : await api.importGlb(file);
-      await refreshAssets(api);
+      setAssetSearchInput('');
+      assetFiltersRef.current = EMPTY_ASSET_BROWSER_FILTERS;
+      setAssetFilters(EMPTY_ASSET_BROWSER_FILTERS);
+      setAssets((current) => [imported, ...current.filter((asset) => asset.id !== imported.id)]);
       selectAsset(imported);
+      await requestAssetPage(api, EMPTY_ASSET_BROWSER_FILTERS, false);
       setReport(null);
       setNotice(`${file.name} imported locally${isImage ? '. Generate a 3D asset from it when a Pixal3D runtime is ready.' : '.'}`);
     } catch (cause) {
@@ -835,8 +948,106 @@ export function App() {
               {report && <div className="result-card"><div className="result-heading"><div><span className="result-icon">✓</span><strong>Simplification complete</strong></div><span className="result-delta">−{triangleReduction(report)}%</span></div><div className="result-stats"><div><span>Before</span><strong>{report.triangles_before.toLocaleString()}</strong></div><div className="result-arrow">→</div><div><span>After</span><strong>{report.triangles_after.toLocaleString()}</strong></div><div><span>Target</span><strong>{report.target_triangles.toLocaleString()}</strong></div><div><span>Error</span><strong>{report.geometric_error.toFixed(4)}</strong></div></div>{report.warnings.length > 0 && <p className="result-warning">{report.warnings[0]}</p>}</div>}
 
               <div className="library-section" id="asset-library">
-                <div className="section-heading"><div><h2>Recent assets</h2><span>Files stored locally in your workspace</span></div><button className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <span>↻</span></button></div>
-                {assets.length === 0 ? <div className="library-empty">Your imported models will appear here.</div> : <div className="asset-list">{assets.slice(0, 5).map((asset) => <button key={asset.id} className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`} onClick={() => selectAsset(asset)}><span className="asset-row-icon"><MiniCube /></span><span className="asset-row-name"><strong>{asset.name}</strong><small>{asset.source_asset_id ? 'Derived result' : 'Original'} · {formatSize(asset.byte_size)}</small></span><span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>{asset.id === selectedId && <span className="asset-current-dot" />}</button>)}</div>}
+                <div className="section-heading">
+                  <div><h2>Asset library</h2><span>Search and browse assets stored locally in your workspace</span></div>
+                  <button className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <span>↻</span></button>
+                </div>
+                <form className="asset-search" onSubmit={(event) => {
+                  event.preventDefault();
+                  applyAssetBrowserFilters({ ...assetFilters, query: assetSearchInput.trim() });
+                }}>
+                  <label className="asset-search-input">
+                    <span>Search by filename</span>
+                    <input
+                      aria-label="Search assets by filename"
+                      type="search"
+                      maxLength={256}
+                      value={assetSearchInput}
+                      onChange={(event) => setAssetSearchInput(event.currentTarget.value)}
+                      placeholder="Try a model or image name"
+                    />
+                  </label>
+                  <button type="submit" className="asset-filter-button" disabled={connection !== 'connected'}>Search</button>
+                </form>
+                <div className="asset-filters">
+                  <label>
+                    <span>Type</span>
+                    <select
+                      aria-label="Filter assets by type"
+                      value={assetFilters.kind}
+                      disabled={connection !== 'connected'}
+                      onChange={(event) => applyAssetBrowserFilters({
+                        ...assetFilters,
+                        query: assetSearchInput.trim(),
+                        kind: event.currentTarget.value as AssetKindFilter,
+                      })}
+                    >
+                      <option value="all">All types</option>
+                      <option value="mesh">3D models</option>
+                      <option value="image">Images</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Origin</span>
+                    <select
+                      aria-label="Filter assets by origin"
+                      value={assetFilters.origin}
+                      disabled={connection !== 'connected'}
+                      onChange={(event) => applyAssetBrowserFilters({
+                        ...assetFilters,
+                        query: assetSearchInput.trim(),
+                        origin: event.currentTarget.value as AssetOriginFilter,
+                      })}
+                    >
+                      <option value="all">All assets</option>
+                      <option value="original">Originals</option>
+                      <option value="derived">Generated results</option>
+                    </select>
+                  </label>
+                  {hasActiveAssetFilters && (
+                    <button type="button" className="text-button asset-reset" onClick={() => applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS)}>
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+                <p className="asset-library-note">
+                  {assetPageLoading ? 'Loading assets…' : `Showing ${visibleAssets.length} loaded asset${visibleAssets.length === 1 ? '' : 's'}`}
+                  {pinnedAssetIds.size > 0 && ' · Your selected asset and comparison pair stay visible while filtering.'}
+                </p>
+                {visibleAssets.length === 0
+                  ? <div className="library-empty">
+                    {assetPageLoading
+                      ? 'Loading assets…'
+                      : assets.length === 0
+                        ? 'Your imported models will appear here.'
+                        : 'No assets match these filters. Try a different search or clear the filters.'}
+                  </div>
+                  : <div className="asset-list">{visibleAssets.map((asset) => {
+                    const pinnedOutsideFilter = pinnedAssetIds.has(asset.id)
+                      && !matchesAssetBrowserFilters(asset, assetFilters);
+                    return (
+                      <button
+                        key={asset.id}
+                        className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`}
+                        onClick={() => selectAsset(asset)}
+                      >
+                        <span className="asset-row-icon"><MiniCube /></span>
+                        <span className="asset-row-name">
+                          <strong>{asset.name}</strong>
+                          <small>{asset.source_asset_id ? 'Derived result' : 'Original'} · {formatSize(asset.byte_size)}{pinnedOutsideFilter ? ' · Pinned selection' : ''}</small>
+                        </span>
+                        <span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>
+                        {asset.id === selectedId && <span className="asset-current-dot" />}
+                      </button>
+                    );
+                  })}</div>}
+                {assetNextCursor && (
+                  <div className="asset-load-more">
+                    <button type="button" className="asset-filter-button" onClick={() => void requestAssetPage(api, assetFilters, true)} disabled={assetPageLoading || connection !== 'connected'}>
+                      {assetPageLoading ? 'Loading…' : 'Load more assets'}
+                    </button>
+                  </div>
+                )}
               </div>
 
               <section className="job-history" aria-labelledby="job-history-title">

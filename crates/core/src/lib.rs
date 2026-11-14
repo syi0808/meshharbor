@@ -50,7 +50,7 @@ pub use retopology::{
     validate_remesh_request, validate_remesh_response,
 };
 pub use runtime::{Pixal3dRuntimeManager, RuntimeSetupReport};
-pub use store::{Artifact, Asset, AssetKind, CoreError, CoreResult, Job, JobState, Store};
+pub use store::{Artifact, Asset, AssetKind, AssetPage, CoreError, CoreResult, Job, JobState, Store};
 
 #[cfg(test)]
 #[path = "../build_support/runtime_bundle.rs"]

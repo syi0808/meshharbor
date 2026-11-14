@@ -969,6 +969,7 @@ fn api_router(state: AppState, token: String) -> Router {
                 .post(api_import_asset)
                 .layer(DefaultBodyLimit::max(MAX_ASSET_BYTES)),
         )
+        .route("/api/v1/assets/page", get(api_list_asset_page))
         .route("/api/v1/assets/{asset_id}", get(api_get_asset))
         .route("/api/v1/assets/{asset_id}/simplify", post(api_simplify))
         .route("/api/v1/jobs", get(api_list_jobs).post(api_create_job))
@@ -1244,6 +1245,28 @@ async fn api_list_assets(
 #[derive(Debug, Deserialize)]
 struct LimitQuery {
     limit: Option<usize>,
+}
+
+async fn api_list_asset_page(
+    State(state): State<AppState>,
+    Query(query): Query<AssetPageQuery>,
+) -> Result<Json<meshharbor_core::AssetPage>, ApiError> {
+    Ok(Json(state.core.store().list_assets_page(
+        query.limit.unwrap_or(50),
+        query.cursor.as_deref(),
+        query.q.as_deref(),
+        query.kind,
+        query.derived,
+    )?))
+}
+
+#[derive(Debug, Deserialize)]
+struct AssetPageQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+    q: Option<String>,
+    kind: Option<meshharbor_core::AssetKind>,
+    derived: Option<bool>,
 }
 
 async fn api_import_asset(
@@ -2606,6 +2629,73 @@ mod tests {
             CoreError::InvalidInput(_)
         ));
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn api_asset_page_filters_and_returns_a_cursor() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-asset-page-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let bytes = minimal_png();
+        let source = core.import_asset("Oak%Panel Source.png", &bytes).unwrap();
+        let exact = core
+            .store()
+            .import_derived_asset("Oak%Panel Derived.png", &bytes, &source.id, json!({}))
+            .unwrap();
+        core.store()
+            .import_derived_asset("OakZZPanel Derived.png", &bytes, &source.id, json!({}))
+            .unwrap();
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: Arc::new(Semaphore::new(1)),
+            },
+            "token".into(),
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/assets/page?limit=1&q=oak%25panel&kind=image&derived=true")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::AUTHORIZATION, "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: meshharbor_core::AssetPage = serde_json::from_slice(
+            &response.into_body().collect().await.unwrap().to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            page.items.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            vec![exact.id.as_str()]
+        );
+        assert_eq!(page.next_cursor, None);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/assets/page?limit=1")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::AUTHORIZATION, "Bearer token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let page: meshharbor_core::AssetPage = serde_json::from_slice(
+            &response.into_body().collect().await.unwrap().to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert!(page.next_cursor.is_some());
+
+        drop(core);
         std::fs::remove_dir_all(root).unwrap();
     }
 

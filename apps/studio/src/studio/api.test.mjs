@@ -145,6 +145,41 @@ test('job polling retries use capped exponential backoff', () => {
   assert.equal(jobPollRetryDelay(Number.NaN), 500);
 });
 
+test('asset pages use bounded encoded read-only requests', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ path: String(input), init });
+    return Response.json({ items: [], next_cursor: null });
+  };
+  try {
+    const api = new MeshHarborApi();
+    await api.assetPage(500, 'asset/id ?', { query: 'oak %_', kind: 'mesh', derived: true });
+    await api.assetPage(-2);
+    await api.assetPage(Number.NaN);
+    assert.deepEqual(calls.map(({ path }) => {
+      const url = new URL(path, 'http://localhost');
+      return {
+        path: url.pathname,
+        limit: url.searchParams.get('limit'),
+        cursor: url.searchParams.get('cursor'),
+        query: url.searchParams.get('q'),
+        kind: url.searchParams.get('kind'),
+        derived: url.searchParams.get('derived'),
+      };
+    }), [
+      { path: '/api/v1/assets/page', limit: '100', cursor: 'asset/id ?', query: 'oak %_', kind: 'mesh', derived: 'true' },
+      { path: '/api/v1/assets/page', limit: '1', cursor: null, query: null, kind: null, derived: null },
+      { path: '/api/v1/assets/page', limit: '50', cursor: null, query: null, kind: null, derived: null },
+    ]);
+    assert.equal(calls[0].init.method, undefined);
+    assert.equal(calls[0].init.body, undefined);
+    assert.equal(new Headers(calls[0].init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('job history uses a bounded read-only dashboard request', async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];

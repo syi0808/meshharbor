@@ -90,6 +90,12 @@ pub struct Asset {
     pub artifacts: Vec<Artifact>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetPage {
+    pub items: Vec<Asset>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
@@ -498,6 +504,92 @@ impl Store {
                 Err(error) => Some(Err(error)),
             })
             .collect()
+    }
+
+    /// Read one stable page of assets ordered newest first. Cursor pagination keeps older
+    /// assets reachable without loading the entire workspace into the dashboard.
+    pub fn list_assets_page(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+        query: Option<&str>,
+        kind: Option<AssetKind>,
+        derived: Option<bool>,
+    ) -> CoreResult<AssetPage> {
+        const MAX_PAGE_SIZE: usize = 100;
+        const MAX_SEARCH_BYTES: usize = 256;
+
+        let page_size = limit.clamp(1, MAX_PAGE_SIZE);
+        let query = query.map(str::trim).filter(|value| !value.is_empty());
+        if query.is_some_and(|value| value.len() > MAX_SEARCH_BYTES) {
+            return Err(CoreError::InvalidInput(format!(
+                "Asset search query exceeds {MAX_SEARCH_BYTES} bytes."
+            )));
+        }
+        let search_pattern = query.map(|value| {
+            let mut pattern = String::with_capacity(value.len() + 2);
+            pattern.push('%');
+            for character in value.chars() {
+                if matches!(character, '%' | '_' | '\\') {
+                    pattern.push('\\');
+                }
+                pattern.push(character);
+            }
+            pattern.push('%');
+            pattern
+        });
+
+        let asset_ids = {
+            let conn = self.connection.lock().expect("SQLite mutex poisoned");
+            let cursor_created_at = match cursor {
+                Some(cursor) => Some(
+                    conn.query_row(
+                        "SELECT created_at FROM assets WHERE id=?1",
+                        [cursor],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .ok_or_else(|| {
+                        CoreError::InvalidInput("Asset page cursor is unknown.".into())
+                    })?,
+                ),
+                None => None,
+            };
+            let mut statement = conn.prepare(
+                "SELECT id FROM assets
+                 WHERE (?1 IS NULL OR name LIKE ?1 ESCAPE '\\')
+                   AND (?2 IS NULL OR kind = ?2)
+                   AND (?3 IS NULL
+                        OR (?3 = 1 AND source_asset_id IS NOT NULL)
+                        OR (?3 = 0 AND source_asset_id IS NULL))
+                   AND (?4 IS NULL OR created_at < ?4 OR (created_at = ?4 AND id > ?5))
+                 ORDER BY created_at DESC, id ASC
+                 LIMIT ?6",
+            )?;
+            let rows = statement.query_map(
+                params![
+                    search_pattern,
+                    kind.map(AssetKind::as_str),
+                    derived.map(|value| if value { 1_i64 } else { 0_i64 }),
+                    cursor_created_at,
+                    cursor,
+                    (page_size + 1) as i64,
+                ],
+                |row| row.get::<_, String>(0),
+            )?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let has_more = asset_ids.len() > page_size;
+        let page_ids = &asset_ids[..asset_ids.len().min(page_size)];
+        let next_cursor = has_more.then(|| page_ids.last().cloned()).flatten();
+        let mut items = Vec::with_capacity(page_ids.len());
+        for id in page_ids {
+            if let Some(asset) = self.get_asset(id)? {
+                items.push(asset);
+            }
+        }
+        Ok(AssetPage { items, next_cursor })
     }
 
     /// List persisted job records, newest update first. This does not resume or modify jobs.
@@ -942,6 +1034,97 @@ mod tests {
             store.get_asset(&imported.id).unwrap().unwrap().sha256,
             imported.sha256
         );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn asset_pages_use_a_stable_cursor_without_duplicates_or_gaps() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let bytes = crate::glb::test_png_with_dimensions(1, 1);
+        for name in ["first.png", "second.png", "third.png", "fourth.png", "fifth.png"] {
+            store.import_asset(name, &bytes).unwrap();
+        }
+
+        let expected: Vec<_> = store
+            .list_assets(200)
+            .unwrap()
+            .into_iter()
+            .map(|asset| asset.id)
+            .collect();
+        let mut actual = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = store
+                .list_assets_page(2, cursor.as_deref(), None, None, None)
+                .unwrap();
+            assert!(page.items.len() <= 2);
+            actual.extend(page.items.into_iter().map(|asset| asset.id));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(actual, expected);
+        assert!(store
+            .list_assets_page(2, Some("missing-asset-cursor"), None, None, None)
+            .is_err());
+        let empty = store
+            .list_assets_page(2, None, Some("no-such-asset"), None, None)
+            .unwrap();
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.next_cursor, None);
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn asset_pages_filter_names_literally_by_kind_and_origin() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let bytes = crate::glb::test_png_with_dimensions(1, 1);
+        let source = store.import_asset("Oak%Panel Source.png", &bytes).unwrap();
+        let exact_derived = store
+            .import_derived_asset("Oak%Panel Derived.png", &bytes, &source.id, json!({}))
+            .unwrap();
+        store
+            .import_derived_asset("OakZZPanel Derived.png", &bytes, &source.id, json!({}))
+            .unwrap();
+
+        let exact = store
+            .list_assets_page(
+                20,
+                None,
+                Some("oak%panel"),
+                Some(AssetKind::Image),
+                Some(true),
+            )
+            .unwrap();
+        assert_eq!(
+            exact.items.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            vec![exact_derived.id.as_str()]
+        );
+
+        let originals = store
+            .list_assets_page(
+                20,
+                None,
+                Some("oak%panel"),
+                Some(AssetKind::Image),
+                Some(false),
+            )
+            .unwrap();
+        assert_eq!(
+            originals.items.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            vec![source.id.as_str()]
+        );
+        let wrong_kind = store
+            .list_assets_page(20, None, Some("oak%panel"), Some(AssetKind::Mesh), None)
+            .unwrap();
+        assert!(wrong_kind.items.is_empty());
+
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
