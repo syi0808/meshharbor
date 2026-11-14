@@ -264,7 +264,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-
     #[test]
     fn runtime_install_lock_excludes_generation_but_allows_concurrent_readers() {
         let root = temp_dir();
@@ -306,5 +305,4 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(other_root).unwrap();
     }
-
 }
