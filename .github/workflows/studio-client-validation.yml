@@ -3,7 +3,8 @@ name: Studio client validation
 on:
   push:
     branches:
-      - feat/runtime-queued-cancellation-ui
+      - main
+      - feat/studio-npm-lockfile
     paths:
       - "apps/studio/**"
       - ".github/workflows/studio-client-validation.yml"
@@ -27,8 +28,8 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24
-      - name: Install Studio dependencies
-        run: npm install --no-package-lock --no-audit --no-fund
+      - name: Install locked Studio dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: apps/studio
       - name: Run Studio API and security tests
         run: npm test
