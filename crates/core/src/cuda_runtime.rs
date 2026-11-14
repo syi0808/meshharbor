@@ -121,6 +121,14 @@ impl Pixal3dCudaRuntimeManager {
         self.ensure_source()?;
         let device = self.detect_gpu()?;
         let uv = ensure_uv(&self.runtime_root)?;
+        self.setup_environment_with_tools(&uv, &device)
+    }
+
+    fn setup_environment_with_tools(
+        &self,
+        uv: &Path,
+        device: &str,
+    ) -> CoreResult<RuntimeSetupReport> {
         let python_dir = self.runtime_root.join("python");
         let venv_dir = self.runtime_root.join(".venv");
         let home = self.home_path();
@@ -131,17 +139,16 @@ impl Pixal3dCudaRuntimeManager {
 
         eprintln!("NVIDIA GPU detected: {device}");
         eprintln!("[1/4] Installing isolated managed Python {PYTHON_REQUEST}…");
-        let mut install = self.uv_command(&uv);
+        let mut install = self.uv_command(uv);
         install
             .args(["python", "install", PYTHON_REQUEST, "--install-dir"])
             .arg(&python_dir);
         run_visible(install, "uv could not install managed Python 3.12")?;
 
-        let managed_python = self.find_managed_python(&uv)?;
-        let version = run_capture(
-            Command::new(&managed_python).arg("--version"),
-            "Could not verify managed Python",
-        )?;
+        let managed_python = self.find_managed_python(uv)?;
+        let mut version_check = self.python_command(&managed_python);
+        version_check.arg("--version");
+        let version = run_capture(&mut version_check, "Could not verify managed Python")?;
         if !version.starts_with("Python 3.12.") {
             return Err(CoreError::OperationUnavailable(format!(
                 "uv returned unexpected interpreter {version}; the CUDA profile requires Python 3.12."
@@ -149,7 +156,7 @@ impl Pixal3dCudaRuntimeManager {
         }
 
         eprintln!("[2/4] Creating an isolated CUDA Python environment…");
-        let mut venv = self.uv_command(&uv);
+        let mut venv = self.uv_command(uv);
         venv.args(["venv", "--no-project", "--allow-existing", "--python"])
             .arg(&managed_python)
             .arg(&venv_dir);
@@ -161,7 +168,7 @@ impl Pixal3dCudaRuntimeManager {
             eprintln!(
                 "[3/4] Resolving the vendored dependency ranges into a private per-install uv.lock…"
             );
-            let mut lock = self.uv_command(&uv);
+            let mut lock = self.uv_command(uv);
             lock.current_dir(&self.managed_root)
                 .arg("lock")
                 .arg("--python")
@@ -172,7 +179,7 @@ impl Pixal3dCudaRuntimeManager {
         }
 
         eprintln!("[4/4] Installing the pinned Python 3.12 / PyTorch 2.6.0 + CUDA 12.4 profile…");
-        let mut sync = self.uv_command(&uv);
+        let mut sync = self.uv_command(uv);
         sync.current_dir(&self.managed_root)
             .env("UV_PROJECT_ENVIRONMENT", &venv_dir)
             .args(["sync", "--project"])
@@ -255,6 +262,10 @@ impl Pixal3dCudaRuntimeManager {
                 "Run `meshharbor runtime cuda-setup` before installing CUDA models.".into(),
             ));
         }
+        self.install_models_with_python(&python)
+    }
+
+    fn install_models_with_python(&self, python: &Path) -> CoreResult<RuntimeSetupReport> {
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(self.hf_home())?;
@@ -266,7 +277,7 @@ impl Pixal3dCudaRuntimeManager {
         let access_check = format!(
             "from huggingface_hub import HfApi; HfApi().model_info(repo_id='facebook/dinov3-vitl16-pretrain-lvd1689m', revision='{DINO_REVISION}'); print('DINOv3 gated access verified')"
         );
-        let mut preflight = self.python_command(&python);
+        let mut preflight = self.python_command(python);
         preflight
             .args(["-c", access_check.as_str()])
             .stdout(Stdio::inherit())
@@ -279,7 +290,7 @@ impl Pixal3dCudaRuntimeManager {
         eprintln!(
             "[2/2] Downloading pinned Pixal3D, DINOv3 and NAF checkpoints (roughly 25–30 GB)…"
         );
-        let mut download = self.python_command(&python);
+        let mut download = self.python_command(python);
         download
             .current_dir(&self.upstream_root)
             .args(["-m", "pixalcuda.cli", "download", "--skip-camera"])
@@ -301,7 +312,7 @@ impl Pixal3dCudaRuntimeManager {
             backend_id: "pixal3d-cuda".into(),
             status: "model_files_ready".into(),
             runtime_root: self.runtime_root.clone(),
-            python,
+            python: python.to_path_buf(),
             lockfile: self.managed_root.join("uv.lock"),
             message: "Pinned Pixal3D and DINOv3 snapshots and SHA-256-verified NAF weights are present in the isolated HF cache. Inference remains offline; model-specific terms are separate from MeshHarbor's MIT license.".into(),
         })
