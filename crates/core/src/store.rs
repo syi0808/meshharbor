@@ -1043,7 +1043,13 @@ mod tests {
         let dir = temp_dir();
         let store = Store::open(&dir).unwrap();
         let bytes = crate::glb::test_png_with_dimensions(1, 1);
-        for name in ["first.png", "second.png", "third.png", "fourth.png", "fifth.png"] {
+        for name in [
+            "first.png",
+            "second.png",
+            "third.png",
+            "fourth.png",
+            "fifth.png",
+        ] {
             store.import_asset(name, &bytes).unwrap();
         }
 
@@ -1067,9 +1073,11 @@ mod tests {
             }
         }
         assert_eq!(actual, expected);
-        assert!(store
-            .list_assets_page(2, Some("missing-asset-cursor"), None, None, None)
-            .is_err());
+        assert!(
+            store
+                .list_assets_page(2, Some("missing-asset-cursor"), None, None, None)
+                .is_err()
+        );
         let empty = store
             .list_assets_page(2, None, Some("no-such-asset"), None, None)
             .unwrap();
@@ -1103,7 +1111,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            exact.items.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            exact
+                .items
+                .iter()
+                .map(|asset| asset.id.as_str())
+                .collect::<Vec<_>>(),
             vec![exact_derived.id.as_str()]
         );
 
@@ -1117,7 +1129,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            originals.items.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            originals
+                .items
+                .iter()
+                .map(|asset| asset.id.as_str())
+                .collect::<Vec<_>>(),
             vec![source.id.as_str()]
         );
         let wrong_kind = store

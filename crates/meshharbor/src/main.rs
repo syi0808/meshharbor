@@ -2667,12 +2667,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let page: meshharbor_core::AssetPage = serde_json::from_slice(
-            &response.into_body().collect().await.unwrap().to_bytes(),
-        )
-        .unwrap();
+        let page: meshharbor_core::AssetPage =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
         assert_eq!(
-            page.items.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            page.items
+                .iter()
+                .map(|asset| asset.id.as_str())
+                .collect::<Vec<_>>(),
             vec![exact.id.as_str()]
         );
         assert_eq!(page.next_cursor, None);
@@ -2688,10 +2690,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let page: meshharbor_core::AssetPage = serde_json::from_slice(
-            &response.into_body().collect().await.unwrap().to_bytes(),
-        )
-        .unwrap();
+        let page: meshharbor_core::AssetPage =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
         assert_eq!(page.items.len(), 1);
         assert!(page.next_cursor.is_some());
 

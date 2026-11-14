@@ -190,12 +190,14 @@ export function App() {
     try {
       const page = await client.assetPage(ASSET_PAGE_SIZE, cursor, toAssetPageFilters(filters));
       if (!assetPageRequestGuard.current.isCurrent(requestId)) return;
-      const preservedIds = [
-        comparisonPairRef.current?.inputAssetId,
-        comparisonPairRef.current?.resultAssetId,
-        selectedIdRef.current,
-      ];
       setAssets((current) => {
+        const selectedPair = comparisonPairRef.current
+          ?? assetComparisonPairForSelection(current, selectedIdRef.current, null);
+        const preservedIds = [
+          selectedPair?.inputAssetId,
+          selectedPair?.resultAssetId,
+          selectedIdRef.current,
+        ];
         const pageIds = new Set(page.items.map((asset) => asset.id));
         const retained = current.filter((asset) =>
           !pageIds.has(asset.id) && (append || preservedIds.includes(asset.id)));
@@ -373,10 +375,12 @@ export function App() {
       setRuntime(runtimeInfo);
       setOperations(operationList);
       setAssets((current) => {
+        const selectedPair = comparisonPairRef.current
+          ?? assetComparisonPairForSelection(current, selectedIdRef.current, null);
         const pageIds = new Set(assetPage.items.map((asset) => asset.id));
         const preservedIds = new Set([
-          comparisonPairRef.current?.inputAssetId,
-          comparisonPairRef.current?.resultAssetId,
+          selectedPair?.inputAssetId,
+          selectedPair?.resultAssetId,
           selectedIdRef.current,
         ]);
         return [
