@@ -118,13 +118,13 @@ pub fn prepare_bundle(
     if assets.is_empty() {
         return Err("Runtime bundle manifest must contain at least one file.".into());
     }
-    if let Some(expected) = expected_file_count {
-        if assets.len() != expected {
-            return Err(format!(
-                "Runtime bundle manifest contains {} files; expected {expected}.",
-                assets.len()
-            ));
-        }
+    if let Some(expected) = expected_file_count
+        && assets.len() != expected
+    {
+        return Err(format!(
+            "Runtime bundle manifest contains {} files; expected {expected}.",
+            assets.len()
+        ));
     }
     assets.sort_by(|left, right| {
         left.backend
@@ -653,6 +653,27 @@ mod tests {
 
         let error = fixture.prepare().unwrap_err();
         assert!(error.contains("Duplicate runtime bundle manifest entry"));
+    }
+
+    #[test]
+    fn expected_file_count_is_enforced() {
+        let fixture = Fixture::new(b"pinned");
+        let error = prepare_bundle(
+            &fixture.root,
+            &fixture.manifest,
+            &fixture.output,
+            None,
+            Some(2),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("expected 2"));
+        assert!(
+            !fixture
+                .output
+                .join("runtime-assets/cuda/upstream/pixalcuda/cli.py")
+                .exists()
+        );
     }
 
     #[test]

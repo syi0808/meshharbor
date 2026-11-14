@@ -1,0 +1,6 @@
+# SHA-256-pinned runtime inputs must be checked out byte-for-byte on every OS.
+crates/core/runtime_bundle_manifest.json -text
+runtimes/pixal3d/cuda/managed/** -text
+runtimes/pixal3d/cuda/upstream/** -text
+runtimes/pixal3d/mlx/managed/** -text
+runtimes/pixal3d/mlx/upstream/** -text
