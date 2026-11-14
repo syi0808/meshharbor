@@ -701,4 +701,204 @@ mod tests {
         assert!(readiness.gated_model_access_required);
         let _ = std::fs::remove_dir_all(root);
     }
+
+
+    #[cfg(unix)]
+    fn write_test_script(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, contents).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn isolated_manager(root: &Path) -> (Pixal3dCudaRuntimeManager, PathBuf) {
+        let data_root = root.join("app-data");
+        let runtime_root = data_root.join("runtimes/pixal3d-cuda");
+        std::fs::create_dir_all(&data_root).unwrap();
+        (
+            Pixal3dCudaRuntimeManager {
+                upstream_root: runtime_root.join("source/upstream"),
+                managed_root: runtime_root.join("source/managed"),
+                runtime_root: runtime_root.clone(),
+            },
+            data_root,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_cuda_setup_uses_app_private_tools_and_clears_credentials() {
+        let root = env::temp_dir().join(format!("meshharbor-cuda-setup-{}", Uuid::new_v4()));
+        let (manager, data_root) = isolated_manager(&root);
+        let runtime_root = manager.runtime_root.clone();
+        std::fs::write(data_root.join("owner-sentinel"), "preserve me").unwrap();
+        manager.ensure_source().unwrap();
+
+        let fake_python = root.join("fake-python");
+        write_test_script(
+            &fake_python,
+            r#"#!/bin/sh
+printf '%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOME" >> "$HOME/python-env.log"
+case "$1" in
+  --version) echo "Python 3.12.9" ;;
+  -m)
+    if [ "$2" = "pixalcuda.cli" ] && [ "$3" = "doctor" ]; then
+      echo '{"cuda_available":true,"torch":"2.6.0+cu124","cuda_runtime":"12.4","sdpa_torch.float16":true,"sdpa_torch.float32":true}'
+    fi
+    ;;
+  -c) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#,
+        );
+        let fake_uv = root.join("fake-uv");
+        let mut uv_script = String::from(
+            r#"#!/bin/sh
+printf '%s:%s|%s|%s|%s\n' "$1" "$2" "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" >> "$UV_CACHE_DIR/uv.log"
+FAKE_PYTHON_PLACEHOLDER
+case "$1:$2" in
+  python:install)
+    interpreter="$UV_PYTHON_INSTALL_DIR/cpython-3.12.9/bin/python"
+    mkdir -p "$(dirname "$interpreter")"
+    cp "$FAKE_PYTHON" "$interpreter"
+    chmod +x "$interpreter"
+    ;;
+  python:find)
+    echo "$UV_PYTHON_INSTALL_DIR/cpython-3.12.9/bin/python"
+    ;;
+  venv:*)
+    destination=""
+    for argument in "$@"; do destination="$argument"; done
+    mkdir -p "$destination/bin"
+    cp "$FAKE_PYTHON" "$destination/bin/python"
+    chmod +x "$destination/bin/python"
+    ;;
+  lock:*)
+    : > uv.lock
+    ;;
+  sync:*) ;;
+  *)
+    echo "unexpected fake uv arguments: $*" >&2
+    exit 81
+    ;;
+esac
+"#,
+        );
+        let fake_python_assignment = format!(
+            "FAKE_PYTHON='{}'",
+            fake_python.to_string_lossy().replace('\'', "'\\''")
+        );
+        uv_script = uv_script.replace("FAKE_PYTHON_PLACEHOLDER", &fake_python_assignment);
+        write_test_script(&fake_uv, &uv_script);
+
+        let report = manager
+            .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU")
+            .unwrap();
+        assert_eq!(report.backend_id, "pixal3d-cuda");
+        assert_eq!(report.status, "python_environment_ready_models_not_installed");
+        assert!(report.runtime_root.starts_with(&data_root));
+        assert!(report.python.starts_with(&runtime_root));
+        assert!(report.lockfile.is_file());
+        assert!(runtime_root.join("cuda-preflight.json").is_file());
+        assert!(!runtime_root.join("weights").exists());
+
+        let uv_log = std::fs::read_to_string(manager.cache_path().join("uv.log")).unwrap();
+        assert!(uv_log.lines().all(|line| {
+            let fields: Vec<_> = line.split('|').collect();
+            fields.len() == 5 && fields[2].is_empty() && fields[3].is_empty()
+                && fields[4].starts_with(&manager.home_path().to_string_lossy().to_string())
+        }));
+        let python_log = std::fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
+        assert!(python_log.lines().all(|line| {
+            let fields: Vec<_> = line.split('|').collect();
+            fields.len() == 4
+                && fields[0].is_empty()
+                && fields[1].is_empty()
+                && fields[2].starts_with(&manager.home_path().to_string_lossy().to_string())
+                && fields[3].starts_with(&manager.hf_home().to_string_lossy().to_string())
+        }));
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("owner-sentinel")).unwrap(),
+            "preserve me"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_download_retry_keeps_hf_partial_then_completes_pinned_cache_files() {
+        let root = env::temp_dir().join(format!("meshharbor-cuda-download-{}", Uuid::new_v4()));
+        let (manager, data_root) = isolated_manager(&root);
+        let runtime_root = manager.runtime_root.clone();
+        std::fs::write(data_root.join("owner-sentinel"), "preserve me").unwrap();
+        manager.ensure_source().unwrap();
+
+        let fake_python = root.join("fake-python");
+        let mut python_script = String::from(
+            r#"#!/bin/sh
+printf '%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOME" >> "$HOME/python-env.log"
+if [ "$1" = "-c" ]; then exit 0; fi
+if [ "$1" = "-m" ] && [ "$2" = "pixalcuda.cli" ] && [ "$3" = "download" ]; then
+  count_file="$HOME/download-attempts"
+  if [ -f "$count_file" ]; then count=$(cat "$count_file"); else count=0; fi
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  if [ "$count" -eq 1 ]; then
+    mkdir -p "$HF_HOME/hub/.cache/download"
+    printf 'partial checkpoint bytes' > "$HF_HOME/hub/.cache/download/partial"
+    exit 23
+  fi
+  PAYLOAD_PLACEHOLDER
+  exit 0
+fi
+exit 0
+"#,
+        );
+        let mut payload = String::new();
+        for filename in PIXAL_CHECKPOINTS {
+            payload.push_str(&format!(
+                "mkdir -p \"$HF_HOME/hub/{PIXAL_REPOSITORY}/snapshots/{PIXAL_REVISION}/ckpts\"\nprintf 'fixture' > \"$HF_HOME/hub/{PIXAL_REPOSITORY}/snapshots/{PIXAL_REVISION}/ckpts/{filename}\"\n"
+            ));
+        }
+        payload.push_str(&format!(
+            "mkdir -p \"$HF_HOME/hub/{PIXAL_REPOSITORY}/snapshots/{PIXAL_REVISION}\"\nprintf 'fixture' > \"$HF_HOME/hub/{PIXAL_REPOSITORY}/snapshots/{PIXAL_REVISION}/pipeline.json\"\n"
+        ));
+        payload.push_str(&format!(
+            "mkdir -p \"$HF_HOME/hub/{DINO_REPOSITORY}/snapshots/{DINO_REVISION}\"\nprintf 'fixture' > \"$HF_HOME/hub/{DINO_REPOSITORY}/snapshots/{DINO_REVISION}/model.safetensors\"\n"
+        ));
+        payload.push_str(
+            "mkdir -p \"$HF_HOME/hub/pixal3d-cuda\"\nprintf 'fixture' > \"$HF_HOME/hub/pixal3d-cuda/naf_release.pth\"\n",
+        );
+        python_script = python_script.replace("PAYLOAD_PLACEHOLDER", &payload);
+        write_test_script(&fake_python, &python_script);
+
+        let partial = manager
+            .hf_home()
+            .join("hub/.cache/download/partial");
+        assert!(manager.install_models_with_python(&fake_python).is_err());
+        assert_eq!(std::fs::read_to_string(&partial).unwrap(), "partial checkpoint bytes");
+
+        let report = manager.install_models_with_python(&fake_python).unwrap();
+        assert_eq!(report.status, "model_files_ready");
+        assert!(manager.readiness().models_downloaded);
+        assert_eq!(std::fs::read_to_string(&partial).unwrap(), "partial checkpoint bytes");
+        let python_log = std::fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
+        assert!(python_log.lines().all(|line| {
+            let fields: Vec<_> = line.split('|').collect();
+            fields.len() == 4
+                && fields[0].is_empty()
+                && fields[1].is_empty()
+                && fields[2].starts_with(&manager.home_path().to_string_lossy().to_string())
+                && fields[3].starts_with(&manager.hf_home().to_string_lossy().to_string())
+        }));
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("owner-sentinel")).unwrap(),
+            "preserve me"
+        );
+        assert!(runtime_root.starts_with(&data_root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }
