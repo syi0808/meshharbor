@@ -23,6 +23,15 @@ jobs:
           components: clippy, rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Regenerate Cargo lockfile for resolver review
+        run: cargo update --workspace
+      - name: Upload resolver-generated lockfile for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock-resolver-${{ github.sha }}
+          path: Cargo.lock
+          if-no-files-found: error
       - name: Run strict Clippy with optional remesher
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::chunks-exact-to-as-chunks
       - name: Run workspace tests with optional remesher and committed lockfile
