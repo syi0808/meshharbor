@@ -173,8 +173,15 @@ mod tests {
     };
 
     use super::DataDirLock;
+    use crate::DATA_DIR_LOCK_TEST_MUTEX;
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn test_lock_guard() -> std::sync::MutexGuard<'static, ()> {
+        DATA_DIR_LOCK_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
 
     fn temp_dir() -> PathBuf {
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -186,6 +193,7 @@ mod tests {
 
     #[test]
     fn runtime_lock_child_holds_lock_until_process_exit() {
+        let _test_guard = test_lock_guard();
         let Ok(root) = std::env::var("MESHHARBOR_TEST_RUNTIME_LOCK_CHILD_ROOT") else {
             return;
         };
@@ -197,6 +205,7 @@ mod tests {
 
     #[test]
     fn runtime_lock_is_process_wide_and_released_when_child_exits() {
+        let _test_guard = test_lock_guard();
         let root = temp_dir();
         let ready = root.join("child-ready");
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -242,6 +251,7 @@ mod tests {
 
     #[test]
     fn services_share_lock_but_recovery_is_exclusive() {
+        let _test_guard = test_lock_guard();
         let root = temp_dir();
         let first_service = DataDirLock::try_acquire_for_service(&root).unwrap();
         let second_service = DataDirLock::try_acquire_for_service(&root).unwrap();
@@ -269,6 +279,7 @@ mod tests {
 
     #[test]
     fn runtime_install_lock_excludes_generation_but_allows_concurrent_readers() {
+        let _test_guard = test_lock_guard();
         let root =
             std::env::temp_dir().join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
 
@@ -305,6 +316,7 @@ mod tests {
 
     #[test]
     fn runtime_locks_are_scoped_to_each_data_directory() {
+        let _test_guard = test_lock_guard();
         let root =
             std::env::temp_dir().join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
         let other_root =
