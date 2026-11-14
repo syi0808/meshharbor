@@ -611,13 +611,7 @@ impl Store {
                 "message": "This job was unfinished when MeshHarbor last exited. It was not resumed; inspect existing assets before retrying.",
                 "previous_state": previous_state.as_str(),
             });
-            recovered.push(self.update_job(
-                &id,
-                JobState::Failed,
-                100,
-                None,
-                Some(error),
-            )?);
+            recovered.push(self.update_job(&id, JobState::Failed, 100, None, Some(error))?);
         }
         Ok(recovered)
     }
@@ -666,19 +660,16 @@ fn job_state_from_transaction(transaction: &Transaction<'_>, id: &str) -> CoreRe
 fn valid_transition(current: &JobState, next: &JobState) -> bool {
     matches!(
         (current, next),
-        (JobState::Queued, JobState::Running | JobState::Cancelled | JobState::Failed)
-            | (
-                JobState::Running,
-                JobState::Validating
-                    | JobState::Failed
-                    | JobState::Cancelling
-                    | JobState::Cancelled
-            )
-            | (
-                JobState::Validating,
-                JobState::Succeeded | JobState::Failed | JobState::Cancelling | JobState::Cancelled
-            )
-            | (JobState::Cancelling, JobState::Cancelled | JobState::Failed)
+        (
+            JobState::Queued,
+            JobState::Running | JobState::Cancelled | JobState::Failed
+        ) | (
+            JobState::Running,
+            JobState::Validating | JobState::Failed | JobState::Cancelling | JobState::Cancelled
+        ) | (
+            JobState::Validating,
+            JobState::Succeeded | JobState::Failed | JobState::Cancelling | JobState::Cancelled
+        ) | (JobState::Cancelling, JobState::Cancelled | JobState::Failed)
     )
 }
 
@@ -844,7 +835,9 @@ mod tests {
                 None,
             )
             .unwrap();
-        let failed = store.create_job("image.generate", None, &json!({})).unwrap();
+        let failed = store
+            .create_job("image.generate", None, &json!({}))
+            .unwrap();
         store
             .update_job(&failed.id, JobState::Running, 30, None, None)
             .unwrap();
@@ -889,10 +882,7 @@ mod tests {
         );
         let succeeded = store.get_job(&succeeded.id).unwrap().unwrap();
         assert_eq!(succeeded.state, JobState::Succeeded);
-        assert_eq!(
-            succeeded.result,
-            Some(json!({"asset_id":"asset-existing"}))
-        );
+        assert_eq!(succeeded.result, Some(json!({"asset_id":"asset-existing"})));
         let failed = store.get_job(&failed.id).unwrap().unwrap();
         assert_eq!(failed.state, JobState::Failed);
         assert_eq!(failed.error, Some(json!({"message":"known failure"})));
