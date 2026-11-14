@@ -4,18 +4,39 @@ import { readFile } from 'node:fs/promises';
 
 // Use the project's TypeScript compiler when installed (Node 20+), with a
 // native type-stripping fallback for minimal Node 24 test environments.
-let MeshHarborApi;
+let MeshHarborApi, quadTopologyArtifact;
 try {
   const ts = await import('typescript');
   const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, quadTopologyArtifact } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-  ({ MeshHarborApi } = await import('./api.ts'));
+  ({ MeshHarborApi, quadTopologyArtifact } = await import('./api.ts'));
 }
+
+test('QuadriFlow installer surface stays guarded when no reviewed release is available', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (path, init = {}) => {
+    calls.push({ path, init });
+    if (path === '/api/v1/backends/quadriflow/install') {
+      return Response.json({ error: 'This build does not include an approved QuadriFlow release artifact.' }, { status: 422 });
+    }
+    throw new Error('Unexpected request: ' + path);
+  };
+  try {
+    const api = new MeshHarborApi();
+    await assert.rejects(api.installQuadriflowBackend(), /does not include an approved QuadriFlow release artifact/);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal(new Headers(calls[0].init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('Studio backend setup and image-generation flow downloads the generated GLB', async () => {
   const sourceAsset = { id: 'image-1', artifacts: [{ id: 'source-1', kind: 'source' }] };
@@ -168,6 +189,42 @@ test('Studio submits atlas options and part separation through the shared job AP
       input: { asset_id: 'mesh-asset-1' },
       parameters: { resolution: 1024, padding: 8 },
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('retopology submits a job and downloads quad OBJ separately from GLB preview', async () => {
+  const quad = { id: 'quad/one', kind: 'quad_topology', mime_type: 'model/obj' };
+  const glb = { id: 'preview', kind: 'derived', mime_type: 'model/gltf-binary' };
+  const asset = { mime_type: 'model/gltf-binary', artifacts: [quad, glb] };
+  assert.equal(quadTopologyArtifact(asset), quad);
+  assert.equal(quadTopologyArtifact({ artifacts: [] }), undefined);
+  assert.equal(quadTopologyArtifact(null), undefined);
+  assert.equal(quadTopologyArtifact({ artifacts: [{ ...quad, kind: 'quad_obj' }] }).id, quad.id);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (path, init) => {
+    calls.push({ path, init });
+    if (path === '/api/v1/jobs') return Response.json({ id: 'retopo-1', state: 'queued' });
+    if (path === '/api/v1/artifacts/preview') return new Response('GLB preview');
+    if (path === '/api/v1/artifacts/quad%2Fone') return new Response('v 0 0 0\nf 1 2 3 4\n');
+    throw new Error('Unexpected request: ' + path);
+  };
+  try {
+    const api = new MeshHarborApi();
+    await api.createMeshOperationJob('source', 'mesh.retopology');
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      operation: 'mesh.retopology', input: { asset_id: 'source' }, parameters: {},
+    });
+    assert.equal(await (await api.artifact(asset)).text(), 'GLB preview');
+    assert.equal(await (await api.downloadArtifact(quad)).text(), 'v 0 0 0\nf 1 2 3 4\n');
+    assert.throws(() => api.artifact({ artifacts: [quad] }), /no downloadable artifact/);
+    for (const { init } of calls) {
+      assert.equal(new Headers(init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
+    }
+    globalThis.fetch = async () => new Response('unavailable', { status: 404 });
+    await assert.rejects(api.downloadArtifact(quad), /Artifact download failed \(404\)/);
   } finally {
     globalThis.fetch = originalFetch;
   }

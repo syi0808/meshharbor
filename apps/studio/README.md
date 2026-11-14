@@ -1,6 +1,6 @@
 # MeshHarbor Studio
 
-This is the single-screen Studio client for the local MeshHarbor engine. The first usable workflow is importing a static GLB, viewing it, simplifying it with meshoptimizer, and downloading the derived GLB. Image-to-3D generation, UV re-unwrapping, texture baking, retopology, and other unimplemented operations are shown as unavailable rather than simulated.
+This is the single-screen Studio client for the local MeshHarbor engine. It imports PNG/JPEG/GLB assets and exposes meshoptimizer simplification, conservative cleanup, connected-part splitting, render-order optimization, KHR_meshopt compression, and experimental, currently unavailable QuadriFlow retopology. Retopology is unavailable in the current product build. Studio displays backend status and the next step, and exposes a disabled install request button. The runtime ignores adjacent executables; a managed sidecar can be resolved only after an in-process verifier accepts its release attestation and the executable hash matches the trusted manifest. No such verifier is integrated and the bundled manifest is empty, so install/rollback requests fail closed before downloads or backend-directory writes. For the supported textured subset, base-color and metallic/roughness maps are projected only into the triangulated GLB preview; the separate quad OBJ is geometry-only. Image-to-3D jobs depend on the separately configured local MLX/CUDA backends.
 
 ## Local development
 
@@ -34,3 +34,11 @@ Vite writes static files to `apps/studio/dist`. The Rust build script embeds tha
 Run `npm run test:security` to exercise the Vite middleware's anti-framing headers, exact local-origin guard, and rejection of originless writes/cross-origin preflights/POSTs/untrusted Hosts.
 
 The preview uses Three.js and the browser's WebGL implementation. No remote fonts, images, or model-viewer scripts are loaded by the Studio page.
+
+## Operation limits
+
+- `uv.unwrap` is a low-level REST/CLI/MCP operation, not a standalone Studio tool. It accepts one supported static mesh/primitive/material with existing float UVs and embedded PNG base-color and metallic/roughness maps. It creates a new atlas and rebakes those maps from the same mesh's existing UVs. This is not a high-to-low projection or generic texture bake; unsupported maps and layouts are rejected.
+- `mesh.retopology` is currently unavailable. Adjacent executables are ignored; only a managed sidecar accepted by an in-process signature/provenance verifier and matched to the trusted manifest may be made ready in a future build. It accepts a closed, static triangle GLB; supported textured inputs require existing float UVs, optional normals, and embedded PNG base-color and metallic/roughness maps. A nearest-surface projection is bounded by source-relative distance, normal orientation, coverage, and opposing-shell ambiguity checks. Only those maps are rebaked into the triangulated GLB preview. The separate OBJ artifact retains editable quad faces but has no UVs or appearance. Unsupported attributes/maps fail closed, and the operation does not certify texture quality, self-intersection freedom, or a measured surface-error tolerance.
+- The remaining mesh operations create derived assets and leave source files unchanged. Their accepted GLB layouts and size/count limits are enforced by the Rust engine, not by the UI.
+
+The React/npm bundle and browser workflow have not been verified in this environment; the Studio sources are not evidence of a complete desktop installer or production client build.

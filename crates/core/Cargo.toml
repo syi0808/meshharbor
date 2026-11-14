@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.23.1"
 rusqlite.workspace = true
 meshopt.workspace = true
 serde.workspace = true
@@ -14,5 +15,6 @@ thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 meshharbor-atlas-baker = { path = "../atlas-baker" }
+sigstore-verify = "=0.15.1"
 
 

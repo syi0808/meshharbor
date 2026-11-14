@@ -161,6 +161,10 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn data_root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn open(root: impl AsRef<Path>) -> CoreResult<Self> {
         let root = root.as_ref().to_path_buf();
         let artifact_root = root.join("artifacts");
@@ -238,6 +242,27 @@ impl Store {
         self.import_with_metadata(name, bytes, Some(source_asset_id), "derived", metadata)
     }
 
+    /// Import a derived asset and its secondary artifacts in the same database transaction.
+    /// This prevents an output preview from being visible when its primary editable artifact
+    /// (for example, the original QuadriFlow OBJ) could not be committed.
+    pub fn import_derived_asset_with_artifacts(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        source_asset_id: &str,
+        metadata: Value,
+        additional_artifacts: &[(&str, &str, &[u8])],
+    ) -> CoreResult<Asset> {
+        self.import_with_metadata_and_artifacts(
+            name,
+            bytes,
+            Some(source_asset_id),
+            "derived",
+            metadata,
+            additional_artifacts,
+        )
+    }
+
     fn import_with_metadata(
         &self,
         name: &str,
@@ -245,6 +270,25 @@ impl Store {
         source_asset_id: Option<&str>,
         artifact_kind: &str,
         extra_metadata: Value,
+    ) -> CoreResult<Asset> {
+        self.import_with_metadata_and_artifacts(
+            name,
+            bytes,
+            source_asset_id,
+            artifact_kind,
+            extra_metadata,
+            &[],
+        )
+    }
+
+    fn import_with_metadata_and_artifacts(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        source_asset_id: Option<&str>,
+        artifact_kind: &str,
+        extra_metadata: Value,
+        additional_artifacts: &[(&str, &str, &[u8])],
     ) -> CoreResult<Asset> {
         if bytes.is_empty() {
             return Err(CoreError::InvalidInput("Asset file is empty.".into()));
@@ -257,9 +301,29 @@ impl Store {
                 base.insert(key.clone(), value.clone());
             }
         }
-        let digest = digest(bytes);
-        let artifact_path = self.artifact_path_for_hash(&digest);
+        let asset_digest = digest(bytes);
+        let artifact_path = self.artifact_path_for_hash(&asset_digest);
         self.write_content_addressed(&artifact_path, bytes)?;
+
+        let mut additional_rows = Vec::with_capacity(additional_artifacts.len());
+        for (kind, mime_type, extra_bytes) in additional_artifacts {
+            if kind.trim().is_empty() || mime_type.trim().is_empty() || extra_bytes.is_empty() {
+                return Err(CoreError::InvalidInput(
+                    "Secondary artifacts require nonempty kind, MIME type, and bytes.".into(),
+                ));
+            }
+            let extra_digest = digest(extra_bytes);
+            let extra_path = self.artifact_path_for_hash(&extra_digest);
+            self.write_content_addressed(&extra_path, extra_bytes)?;
+            additional_rows.push((
+                format!("artifact_{}", Uuid::new_v4().simple()),
+                (*kind).to_string(),
+                (*mime_type).to_string(),
+                extra_digest,
+                extra_bytes.len() as i64,
+                extra_path.to_string_lossy().into_owned(),
+            ));
+        }
 
         let asset_id = format!("asset_{}", Uuid::new_v4().simple());
         let artifact_id = format!("artifact_{}", Uuid::new_v4().simple());
@@ -275,7 +339,7 @@ impl Store {
                 safe_name,
                 descriptor.kind.as_str(),
                 descriptor.mime_type,
-                digest,
+                asset_digest,
                 bytes.len() as i64,
                 source_asset_id,
                 metadata_json,
@@ -289,13 +353,29 @@ impl Store {
                 artifact_id,
                 asset_id,
                 artifact_kind,
-                digest,
+                asset_digest,
                 bytes.len() as i64,
                 descriptor.mime_type,
                 artifact_path.to_string_lossy(),
                 created_at
             ],
         )?;
+        for (id, kind, mime_type, extra_digest, byte_size, storage_path) in additional_rows {
+            transaction.execute(
+                "INSERT INTO artifacts (id,asset_id,kind,sha256,byte_size,mime_type,storage_path,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    id,
+                    asset_id,
+                    kind,
+                    extra_digest,
+                    byte_size,
+                    mime_type,
+                    storage_path,
+                    created_at
+                ],
+            )?;
+        }
         transaction.commit()?;
         drop(conn);
         self.get_asset(&asset_id)?.ok_or_else(|| {
@@ -743,6 +823,35 @@ mod tests {
             store.get_asset(&imported.id).unwrap().unwrap().sha256,
             imported.sha256
         );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn imports_derived_asset_and_secondary_artifact_atomically() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let source = store
+            .import_asset("source.png", b"\x89PNG\r\n\x1a\nimage bytes")
+            .unwrap();
+        let preview = b"\x89PNG\r\n\x1a\npreview bytes";
+        let quad_obj = b"v 0 0 0\nf 1 2 3 4\n";
+        let result = store
+            .import_derived_asset_with_artifacts(
+                "retopology.png",
+                preview,
+                &source.id,
+                serde_json::Value::Null,
+                &[("quad_topology", "model/obj", quad_obj)],
+            )
+            .unwrap();
+        assert_eq!(result.artifacts.len(), 2);
+        let obj = result
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "quad_topology")
+            .unwrap();
+        assert_eq!(store.read_artifact(&obj.id).unwrap().bytes, quad_obj);
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }

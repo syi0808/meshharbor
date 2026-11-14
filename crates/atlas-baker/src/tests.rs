@@ -1,4 +1,7 @@
-use super::{AtlasBakeError, AtlasBakeOptions, bake_glb};
+use super::{
+    AtlasBakeError, AtlasBakeOptions, bake_glb, bake_projected_mesh, encode_projected_mesh_glb,
+    extract_projection_source_mesh, project_point_to_surface,
+};
 use serde_json::{Value, json};
 
 const BASE_PNG: &[u8] = &[
@@ -39,6 +42,104 @@ fn floats(values: &[f32]) -> Vec<u8> {
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect()
+}
+
+fn opposing_shell_fixture() -> Vec<u8> {
+    let mut glb = super::Glb::parse(&fixture(false, false, false)).unwrap();
+    let positions = [
+        0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.01, 1.0, 0.0,
+        0.01, 1.0, 1.0, 0.01, 0.0, 1.0, 0.01,
+    ];
+    let normals = [
+        0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0,
+        -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0,
+    ];
+    let uv = [
+        0.0f32, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0,
+    ];
+    let indices = [0u16, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6];
+    let pos_view = super::append_view(
+        &mut glb.document,
+        &mut glb.binary,
+        &floats(&positions),
+        Some(34962),
+    )
+    .unwrap();
+    let normal_view = super::append_view(
+        &mut glb.document,
+        &mut glb.binary,
+        &floats(&normals),
+        Some(34962),
+    )
+    .unwrap();
+    let uv_view = super::append_view(
+        &mut glb.document,
+        &mut glb.binary,
+        &floats(&uv),
+        Some(34962),
+    )
+    .unwrap();
+    let index_bytes: Vec<u8> = indices
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let index_view = super::append_view(
+        &mut glb.document,
+        &mut glb.binary,
+        &index_bytes,
+        Some(34963),
+    )
+    .unwrap();
+    for (accessor, view, count) in [
+        (0, pos_view, 8),
+        (1, normal_view, 8),
+        (2, uv_view, 8),
+        (3, index_view, 12),
+    ] {
+        glb.document["accessors"][accessor]["bufferView"] = json!(view);
+        glb.document["accessors"][accessor]["count"] = json!(count);
+    }
+    glb.document["buffers"][0]["byteLength"] = json!(glb.binary.len());
+    glb.write().unwrap()
+}
+
+#[test]
+fn surface_projection_reports_barycentrics_distance_and_ambiguity() {
+    let verts = [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+    let hit =
+        project_point_to_surface([0.25, 0.25, 0.1], [0., 0., 1.], &verts, &[0, 1, 2], 0.2).unwrap();
+    assert_eq!(hit.triangle, 0);
+    assert!((hit.distance - 0.1).abs() < 1e-5);
+    assert!((hit.barycentric[0] - 0.5).abs() < 1e-5);
+    assert!(!hit.ambiguous);
+    assert!(
+        project_point_to_surface([0.25, 0.25, 0.3], [0., 0., 1.], &verts, &[0, 1, 2], 0.2).is_err()
+    );
+    assert!(
+        project_point_to_surface([0.25, 0.25, 0.1], [0., 0., -1.], &verts, &[0, 1, 2], 0.2)
+            .is_err()
+    );
+}
+
+#[test]
+fn surface_projection_marks_close_opposing_shells_ambiguous() {
+    let verts = [
+        [0., 0., 0.],
+        [1., 0., 0.],
+        [0., 1., 0.],
+        [0., 0., 0.01],
+        [0., 1., 0.01],
+        [1., 0., 0.01],
+    ];
+    let hit = project_point_to_surface(
+        [0.25, 0.25, 0.005],
+        [0., 0., 1.],
+        &verts,
+        &[0, 1, 2, 3, 4, 5],
+        0.1,
+    )
+    .unwrap();
+    assert!(hit.ambiguous);
 }
 
 fn fixture(with_tangent: bool, with_normal_map: bool, with_color: bool) -> Vec<u8> {
@@ -120,6 +221,111 @@ fn fixture(with_tangent: bool, with_normal_map: bool, with_color: bool) -> Vec<u
     }
     .write()
     .unwrap()
+}
+
+#[test]
+fn projected_bake_reunwraps_target_and_reports_full_coverage() {
+    let source = fixture(false, false, false);
+    let source_mesh = extract_projection_source_mesh(&source).unwrap();
+    assert_eq!(source_mesh.positions.len(), 4);
+    assert_eq!(source_mesh.indices.len(), 6);
+    let normals = [[0.0, 0.0, 1.0]; 4];
+    let baked = bake_projected_mesh(
+        &source,
+        &source_mesh.positions,
+        &normals,
+        &source_mesh.indices,
+        AtlasBakeOptions {
+            resolution: 128,
+            padding: 4,
+        },
+        0.02,
+    )
+    .unwrap();
+    assert_eq!(baked.positions.len(), baked.uv.len());
+    assert_eq!(baked.positions.len(), baked.normals.len());
+    assert_eq!(baked.indices.len(), 6);
+    assert!(baked.report.projection_coverage >= 0.995);
+    assert_eq!(baked.report.ambiguous_texels, 0);
+    assert!(baked.report.maximum_projection_distance <= baked.report.projection_distance_limit);
+    assert!(baked.base_color_png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(
+        baked
+            .metallic_roughness_png
+            .starts_with(b"\x89PNG\r\n\x1a\n")
+    );
+    let preview = encode_projected_mesh_glb(&baked).unwrap();
+    let preview_glb = super::Glb::parse(&preview).unwrap();
+    assert_eq!(preview_glb.document["images"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        preview_glb.document["textures"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        preview_glb.document["meshes"][0]["primitives"][0]["mode"],
+        4
+    );
+}
+
+#[test]
+fn projected_bake_fails_closed_when_target_exceeds_distance_gate() {
+    let source = fixture(false, false, false);
+    let target_positions = [
+        [0.0, 0.0, 0.2],
+        [1.0, 0.0, 0.2],
+        [1.0, 1.0, 0.2],
+        [0.0, 1.0, 0.2],
+    ];
+    let target_normals = [[0.0, 0.0, 1.0]; 4];
+    assert!(
+        bake_projected_mesh(
+            &source,
+            &target_positions,
+            &target_normals,
+            &[0, 1, 2, 0, 2, 3],
+            AtlasBakeOptions {
+                resolution: 128,
+                padding: 4,
+            },
+            0.02,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn projected_bake_rejects_ambiguous_opposing_thin_shells() {
+    let source = opposing_shell_fixture();
+    let target_positions = [
+        [0.0, 0.0, 0.005],
+        [1.0, 0.0, 0.005],
+        [1.0, 1.0, 0.005],
+        [0.0, 1.0, 0.005],
+    ];
+    let target_normals = [[0.0, 0.0, 1.0]; 4];
+    let error = bake_projected_mesh(
+        &source,
+        &target_positions,
+        &target_normals,
+        &[0, 1, 2, 0, 2, 3],
+        AtlasBakeOptions {
+            resolution: 128,
+            padding: 4,
+        },
+        0.02,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, AtlasBakeError::Native(message) if message.contains("ambiguous opposing surfaces"))
+    );
+}
+
+#[test]
+fn projected_source_rejects_non_transferable_attributes() {
+    let source_with_color = fixture(false, false, true);
+    assert!(extract_projection_source_mesh(&source_with_color).is_err());
+    let source_with_normal_map = fixture(false, true, false);
+    assert!(extract_projection_source_mesh(&source_with_normal_map).is_err());
 }
 
 #[test]

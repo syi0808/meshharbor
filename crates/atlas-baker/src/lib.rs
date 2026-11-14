@@ -76,6 +76,255 @@ pub struct AtlasBakeReport {
     pub warnings: Vec<String>,
 }
 
+/// Geometry and UV streams from the narrow texture-projection source format.
+/// The caller may pass these positions and indices to a geometry-only remesher.
+#[derive(Debug, Clone)]
+pub struct ProjectionSourceMesh {
+    pub positions: Vec<[f32; 3]>,
+    pub uv: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectedMeshBakeReport {
+    pub source_triangles: u64,
+    pub target_triangles: u64,
+    pub output_triangles: u64,
+    pub output_vertices: u64,
+    pub atlas_width: u32,
+    pub atlas_height: u32,
+    pub chart_count: u32,
+    pub covered_texels: u64,
+    pub gutter_texels: u64,
+    pub projection_attempted_texels: u64,
+    pub projection_covered_texels: u64,
+    pub projection_coverage: f32,
+    pub ambiguous_texels: u64,
+    pub maximum_projection_distance: f32,
+    pub projection_distance_limit: f32,
+    pub rebaked_maps: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Target geometry with a new atlas and projected base-color/metallic-roughness
+/// maps. The result is not a texture-quality certification.
+#[derive(Debug, Clone)]
+pub struct ProjectedMeshBake {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub uv: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+    pub base_color_png: Vec<u8>,
+    pub metallic_roughness_png: Vec<u8>,
+    pub base_color_factor: [f32; 4],
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+    pub double_sided: bool,
+    pub report: ProjectedMeshBakeReport,
+}
+
+/// Result for one bounded closest-surface projection query. This primitive is
+/// used by the projected rebake path and deliberately does not imply a bake.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceProjection {
+    pub triangle: u32,
+    pub barycentric: [f32; 3],
+    pub position: [f32; 3],
+    pub distance: f32,
+    pub normal_dot: f32,
+    /// A second, nearly-equidistant hit with an opposing normal is ambiguous.
+    pub ambiguous: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct ProjectionCandidate {
+    distance2: f32,
+    triangle: u32,
+    barycentric: [f32; 3],
+    position: [f32; 3],
+    normal_dot: f32,
+}
+
+/// Project one point onto an indexed triangle surface. The search is bounded
+/// by `max_distance`; opposing near-equal hits are reported as ambiguous so a
+/// caller can fail closed on thin shells. This is exposed separately to make
+/// projection semantics testable without encoding a texture atlas.
+#[cfg(test)]
+fn project_point_to_surface(
+    point: [f32; 3],
+    target_normal: [f32; 3],
+    source_positions: &[[f32; 3]],
+    source_indices: &[u32],
+    max_distance: f32,
+) -> Result<SurfaceProjection, AtlasBakeError> {
+    if !point
+        .iter()
+        .chain(target_normal.iter())
+        .all(|v| v.is_finite())
+        || !max_distance.is_finite()
+        || max_distance <= 0.0
+        || source_positions.is_empty()
+        || source_indices.is_empty()
+        || !source_indices.len().is_multiple_of(3)
+        || source_indices.len() / 3 > u32::MAX as usize
+        || source_positions.iter().flatten().any(|v| !v.is_finite())
+        || source_indices
+            .iter()
+            .any(|i| *i as usize >= source_positions.len())
+    {
+        return Err(AtlasBakeError::InvalidInput(
+            "invalid projection query or source triangle mesh".into(),
+        ));
+    }
+    let norm = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let tn = norm(target_normal);
+    if tn <= 1e-12 {
+        return Err(AtlasBakeError::InvalidInput(
+            "target normal must be non-zero".into(),
+        ));
+    }
+    let target_normal = [
+        target_normal[0] / tn,
+        target_normal[1] / tn,
+        target_normal[2] / tn,
+    ];
+    let mut best: Option<ProjectionCandidate> = None;
+    let mut nearest_opposing = f32::INFINITY;
+    for (face, tri) in source_indices.chunks_exact(3).enumerate() {
+        let a = source_positions[tri[0] as usize];
+        let b = source_positions[tri[1] as usize];
+        let c = source_positions[tri[2] as usize];
+        let ab = sub3(b, a);
+        let ac = sub3(c, a);
+        let face_n = normalize3(cross3(ab, ac));
+        if face_n.is_none() {
+            continue;
+        }
+        let n = face_n.unwrap();
+        let (q, bary) = closest_point_triangle(point, a, b, c);
+        let d2 = dot3(sub3(q, point), sub3(q, point));
+        if d2 > max_distance * max_distance {
+            continue;
+        }
+        let nd = dot3(target_normal, n);
+        if nd < -0.25 {
+            nearest_opposing = nearest_opposing.min(d2);
+        }
+        if best.is_none_or(|candidate| d2 < candidate.distance2) {
+            best = Some(ProjectionCandidate {
+                distance2: d2,
+                triangle: face as u32,
+                barycentric: bary,
+                position: q,
+                normal_dot: nd,
+            });
+        }
+    }
+    let Some(candidate) = best else {
+        return Err(AtlasBakeError::Unsupported(
+            "no source surface lies within the projection distance limit".into(),
+        ));
+    };
+    let ProjectionCandidate {
+        distance2: d2,
+        triangle,
+        barycentric,
+        position,
+        normal_dot,
+    } = candidate;
+    if normal_dot < 0.25 {
+        return Err(AtlasBakeError::Unsupported(
+            "nearest source surface fails the minimum facing-direction gate".into(),
+        ));
+    }
+    let distance = d2.sqrt();
+    let ambiguous = nearest_opposing.is_finite()
+        && (nearest_opposing.sqrt() - distance).abs() <= max_distance * 0.1;
+    Ok(SurfaceProjection {
+        triangle,
+        barycentric,
+        position,
+        distance,
+        normal_dot,
+        ambiguous,
+    })
+}
+
+#[cfg(test)]
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+#[cfg(test)]
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+#[cfg(test)]
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+#[cfg(test)]
+fn normalize3(a: [f32; 3]) -> Option<[f32; 3]> {
+    let n = dot3(a, a).sqrt();
+    (n > 1e-12).then(|| [a[0] / n, a[1] / n, a[2] / n])
+}
+#[cfg(test)]
+fn closest_point_triangle(
+    p: [f32; 3],
+    a: [f32; 3],
+    b: [f32; 3],
+    c: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    let ab = sub3(b, a);
+    let ac = sub3(c, a);
+    let ap = sub3(p, a);
+    let d1 = dot3(ab, ap);
+    let d2 = dot3(ac, ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return (a, [1.0, 0.0, 0.0]);
+    }
+    let bp = sub3(p, b);
+    let d3 = dot3(ab, bp);
+    let d4 = dot3(ac, bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return (b, [0.0, 1.0, 0.0]);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return (add_scaled(a, ab, v), [1.0 - v, v, 0.0]);
+    }
+    let cp = sub3(p, c);
+    let d5 = dot3(ab, cp);
+    let d6 = dot3(ac, cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return (c, [0.0, 0.0, 1.0]);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return (add_scaled(a, ac, w), [1.0 - w, 0.0, w]);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (add_scaled(b, sub3(c, b), w), [0.0, 1.0 - w, w]);
+    }
+    let denom = 1.0 / (va + vb + vc);
+    let v = vb * denom;
+    let w = vc * denom;
+    (add_scaled(add_scaled(a, ab, v), ac, w), [1.0 - v - w, v, w])
+}
+#[cfg(test)]
+fn add_scaled(a: [f32; 3], b: [f32; 3], s: f32) -> [f32; 3] {
+    [a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s]
+}
+
 /// Generate atlas UVs and rebake the supported embedded PBR textures.
 ///
 /// Static attributes other than `TEXCOORD_0` are duplicated byte-for-byte via
@@ -345,6 +594,532 @@ pub fn bake_glb(
         ],
     };
     Ok((glb.write()?, report))
+}
+
+/// Read the narrow source subset accepted for retopology appearance projection.
+/// This intentionally rejects extra vertex streams and scene transforms so
+/// ignored attributes cannot silently disappear from a retopologized asset.
+pub fn extract_projection_source_mesh(
+    bytes: &[u8],
+) -> Result<ProjectionSourceMesh, AtlasBakeError> {
+    if bytes.len() > 64 * 1024 * 1024 {
+        return Err(unsupported(
+            "projection source GLB exceeds the 64 MiB limit",
+        ));
+    }
+    let glb = Glb::parse(bytes)?;
+    if !glb.other_chunks.is_empty() {
+        return Err(unsupported(
+            "unknown GLB chunks are not supported for projection",
+        ));
+    }
+    let snapshot = validate_supported(&glb.document)?;
+    validate_projection_scene(&glb.document)?;
+    let attributes = glb.document["meshes"][0]["primitives"][0]["attributes"]
+        .as_object()
+        .ok_or_else(|| invalid("primitive attributes are missing"))?;
+    if attributes
+        .keys()
+        .any(|name| !matches!(name.as_str(), "POSITION" | "NORMAL" | "TEXCOORD_0"))
+        || !attributes.contains_key("POSITION")
+        || !attributes.contains_key("TEXCOORD_0")
+    {
+        return Err(unsupported(
+            "texture projection accepts only POSITION, optional NORMAL, and TEXCOORD_0; other vertex attributes are not transferred",
+        ));
+    }
+    validate_projection_material(&glb.document, snapshot.material)?;
+    let binary = glb.binary.as_slice();
+    let position_data = read_accessor(&glb.document, binary, snapshot.position_accessor)?;
+    require_accessor(
+        &position_data,
+        "POSITION",
+        5126,
+        "VEC3",
+        snapshot.source_vertices,
+    )?;
+    let positions = decode_vec3(&position_data.bytes)?;
+    let uv_data = read_accessor(&glb.document, binary, snapshot.uv_accessor)?;
+    require_accessor(
+        &uv_data,
+        "TEXCOORD_0",
+        5126,
+        "VEC2",
+        snapshot.source_vertices,
+    )?;
+    let uv = decode_vec2(&uv_data.bytes)?;
+    let index_accessor = snapshot.index_accessor.ok_or_else(|| {
+        unsupported("texture projection requires an indexed triangle source mesh")
+    })?;
+    let indices = read_indices(&glb.document, binary, index_accessor)?;
+    if positions.is_empty()
+        || positions.len() > 100_000
+        || indices.is_empty()
+        || indices.len() > 1_500_000
+        || !indices.len().is_multiple_of(3)
+        || indices
+            .iter()
+            .any(|index| *index as usize >= positions.len())
+    {
+        return Err(unsupported(
+            "projection source requires 1..100,000 vertices and 1..500,000 valid indexed triangles",
+        ));
+    }
+    Ok(ProjectionSourceMesh {
+        positions,
+        uv,
+        indices,
+    })
+}
+
+/// Generate a new atlas for remeshed target geometry and project only supported
+/// embedded appearance maps from a validated source GLB.
+pub fn bake_projected_mesh(
+    source_glb: &[u8],
+    target_positions: &[[f32; 3]],
+    target_normals: &[[f32; 3]],
+    target_indices: &[u32],
+    options: AtlasBakeOptions,
+    max_distance_ratio: f32,
+) -> Result<ProjectedMeshBake, AtlasBakeError> {
+    validate_options(options)?;
+    if target_positions.is_empty()
+        || target_positions.len() > MAX_VERTICES
+        || target_positions.len() != target_normals.len()
+        || target_indices.is_empty()
+        || target_indices.len() > MAX_INDICES
+        || !target_indices.len().is_multiple_of(3)
+        || target_positions.iter().flatten().any(|v| !v.is_finite())
+        || target_normals.iter().flatten().any(|v| !v.is_finite())
+        || target_indices
+            .iter()
+            .any(|index| *index as usize >= target_positions.len())
+    {
+        return Err(invalid(
+            "target mesh must have bounded finite position/normal streams and valid indexed triangles",
+        ));
+    }
+    if !max_distance_ratio.is_finite() || !(0.0001..=0.05).contains(&max_distance_ratio) {
+        return Err(invalid(
+            "projection distance ratio must be between 0.0001 and 0.05",
+        ));
+    }
+    let source = extract_projection_source_mesh(source_glb)?;
+    let glb = Glb::parse(source_glb)?;
+    let snapshot = validate_supported(&glb.document)?;
+    let base_png = read_png_image(&glb.document, &glb.binary, snapshot.base_image)?;
+    let mr_png = read_png_image(&glb.document, &glb.binary, snapshot.mr_image)?;
+    let material = &glb.document["materials"][snapshot.material];
+    let pbr = &material["pbrMetallicRoughness"];
+    let base_color_factor = factor_vec4(pbr.get("baseColorFactor"), [1.0; 4], "baseColorFactor")?;
+    if (base_color_factor[3] - 1.0).abs() > f32::EPSILON {
+        return Err(unsupported(
+            "transparent baseColorFactor is not supported by projected rebaking",
+        ));
+    }
+    let metallic_factor = factor_scalar(pbr.get("metallicFactor"), 1.0, "metallicFactor")?;
+    let roughness_factor = factor_scalar(pbr.get("roughnessFactor"), 1.0, "roughnessFactor")?;
+    let double_sided = material
+        .get("doubleSided")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let native = meshharbor_xatlas_sys::unwrap_and_bake_projected(
+        meshharbor_xatlas_sys::AtlasInput {
+            positions: target_positions,
+            normals: Some(target_normals),
+            original_uv: &[],
+            indices: target_indices,
+            base_png: &base_png,
+            mr_png: &mr_png,
+        },
+        meshharbor_xatlas_sys::AtlasSettings {
+            resolution: options.resolution,
+            padding: options.padding,
+        },
+        meshharbor_xatlas_sys::ProjectionSource {
+            positions: &source.positions,
+            uv: &source.uv,
+            indices: &source.indices,
+        },
+        max_distance_ratio,
+        0.995,
+    )
+    .map_err(AtlasBakeError::Native)?;
+    if native.xref.is_empty()
+        || native.xref.len() != native.uv.len()
+        || native.xref.len() > MAX_INDICES
+        || native.indices.is_empty()
+        || !native.indices.len().is_multiple_of(3)
+        || native
+            .indices
+            .iter()
+            .any(|index| *index as usize >= native.xref.len())
+        || native
+            .xref
+            .iter()
+            .any(|index| *index as usize >= target_positions.len())
+        || native
+            .uv
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        return Err(AtlasBakeError::Native(
+            "xatlas returned inconsistent projected target geometry".into(),
+        ));
+    }
+    let projection = native.projection.ok_or_else(|| {
+        AtlasBakeError::Native("projection worker did not return coverage statistics".into())
+    })?;
+    let coverage = if projection.attempted_texels == 0 {
+        0.0
+    } else {
+        projection.projected_texels as f32 / projection.attempted_texels as f32
+    };
+    if coverage < 0.995 || projection.ambiguous_texels > 0 {
+        return Err(AtlasBakeError::Unsupported(
+            "projected atlas failed its coverage or thin-shell ambiguity gate".into(),
+        ));
+    }
+    let positions = native
+        .xref
+        .iter()
+        .map(|index| target_positions[*index as usize])
+        .collect();
+    let normals = native
+        .xref
+        .iter()
+        .map(|index| target_normals[*index as usize])
+        .collect();
+    let report = ProjectedMeshBakeReport {
+        source_triangles: (source.indices.len() / 3) as u64,
+        target_triangles: (target_indices.len() / 3) as u64,
+        output_triangles: (native.indices.len() / 3) as u64,
+        output_vertices: native.xref.len() as u64,
+        atlas_width: native.width,
+        atlas_height: native.height,
+        chart_count: native.chart_count,
+        covered_texels: native.covered_texels,
+        gutter_texels: native.gutter_texels,
+        projection_attempted_texels: projection.attempted_texels,
+        projection_covered_texels: projection.projected_texels,
+        projection_coverage: coverage,
+        ambiguous_texels: projection.ambiguous_texels,
+        maximum_projection_distance: projection.maximum_distance,
+        projection_distance_limit: projection.distance_limit,
+        rebaked_maps: vec!["baseColorTexture".into(), "metallicRoughnessTexture".into()],
+        warnings: vec![
+            "Appearance was projected from the nearest similarly-facing source surface; projection coverage is not a visual-quality certification.".into(),
+            "Normal, occlusion, emissive, alpha, and other non-PBR texture maps are not transferred.".into(),
+        ],
+    };
+    Ok(ProjectedMeshBake {
+        positions,
+        normals,
+        uv: native.uv,
+        indices: native.indices,
+        base_color_png: native.base_color_png,
+        metallic_roughness_png: native.metallic_roughness_png,
+        base_color_factor,
+        metallic_factor,
+        roughness_factor,
+        double_sided,
+        report,
+    })
+}
+
+/// Encode a projected mesh bake as a standalone, textured triangle-preview GLB.
+pub fn encode_projected_mesh_glb(bake: &ProjectedMeshBake) -> Result<Vec<u8>, AtlasBakeError> {
+    let vertex_count = bake.positions.len();
+    if vertex_count == 0
+        || vertex_count != bake.normals.len()
+        || vertex_count != bake.uv.len()
+        || bake.indices.is_empty()
+        || !bake.indices.len().is_multiple_of(3)
+        || bake
+            .indices
+            .iter()
+            .any(|index| *index as usize >= vertex_count)
+        || bake
+            .positions
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        || bake
+            .normals
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        || bake
+            .uv
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        return Err(invalid(
+            "projected mesh streams are inconsistent or out of range",
+        ));
+    }
+    if !bake.base_color_png.starts_with(PNG_MAGIC)
+        || !bake.metallic_roughness_png.starts_with(PNG_MAGIC)
+        || bake.base_color_png.len() > MAX_PNG_BYTES
+        || bake.metallic_roughness_png.len() > MAX_PNG_BYTES
+    {
+        return Err(invalid(
+            "projected output textures must be bounded embedded PNGs",
+        ));
+    }
+    let mut document = json!({
+        "asset": { "version": "2.0", "generator": "MeshHarbor projected retopology preview" },
+        "scene": 0,
+        "scenes": [{ "nodes": [0] }],
+        "nodes": [{ "mesh": 0 }],
+        "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3, "material": 0, "mode": 4 }] }],
+        "buffers": [{ "byteLength": 0 }],
+        "bufferViews": [],
+        "accessors": [],
+        "images": [],
+        "textures": [{ "source": 0 }, { "source": 1 }],
+        "materials": [{
+            "pbrMetallicRoughness": {
+                "baseColorFactor": bake.base_color_factor,
+                "baseColorTexture": { "index": 0, "texCoord": 0 },
+                "metallicFactor": bake.metallic_factor,
+                "roughnessFactor": bake.roughness_factor,
+                "metallicRoughnessTexture": { "index": 1, "texCoord": 0 }
+            },
+            "doubleSided": bake.double_sided
+        }]
+    });
+    let mut binary = Vec::new();
+    let mut position_bytes = Vec::with_capacity(vertex_count * 12);
+    let mut normal_bytes = Vec::with_capacity(vertex_count * 12);
+    let mut uv_bytes = Vec::with_capacity(vertex_count * 8);
+    let mut minimum = [f32::INFINITY; 3];
+    let mut maximum = [f32::NEG_INFINITY; 3];
+    for (position, normal, uv) in bake
+        .positions
+        .iter()
+        .zip(&bake.normals)
+        .zip(&bake.uv)
+        .map(|((p, n), uv)| (p, n, uv))
+    {
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(position[axis]);
+            maximum[axis] = maximum[axis].max(position[axis]);
+            position_bytes.extend_from_slice(&position[axis].to_le_bytes());
+            normal_bytes.extend_from_slice(&normal[axis].to_le_bytes());
+        }
+        for component in uv {
+            uv_bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    let position_view = append_view(&mut document, &mut binary, &position_bytes, Some(34962))?;
+    let normal_view = append_view(&mut document, &mut binary, &normal_bytes, Some(34962))?;
+    let uv_view = append_view(&mut document, &mut binary, &uv_bytes, Some(34962))?;
+    let index_bytes: Vec<u8> = bake
+        .indices
+        .iter()
+        .flat_map(|index| index.to_le_bytes())
+        .collect();
+    let index_view = append_view(&mut document, &mut binary, &index_bytes, Some(34963))?;
+    let base_view = append_view(&mut document, &mut binary, &bake.base_color_png, None)?;
+    let mr_view = append_view(
+        &mut document,
+        &mut binary,
+        &bake.metallic_roughness_png,
+        None,
+    )?;
+    let position_accessor = append_new_accessor(
+        &mut document,
+        position_view,
+        vertex_count,
+        5126,
+        "VEC3",
+        None,
+    )?;
+    document["accessors"][position_accessor]["min"] = json!(minimum);
+    document["accessors"][position_accessor]["max"] = json!(maximum);
+    append_new_accessor(&mut document, normal_view, vertex_count, 5126, "VEC3", None)?;
+    append_new_accessor(&mut document, uv_view, vertex_count, 5126, "VEC2", None)?;
+    append_new_accessor(
+        &mut document,
+        index_view,
+        bake.indices.len(),
+        5125,
+        "SCALAR",
+        None,
+    )?;
+    document["images"] = json!([
+        { "bufferView": base_view, "mimeType": "image/png" },
+        { "bufferView": mr_view, "mimeType": "image/png" }
+    ]);
+    document["buffers"][0]["byteLength"] = json!(binary.len());
+    if binary.len() > 128 * 1024 * 1024 {
+        return Err(AtlasBakeError::Output(
+            "projected preview exceeds the 128 MiB binary limit".into(),
+        ));
+    }
+    let output = Glb {
+        document,
+        binary,
+        other_chunks: Vec::new(),
+    }
+    .write()?;
+    if output.len() > 128 * 1024 * 1024 {
+        return Err(AtlasBakeError::Output(
+            "projected preview exceeds the 128 MiB output limit".into(),
+        ));
+    }
+    Ok(output)
+}
+
+fn validate_projection_scene(document: &Value) -> Result<(), AtlasBakeError> {
+    let nodes = array(document, "nodes")?;
+    let scenes = array(document, "scenes")?;
+    if nodes.len() != 1
+        || nodes[0].get("mesh").and_then(Value::as_u64) != Some(0)
+        || nodes[0].get("skin").is_some()
+        || nodes[0]
+            .get("children")
+            .and_then(Value::as_array)
+            .is_some_and(|children| !children.is_empty())
+        || ["matrix", "translation", "rotation", "scale"]
+            .iter()
+            .any(|key| nodes[0].get(*key).is_some())
+        || scenes.len() != 1
+        || array(&scenes[0], "nodes")?.len() != 1
+        || array(&scenes[0], "nodes")?[0].as_u64() != Some(0)
+        || document.get("scene").and_then(Value::as_u64).unwrap_or(0) != 0
+        || document
+            .get("cameras")
+            .and_then(Value::as_array)
+            .is_some_and(|cameras| !cameras.is_empty())
+    {
+        return Err(unsupported(
+            "projection requires one untransformed static mesh node in one scene",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_projection_material(
+    document: &Value,
+    material_index: usize,
+) -> Result<(), AtlasBakeError> {
+    let material = array(document, "materials")?
+        .get(material_index)
+        .ok_or_else(|| invalid("material index is out of range"))?;
+    if material
+        .get("alphaMode")
+        .and_then(Value::as_str)
+        .unwrap_or("OPAQUE")
+        != "OPAQUE"
+    {
+        return Err(unsupported(
+            "MASK and BLEND alpha modes are not supported by projected rebaking",
+        ));
+    }
+    let pbr = material
+        .get("pbrMetallicRoughness")
+        .ok_or_else(|| unsupported("PBR metallic-roughness material is required"))?;
+    let base = factor_vec4(pbr.get("baseColorFactor"), [1.0; 4], "baseColorFactor")?;
+    if (base[3] - 1.0).abs() > f32::EPSILON {
+        return Err(unsupported(
+            "transparent baseColorFactor is not supported by projected rebaking",
+        ));
+    }
+    let emission = factor_vec3(material.get("emissiveFactor"), [0.0; 3], "emissiveFactor")?;
+    if emission.iter().any(|value| value.abs() > f32::EPSILON) {
+        return Err(unsupported(
+            "non-zero emissiveFactor is not transferred by projected rebaking",
+        ));
+    }
+    if pbr
+        .get("extensions")
+        .and_then(Value::as_object)
+        .is_some_and(|extensions| !extensions.is_empty())
+    {
+        return Err(unsupported(
+            "PBR material extensions are not supported by projected rebaking",
+        ));
+    }
+    Ok(())
+}
+
+fn factor_scalar(value: Option<&Value>, default: f32, name: &str) -> Result<f32, AtlasBakeError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let value = value
+        .as_f64()
+        .ok_or_else(|| invalid(format!("{name} must be numeric")))? as f32;
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(invalid(format!(
+            "{name} must be a finite value from 0 to 1"
+        )));
+    }
+    Ok(value)
+}
+
+fn factor_vec4(
+    value: Option<&Value>,
+    default: [f32; 4],
+    name: &str,
+) -> Result<[f32; 4], AtlasBakeError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| invalid(format!("{name} must be an array")))?;
+    if values.len() != 4 {
+        return Err(invalid(format!("{name} must have four components")));
+    }
+    let mut output = [0.0; 4];
+    for (index, component) in values.iter().enumerate() {
+        let number = component
+            .as_f64()
+            .ok_or_else(|| invalid(format!("{name} must contain numbers")))?
+            as f32;
+        if !number.is_finite() || !(0.0..=1.0).contains(&number) {
+            return Err(invalid(format!(
+                "{name} components must be finite values from 0 to 1"
+            )));
+        }
+        output[index] = number;
+    }
+    Ok(output)
+}
+
+fn factor_vec3(
+    value: Option<&Value>,
+    default: [f32; 3],
+    name: &str,
+) -> Result<[f32; 3], AtlasBakeError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| invalid(format!("{name} must be an array")))?;
+    if values.len() != 3 {
+        return Err(invalid(format!("{name} must have three components")));
+    }
+    let mut output = [0.0; 3];
+    for (index, component) in values.iter().enumerate() {
+        let number = component
+            .as_f64()
+            .ok_or_else(|| invalid(format!("{name} must contain numbers")))?
+            as f32;
+        if !number.is_finite() || number < 0.0 {
+            return Err(invalid(format!(
+                "{name} components must be finite and non-negative"
+            )));
+        }
+        output[index] = number;
+    }
+    Ok(output)
 }
 
 fn validate_options(options: AtlasBakeOptions) -> Result<(), AtlasBakeError> {

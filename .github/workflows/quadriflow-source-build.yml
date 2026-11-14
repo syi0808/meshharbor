@@ -1,0 +1,145 @@
+name: QuadriFlow three-platform build smoke
+
+on:
+  push:
+    branches:
+      - feat/retopology-worker-rebased
+    paths:
+      - .github/workflows/quadriflow-source-build.yml
+      - scripts/quadriflow-platform-smoke.py
+      - crates/core/tests/quadriflow_output.rs
+      - crates/core/tests/fixtures/quadriflow_cube_triangles.obj
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke:
+    if: "${{ startsWith(github.event.head_commit.message, 'test(retopology): approved QuadriFlow three-platform build smoke') }}"
+    name: ${{ matrix.platform }} build and synthetic-cube smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: macos-14
+            platform: macos
+          - os: windows-2022
+            platform: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out MeshHarbor
+        uses: actions/checkout@v4
+
+      - name: Install native build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cmake g++ libeigen3-dev libboost-dev
+
+      - name: Install native build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install eigen boost
+
+      - name: Install native build dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $root) { $root = 'C:\vcpkg' }
+          if (-not (Test-Path "$root\vcpkg.exe")) { throw "vcpkg not found at $root" }
+          & "$root\vcpkg.exe" install eigen3:x64-windows-static boost:x64-windows-static
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed with exit code $LASTEXITCODE" }
+          "VCPKG_INSTALLATION_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust for the output validator
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build pinned upstream and validate one synthetic cube
+        run: python scripts/quadriflow-platform-smoke.py
+
+      - name: Upload smoke binary and provenance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quadriflow-smoke-${{ matrix.platform }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/quadriflow-platform-smoke/artifact/
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows-retry:
+    if: "${{ startsWith(github.event.head_commit.message, 'test(retopology): approved QuadriFlow Windows retry') }}"
+    name: Windows build and synthetic-cube smoke
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Check out MeshHarbor
+        uses: actions/checkout@v4
+
+      - name: Install native build dependencies (Windows)
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $root) { $root = 'C:\vcpkg' }
+          if (-not (Test-Path "$root\vcpkg.exe")) { throw "vcpkg not found at $root" }
+          & "$root\vcpkg.exe" install eigen3:x64-windows-static boost:x64-windows-static
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed with exit code $LASTEXITCODE" }
+          "VCPKG_INSTALLATION_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust for the output validator
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build pinned upstream and validate one synthetic cube
+        run: python scripts/quadriflow-platform-smoke.py
+
+      - name: Upload smoke binary and provenance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quadriflow-smoke-windows-${{ runner.arch }}
+          path: ${{ runner.temp }}/quadriflow-platform-smoke/artifact/
+          if-no-files-found: warn
+          retention-days: 14
+  macos-arm64-smoke:
+    if: "${{ startsWith(github.event.head_commit.message, 'test(retopology): retry QuadriFlow macOS smoke') }}"
+    name: macOS arm64 build and synthetic-cube smoke
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out MeshHarbor
+        uses: actions/checkout@v4
+
+      - name: Install native build dependencies
+        run: brew install eigen boost
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust for the output validator
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build pinned upstream and validate one synthetic cube
+        run: python scripts/quadriflow-platform-smoke.py
+
+      - name: Upload smoke binary and provenance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quadriflow-smoke-macos-${{ runner.arch }}
+          path: ${{ runner.temp }}/quadriflow-platform-smoke/artifact/
+          if-no-files-found: warn
+          retention-days: 14

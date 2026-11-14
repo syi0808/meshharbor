@@ -2,7 +2,9 @@ use meshopt::{SimplifyOptions, SimplifyVertex, VertexDataAdapter};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use crate::{AssetKind, CoreError};
+use crate::{
+    AssetKind, CoreError, RetopologyOptions, RetopologyReport, remesh_triangles_in_worker,
+};
 
 const GLB_MAGIC: &[u8; 4] = b"glTF";
 const JSON_CHUNK: u32 = 0x4e4f_534a;
@@ -1420,6 +1422,454 @@ pub fn simplify_glb(
     ))
 }
 
+const MAX_RETOPOLOGY_INPUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RETOPOLOGY_OUTPUT_BYTES: usize = 128 * 1024 * 1024;
+
+pub(crate) fn extract_retopology_geometry(
+    bytes: &[u8],
+) -> Result<(Vec<[f32; 3]>, Vec<u32>), CoreError> {
+    if bytes.len() > MAX_RETOPOLOGY_INPUT_BYTES {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts GLB files up to 64 MiB.".into(),
+        ));
+    }
+
+    let glb = GlbFile::parse(bytes)?;
+    let binary = glb.binary.as_ref().ok_or_else(|| {
+        CoreError::OperationUnavailable("Retopology requires an embedded GLB buffer.".into())
+    })?;
+    validate_single_embedded_buffer(&glb.document, binary.len())?;
+    validate_retopology_glb_document(&glb.document)?;
+
+    let primitive = &glb.document["meshes"][0]["primitives"][0];
+    let attributes = primitive
+        .get("attributes")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CoreError::InvalidInput("Primitive attributes are missing.".into()))?;
+    let position_accessor_index = attributes
+        .get("POSITION")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION accessor is missing.".into()))?
+        as usize;
+    let accessors = array(&glb.document, "accessors");
+    let position_accessor = accessors
+        .get(position_accessor_index)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION references a missing accessor.".into()))?;
+    if position_accessor
+        .get("componentType")
+        .and_then(Value::as_u64)
+        != Some(5126)
+        || position_accessor.get("normalized").and_then(Value::as_bool) == Some(true)
+        || position_accessor.get("type").and_then(Value::as_str) != Some("VEC3")
+        || position_accessor.get("sparse").is_some()
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology requires a non-sparse float32 VEC3 POSITION accessor.".into(),
+        ));
+    }
+    let position_count = position_accessor
+        .get("count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION count is missing.".into()))?
+        as usize;
+    if position_count == 0 || position_count > 100_000 {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts 1 to 100,000 POSITION vertices.".into(),
+        ));
+    }
+
+    let index_accessor_index = primitive
+        .get("indices")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            CoreError::OperationUnavailable("Retopology requires indexed triangles.".into())
+        })? as usize;
+    let index_accessor = accessors.get(index_accessor_index).ok_or_else(|| {
+        CoreError::InvalidInput("Primitive references a missing index accessor.".into())
+    })?;
+    let index_count = index_accessor
+        .get("count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CoreError::InvalidInput("Index count is missing.".into()))?
+        as usize;
+    if index_count == 0 || !index_count.is_multiple_of(3) || index_count > 600_000 {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts 1 to 200,000 indexed triangles.".into(),
+        ));
+    }
+    if index_accessor.get("normalized").and_then(Value::as_bool) == Some(true) {
+        return Err(CoreError::OperationUnavailable(
+            "Normalized index accessors are not supported.".into(),
+        ));
+    }
+
+    let position_vectors = decode_float_vectors(
+        &glb.document,
+        binary,
+        position_accessor_index,
+        "VEC3",
+        "POSITION",
+    )?;
+    let positions = position_vectors
+        .into_iter()
+        .map(|position| [position[0], position[1], position[2]])
+        .collect();
+    let indices = read_primitive_indices(&glb.document, binary, primitive)?;
+    Ok((positions, indices))
+}
+
+pub fn retopology_glb(
+    bytes: &[u8],
+    options: RetopologyOptions,
+) -> Result<(Vec<u8>, RetopologyReport), CoreError> {
+    if bytes.len() > MAX_RETOPOLOGY_INPUT_BYTES {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts GLB files up to 64 MiB.".into(),
+        ));
+    }
+
+    let mut glb = GlbFile::parse(bytes)?;
+    let mut binary = glb.binary.take().ok_or_else(|| {
+        CoreError::OperationUnavailable("Retopology requires an embedded GLB buffer.".into())
+    })?;
+    validate_single_embedded_buffer(&glb.document, binary.len())?;
+    validate_retopology_glb_document(&glb.document)?;
+
+    let primitive = &glb.document["meshes"][0]["primitives"][0];
+    let attributes = primitive
+        .get("attributes")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CoreError::InvalidInput("Primitive attributes are missing.".into()))?;
+    let position_accessor_index = attributes
+        .get("POSITION")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION accessor is missing.".into()))?
+        as usize;
+    let accessors = array(&glb.document, "accessors");
+    let position_accessor = accessors
+        .get(position_accessor_index)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION references a missing accessor.".into()))?;
+    if position_accessor
+        .get("componentType")
+        .and_then(Value::as_u64)
+        != Some(5126)
+        || position_accessor.get("normalized").and_then(Value::as_bool) == Some(true)
+        || position_accessor.get("type").and_then(Value::as_str) != Some("VEC3")
+        || position_accessor.get("sparse").is_some()
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology requires a non-sparse float32 VEC3 POSITION accessor.".into(),
+        ));
+    }
+    let position_count = position_accessor
+        .get("count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CoreError::InvalidInput("POSITION count is missing.".into()))?
+        as usize;
+    if position_count == 0 || position_count > 100_000 {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts 1 to 100,000 POSITION vertices.".into(),
+        ));
+    }
+
+    let index_accessor_index = primitive
+        .get("indices")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            CoreError::OperationUnavailable("Retopology requires indexed triangles.".into())
+        })? as usize;
+    let index_accessor = accessors.get(index_accessor_index).ok_or_else(|| {
+        CoreError::InvalidInput("Primitive references a missing index accessor.".into())
+    })?;
+    let index_count = index_accessor
+        .get("count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CoreError::InvalidInput("Index count is missing.".into()))?
+        as usize;
+    if index_count == 0 || !index_count.is_multiple_of(3) || index_count > 600_000 {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts 1 to 200,000 indexed triangles.".into(),
+        ));
+    }
+    if index_accessor.get("normalized").and_then(Value::as_bool) == Some(true) {
+        return Err(CoreError::OperationUnavailable(
+            "Normalized index accessors are not supported.".into(),
+        ));
+    }
+
+    let position_vectors = decode_float_vectors(
+        &glb.document,
+        &binary,
+        position_accessor_index,
+        "VEC3",
+        "POSITION",
+    )?;
+    let mut positions = Vec::with_capacity(position_vectors.len());
+    for position in position_vectors {
+        positions.push([position[0], position[1], position[2]]);
+    }
+    let input_indices = read_primitive_indices(&glb.document, &binary, primitive)?;
+    let (response, mut report) = remesh_triangles_in_worker(&positions, &input_indices, options)?;
+
+    let normals = generate_vertex_normals(&response.positions, &response.indices)?;
+    let new_position_accessor =
+        append_float_vec3_accessor(&mut glb.document, &mut binary, &response.positions, true)?;
+    let new_normal_accessor =
+        append_float_vec3_accessor(&mut glb.document, &mut binary, &normals, false)?;
+    let new_index_accessor =
+        append_index_accessor(&mut glb.document, &mut binary, &response.indices)?;
+
+    let primitive = &mut glb.document["meshes"][0]["primitives"][0];
+    primitive["attributes"] = json!({
+        "POSITION": new_position_accessor,
+        "NORMAL": new_normal_accessor,
+    });
+    primitive["indices"] = json!(new_index_accessor);
+    primitive["mode"] = json!(4);
+    glb.document["buffers"][0]["byteLength"] = json!(binary.len());
+    glb.binary = Some(binary);
+
+    report.warnings.push(
+        "GLB mode is limited to one closed, untextured static triangle mesh; vertex normals are recomputed, and source textures/UVs are not transferred.".into(),
+    );
+    let output = glb.write()?;
+    if output.len() > MAX_RETOPOLOGY_OUTPUT_BYTES {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology output exceeds the 128 MiB GLB limit.".into(),
+        ));
+    }
+    Ok((output, report))
+}
+
+fn validate_retopology_glb_document(document: &Value) -> Result<(), CoreError> {
+    if !array(document, "animations").is_empty() || !array(document, "skins").is_empty() {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology does not support animated or skinned GLB assets.".into(),
+        ));
+    }
+    if !array(document, "extensionsUsed").is_empty()
+        || !array(document, "extensionsRequired").is_empty()
+        || has_nonempty_extensions(document)
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology does not support GLB extensions.".into(),
+        ));
+    }
+    if !array(document, "textures").is_empty()
+        || !array(document, "images").is_empty()
+        || !array(document, "samplers").is_empty()
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology is geometry-only and does not support textures or images.".into(),
+        ));
+    }
+
+    let meshes = array(document, "meshes");
+    if meshes.len() != 1 || array(&meshes[0], "primitives").len() != 1 {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology requires exactly one mesh with one primitive.".into(),
+        ));
+    }
+    if meshes[0].get("weights").is_some() {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology does not support mesh morph weights.".into(),
+        ));
+    }
+    let nodes = array(document, "nodes");
+    let scenes = array(document, "scenes");
+    if nodes.len() != 1
+        || nodes[0].get("mesh").and_then(Value::as_u64) != Some(0)
+        || nodes[0].get("skin").is_some()
+        || nodes[0].get("camera").is_some()
+        || !array(&nodes[0], "children").is_empty()
+        || ["matrix", "translation", "rotation", "scale"]
+            .iter()
+            .any(|transform| nodes[0].get(*transform).is_some())
+        || scenes.len() != 1
+        || array(&scenes[0], "nodes").len() != 1
+        || array(&scenes[0], "nodes")[0].as_u64() != Some(0)
+        || document.get("scene").and_then(Value::as_u64).unwrap_or(0) != 0
+        || !array(document, "cameras").is_empty()
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology requires one scene containing a single node that references mesh 0 with no node transform; bake transforms into vertex positions first.".into(),
+        ));
+    }
+
+    let primitive = &meshes[0]["primitives"][0];
+    if primitive.get("mode").and_then(Value::as_u64).unwrap_or(4) != 4
+        || primitive.get("targets").is_some()
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology supports static TRIANGLES primitives without morph targets.".into(),
+        ));
+    }
+    let attributes = primitive
+        .get("attributes")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CoreError::InvalidInput("Primitive attributes are missing.".into()))?;
+    if attributes.len() != 1 || !attributes.contains_key("POSITION") {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts POSITION only; normals, UVs, colors, skinning, and custom attributes are not transferable.".into(),
+        ));
+    }
+
+    let materials = array(document, "materials");
+    if materials.len() > 1
+        || primitive
+            .get("material")
+            .and_then(Value::as_u64)
+            .is_some_and(|index| index as usize >= materials.len())
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts at most one supported untextured material.".into(),
+        ));
+    }
+    if materials.iter().any(|material| {
+        material.get("alphaMode").and_then(Value::as_str) == Some("BLEND")
+            || contains_texture_reference(material)
+    }) {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology does not support textured or blended materials.".into(),
+        ));
+    }
+
+    if array(document, "accessors").len() != 2 || array(document, "bufferViews").len() != 2 {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology requires one POSITION accessor and one index accessor.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn has_nonempty_extensions(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            (key == "extensions"
+                && value
+                    .as_object()
+                    .is_some_and(|extensions| !extensions.is_empty()))
+                || has_nonempty_extensions(value)
+        }),
+        Value::Array(values) => values.iter().any(has_nonempty_extensions),
+        _ => false,
+    }
+}
+
+fn contains_texture_reference(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            (key.ends_with("Texture") && !value.is_null()) || contains_texture_reference(value)
+        }),
+        Value::Array(values) => values.iter().any(contains_texture_reference),
+        _ => false,
+    }
+}
+
+fn generate_vertex_normals(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Result<Vec<[f32; 3]>, CoreError> {
+    let mut normals = vec![[0.0f64; 3]; positions.len()];
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [
+            triangle[0] as usize,
+            triangle[1] as usize,
+            triangle[2] as usize,
+        ];
+        let pa = positions[a].map(f64::from);
+        let pb = positions[b].map(f64::from);
+        let pc = positions[c].map(f64::from);
+        let edge_a = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+        let edge_b = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+        let normal = [
+            edge_a[1] * edge_b[2] - edge_a[2] * edge_b[1],
+            edge_a[2] * edge_b[0] - edge_a[0] * edge_b[2],
+            edge_a[0] * edge_b[1] - edge_a[1] * edge_b[0],
+        ];
+        for vertex in [a, b, c] {
+            for axis in 0..3 {
+                normals[vertex][axis] += normal[axis];
+            }
+        }
+    }
+    normals
+        .into_iter()
+        .map(|normal| {
+            let length =
+                (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+            if !length.is_finite() || length <= 1.0e-30 {
+                return Err(CoreError::OperationUnavailable(
+                    "Retopology could not recompute a vertex normal.".into(),
+                ));
+            }
+            Ok([
+                (normal[0] / length) as f32,
+                (normal[1] / length) as f32,
+                (normal[2] / length) as f32,
+            ])
+        })
+        .collect()
+}
+
+fn append_float_vec3_accessor(
+    document: &mut Value,
+    binary: &mut Vec<u8>,
+    values: &[[f32; 3]],
+    include_bounds: bool,
+) -> Result<usize, CoreError> {
+    pad_vec(binary, 0);
+    let byte_offset = binary.len();
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for value in values {
+        if value.iter().any(|component| !component.is_finite()) {
+            return Err(CoreError::OperationUnavailable(
+                "Retopology produced non-finite vertex data.".into(),
+            ));
+        }
+        for axis in 0..3 {
+            min[axis] = min[axis].min(value[axis]);
+            max[axis] = max[axis].max(value[axis]);
+            binary.extend_from_slice(&value[axis].to_le_bytes());
+        }
+    }
+    let byte_length = values
+        .len()
+        .checked_mul(12)
+        .ok_or_else(|| CoreError::InvalidInput("Vertex buffer length overflowed.".into()))?;
+    let views = document
+        .get_mut("bufferViews")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| CoreError::InvalidInput("GLB bufferViews are missing.".into()))?;
+    let view_index = views.len();
+    views.push(json!({
+        "buffer": 0,
+        "byteOffset": byte_offset,
+        "byteLength": byte_length,
+        "byteStride": 12,
+        "target": 34962
+    }));
+    let accessors = document
+        .get_mut("accessors")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| CoreError::InvalidInput("GLB accessors are missing.".into()))?;
+    let accessor_index = accessors.len();
+    let mut accessor = json!({
+        "bufferView": view_index,
+        "byteOffset": 0,
+        "componentType": 5126,
+        "count": values.len(),
+        "type": "VEC3"
+    });
+    if include_bounds {
+        accessor["min"] = json!(min);
+        accessor["max"] = json!(max);
+    }
+    accessors.push(accessor);
+    Ok(accessor_index)
+}
+
 fn validate_static_glb(document: &Value) -> Result<(), CoreError> {
     if !array(document, "animations").is_empty() {
         return Err(CoreError::OperationUnavailable(
@@ -1965,6 +2415,44 @@ mod tests {
         pack_glb(document, binary)
     }
 
+    fn tetrahedron_glb() -> Vec<u8> {
+        let positions = [
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let indices = [0u16, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
+        let mut binary = Vec::new();
+        for position in positions {
+            for component in position {
+                binary.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        let index_offset = binary.len();
+        for index in indices {
+            binary.extend_from_slice(&index.to_le_bytes());
+        }
+        pack_glb(
+            json!({
+                "asset": { "version": "2.0" },
+                "bufferViews": [
+                    { "buffer": 0, "byteOffset": 0, "byteLength": 48, "byteStride": 12, "target": 34962 },
+                    { "buffer": 0, "byteOffset": index_offset, "byteLength": 24, "target": 34963 }
+                ],
+                "accessors": [
+                    { "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0] },
+                    { "bufferView": 1, "componentType": 5123, "count": 12, "type": "SCALAR", "min": [0], "max": [3] }
+                ],
+                "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 }, "indices": 1, "mode": 4 }] }],
+                "nodes": [{ "mesh": 0 }],
+                "scenes": [{ "nodes": [0] }],
+                "scene": 0
+            }),
+            binary,
+        )
+    }
+
     fn grid_glb(side: usize) -> Vec<u8> {
         let mut binary = Vec::new();
         let mut indices = Vec::<u16>::new();
@@ -2009,6 +2497,67 @@ mod tests {
             }),
             binary,
         )
+    }
+
+    #[test]
+    fn retopology_gate_accepts_a_minimal_untextured_tetrahedron() {
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        validate_retopology_glb_document(&glb.document).unwrap();
+        validate_single_embedded_buffer(&glb.document, glb.binary.as_ref().unwrap().len()).unwrap();
+    }
+
+    #[test]
+    fn retopology_gate_rejects_uvs_textures_extensions_and_extra_primitives() {
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"] = json!(2);
+        assert!(validate_retopology_glb_document(&document).is_err());
+
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["textures"] = json!([{}]);
+        assert!(validate_retopology_glb_document(&document).is_err());
+
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["nodes"][0]["translation"] = json!([2.0, 0.0, 0.0]);
+        assert!(validate_retopology_glb_document(&document).is_err());
+
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["nodes"][0]["extensions"] = json!({ "VENDOR_example": {} });
+        assert!(validate_retopology_glb_document(&document).is_err());
+
+        let glb = GlbFile::parse(&tetrahedron_glb()).unwrap();
+        let mut document = glb.document.clone();
+        document["meshes"][0]["primitives"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "attributes": { "POSITION": 0 },
+                "indices": 1,
+                "mode": 4
+            }));
+        assert!(validate_retopology_glb_document(&document).is_err());
+    }
+
+    #[test]
+    fn generated_vertex_normals_are_finite_and_unit_length() {
+        let positions = [
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let indices = [0u32, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
+        let normals = generate_vertex_normals(&positions, &indices).unwrap();
+        assert_eq!(normals.len(), positions.len());
+        for normal in normals {
+            assert!(normal.iter().all(|component| component.is_finite()));
+            let length =
+                (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+            assert!((length - 1.0).abs() < 1.0e-6);
+        }
     }
 
     #[test]

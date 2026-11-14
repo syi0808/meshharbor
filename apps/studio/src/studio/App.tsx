@@ -1,16 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MeshHarborApi } from './api';
+import { MeshHarborApi, quadTopologyArtifact } from './api';
 import { ModelPreview } from './ModelPreview';
-import type { Asset, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
+import type { Artifact, Asset, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
 
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
+type StudioMeshOperationId = Exclude<MeshOperationId, 'uv.unwrap'>;
 
 function formatSize(size: number) {
   return size < 1024 * 1024 ? `${(size / 1024).toFixed(0)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const meshOperationOptions: Array<{ id: MeshOperationId; title: string; description: string }> = [
+const meshOperationOptions: Array<{ id: StudioMeshOperationId; title: string; description: string }> = [
+  {
+    id: 'mesh.retopology',
+    title: 'Quad retopology (experimental)',
+    description: 'QuadriFlow remeshes geometry. Supported embedded base-color/metallic-roughness PNGs are projected only into the triangulated GLB preview; the separate quad OBJ remains geometry-only. Unsupported inputs fail closed.',
+  },
   {
     id: 'mesh.cleanup',
     title: 'Cleanup',
@@ -20,11 +26,6 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; descript
     id: 'mesh.separate_parts',
     title: 'Separate connected parts',
     description: 'Split disconnected indexed components into primitives within the same mesh; no node separation or welding.',
-  },
-  {
-    id: 'uv.unwrap',
-    title: 'Atlas UV + texture rebake',
-    description: 'Unwrap one supported static mesh and rebake its embedded base-color and metallic/roughness PNGs; not high-to-low projection.',
   },
   {
     id: 'render.optimize',
@@ -55,6 +56,8 @@ export function App() {
   const [job, setJob] = useState<Job | null>(null);
   const [report, setReport] = useState<SimplificationReport | null>(null);
   const [busy, setBusy] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const downloadInFlight = useRef(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -63,6 +66,10 @@ export function App() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const api = useMemo(() => new MeshHarborApi(), []);
   const selectedAsset = assets.find((asset) => asset.id === selectedId) ?? null;
+  const quadArtifact = quadTopologyArtifact(selectedAsset);
+  const retopologyAvailable = operations.find((operation) => operation.id === 'mesh.retopology')?.implemented === true;
+  const quadriflowBackend = runtime?.quadriflow_backend;
+  const [installingBackend, setInstallingBackend] = useState(false);
   const isRunning = !!job && ['queued', 'running', 'validating', 'cancelling'].includes(job.state);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
   const mlxBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-mlx');
@@ -77,6 +84,24 @@ export function App() {
     setAssets(items);
     setSelectedId((current) => current && items.some((item) => item.id === current) ? current : items.find((item) => item.kind === 'mesh')?.id ?? null);
   }, []);
+
+  const installQuadriflowBackend = useCallback(async () => {
+    if (!quadriflowBackend?.install_available || installingBackend) return;
+    setError(null);
+    setNotice(null);
+    setInstallingBackend(true);
+    try {
+      await api.installQuadriflowBackend();
+      const [runtimeInfo, operationList] = await Promise.all([api.runtime(), api.operations()]);
+      setRuntime(runtimeInfo);
+      setOperations(operationList);
+      setNotice('QuadriFlow backend installation completed.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'QuadriFlow backend installation failed.');
+    } finally {
+      setInstallingBackend(false);
+    }
+  }, [api, installingBackend, quadriflowBackend?.install_available]);
 
   const connect = useCallback(async () => {
     setError(null);
@@ -176,6 +201,15 @@ export function App() {
           } else if (latest.operation === 'mesh.separate_parts') {
             const parts = Number(resultReport.connected_parts ?? 0);
             setNotice(`Part separation complete. Found ${parts.toLocaleString()} connected component${parts === 1 ? '' : 's'}, emitted as primitives in the same mesh.`);
+          } else if (latest.operation === 'mesh.retopology') {
+            const projection = resultReport.appearance_projection;
+            const coverage = projection && typeof projection === 'object'
+              ? Number((projection as Record<string, unknown>).projection_coverage)
+              : Number.NaN;
+            const projectionNotice = Number.isFinite(coverage)
+              ? ` Supported base-color and metallic-roughness maps passed ${(coverage * 100).toFixed(1)}% projection coverage in the preview.`
+              : ' No appearance maps were projected.';
+            setNotice(`Experimental retopology complete.${projectionNotice} The GLB preview is triangulated; the separate quad OBJ contains geometry only.`);
           } else if (latest.operation === 'uv.unwrap') {
             const width = Number(resultReport.atlas_width ?? 0);
             const height = Number(resultReport.atlas_height ?? 0);
@@ -298,7 +332,7 @@ export function App() {
     }
   }
 
-  async function runMeshOperation(operation: MeshOperationId) {
+  async function runMeshOperation(operation: StudioMeshOperationId) {
     if (!selectedAsset || selectedAsset.kind !== 'mesh') return;
     setError(null);
     setNotice(null);
@@ -307,9 +341,7 @@ export function App() {
     try {
       const parameters: Record<string, number> = operation === 'render.optimize'
         ? { overdraw_threshold: 1.05 }
-        : operation === 'uv.unwrap'
-          ? { resolution: 1024, padding: 8 }
-          : {};
+        : {};
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
       setJob(nextJob);
       setActiveView('result');
@@ -411,18 +443,24 @@ export function App() {
     }
   }
 
-  async function downloadResult() {
-    if (!selectedAsset) return;
+  async function downloadResult(artifact?: Artifact) {
+    if (!selectedAsset || downloadInFlight.current || connection !== 'connected') return;
+    downloadInFlight.current = true;
+    setDownloading(true);
+    setError(null);
     try {
-      const blob = await api.artifact(selectedAsset);
+      const blob = artifact ? await api.downloadArtifact(artifact) : await api.artifact(selectedAsset);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = selectedAsset.name;
+      anchor.download = artifact ? `${selectedAsset.name.replace(/\.[^.]+$/, '')}-quads.obj` : selectedAsset.name;
       anchor.click();
-      URL.revokeObjectURL(url);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not download this asset.');
+    } finally {
+      downloadInFlight.current = false;
+      setDownloading(false);
     }
   }
 
@@ -470,7 +508,15 @@ export function App() {
           <div className="nav-item selected"><span className="nav-icon simplify-icon">◒</span> Simplify mesh <span className="selected-dot" /></div>
           <button className="nav-item" onClick={() => document.getElementById('mesh-tools')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon">⌘</span> Cleanup &amp; export</button>
           <button className="nav-item" title="Image-to-3D generation" onClick={() => document.getElementById('image-generation')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon sparkle-icon">✳</span> Generate</button>
-          <div className="nav-item unavailable" title="Not implemented in this build"><span className="nav-icon">⌘</span> Retopology <span className="soon-label">SOON</span></div>
+          <button
+            className="nav-item"
+            title={retopologyAvailable
+              ? 'Experimental QuadriFlow; a verified, manifest-matched managed sidecar is available.'
+              : 'Retopology is unavailable until a trusted managed QuadriFlow release is verified; adjacent binaries are ignored.'}
+            onClick={() => document.getElementById('mesh-tools')?.scrollIntoView({ behavior: 'smooth' })}
+          >
+            <span className="nav-icon">⌘</span> Retopology <span className="soon-label">{retopologyAvailable ? 'READY' : 'UNAVAILABLE'}</span>
+          </button>
           <div className="sidebar-bottom">
             <div className="local-card">
               <div className="local-card-top"><span className="local-lock">⌑</span><span>PRIVATE BY DESIGN</span></div>
@@ -502,7 +548,8 @@ export function App() {
                     <button className={activeView === 'source' ? 'active' : ''} onClick={() => { setActiveView('source'); if (selectedAsset?.source_asset_id) setSelectedId(selectedAsset.source_asset_id); }}>Original</button>
                     <button className={activeView === 'result' ? 'active' : ''} onClick={() => { setActiveView('result'); const derivedId = job?.result?.asset_id ?? assets.find((asset) => asset.source_asset_id === selectedAsset?.id)?.id; if (derivedId) setSelectedId(derivedId); }} disabled={!job?.result?.asset_id && !selectedAsset?.source_asset_id && !assets.some((asset) => asset.source_asset_id === selectedAsset?.id)}>Result</button>
                   </div>
-                  <button className="icon-button" title="Download selected GLB" aria-label="Download selected GLB" disabled={!selectedAsset} onClick={() => void downloadResult()}><DownloadIcon /></button>
+                  {quadArtifact && <button className="button button-secondary" title="Original editable quad topology, without textures or UVs" disabled={downloading || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Download quad OBJ</button>}
+                  <button className="icon-button" title="Download selected GLB" aria-label="Download selected GLB" disabled={!selectedAsset || downloading || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadIcon /></button>
                 </div>
                 <ModelPreview asset={previewAsset} loadModel={loadPreview} onError={reportPreviewError} />
                 {selectedAsset && (
@@ -557,14 +604,14 @@ export function App() {
                     {isRunning && job.operation === 'runtime.pixal3d.install_models' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Downloading pinned model files'}</span></div><div className="progress-track"><span /></div><small>This is a large download (about 24 GB) and may take a while. Per-file transfer output appears in the engine terminal.</small></div>}
                     {isRunning && job.operation === 'runtime.pixal3d.convert_naf' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Preparing isolated NAF converter'}</span></div><div className="progress-track"><span /></div><small>Downloads pinned CPU-only conversion packages into a separate environment, then verifies the converted file.</small></div>}
                     {!isRunning && mlxBackend?.installable && !mlxBackend.environment_ready && <><p>MeshHarbor will create a private Python 3.12 environment and install the pinned backend dependencies. Install <a href="https://docs.astral.sh/uv/getting-started/installation/" target="_blank" rel="noreferrer">uv</a> first if it is not already on PATH.</p><button className="button button-secondary runtime-action" disabled={busy || isRunning || connection !== 'connected'} onClick={() => void setupPixal3dRuntime()}>{busy ? 'Starting…' : 'Set up Python environment'} <span className="button-arrow">→</span></button></>}
-                    {!isRunning && mlxBackend?.environment_ready && !mlxBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime hf-login</code>. The token is entered through Hugging Face's masked prompt and stored only in MeshHarbor's isolated cache.</p><p className="runtime-terms">Model checkpoints have separate terms from MeshHarbor's MIT license. Review the DINOv3 and NAF checkpoint terms and obtain gated access before continuing. This download uses about 24 GB of disk space, then installs an isolated CPU-only NAF conversion environment.</p><label className="runtime-consent"><input type="checkbox" checked={modelDownloadAcknowledged} onChange={(event) => setModelDownloadAcknowledged(event.target.checked)} disabled={busy || isRunning || connection !== 'connected'} /><span>I have reviewed the model terms, have access to gated DINOv3, and am ready to download the files to this computer.</span></label><button className="button button-secondary runtime-action" disabled={!mlxBackend.downloads_enabled || !modelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dModels()}>{busy ? 'Starting…' : 'Download model files'} <span className="button-arrow">↓</span></button></>}
+                    {!isRunning && mlxBackend?.environment_ready && !mlxBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime hf-login</code>. The token is entered through Hugging Face's masked prompt and stored only in MeshHarbor's isolated cache.</p><p className="runtime-terms">MeshHarbor’s project license has not been selected in this repository, and model-checkpoint terms remain separate. Review the DINOv3 and NAF checkpoint terms and obtain gated access before continuing. This download uses about 24 GB of disk space, then installs an isolated CPU-only NAF conversion environment.</p><label className="runtime-consent"><input type="checkbox" checked={modelDownloadAcknowledged} onChange={(event) => setModelDownloadAcknowledged(event.target.checked)} disabled={busy || isRunning || connection !== 'connected'} /><span>I have reviewed the model terms, have access to gated DINOv3, and am ready to download the files to this computer.</span></label><button className="button button-secondary runtime-action" disabled={!mlxBackend.downloads_enabled || !modelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dModels()}>{busy ? 'Starting…' : 'Download model files'} <span className="button-arrow">↓</span></button></>}
                     {!isRunning && mlxBackend?.models_downloaded && mlxBackend.naf_conversion_required && <div className="runtime-conversion"><strong>One setup step remains</strong><span>The verified NAF checkpoint needs one-time conversion. MeshHarbor installs the pinned CPU-only converter into a separate environment.</span><button className="button button-secondary runtime-action" disabled={!mlxBackend.conversion_enabled || busy || isRunning || connection !== 'connected'} onClick={() => void convertPixal3dNaf()}>{busy ? 'Starting…' : 'Finish NAF conversion'} <span className="button-arrow">→</span></button></div>}
                     {!isRunning && mlxBackend?.installable === false && <p>Pixal3D MLX setup is supported on Apple Silicon macOS only. CUDA setup is a separate Linux/NVIDIA runtime.</p>}
                     <div className="runtime-panel-heading">Pixal3D CUDA setup <span>{cudaBackend?.status.replaceAll('_', ' ') ?? 'engine disconnected'}</span></div>
                     {isRunning && job.operation === 'runtime.pixal3d.cuda_setup' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Installing CUDA Python environment and running GPU checks'}</span></div><div className="progress-track"><span /></div><small>Uses Python 3.12, PyTorch 2.6.0 with CUDA 12.4, and an app-private per-install lock. Detailed output appears in the engine terminal.</small></div>}
                     {isRunning && job.operation === 'runtime.pixal3d.cuda_install_models' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Downloading pinned CUDA model files'}</span></div><div className="progress-track"><span /></div><small>About 25–30 GB; the DINOv3 access check happens before the checkpoint download.</small></div>}
                     {!isRunning && cudaBackend?.installable && !cudaBackend.environment_ready && <><p>On Linux x86_64 with an NVIDIA GPU, MeshHarbor will create a private Python 3.12 environment, resolve upstream dependency ranges into an app-private lock, install the CUDA 12.4 profile, and run a CUDA/SDPA preflight. This does not download model weights.</p><button className="button button-secondary runtime-action" disabled={busy || isRunning || connection !== 'connected'} onClick={() => void setupPixal3dCudaRuntime()}>{busy ? 'Starting…' : 'Set up CUDA environment'} <span className="button-arrow">→</span></button></>}
-                    {!isRunning && cudaBackend?.environment_ready && !cudaBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime cuda-hf-login</code>. Hugging Face's prompt stores credentials only in the isolated CUDA cache.</p><p className="runtime-terms">The project is MIT, but model/checkpoint terms are separate. Review DINOv3, Pixal3D, and NAF terms and obtain gated DINOv3 access first. The download is about 25–30 GB and needs roughly 40 GiB of free disk space.</p><label className="runtime-consent"><input type="checkbox" checked={cudaModelDownloadAcknowledged} onChange={(event) => setCudaModelDownloadAcknowledged(event.target.checked)} disabled={busy || isRunning || connection !== 'connected'} /><span>I reviewed the model terms, have gated DINOv3 access, and approve downloading the CUDA model files to this computer.</span></label><button className="button button-secondary runtime-action" disabled={!cudaBackend.downloads_enabled || !cudaModelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dCudaModels()}>{busy ? 'Starting…' : 'Download CUDA model files'} <span className="button-arrow">↓</span></button></>}
+                    {!isRunning && cudaBackend?.environment_ready && !cudaBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime cuda-hf-login</code>. Hugging Face's prompt stores credentials only in the isolated CUDA cache.</p><p className="runtime-terms">MeshHarbor’s project license has not been selected in this repository; model/checkpoint terms are separate. Review DINOv3, Pixal3D, and NAF terms and obtain gated DINOv3 access first. The download is about 25–30 GB and needs roughly 40 GiB of free disk space.</p><label className="runtime-consent"><input type="checkbox" checked={cudaModelDownloadAcknowledged} onChange={(event) => setCudaModelDownloadAcknowledged(event.target.checked)} disabled={busy || isRunning || connection !== 'connected'} /><span>I reviewed the model terms, have gated DINOv3 access, and approve downloading the CUDA model files to this computer.</span></label><button className="button button-secondary runtime-action" disabled={!cudaBackend.downloads_enabled || !cudaModelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dCudaModels()}>{busy ? 'Starting…' : 'Download CUDA model files'} <span className="button-arrow">↓</span></button></>}
                     {!isRunning && cudaBackend?.installable === false && <p>Pixal3D CUDA setup is Linux x86_64/NVIDIA only. Use the Apple MLX backend on supported Macs; the CUDA backend is not available on this host.</p>}
                     {cudaBackend?.license_notice && <p className="runtime-terms">{cudaBackend.license_notice}</p>}
                     {isRunning && job.operation.startsWith('runtime.') && <small className="runtime-serial-note">Runtime installation and generation share one local worker.</small>}
@@ -614,10 +661,10 @@ export function App() {
                     );
                   })}
                 </div>
-                <div className="control-footnote">Compression exports a GLB that requires KHR_meshopt_compression support. The Studio preview includes its decoder. Atlas rebaking accepts one static mesh/material with embedded PNG base-color and metallic/roughness maps only; no high-to-low projection or separate scene-node splitting is performed.</div>
+                <div className="control-footnote">Compression exports a GLB that requires KHR_meshopt_compression support. The Studio preview includes its decoder. Part separation creates connected-component primitives inside the same mesh; it does not split scene nodes.</div>
               </div>
 
-              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking and retopology remain unavailable. Atlas UV unwrap only rebakes supported embedded same-mesh maps; mesh tools create derived assets and keep originals unchanged. Both Pixal3D backends are opt-in; model terms remain separate from MeshHarbor’s MIT license.</p><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
+              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is unavailable until a signature-verified, manifest-matched managed sidecar is supported; adjacent binaries are intentionally ignored. Editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p><div className="capability-foot"><span>QuadriFlow backend</span><span className="capability-status">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>{quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}<button className="button button-primary" onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</button><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
             </aside>
           </div>
         </main>
