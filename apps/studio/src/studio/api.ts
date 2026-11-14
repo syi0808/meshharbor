@@ -13,6 +13,10 @@ export function cancelJobNotice(job: Job): string {
   return 'The job finished before cancellation took effect.';
 }
 
+export function isQueuedJobCancellable(job: Job | null): boolean {
+  return job?.state === 'queued';
+}
+
 export class MeshHarborApi {
   private readonly dashboardHeaders = { 'X-MeshHarbor-Dashboard': 'local-ui-v1' };
 
