@@ -3355,8 +3355,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn cli_output_paths_reject_windows_case_only_aliases() {
-        let root =
-            std::env::temp_dir().join(format!("meshharbor-cli-case-alias-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-cli-case-alias-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let output = root.join("mesh.glb");
         let quad_output = root.join("MESH.GLB");
