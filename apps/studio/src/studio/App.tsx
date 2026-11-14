@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { cancelJobNotice, isQueuedJobCancellable, jobPollRetryDelay, MeshHarborApi, quadTopologyArtifact } from './api';
+import {
+  cancelJobNotice,
+  canInspectJobHistoryRecord,
+  isActiveJob,
+  isQueuedJobCancellable,
+  jobPollRetryDelay,
+  LatestRequestGuard,
+  MeshHarborApi,
+  quadTopologyArtifact,
+} from './api';
 import { ModelPreview } from './ModelPreview';
 import type { Artifact, Asset, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
 
@@ -54,7 +63,15 @@ export function App() {
   const [generationBackend, setGenerationBackend] = useState('auto');
   const [modelDownloadAcknowledged, setModelDownloadAcknowledged] = useState(false);
   const [cudaModelDownloadAcknowledged, setCudaModelDownloadAcknowledged] = useState(false);
-  const [job, setJob] = useState<Job | null>(null);
+  const historySelectionGuard = useRef(new LatestRequestGuard());
+  const recentJobsRequestGuard = useRef(new LatestRequestGuard());
+  const [job, setJobState] = useState<Job | null>(null);
+  const jobRef = useRef<Job | null>(null);
+  const setJob = useCallback((next: Job | null) => {
+    if (jobRef.current?.id !== next?.id) historySelectionGuard.current.invalidate();
+    jobRef.current = next;
+    setJobState(next);
+  }, []);
   const [report, setReport] = useState<SimplificationReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -71,7 +88,7 @@ export function App() {
   const retopologyAvailable = operations.find((operation) => operation.id === 'mesh.retopology')?.implemented === true;
   const quadriflowBackend = runtime?.quadriflow_backend;
   const [installingBackend, setInstallingBackend] = useState(false);
-  const isRunning = !!job && ['queued', 'running', 'validating', 'cancelling'].includes(job.state);
+  const isRunning = isActiveJob(job);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
   const mlxBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-mlx');
   const cudaBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-cuda');
@@ -86,31 +103,58 @@ export function App() {
     setSelectedId((current) => current && items.some((item) => item.id === current) ? current : items.find((item) => item.kind === 'mesh')?.id ?? null);
   }, []);
 
+  function invalidateHistoryRequests() {
+    historySelectionGuard.current.invalidate();
+    recentJobsRequestGuard.current.invalidate();
+  }
+
   async function refreshRecentJobs() {
+    const requestId = recentJobsRequestGuard.current.begin();
     try {
-      setRecentJobs(await api.jobs(20));
+      const jobs = await api.jobs(20);
+      if (recentJobsRequestGuard.current.isCurrent(requestId)) setRecentJobs(jobs);
     } catch (cause) {
+      if (!recentJobsRequestGuard.current.isCurrent(requestId)) return;
       setError(cause instanceof Error ? cause.message : 'Could not refresh recent job records.');
     }
   }
 
   async function openRecentJob(jobId: string) {
+    const requestId = historySelectionGuard.current.begin();
     setError(null);
     setNotice(null);
     try {
       const latest = await api.job(jobId);
+      if (!historySelectionGuard.current.isCurrent(requestId)) return;
+      if (!canInspectJobHistoryRecord(jobRef.current, latest)) {
+        setNotice('Wait for the active job to finish before opening a different saved result. Its progress and cancellation controls will remain attached.');
+        return;
+      }
+
+      const active = isActiveJob(latest);
+      let derived: Asset | null = null;
+      if (!active && latest.result?.asset_id) {
+        derived = await api.derivedAsset(latest.result.asset_id);
+        if (!historySelectionGuard.current.isCurrent(requestId)) return;
+        if (!canInspectJobHistoryRecord(jobRef.current, latest)) {
+          setNotice('A new job is active. Its progress and cancellation controls remain attached; try viewing saved results after it finishes.');
+          return;
+        }
+      }
+
+      recentJobsRequestGuard.current.invalidate();
       setRecentJobs((current) => [latest, ...current.filter((record) => record.id !== latest.id)]
         .sort((left, right) => Number(right.updated_at) - Number(left.updated_at)
           || right.id.localeCompare(left.id))
         .slice(0, 20));
-      const active = ['queued', 'running', 'validating', 'cancelling'].includes(latest.state);
+
       if (active) {
-        if (job?.id === latest.id) setJob(latest);
+        if (jobRef.current?.id === latest.id) setJob(latest);
         if (latest.input_asset_id) {
           setSelectedId(latest.input_asset_id);
           setActiveView('source');
         }
-        setNotice(job?.id === latest.id
+        setNotice(jobRef.current?.id === latest.id
           ? `Refreshing the current ${latest.operation} job. Its state is persisted locally.`
           : `Last saved state: ${latest.state} (${latest.progress}%). This read-only check did not resume work. Refresh to check again. A saved active state may be stale after an unexpected engine exit; stop every REST/MCP process using this data directory and run meshharbor jobs recover-interrupted --confirm-no-running-meshharbor before retrying.`);
         return;
@@ -124,9 +168,8 @@ export function App() {
         setSelectedId(latest.input_asset_id);
         setActiveView('source');
       }
-      if (latest.result?.asset_id) {
-        const derived = await api.derivedAsset(latest.result.asset_id);
-        setAssets((current) => [derived, ...current.filter((item) => item.id !== derived.id)]);
+      if (derived) {
+        setAssets((current) => [derived!, ...current.filter((item) => item.id !== derived!.id)]);
         setSelectedId(derived.id);
         setActiveView('result');
       }
@@ -136,6 +179,7 @@ export function App() {
         setNotice(`Loaded the saved ${latest.operation} record. No work was restarted.`);
       }
     } catch (cause) {
+      if (!historySelectionGuard.current.isCurrent(requestId)) return;
       setError(cause instanceof Error ? cause.message : 'Could not load this saved job.');
     }
   }
@@ -329,6 +373,7 @@ export function App() {
 
   useEffect(() => {
     if (!job) return;
+    recentJobsRequestGuard.current.invalidate();
     setRecentJobs((current) => {
       const next = [job, ...current.filter((record) => record.id !== job.id)];
       next.sort((left, right) => Number(right.updated_at) - Number(left.updated_at)
@@ -392,6 +437,7 @@ export function App() {
 
   async function simplify() {
     if (!selectedAsset) return;
+    invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -409,6 +455,7 @@ export function App() {
 
   async function runMeshOperation(operation: StudioMeshOperationId) {
     if (!selectedAsset || selectedAsset.kind !== 'mesh') return;
+    invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -429,6 +476,7 @@ export function App() {
 
   async function generate() {
     if (!selectedAsset || selectedAsset.kind !== 'image') return;
+    invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -445,6 +493,7 @@ export function App() {
   }
 
   async function setupPixal3dRuntime() {
+    invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -460,6 +509,7 @@ export function App() {
 
   async function installPixal3dModels() {
     if (!modelDownloadAcknowledged) return;
+    invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -475,6 +525,7 @@ export function App() {
   }
 
   async function convertPixal3dNaf() {
+    invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -489,6 +540,7 @@ export function App() {
   }
 
   async function setupPixal3dCudaRuntime() {
+    invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -504,6 +556,7 @@ export function App() {
 
   async function installPixal3dCudaModels() {
     if (!cudaModelDownloadAcknowledged) return;
+    invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -541,6 +594,7 @@ export function App() {
 
   async function cancelJob() {
     if (!isQueuedJobCancellable(job)) return;
+    invalidateHistoryRequests();
     try {
       const updated = await api.cancelJob(job.id);
       setJob(updated);
@@ -656,7 +710,7 @@ export function App() {
                     <div className={`job-history-row ${savedJob.id === job?.id ? 'selected' : ''}`} key={savedJob.id}>
                       <div className="job-history-copy"><strong>{savedJob.operation}</strong><small>Updated {formatJobTime(savedJob.updated_at)}</small></div>
                       <div className="job-history-status" data-state={savedJob.state}><strong>{savedJob.state}</strong><span>{savedJob.progress}%</span></div>
-                      <button className="job-history-open" onClick={() => void openRecentJob(savedJob.id)} disabled={connection !== 'connected'}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</button>
+                      <button className="job-history-open" onClick={() => void openRecentJob(savedJob.id)} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</button>
                     </div>
                   ))}</div>}
               </section>

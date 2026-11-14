@@ -502,9 +502,8 @@ impl Store {
     pub fn list_jobs(&self, limit: usize) -> CoreResult<Vec<Job>> {
         let ids = {
             let conn = self.connection.lock().expect("SQLite mutex poisoned");
-            let mut statement = conn.prepare(
-                "SELECT id FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?1",
-            )?;
+            let mut statement =
+                conn.prepare("SELECT id FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?1")?;
             let rows =
                 statement.query_map([limit.clamp(1, 200) as i64], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -929,7 +928,10 @@ mod tests {
         let reopened = Store::open(&dir).unwrap();
         let persisted = reopened.list_jobs(10).unwrap();
         assert_eq!(
-            persisted.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            persisted
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
             vec![active.id.as_str(), middle.id.as_str(), older.id.as_str()]
         );
         assert_eq!(

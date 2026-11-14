@@ -3047,7 +3047,12 @@ mod tests {
             .unwrap();
         assert_eq!(listed_response.status(), StatusCode::OK);
         let listed: Vec<meshharbor_core::Job> = serde_json::from_slice(
-            &listed_response.into_body().collect().await.unwrap().to_bytes(),
+            &listed_response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
         )
         .unwrap();
         assert_eq!(listed.len(), 1);

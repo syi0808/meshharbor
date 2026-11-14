@@ -4,17 +4,17 @@ import { readFile } from 'node:fs/promises';
 
 // Use the project's TypeScript compiler when installed (Node 20+), with a
 // native type-stripping fallback for minimal Node 24 test environments.
-let MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, jobPollRetryDelay;
+let MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, LatestRequestGuard, jobPollRetryDelay;
 try {
   const ts = await import('typescript');
   const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, jobPollRetryDelay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, LatestRequestGuard, jobPollRetryDelay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, jobPollRetryDelay } = await import('./api.ts'));
+  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, LatestRequestGuard, jobPollRetryDelay } = await import('./api.ts'));
 }
 
 test('Studio offers cancellation only before a job leaves the queue', () => {
@@ -22,6 +22,25 @@ test('Studio offers cancellation only before a job leaves the queue', () => {
   for (const state of ['running', 'validating', 'cancelling', 'cancelled', 'succeeded', 'failed']) {
     assert.equal(isQueuedJobCancellable({ state }), false, `${state} jobs must not be cancellable from the UI`);
   }
+});
+
+test('history inspection cannot replace a live tracked job', () => {
+  const tracked = { id: 'active', state: 'running' };
+  const saved = { id: 'saved', state: 'succeeded' };
+  assert.equal(isActiveJob(tracked), true);
+  assert.equal(canInspectJobHistoryRecord(tracked, saved), false);
+  assert.equal(canInspectJobHistoryRecord(tracked, tracked), true);
+  assert.equal(canInspectJobHistoryRecord({ ...tracked, state: 'succeeded' }, saved), true);
+});
+
+test('latest-request guard discards superseded and invalidated results', () => {
+  const guard = new LatestRequestGuard();
+  const first = guard.begin();
+  const second = guard.begin();
+  assert.equal(guard.isCurrent(first), false);
+  assert.equal(guard.isCurrent(second), true);
+  guard.invalidate();
+  assert.equal(guard.isCurrent(second), false);
 });
 
 test('job polling retries use capped exponential backoff', () => {
