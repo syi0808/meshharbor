@@ -809,10 +809,10 @@ esac
         let uv_log = std::fs::read_to_string(manager.cache_path().join("uv.log")).unwrap();
         assert!(uv_log.lines().all(|line| {
             let fields: Vec<_> = line.split('|').collect();
-            fields.len() == 5
+            fields.len() == 4
+                && fields[1].is_empty()
                 && fields[2].is_empty()
-                && fields[3].is_empty()
-                && fields[4].starts_with(&manager.home_path().to_string_lossy().to_string())
+                && fields[3].starts_with(&manager.home_path().to_string_lossy().to_string())
         }));
         let python_log =
             std::fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
