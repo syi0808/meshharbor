@@ -53,7 +53,7 @@ meshharbor process-mesh asset_<id> --operation mesh.compress --output ./scene-co
 
 
 # If MeshHarbor exited unexpectedly, first stop every REST/MCP process using this data directory.
-# The command also refuses to run while a MeshHarbor service holds the data-directory lock.
+# The command also refuses to run while a REST or MCP service holds the shared data-directory lock.
 meshharbor jobs recover-interrupted --confirm-no-running-meshharbor
 
 # Optional Apple Silicon MLX runtime setup (uv is installed automatically if missing)

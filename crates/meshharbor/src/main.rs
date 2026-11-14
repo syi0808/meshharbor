@@ -552,7 +552,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !listen.ip().is_loopback() {
                 return Err("Refusing non-loopback bind; remote listening is not implemented in this build.".into());
             }
-            let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire(&root)?;
+            let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_service(&root)?;
             let core = OperationCore::open(&root)?;
             let token = std::env::var("MESHHARBOR_API_TOKEN")
                 .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
@@ -568,7 +568,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::serve(listener, app).await?;
         }
         Command::Mcp => {
-            let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire(&root)?;
+            let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_service(&root)?;
             let server = McpServer::new(OperationCore::open(&root)?, Arc::new(Semaphore::new(1)));
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
@@ -676,7 +676,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         Command::Jobs { command } => match command {
             JobsCommand::RecoverInterrupted { .. } => {
-                let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire(&root)?;
+                let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_recovery(&root)?;
                 let core = OperationCore::open(&root)?;
                 let recovered = core.store().recover_interrupted_jobs()?;
                 eprintln!(
