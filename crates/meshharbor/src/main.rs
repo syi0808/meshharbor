@@ -2362,8 +2362,8 @@ mod tests {
 
     #[test]
     fn runtime_lock_conflicts_are_retryable_and_services_can_coexist() {
-        let root = std::env::temp_dir()
-            .join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
         let service = data_dir_lock::DataDirLock::try_acquire_for_service(&root).unwrap();
         let installer = acquire_runtime_write_lock(&root).unwrap();
 
