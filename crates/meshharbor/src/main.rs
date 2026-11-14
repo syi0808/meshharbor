@@ -624,19 +624,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !listen.ip().is_loopback() {
                 return Err("Refusing non-loopback bind; remote listening is not implemented in this build.".into());
             }
+            let token = resolve_api_token(std::env::var("MESHHARBOR_API_TOKEN"))?;
             let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_service(&root)?;
             let core = OperationCore::open(&root)?;
-            let token = std::env::var("MESHHARBOR_API_TOKEN")
-                .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
             let app = api_router(
                 AppState {
                     core,
                     scheduler: Arc::new(Semaphore::new(1)),
                 },
-                token.clone(),
+                token.value.clone(),
             );
             let listener = TcpListener::bind(listen).await?;
-            eprintln!("MeshHarbor REST API listening at http://{listen}; bearer token: {token}");
+            eprintln!(
+                "MeshHarbor REST API listening at http://{listen}; {}",
+                token_startup_log(&token)
+            );
             axum::serve(listener, app).await?;
         }
         Command::Mcp => {
@@ -2078,6 +2080,47 @@ fn default_limit() -> usize {
     50
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApiTokenSource {
+    Generated,
+    Configured,
+}
+
+struct ApiToken {
+    value: String,
+    source: ApiTokenSource,
+}
+
+fn resolve_api_token(value: Result<String, std::env::VarError>) -> std::io::Result<ApiToken> {
+    match value {
+        Ok(value) if value.trim().is_empty() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "MESHHARBOR_API_TOKEN must not be empty or whitespace-only; unset it to generate a temporary token.",
+        )),
+        Ok(value) => Ok(ApiToken {
+            value,
+            source: ApiTokenSource::Configured,
+        }),
+        Err(std::env::VarError::NotPresent) => Ok(ApiToken {
+            value: uuid::Uuid::new_v4().to_string(),
+            source: ApiTokenSource::Generated,
+        }),
+        Err(std::env::VarError::NotUnicode(_)) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "MESHHARBOR_API_TOKEN must contain valid Unicode text.",
+        )),
+    }
+}
+
+fn token_startup_log(token: &ApiToken) -> String {
+    match token.source {
+        ApiTokenSource::Generated => format!("temporary bearer token: {}", token.value),
+        ApiTokenSource::Configured => {
+            "bearer token supplied via MESHHARBOR_API_TOKEN (value not logged)".to_string()
+        }
+    }
+}
+
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -2298,6 +2341,51 @@ mod tests {
         assert_eq!(decode_base64("dGVzdA==").unwrap(), b"test");
         assert!(decode_base64("test===").is_err());
         assert!(decode_base64("dGV$").is_err());
+    }
+
+    #[test]
+    fn api_token_environment_override_rejects_empty_or_whitespace_values() {
+        for value in ["", " ", "\t\n"] {
+            let error = match resolve_api_token(Ok(value.to_string())) {
+                Ok(_) => panic!("empty token override was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("must not be empty"));
+        }
+    }
+
+    #[test]
+    fn api_token_fallback_and_configured_value_have_distinct_log_behavior() {
+        let generated = resolve_api_token(Err(std::env::VarError::NotPresent))
+            .unwrap_or_else(|_| panic!("missing override should generate a temporary token"));
+        assert_eq!(generated.source, ApiTokenSource::Generated);
+        assert!(!generated.value.is_empty());
+        assert!(
+            token_startup_log(&generated).contains(&generated.value),
+            "the generated temporary token must be available to a local API client"
+        );
+
+        let configured = resolve_api_token(Ok("custom-secret-token".to_string()))
+            .unwrap_or_else(|_| panic!("non-empty override should be accepted"));
+        assert_eq!(configured.value, "custom-secret-token");
+        assert_eq!(configured.source, ApiTokenSource::Configured);
+        assert_eq!(
+            token_startup_log(&configured),
+            "bearer token supplied via MESHHARBOR_API_TOKEN (value not logged)"
+        );
+        assert!(!token_startup_log(&configured).contains(&configured.value));
+    }
+
+    #[test]
+    fn non_unicode_api_token_override_fails_without_echoing_the_value() {
+        let error = resolve_api_token(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from("secret"),
+        )))
+        .err()
+        .expect("non-Unicode overrides must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!error.to_string().contains("secret"));
     }
 
     #[test]
