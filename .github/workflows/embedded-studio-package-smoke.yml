@@ -65,6 +65,24 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759
 
+      - name: Install pinned NASM for Windows AWS-LC build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'nasm-3.02-win64.zip'
+          Invoke-WebRequest -Uri 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' -OutFile $archive -TimeoutSec 60
+          $expectedSha256 = '161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7'
+          $actualSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) { throw 'NASM archive checksum mismatch.' }
+          $nasmRoot = Join-Path $env:RUNNER_TEMP 'nasm-toolchain'
+          Expand-Archive -LiteralPath $archive -DestinationPath $nasmRoot -Force
+          $nasmDirectory = Join-Path $nasmRoot 'nasm-3.02'
+          $nasmExecutable = Join-Path $nasmDirectory 'nasm.exe'
+          if (!(Test-Path $nasmExecutable)) { throw 'Pinned NASM executable is missing.' }
+          & $nasmExecutable -v
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned NASM version check failed.' }
+          $nasmDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Build release CLI with embedded Studio
         env:
           CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
