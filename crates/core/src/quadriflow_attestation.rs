@@ -5,17 +5,17 @@
 //! the installer makes a network or filesystem change. It is evidence of
 //! provenance only, not release or license approval.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{
-    de::{MapAccess, SeqAccess, Visitor},
     Deserialize,
+    de::{MapAccess, SeqAccess, Visitor},
 };
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 use sigstore_verify::{
+    VerificationPolicy, VerificationResult, Verifier,
     trust_root::{SigstoreInstance, TrustedRoot},
     types::{Bundle, MediaType, Sha256Hash, SignatureContent},
-    VerificationPolicy, VerificationResult, Verifier,
 };
 use thiserror::Error;
 
@@ -25,6 +25,10 @@ use crate::{
 };
 
 const MESH_HARBOR_REPOSITORY_URI: &str = "https://github.com/syi0808/meshharbor";
+const MESH_HARBOR_REPOSITORY_NAME: &str = "syi0808/meshharbor";
+// MeshHarbor was created after GitHub's immutable-subject default rollout.
+const MESH_HARBOR_TOKEN_SUBJECT: &str =
+    "repo:syi0808@66503450/meshharbor@1454899411:ref:refs/heads/main";
 const MESH_HARBOR_OWNER_URI: &str = "https://github.com/syi0808";
 const MESH_HARBOR_REPOSITORY_ID: &str = "1454899411";
 const MESH_HARBOR_OWNER_ID: &str = "66503450";
@@ -42,8 +46,7 @@ const IN_TOTO_STATEMENT_V1: &str = "https://in-toto.io/Statement/v1";
 const IN_TOTO_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 const MAX_BUNDLE_BYTES: usize = 256 * 1024;
 
-const PINNED_BUILD_RECIPE: &[u8] =
-    include_bytes!("../../../scripts/quadriflow-platform-smoke.py");
+const PINNED_BUILD_RECIPE: &[u8] = include_bytes!("../../../scripts/quadriflow-platform-smoke.py");
 
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error("QuadriFlow Sigstore signature or provenance does not match the pinned policy.")]
@@ -79,7 +82,10 @@ pub(crate) fn verify_release_artifact(
     if bundle.media_type != MediaType::Bundle0_3 {
         return Err(AttestationVerificationError);
     }
-    validate_certificate_claims(&verification, &workflow_certificate_policy(&artifact.workflow))?;
+    validate_certificate_claims(
+        &verification,
+        &workflow_certificate_policy(&artifact.workflow),
+    )?;
 
     let envelope = match &bundle.content {
         SignatureContent::DsseEnvelope(envelope) => envelope,
@@ -97,6 +103,7 @@ struct CertificatePolicy<'a> {
     identity: &'a str,
     issuer: &'a str,
     repository_uri: &'a str,
+    repository_name: &'a str,
     repository_id: &'a str,
     owner_uri: &'a str,
     owner_id: &'a str,
@@ -105,6 +112,14 @@ struct CertificatePolicy<'a> {
     run_id: u64,
     run_attempt: u64,
     trigger: &'a str,
+    token_subject: TokenSubjectPolicy<'a>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenSubjectPolicy<'a> {
+    Required(&'a str),
+    #[cfg(test)]
+    AbsentInHistoricalFixture,
 }
 
 fn workflow_certificate_policy(evidence: &QuadriFlowWorkflowEvidence) -> CertificatePolicy<'_> {
@@ -112,6 +127,7 @@ fn workflow_certificate_policy(evidence: &QuadriFlowWorkflowEvidence) -> Certifi
         identity: WORKFLOW_IDENTITY,
         issuer: OIDC_ISSUER,
         repository_uri: MESH_HARBOR_REPOSITORY_URI,
+        repository_name: MESH_HARBOR_REPOSITORY_NAME,
         repository_id: MESH_HARBOR_REPOSITORY_ID,
         owner_uri: MESH_HARBOR_OWNER_URI,
         owner_id: MESH_HARBOR_OWNER_ID,
@@ -120,6 +136,7 @@ fn workflow_certificate_policy(evidence: &QuadriFlowWorkflowEvidence) -> Certifi
         run_id: evidence.run_id,
         run_attempt: evidence.run_attempt,
         trigger: "workflow_dispatch",
+        token_subject: TokenSubjectPolicy::Required(MESH_HARBOR_TOKEN_SUBJECT),
     }
 }
 
@@ -141,11 +158,11 @@ fn verify_sigstore_bundle(
         return Err(AttestationVerificationError);
     }
 
-    let trusted_root = TrustedRoot::from_embedded(instance)
-        .map_err(|_| AttestationVerificationError)?;
+    let trusted_root =
+        TrustedRoot::from_embedded(instance).map_err(|_| AttestationVerificationError)?;
     let verifier = Verifier::new(&trusted_root).map_err(|_| AttestationVerificationError)?;
-    let artifact_digest = Sha256Hash::from_hex(artifact_sha256)
-        .map_err(|_| AttestationVerificationError)?;
+    let artifact_digest =
+        Sha256Hash::from_hex(artifact_sha256).map_err(|_| AttestationVerificationError)?;
     let policy = VerificationPolicy::new(identity, issuer);
     let result = verifier
         .verify(artifact_digest, &bundle, &policy)
@@ -174,30 +191,60 @@ fn validate_certificate_claims(
     let claims = &certificate.ci_claims;
     let expected_run = format!(
         "{}/actions/runs/{}/attempts/{}",
-        MESH_HARBOR_REPOSITORY_URI, expected.run_id, expected.run_attempt
+        expected.repository_uri, expected.run_id, expected.run_attempt
     );
-    let token_subject = format!("repo:syi0808/meshharbor:ref:{}", expected.source_ref);
+    let token_subject_matches = match expected.token_subject {
+        TokenSubjectPolicy::Required(value) => claims.token_subject.as_deref() == Some(value),
+        #[cfg(test)]
+        TokenSubjectPolicy::AbsentInHistoricalFixture => claims.token_subject.is_none(),
+    };
 
     let required = [
         (claims.build_signer_uri.as_deref(), expected.identity),
-        (claims.build_signer_digest.as_deref(), expected.workflow_commit),
+        (
+            claims.build_signer_digest.as_deref(),
+            expected.workflow_commit,
+        ),
         (claims.runner_environment.as_deref(), "github-hosted"),
-        (claims.source_repository_uri.as_deref(), expected.repository_uri),
-        (claims.source_repository_digest.as_deref(), expected.workflow_commit),
+        (
+            claims.source_repository_uri.as_deref(),
+            expected.repository_uri,
+        ),
+        (
+            claims.source_repository_digest.as_deref(),
+            expected.workflow_commit,
+        ),
         (claims.source_repository_ref.as_deref(), expected.source_ref),
-        (claims.source_repository_identifier.as_deref(), expected.repository_id),
-        (claims.source_repository_owner_uri.as_deref(), expected.owner_uri),
-        (claims.source_repository_owner_identifier.as_deref(), expected.owner_id),
+        (
+            claims.source_repository_identifier.as_deref(),
+            expected.repository_id,
+        ),
+        (
+            claims.source_repository_owner_uri.as_deref(),
+            expected.owner_uri,
+        ),
+        (
+            claims.source_repository_owner_identifier.as_deref(),
+            expected.owner_id,
+        ),
         (claims.build_config_uri.as_deref(), expected.identity),
-        (claims.build_config_digest.as_deref(), expected.workflow_commit),
+        (
+            claims.build_config_digest.as_deref(),
+            expected.workflow_commit,
+        ),
         (claims.build_trigger.as_deref(), expected.trigger),
         (claims.run_invocation_uri.as_deref(), expected_run.as_str()),
-        (claims.source_repository_visibility_at_signing.as_deref(), "public"),
-        (claims.token_subject.as_deref(), token_subject.as_str()),
+        (
+            claims.source_repository_visibility_at_signing.as_deref(),
+            "public",
+        ),
     ];
     if result.identity().map(|value| value.as_str()) != Some(expected.identity)
         || result.issuer() != Some(expected.issuer)
-        || required.iter().any(|(actual, value)| *actual != Some(*value))
+        || required
+            .iter()
+            .any(|(actual, value)| *actual != Some(*value))
+        || !token_subject_matches
         || claims.deployment_environment.is_some()
     {
         return Err(AttestationVerificationError);
@@ -209,7 +256,10 @@ fn validate_certificate_claims(
     let optional_legacy = [
         (deprecated.workflow_trigger.as_deref(), expected.trigger),
         (deprecated.workflow_sha.as_deref(), expected.workflow_commit),
-        (deprecated.workflow_repository.as_deref(), "syi0808/meshharbor"),
+        (
+            deprecated.workflow_repository.as_deref(),
+            expected.repository_name,
+        ),
         (deprecated.workflow_ref.as_deref(), expected.source_ref),
     ];
     if optional_legacy
@@ -227,7 +277,10 @@ fn validate_slsa_statement(
     artifact: &QuadriFlowReleaseArtifact,
 ) -> VerifyResult<()> {
     let statement = object(statement)?;
-    require_exact_keys(statement, &["_type", "subject", "predicateType", "predicate"])?;
+    require_exact_keys(
+        statement,
+        &["_type", "subject", "predicateType", "predicate"],
+    )?;
     require_string(statement, "_type", IN_TOTO_STATEMENT_V1)?;
     require_string(statement, "predicateType", SLSA_PREDICATE_TYPE)?;
 
@@ -250,15 +303,27 @@ fn validate_slsa_statement(
     require_exact_keys(digest, &["sha256"])?;
     require_string(digest, "sha256", &artifact.payload.executable.sha256)?;
 
-    let predicate = object(statement.get("predicate").ok_or(AttestationVerificationError)?)?;
+    let predicate = object(
+        statement
+            .get("predicate")
+            .ok_or(AttestationVerificationError)?,
+    )?;
     require_exact_keys(predicate, &["buildDefinition", "runDetails"])?;
     validate_build_definition(
-        object(predicate.get("buildDefinition").ok_or(AttestationVerificationError)?)?,
+        object(
+            predicate
+                .get("buildDefinition")
+                .ok_or(AttestationVerificationError)?,
+        )?,
         source_commit,
         artifact,
     )?;
     validate_run_details(
-        object(predicate.get("runDetails").ok_or(AttestationVerificationError)?)?,
+        object(
+            predicate
+                .get("runDetails")
+                .ok_or(AttestationVerificationError)?,
+        )?,
         &artifact.workflow,
     )?;
     Ok(())
@@ -338,10 +403,13 @@ fn validate_build_definition(
         .and_then(Value::as_array)
         .filter(|dependencies| dependencies.len() == expected_dependencies.len())
         .ok_or(AttestationVerificationError)?;
-    if expected_dependencies
-        .iter()
-        .any(|expected| dependencies.iter().filter(|actual| *actual == expected).count() != 1)
-    {
+    if expected_dependencies.iter().any(|expected| {
+        dependencies
+            .iter()
+            .filter(|actual| *actual == expected)
+            .count()
+            != 1
+    }) {
         return Err(AttestationVerificationError);
     }
     Ok(())
@@ -515,6 +583,7 @@ mod tests {
             identity: CONDA_IDENTITY,
             issuer: OIDC_ISSUER,
             repository_uri: "https://github.com/prefix-dev/sigstore-example",
+            repository_name: "prefix-dev/sigstore-example",
             repository_id: "1048392115",
             owner_uri: "https://github.com/prefix-dev",
             owner_id: "111356225",
@@ -523,6 +592,7 @@ mod tests {
             run_id: 17_377_272_645,
             run_attempt: 1,
             trigger: "push",
+            token_subject: TokenSubjectPolicy::AbsentInHistoricalFixture,
         }
     }
 
@@ -642,6 +712,18 @@ mod tests {
     }
 
     #[test]
+    fn mesh_harbor_policy_requires_immutable_token_subject() {
+        let artifact = test_artifact();
+        let policy = workflow_certificate_policy(&artifact.workflow);
+
+        assert_eq!(policy.repository_name, MESH_HARBOR_REPOSITORY_NAME);
+        assert_eq!(
+            policy.token_subject,
+            TokenSubjectPolicy::Required(MESH_HARBOR_TOKEN_SUBJECT)
+        );
+    }
+
+    #[test]
     fn official_public_good_fixture_verifies_signature_and_workflow_claims() {
         let artifact_digest = sha256_hex(CONDA_ARTIFACT);
         let (bundle, result) = verify_sigstore_bundle(
@@ -655,29 +737,38 @@ mod tests {
         assert_eq!(bundle.media_type, MediaType::Bundle0_3);
         validate_certificate_claims(&result, &fixture_certificate_policy())
             .expect("fixture certificate's GitHub CI claims should match the pinned test policy");
+        let strict_subject_policy = CertificatePolicy {
+            token_subject: TokenSubjectPolicy::Required(
+                "repo:prefix-dev/sigstore-example:ref:refs/heads/main",
+            ),
+            ..fixture_certificate_policy()
+        };
+        assert!(
+            validate_certificate_claims(&result, &strict_subject_policy).is_err(),
+            "the historical fixture certificate predates the tokenSubject claim"
+        );
 
         let SignatureContent::DsseEnvelope(envelope) = bundle.content else {
             panic!("expected a DSSE envelope")
         };
         let statement = parse_unique_json(envelope.payload.as_bytes()).unwrap();
-        assert!(validate_slsa_statement(
-            &statement,
-            PINNED_SOURCE_COMMIT,
-            &test_artifact()
-        )
-        .is_err());
+        assert!(
+            validate_slsa_statement(&statement, PINNED_SOURCE_COMMIT, &test_artifact()).is_err()
+        );
     }
 
     #[test]
     fn signed_digest_mismatch_is_rejected() {
-        assert!(verify_sigstore_bundle(
-            CONDA_BUNDLE,
-            &"0".repeat(64),
-            CONDA_IDENTITY,
-            OIDC_ISSUER,
-            SigstoreInstance::PublicGood,
-        )
-        .is_err());
+        assert!(
+            verify_sigstore_bundle(
+                CONDA_BUNDLE,
+                &"0".repeat(64),
+                CONDA_IDENTITY,
+                OIDC_ISSUER,
+                SigstoreInstance::PublicGood,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -687,9 +778,8 @@ mod tests {
         assert!(validate_slsa_statement(&valid, PINNED_SOURCE_COMMIT, &artifact).is_ok());
 
         let mut wrong_material = valid.clone();
-        wrong_material["predicate"]["buildDefinition"]["resolvedDependencies"][1]["digest"][
-            "gitCommit"
-        ] = Value::String("0".repeat(40));
+        wrong_material["predicate"]["buildDefinition"]["resolvedDependencies"][1]["digest"]["gitCommit"] =
+            Value::String("0".repeat(40));
         assert!(validate_slsa_statement(&wrong_material, PINNED_SOURCE_COMMIT, &artifact).is_err());
 
         let mut extra_material = valid;

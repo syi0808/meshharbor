@@ -263,11 +263,8 @@ fn verified_release_manifest<'a>(
     // The bundle bytes are app-pinned in the manifest, so this performs no
     // network or filesystem I/O and must succeed before issuing the capability.
     for artifact in &manifest.artifacts {
-        crate::quadriflow_attestation::verify_release_artifact(
-            &manifest.source.commit,
-            artifact,
-        )
-        .map_err(|_| QuadriFlowInstallError::ReleaseVerificationFailed)?;
+        crate::quadriflow_attestation::verify_release_artifact(&manifest.source.commit, artifact)
+            .map_err(|_| QuadriFlowInstallError::ReleaseVerificationFailed)?;
     }
     Ok(VerifiedQuadriFlowManifest { manifest })
 }
@@ -289,7 +286,8 @@ pub fn quadriflow_backend_status(data_root: &Path) -> QuadriFlowBackendStatus {
         };
     }
 
-    let (status, message, next_step, install_available) = match bundled_quadriflow_release_manifest() {
+    let (status, message, next_step, install_available) = match bundled_quadriflow_release_manifest(
+    ) {
         Ok(manifest) if manifest.artifacts.is_empty() => (
             if host_platform().is_some() {
                 "release_unavailable"
@@ -302,12 +300,19 @@ pub fn quadriflow_backend_status(data_root: &Path) -> QuadriFlowBackendStatus {
         ),
         Ok(manifest) => match verified_release_manifest(&manifest) {
             Ok(_) => match host_platform() {
-                Some(platform) if manifest.artifacts.iter().any(|artifact| artifact.platform == platform) => (
-                    "install_available",
-                    "A manifest-pinned QuadriFlow artifact has a verified public Sigstore signature and provenance.",
-                    "An installation request will recheck archive and payload hashes before activation.",
-                    true,
-                ),
+                Some(platform)
+                    if manifest
+                        .artifacts
+                        .iter()
+                        .any(|artifact| artifact.platform == platform) =>
+                {
+                    (
+                        "install_available",
+                        "A manifest-pinned QuadriFlow artifact has a verified public Sigstore signature and provenance.",
+                        "An installation request will recheck archive and payload hashes before activation.",
+                        true,
+                    )
+                }
                 Some(_) => (
                     "platform_unavailable",
                     "The signed QuadriFlow manifest has no artifact for this host platform.",
@@ -1262,12 +1267,12 @@ fn archive_error(message: &str) -> QuadriFlowInstallError {
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use super::*;
     use crate::{
         QuadriFlowArchive, QuadriFlowPayload, QuadriFlowPayloadFile, QuadriFlowSource,
         QuadriFlowWorkflowEvidence,
     };
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
     struct TestRoot(PathBuf);
 

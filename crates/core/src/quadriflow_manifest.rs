@@ -6,10 +6,10 @@
 //! verification. A non-empty manifest is not legal, provenance, or release
 //! approval; the embedded manifest remains empty until its release gates pass.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 pub(crate) const PINNED_SOURCE_REPOSITORY: &str = "https://github.com/hjwdzh/QuadriFlow";
 pub(crate) const PINNED_SOURCE_COMMIT: &str = "810b7a0967c35b0dc85b4464e3835e26a756c967";
@@ -153,9 +153,7 @@ pub enum QuadriFlowManifestError {
     ArtifactSize,
     #[error("QuadriFlow artifact contains a malformed SHA-256 digest.")]
     Digest,
-    #[error(
-        "QuadriFlow attestation bundle is invalid or mismatched with its payload pin."
-    )]
+    #[error("QuadriFlow attestation bundle is invalid or mismatched with its payload pin.")]
     AttestationBundle,
     #[error("QuadriFlow release payload has an unexpected size or SHA-256 digest.")]
     PayloadDigest,
@@ -315,8 +313,7 @@ fn validate_attestation_bundle_pin(
         || BASE64.encode(&bytes) != artifact.attestation_bundle_base64
         || bytes.len() as u64 != artifact.payload.provenance_signature.size_bytes
         || !valid_digest(&artifact.payload.provenance_signature.sha256)
-        || format!("{:x}", Sha256::digest(&bytes))
-            != artifact.payload.provenance_signature.sha256
+        || format!("{:x}", Sha256::digest(&bytes)) != artifact.payload.provenance_signature.sha256
     {
         return Err(QuadriFlowManifestError::AttestationBundle);
     }
