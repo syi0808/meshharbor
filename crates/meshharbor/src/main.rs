@@ -83,6 +83,15 @@ enum Command {
         /// Requested approximate quad count for mesh.retopology (4 to 50,000).
         #[arg(long)]
         target_quads: Option<u32>,
+        /// xatlas packing resolution hint for uv.unwrap (64 to 4,096).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(64..=4096))]
+        resolution: Option<u32>,
+        /// Chart gutter in atlas texels for uv.unwrap (0 to 64).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=64))]
+        padding: Option<u32>,
+        /// Overdraw optimization threshold for render.optimize (1.0 to 1.5).
+        #[arg(long, value_parser = parse_overdraw_threshold)]
+        overdraw_threshold: Option<f32>,
         /// Optional new path for a derived GLB or the triangulated retopology preview; existing files are never overwritten.
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -748,19 +757,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             asset_id,
             operation,
             target_quads,
+            resolution,
+            padding,
+            overdraw_threshold,
             output,
             quad_output,
         } => {
-            if operation != "mesh.retopology" && (target_quads.is_some() || quad_output.is_some()) {
-                return Err("--target-quads and --quad-output require mesh.retopology.".into());
-            }
+            validate_process_mesh_cli_options(
+                &operation,
+                target_quads,
+                quad_output.is_some(),
+                resolution,
+                padding,
+                overdraw_threshold,
+            )?;
             preflight_cli_output_paths(output.as_deref(), quad_output.as_deref())?;
             let core = OperationCore::open(&root)?;
-            let parameters = if operation == "mesh.retopology" {
-                json!({ "target_quads": target_quads.unwrap_or(10_000) })
-            } else {
-                json!({})
-            };
+            let parameters = process_mesh_cli_parameters(
+                &operation,
+                target_quads,
+                resolution,
+                padding,
+                overdraw_threshold,
+            );
             let result = core.process_mesh_asset(&asset_id, &operation, parameters)?;
             if let Some(path) = output {
                 let artifact = result
@@ -2314,6 +2333,63 @@ fn default_data_dir_for(
     }
 }
 
+fn parse_overdraw_threshold(value: &str) -> Result<f32, String> {
+    let threshold = value
+        .parse::<f32>()
+        .map_err(|error| format!("invalid overdraw threshold: {error}"))?;
+    if !threshold.is_finite() || !(1.0..=1.5).contains(&threshold) {
+        return Err("must be finite and between 1.0 and 1.5.".into());
+    }
+    Ok(threshold)
+}
+
+fn validate_process_mesh_cli_options(
+    operation: &str,
+    target_quads: Option<u32>,
+    has_quad_output: bool,
+    resolution: Option<u32>,
+    padding: Option<u32>,
+    overdraw_threshold: Option<f32>,
+) -> Result<(), &'static str> {
+    if operation != "mesh.retopology" && (target_quads.is_some() || has_quad_output) {
+        return Err("--target-quads and --quad-output require mesh.retopology.");
+    }
+    if operation != "uv.unwrap" && (resolution.is_some() || padding.is_some()) {
+        return Err("--resolution and --padding require uv.unwrap.");
+    }
+    if operation != "render.optimize" && overdraw_threshold.is_some() {
+        return Err("--overdraw-threshold requires render.optimize.");
+    }
+    Ok(())
+}
+
+fn process_mesh_cli_parameters(
+    operation: &str,
+    target_quads: Option<u32>,
+    resolution: Option<u32>,
+    padding: Option<u32>,
+    overdraw_threshold: Option<f32>,
+) -> Value {
+    let mut parameters = json!({});
+    match operation {
+        "mesh.retopology" => {
+            parameters["target_quads"] = json!(target_quads.unwrap_or(10_000));
+        }
+        "uv.unwrap" => {
+            let defaults = meshharbor_core::AtlasBakeOptions::default();
+            parameters["resolution"] = json!(resolution.unwrap_or(defaults.resolution));
+            parameters["padding"] = json!(padding.unwrap_or(defaults.padding));
+        }
+        "render.optimize" => {
+            if let Some(threshold) = overdraw_threshold {
+                parameters["overdraw_threshold"] = json!(threshold);
+            }
+        }
+        _ => {}
+    }
+    parameters
+}
+
 fn default_max_error() -> f32 {
     0.02
 }
@@ -2711,6 +2787,186 @@ mod tests {
         drop(installer_after_readers);
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn process_mesh_cli_parses_uv_and_render_settings_with_bounds() {
+        let uv = Cli::try_parse_from([
+            "meshharbor",
+            "process-mesh",
+            "asset_example",
+            "--operation",
+            "uv.unwrap",
+            "--resolution",
+            "2048",
+            "--padding",
+            "12",
+        ])
+        .unwrap();
+        assert!(matches!(
+            uv.command,
+            Command::ProcessMesh {
+                resolution: Some(2048),
+                padding: Some(12),
+                ..
+            }
+        ));
+
+        let render = Cli::try_parse_from([
+            "meshharbor",
+            "process-mesh",
+            "asset_example",
+            "--operation",
+            "render.optimize",
+            "--overdraw-threshold",
+            "1.2",
+        ])
+        .unwrap();
+        assert!(matches!(
+            render.command,
+            Command::ProcessMesh {
+                overdraw_threshold: Some(value),
+                ..
+            } if (value - 1.2).abs() < 0.0001
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "meshharbor",
+                "process-mesh",
+                "asset_example",
+                "--operation",
+                "uv.unwrap",
+                "--resolution",
+                "63",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "meshharbor",
+                "process-mesh",
+                "asset_example",
+                "--operation",
+                "uv.unwrap",
+                "--padding",
+                "65",
+            ])
+            .is_err()
+        );
+
+        for (resolution, padding) in [("64", "0"), ("4096", "64")] {
+            let cli = Cli::try_parse_from([
+                "meshharbor",
+                "process-mesh",
+                "asset_example",
+                "--operation",
+                "uv.unwrap",
+                "--resolution",
+                resolution,
+                "--padding",
+                padding,
+            ])
+            .unwrap();
+            let expected_resolution = resolution.parse::<u32>().unwrap();
+            let expected_padding = padding.parse::<u32>().unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::ProcessMesh {
+                    resolution: Some(parsed_resolution),
+                    padding: Some(parsed_padding),
+                    ..
+                } if parsed_resolution == expected_resolution
+                    && parsed_padding == expected_padding
+            ));
+        }
+        assert!(
+            Cli::try_parse_from([
+                "meshharbor",
+                "process-mesh",
+                "asset_example",
+                "--operation",
+                "render.optimize",
+                "--overdraw-threshold",
+                "1.6",
+            ])
+            .is_err()
+        );
+
+        for (value, expected) in [("1.0", 1.0), ("1.5", 1.5)] {
+            let cli = Cli::try_parse_from([
+                "meshharbor",
+                "process-mesh",
+                "asset_example",
+                "--operation",
+                "render.optimize",
+                "--overdraw-threshold",
+                value,
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::ProcessMesh {
+                    overdraw_threshold: Some(parsed),
+                    ..
+                } if parsed == expected
+            ));
+        }
+        for value in ["NaN", "inf", "0.99", "1.51"] {
+            assert!(
+                Cli::try_parse_from([
+                    "meshharbor",
+                    "process-mesh",
+                    "asset_example",
+                    "--operation",
+                    "render.optimize",
+                    "--overdraw-threshold",
+                    value,
+                ])
+                .is_err(),
+                "accepted invalid overdraw threshold {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn process_mesh_cli_settings_are_operation_scoped_and_forwarded() {
+        assert!(
+            validate_process_mesh_cli_options("mesh.cleanup", Some(100), false, None, None, None)
+                .is_err()
+        );
+        assert!(
+            validate_process_mesh_cli_options("mesh.cleanup", None, false, Some(2048), None, None)
+                .is_err()
+        );
+        assert!(
+            validate_process_mesh_cli_options("mesh.cleanup", None, false, None, None, Some(1.2))
+                .is_err()
+        );
+        assert!(
+            validate_process_mesh_cli_options("uv.unwrap", None, false, Some(2048), Some(12), None)
+                .is_ok()
+        );
+        assert!(
+            validate_process_mesh_cli_options(
+                "render.optimize",
+                None,
+                false,
+                None,
+                None,
+                Some(1.2)
+            )
+            .is_ok()
+        );
+
+        let uv_defaults = process_mesh_cli_parameters("uv.unwrap", None, None, None, None);
+        assert_eq!(uv_defaults["resolution"], 1024);
+        assert_eq!(uv_defaults["padding"], 8);
+        let uv_custom = process_mesh_cli_parameters("uv.unwrap", None, Some(2048), Some(12), None);
+        assert_eq!(uv_custom["resolution"], 2048);
+        assert_eq!(uv_custom["padding"], 12);
+        let render = process_mesh_cli_parameters("render.optimize", None, None, None, Some(1.2));
+        assert_eq!(render["overdraw_threshold"], 1.2);
     }
 
     #[test]

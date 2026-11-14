@@ -56,7 +56,11 @@ meshharbor simplify asset_<id> --triangles 4000 --max-error 0.02 --output ./scen
 meshharbor process-mesh asset_<id> --operation mesh.cleanup --output ./scene-cleaned.glb
 meshharbor process-mesh asset_<id> --operation mesh.separate_parts --output ./scene-parts.glb
 meshharbor process-mesh asset_<id> --operation uv.unwrap --output ./scene-atlas.glb
+# Adjust atlas resolution (64–4,096; default 1,024) and chart padding (0–64; default 8)
+meshharbor process-mesh asset_<id> --operation uv.unwrap --resolution 2048 --padding 12 --output ./scene-atlas-hd.glb
 meshharbor process-mesh asset_<id> --operation render.optimize --output ./scene-render-optimized.glb
+# Optional overdraw threshold (1.0–1.5; default 1.05)
+meshharbor process-mesh asset_<id> --operation render.optimize --overdraw-threshold 1.2 --output ./scene-render-tuned.glb
 meshharbor process-mesh asset_<id> --operation mesh.compress --output ./scene-compressed.glb
 
 # Experimental retopology is currently unavailable; adjacent binaries are ignored.
