@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  assetComparisonPairForSelection,
+  assetComparisonPairFromJob,
+  shouldAutoSelectComparisonResult,
   cancelJobNotice,
   canInspectJobHistoryRecord,
   isActiveJob,
@@ -8,8 +11,11 @@ import {
   LatestRequestGuard,
   preferTrackedTerminalJob,
   shouldDeferTrackedJobCompletion,
+  resolveComparisonAsset,
   MeshHarborApi,
   quadTopologyArtifact,
+  type AssetComparisonPair,
+  type AssetComparisonSide,
 } from './api';
 import { ModelPreview } from './ModelPreview';
 import type { Artifact, Asset, Job, MeshOperationId, Operation, RuntimeInfo, SimplificationReport } from './types';
@@ -58,6 +64,9 @@ export function App() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [recentJobs, setRecentJobs] = useState<Job[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedIdRef = useRef<string | null>(null);
+  const [comparisonPair, setComparisonPair] = useState<AssetComparisonPair | null>(null);
+  const [comparisonLoadingSide, setComparisonLoadingSide] = useState<AssetComparisonSide | null>(null);
   const [targetTriangles, setTargetTriangles] = useState(4000);
   const [maxError, setMaxError] = useState(0.02);
   const [textureSize, setTextureSize] = useState(1024);
@@ -86,6 +95,13 @@ export function App() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const api = useMemo(() => new MeshHarborApi(), []);
   const selectedAsset = assets.find((asset) => asset.id === selectedId) ?? null;
+  const activeJobInputAssetId = job && isActiveJob(job) ? job.input_asset_id ?? null : null;
+  const selectedComparisonPair = assetComparisonPairForSelection(
+    assets,
+    selectedId,
+    comparisonPair,
+    activeJobInputAssetId,
+  );
   const quadArtifact = quadTopologyArtifact(selectedAsset);
   const retopologyAvailable = operations.find((operation) => operation.id === 'mesh.retopology')?.implemented === true;
   const quadriflowBackend = runtime?.quadriflow_backend;
@@ -100,14 +116,27 @@ export function App() {
     : runtime?.model_backends.find((backend) => backend.id === generationBackend);
 
   const refreshAssets = useCallback(async (client: MeshHarborApi) => {
+    historySelectionGuard.current.invalidate();
+    setComparisonLoadingSide(null);
     const items = await client.assets();
-    setAssets(items);
-    setSelectedId((current) => current && items.some((item) => item.id === current) ? current : items.find((item) => item.kind === 'mesh')?.id ?? null);
-  }, []);
+    const pinnedIds = [comparisonPair?.inputAssetId, comparisonPair?.resultAssetId];
+    setAssets((current) => [
+      ...items,
+      ...current.filter((asset) => pinnedIds.includes(asset.id) && !items.some((item) => item.id === asset.id)),
+    ]);
+    setSelectedId((current) => {
+      const next = current && (
+        items.some((item) => item.id === current) || pinnedIds.includes(current)
+      ) ? current : items.find((item) => item.kind === 'mesh')?.id ?? null;
+      selectedIdRef.current = next;
+      return next;
+    });
+  }, [comparisonPair]);
 
   function invalidateHistoryRequests() {
     historySelectionGuard.current.invalidate();
     recentJobsRequestGuard.current.invalidate();
+    setComparisonLoadingSide(null);
   }
 
   async function refreshRecentJobs() {
@@ -123,6 +152,7 @@ export function App() {
 
   async function openRecentJob(jobId: string) {
     const requestId = historySelectionGuard.current.begin();
+    setComparisonLoadingSide(null);
     setError(null);
     setNotice(null);
     try {
@@ -144,6 +174,16 @@ export function App() {
       }
 
       const active = isActiveJob(latest);
+      let inputAsset: Asset | null = null;
+      if (latest.input_asset_id
+        && (active || !latest.result?.asset_id)
+        && !assets.some((asset) => asset.id === latest.input_asset_id)) {
+        inputAsset = await api.derivedAsset(latest.input_asset_id);
+        if (!historySelectionGuard.current.isCurrent(requestId)) return;
+        if (inputAsset.id !== latest.input_asset_id) {
+          throw new Error('The saved job input did not match the requested asset.');
+        }
+      }
       let derived: Asset | null = null;
       if (!active && latest.result?.asset_id) {
         derived = await api.derivedAsset(latest.result.asset_id);
@@ -161,8 +201,13 @@ export function App() {
         .slice(0, 20));
 
       if (active) {
+        setComparisonPair(null);
+        if (inputAsset) {
+          const loadedInputAsset = inputAsset;
+          setAssets((current) => [loadedInputAsset, ...current.filter((item) => item.id !== loadedInputAsset.id)]);
+        }
         if (latest.input_asset_id) {
-          setSelectedId(latest.input_asset_id);
+          selectAssetId(latest.input_asset_id);
           setActiveView('source');
         }
         setNotice(jobRef.current?.id === latest.id
@@ -175,13 +220,21 @@ export function App() {
       setReport(latest.operation === 'mesh.simplify' && latest.result?.report
         ? latest.result.report as unknown as SimplificationReport
         : null);
+      setComparisonPair(null);
+      if (inputAsset) {
+        const loadedInputAsset = inputAsset;
+        setAssets((current) => [loadedInputAsset, ...current.filter((item) => item.id !== loadedInputAsset.id)]);
+      }
       if (latest.input_asset_id) {
-        setSelectedId(latest.input_asset_id);
+        selectAssetId(latest.input_asset_id);
         setActiveView('source');
       }
       if (derived) {
-        setAssets((current) => [derived!, ...current.filter((item) => item.id !== derived!.id)]);
-        setSelectedId(derived.id);
+        const resultAsset = derived;
+        const pair = assetComparisonPairFromJob(latest, resultAsset);
+        setComparisonPair(pair);
+        setAssets((current) => [resultAsset, ...current.filter((item) => item.id !== resultAsset.id)]);
+        selectAssetId(resultAsset.id);
         setActiveView('result');
       }
       if (latest.state === 'failed') {
@@ -214,6 +267,10 @@ export function App() {
   }, [api, installingBackend, quadriflowBackend?.install_available]);
 
   const connect = useCallback(async () => {
+    historySelectionGuard.current.invalidate();
+    setComparisonLoadingSide(null);
+    setComparisonPair(null);
+    setActiveView('source');
     setError(null);
     setConnection('connecting');
     try {
@@ -226,7 +283,13 @@ export function App() {
       setOperations(operationList);
       setAssets(assetList);
       setRecentJobs(jobList);
-      setSelectedId((current) => current && assetList.some((item) => item.id === current) ? current : assetList.find((item) => item.kind === 'mesh')?.id ?? null);
+      setSelectedId((current) => {
+        const next = current && assetList.some((item) => item.id === current)
+          ? current
+          : assetList.find((item) => item.kind === 'mesh')?.id ?? null;
+        selectedIdRef.current = next;
+        return next;
+      });
       setConnection('connected');
       setShowConnect(false);
       setNotice('Connected to your local MeshHarbor engine.');
@@ -238,6 +301,15 @@ export function App() {
   }, [api]);
 
   useEffect(() => { void connect(); }, [connect]);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  function selectAssetId(assetId: string | null) {
+    selectedIdRef.current = assetId;
+    setSelectedId(assetId);
+  }
 
   useEffect(() => {
     if (!job || !['queued', 'running', 'validating', 'cancelling'].includes(job.state)) return;
@@ -292,9 +364,13 @@ export function App() {
           setJob(latest);
           if (derived) {
             const completedAsset = derived;
+            const pair = assetComparisonPairFromJob(latest, completedAsset);
+            setComparisonPair(pair);
             setAssets((current) => [completedAsset, ...current.filter((item) => item.id !== completedAsset.id)]);
-            setSelectedId(completedAsset.id);
-            setActiveView('result');
+            if (shouldAutoSelectComparisonResult(pair, selectedIdRef.current)) {
+              selectAssetId(completedAsset.id);
+              setActiveView('result');
+            }
           }
           const resultReport = latest.result?.report ?? {};
           if (latest.operation === 'mesh.cleanup') {
@@ -410,6 +486,37 @@ export function App() {
   }, [api, connection]);
   const reportPreviewError = useCallback((message: string) => setError(`Preview: ${message}`), []);
 
+  function selectAsset(asset: Asset) {
+    invalidateHistoryRequests();
+    const pair = assetComparisonPairForSelection(assets, asset.id, comparisonPair);
+    setComparisonPair(pair);
+    selectAssetId(asset.id);
+    setActiveView(pair?.resultAssetId === asset.id ? 'result' : 'source');
+    setReport(null);
+  }
+
+  async function selectComparisonSide(side: AssetComparisonSide) {
+    const pair = selectedComparisonPair;
+    if (!pair || connection !== 'connected' || busy || comparisonLoadingSide) return;
+    const requestId = historySelectionGuard.current.begin();
+    setComparisonPair(pair);
+    setComparisonLoadingSide(side);
+    setError(null);
+    try {
+      const asset = await resolveComparisonAsset(pair, side, assets, (assetId) => api.derivedAsset(assetId));
+      if (!historySelectionGuard.current.isCurrent(requestId)) return;
+      setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
+      selectAssetId(asset.id);
+      setActiveView(side);
+    } catch (cause) {
+      if (!historySelectionGuard.current.isCurrent(requestId)) return;
+      const label = side === 'source' ? 'original' : 'result';
+      setError(cause instanceof Error ? `Could not load the comparison ${label}. ${cause.message}` : `Could not load the comparison ${label}.`);
+    } finally {
+      if (historySelectionGuard.current.isCurrent(requestId)) setComparisonLoadingSide(null);
+    }
+  }
+
   async function importFiles(files: FileList | File[]) {
     if (connection !== 'connected') {
       setShowConnect(true);
@@ -435,8 +542,7 @@ export function App() {
       const isImage = /\.(png|jpe?g)$/i.test(file.name);
       const imported = isImage ? await api.importImage(file) : await api.importGlb(file);
       await refreshAssets(api);
-      setSelectedId(imported.id);
-      setActiveView('source');
+      selectAsset(imported);
       setReport(null);
       setNotice(`${file.name} imported locally${isImage ? '. Generate a 3D asset from it when a Pixal3D runtime is ready.' : '.'}`);
     } catch (cause) {
@@ -453,10 +559,11 @@ export function App() {
     setNotice(null);
     setBusy(true);
     setReport(null);
+    setComparisonPair(null);
+    setActiveView('source');
     try {
       const nextJob = await api.createSimplifyJob(selectedAsset.id, Math.max(1, Math.floor(targetTriangles)), maxError);
       setJob(nextJob);
-      setActiveView('result');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not start simplification.');
     } finally {
@@ -471,13 +578,14 @@ export function App() {
     setNotice(null);
     setBusy(true);
     setReport(null);
+    setComparisonPair(null);
+    setActiveView('source');
     try {
       const parameters: Record<string, number> = operation === 'render.optimize'
         ? { overdraw_threshold: 1.05 }
         : {};
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
       setJob(nextJob);
-      setActiveView('result');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not start mesh processing.');
     } finally {
@@ -492,10 +600,11 @@ export function App() {
     setNotice(null);
     setBusy(true);
     setReport(null);
+    setComparisonPair(null);
+    setActiveView('source');
     try {
       const nextJob = await api.createImageGenerationJob(selectedAsset.id, generationBackend, textureSize, Math.max(4, Math.floor(targetFaces)));
       setJob(nextJob);
-      setActiveView('result');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not start image generation.');
     } finally {
@@ -684,9 +793,25 @@ export function App() {
               <div className="viewer-card">
                 <div className="viewer-toolbar">
                   <div className="viewer-title"><span className="tiny-cube" /> {selectedAsset?.kind === 'image' ? 'Image preview' : '3D Preview'} {selectedAsset && <span className="viewer-filename">/ {selectedAsset.name}</span>}</div>
-                  <div className="view-toggle" role="tablist" aria-label="Preview version">
-                    <button className={activeView === 'source' ? 'active' : ''} onClick={() => { setActiveView('source'); if (selectedAsset?.source_asset_id) setSelectedId(selectedAsset.source_asset_id); }}>Original</button>
-                    <button className={activeView === 'result' ? 'active' : ''} onClick={() => { setActiveView('result'); const derivedId = job?.result?.asset_id ?? assets.find((asset) => asset.source_asset_id === selectedAsset?.id)?.id; if (derivedId) setSelectedId(derivedId); }} disabled={!job?.result?.asset_id && !selectedAsset?.source_asset_id && !assets.some((asset) => asset.source_asset_id === selectedAsset?.id)}>Result</button>
+                  <div className="view-toggle" role="tablist" aria-label="Preview version" aria-busy={comparisonLoadingSide !== null}>
+                    <button
+                      className={activeView === 'source' ? 'active' : ''}
+                      role="tab"
+                      aria-selected={activeView === 'source'}
+                      disabled={!selectedComparisonPair || comparisonLoadingSide !== null || busy || connection !== 'connected'}
+                      onClick={() => void selectComparisonSide('source')}
+                    >
+                      {comparisonLoadingSide === 'source' ? <><span className="spinner small" /> Loading…</> : 'Original'}
+                    </button>
+                    <button
+                      className={activeView === 'result' ? 'active' : ''}
+                      role="tab"
+                      aria-selected={activeView === 'result'}
+                      disabled={!selectedComparisonPair || comparisonLoadingSide !== null || busy || connection !== 'connected'}
+                      onClick={() => void selectComparisonSide('result')}
+                    >
+                      {comparisonLoadingSide === 'result' ? <><span className="spinner small" /> Loading…</> : 'Result'}
+                    </button>
                   </div>
                   {quadArtifact && <button className="button button-secondary" title="Original editable quad topology, without textures or UVs" disabled={downloading || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Download quad OBJ</button>}
                   <button className="icon-button" title="Download selected GLB" aria-label="Download selected GLB" disabled={!selectedAsset || downloading || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadIcon /></button>
@@ -706,7 +831,7 @@ export function App() {
 
               <div className="library-section" id="asset-library">
                 <div className="section-heading"><div><h2>Recent assets</h2><span>Files stored locally in your workspace</span></div><button className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <span>↻</span></button></div>
-                {assets.length === 0 ? <div className="library-empty">Your imported models will appear here.</div> : <div className="asset-list">{assets.slice(0, 5).map((asset) => <button key={asset.id} className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`} onClick={() => { setSelectedId(asset.id); setActiveView('source'); setReport(null); }}><span className="asset-row-icon"><MiniCube /></span><span className="asset-row-name"><strong>{asset.name}</strong><small>{asset.source_asset_id ? 'Derived result' : 'Original'} · {formatSize(asset.byte_size)}</small></span><span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>{asset.id === selectedId && <span className="asset-current-dot" />}</button>)}</div>}
+                {assets.length === 0 ? <div className="library-empty">Your imported models will appear here.</div> : <div className="asset-list">{assets.slice(0, 5).map((asset) => <button key={asset.id} className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`} onClick={() => selectAsset(asset)}><span className="asset-row-icon"><MiniCube /></span><span className="asset-row-name"><strong>{asset.name}</strong><small>{asset.source_asset_id ? 'Derived result' : 'Original'} · {formatSize(asset.byte_size)}</small></span><span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>{asset.id === selectedId && <span className="asset-current-dot" />}</button>)}</div>}
               </div>
 
               <section className="job-history" aria-labelledby="job-history-title">
