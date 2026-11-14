@@ -28,9 +28,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24
-      - name: Generate Studio lockfile for review
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-        working-directory: apps/studio
       - name: Install locked Studio dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: apps/studio
@@ -39,10 +36,4 @@ jobs:
         working-directory: apps/studio
       - name: Build Studio bundle
         run: npm run build
-        working-directory: apps/studio
-      - name: Export resolved Studio lockfile for review
-        run: |
-          echo MESHHARBOR_NPM_LOCKFILE_B64_BEGIN
-          base64 < package-lock.json
-          echo MESHHARBOR_NPM_LOCKFILE_B64_END
         working-directory: apps/studio
