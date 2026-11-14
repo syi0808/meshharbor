@@ -212,7 +212,6 @@ impl Pixal3dRuntimeManager {
         std::fs::create_dir_all(&home)?;
         let weights = self.runtime_root.join("weights");
         std::fs::create_dir_all(&weights)?;
-        let uv = ensure_uv(&self.runtime_root)?;
         let scripts = self.managed_scripts_root();
         eprintln!(
             "[1/3] Checking access to the gated DINOv3 model before downloading large checkpoints…"
@@ -661,4 +660,202 @@ mod tests {
         materialize_embedded_source(&root, true).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
+
+
+    fn write_test_script(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    #[test]
+    fn managed_python_setup_retries_failed_sync_in_private_storage_without_credentials() {
+        let root = env::temp_dir().join(format!("meshharbor-mlx-setup-retry-{}", Uuid::new_v4()));
+        let data_root = root.join("app-data");
+        let runtime_root = data_root.join("runtimes/pixal3d-mlx");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::write(data_root.join("owner-sentinel"), "preserve me").unwrap();
+        let manager = Pixal3dRuntimeManager {
+            source_root: runtime_root.join("source/upstream"),
+            runtime_root: runtime_root.clone(),
+        };
+        materialize_embedded_source(&runtime_root, true).unwrap();
+        manager.validate_source().unwrap();
+
+        let fake_python = root.join("fake-python");
+        write_test_script(
+            &fake_python,
+            r#"#!/bin/sh
+printf '%s|%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOME" "$PYTHONNOUSERSITE" >> "$HOME/python-env.log"
+case "$1" in
+  --version) echo "Python 3.12.9" ;;
+  -c) echo "fake imports are available" ;;
+  *) exit 0 ;;
+esac
+"#,
+        );
+        let fake_uv = root.join("fake-uv");
+        let mut uv_script = String::from(
+            r#"#!/bin/sh
+printf '%s:%s|%s|%s\n' "$1" "$2" "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" >> "$UV_CACHE_DIR/uv.log"
+FAKE_PYTHON_PLACEHOLDER
+case "$1:$2" in
+  python:install)
+    interpreter="$UV_PYTHON_INSTALL_DIR/cpython-3.12.9/bin/python"
+    mkdir -p "$(dirname "$interpreter")"
+    cp "$FAKE_PYTHON" "$interpreter"
+    chmod +x "$interpreter"
+    ;;
+  python:find)
+    echo "$UV_PYTHON_INSTALL_DIR/cpython-3.12.9/bin/python"
+    ;;
+  venv:*)
+    destination=""
+    for argument in "$@"; do destination="$argument"; done
+    mkdir -p "$destination/bin"
+    cp "$FAKE_PYTHON" "$destination/bin/python"
+    chmod +x "$destination/bin/python"
+    ;;
+  sync:*)
+    if [ ! -e "$UV_CACHE_DIR/sync-failed-once" ]; then
+      : > "$UV_CACHE_DIR/sync-failed-once"
+      exit 17
+    fi
+    ;;
+  *)
+    echo "unexpected fake uv arguments: $*" >&2
+    exit 81
+    ;;
+esac
+"#,
+        );
+        uv_script = uv_script.replace(
+            "FAKE_PYTHON_PLACEHOLDER",
+            &format!("FAKE_PYTHON={}", shell_quote(&fake_python.to_string_lossy())),
+        );
+        write_test_script(&fake_uv, &uv_script);
+
+        assert!(manager.setup_environment_with_uv(&fake_uv).is_err());
+        let report = manager.setup_environment_with_uv(&fake_uv).unwrap();
+        assert_eq!(report.backend_id, "pixal3d-mlx");
+        assert_eq!(report.status, "python_environment_ready_models_not_installed");
+        assert!(report.runtime_root.starts_with(&data_root));
+        assert!(report.python.starts_with(&runtime_root));
+        assert!(report.lockfile.is_file());
+        assert!(!runtime_root.join("weights").exists());
+
+        let uv_log = fs::read_to_string(runtime_root.join("uv-cache/uv.log")).unwrap();
+        assert_eq!(uv_log.matches("sync:--project").count(), 2);
+        assert!(uv_log.lines().all(|line| line.contains("||")));
+        let python_log = fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
+        assert!(python_log.lines().all(|line| {
+            let fields: Vec<_> = line.split('|').collect();
+            fields.len() == 5
+                && fields[0].is_empty()
+                && fields[1].is_empty()
+                && fields[2].starts_with(&manager.home_path().to_string_lossy().to_string())
+                && fields[3].starts_with(
+                    &manager
+                        .home_path()
+                        .join(".cache/huggingface")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                && fields[4] == "1"
+        }));
+        assert_eq!(
+            fs::read_to_string(data_root.join("owner-sentinel")).unwrap(),
+            "preserve me"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_download_retry_keeps_partial_cache_and_reaches_checkpoint_validation() {
+        let root = env::temp_dir().join(format!("meshharbor-mlx-download-retry-{}", Uuid::new_v4()));
+        let data_root = root.join("app-data");
+        let runtime_root = data_root.join("runtimes/pixal3d-mlx");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::write(data_root.join("owner-sentinel"), "preserve me").unwrap();
+        let manager = Pixal3dRuntimeManager {
+            source_root: runtime_root.join("source/upstream"),
+            runtime_root: runtime_root.clone(),
+        };
+        materialize_embedded_source(&runtime_root, true).unwrap();
+        manager.validate_source().unwrap();
+
+        let fake_python = root.join("fake-python");
+        write_test_script(
+            &fake_python,
+            r#"#!/bin/sh
+printf '%s|%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOME" "$PYTHONNOUSERSITE" >> "$HOME/python-env.log"
+case "$1" in
+  -c) echo "fake access check passed"; exit 0 ;;
+esac
+case " $* " in
+  *" --preflight-only "*) exit 0 ;;
+esac
+weights=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--weights-dir" ]; then weights="$2"; shift 2; else shift; fi
+done
+count_file="$HOME/download-attempts"
+if [ -f "$count_file" ]; then count=$(cat "$count_file"); else count=0; fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then
+  mkdir -p "$HF_HOME/hub/.cache/download"
+  printf 'partial checkpoint bytes' > "$HF_HOME/hub/.cache/download/partial"
+  exit 23
+fi
+mkdir -p "$weights"
+printf 'invalid fixture bytes' > "$weights/naf_release.pth"
+exit 0
+"#,
+        );
+        let partial = manager
+            .home_path()
+            .join(".cache/huggingface/hub/.cache/download/partial");
+        let unused_uv = root.join("unused-uv");
+
+        let first = manager.install_models_with_tools(&unused_uv, &fake_python);
+        assert!(first.is_err());
+        assert_eq!(fs::read_to_string(&partial).unwrap(), "partial checkpoint bytes");
+
+        let second = manager.install_models_with_tools(&unused_uv, &fake_python);
+        let error = second.expect_err("fake fixture must reach the pinned checkpoint hash check");
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert_eq!(fs::read_to_string(&partial).unwrap(), "partial checkpoint bytes");
+        assert_eq!(
+            fs::read_to_string(runtime_root.join("weights/naf_release.pth")).unwrap(),
+            "invalid fixture bytes"
+        );
+        let python_log = fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
+        assert!(python_log.lines().all(|line| {
+            let fields: Vec<_> = line.split('|').collect();
+            fields.len() == 5
+                && fields[0].is_empty()
+                && fields[1].is_empty()
+                && fields[2].starts_with(&manager.home_path().to_string_lossy().to_string())
+                && fields[3].starts_with(
+                    &manager
+                        .home_path()
+                        .join(".cache/huggingface")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                && fields[4] == "1"
+        }));
+        assert_eq!(
+            fs::read_to_string(data_root.join("owner-sentinel")).unwrap(),
+            "preserve me"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }
