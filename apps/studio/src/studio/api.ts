@@ -1,4 +1,10 @@
-import type { ApiErrorBody, Artifact, Asset, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
+
+export interface AssetPageFilters {
+  query?: string;
+  kind?: AssetKind;
+  derived?: boolean;
+}
 
 export function quadTopologyArtifact(asset: Asset | null): Artifact | undefined {
   return asset?.artifacts.find((entry) => entry.kind === 'quad_topology' || entry.kind === 'quad_obj');
@@ -211,6 +217,17 @@ export class MeshHarborApi {
 
   assets(): Promise<Asset[]> {
     return this.request('/api/v1/assets?limit=100');
+  }
+
+  assetPage(limit = 50, cursor: string | null = null, filters: AssetPageFilters = {}): Promise<AssetPage> {
+    const boundedLimit = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 50;
+    const params = new URLSearchParams({ limit: String(boundedLimit) });
+    if (cursor) params.set('cursor', cursor);
+    const query = filters.query?.trim();
+    if (query) params.set('q', query);
+    if (filters.kind) params.set('kind', filters.kind);
+    if (filters.derived !== undefined) params.set('derived', String(filters.derived));
+    return this.request(`/api/v1/assets/page?${params.toString()}`);
   }
 
   jobs(limit = 20): Promise<Job[]> {

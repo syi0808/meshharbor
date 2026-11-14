@@ -104,6 +104,7 @@ When `MESHHARBOR_API_TOKEN` is unset, a per-run temporary bearer token is genera
 - `GET /api/v1/health`, `/api/v1/runtime`, `/api/v1/operations`
 - `POST /api/v1/runtime/pixal3d-mlx/setup`, `/models`, `/convert-naf`; `/api/v1/runtime/pixal3d-cuda/setup` and `/models` for explicit asynchronous setup actions
 - `GET /api/v1/assets?limit=50`; `POST /api/v1/assets?filename=scene.glb` with raw file bytes
+- `GET /api/v1/assets/page?limit=50&cursor=<asset_id>&q=<filename>&kind=image|mesh&derived=true|false` returns `{items,next_cursor}` newest-first; filters are optional, and `next_cursor` can be sent back to load older assets
 - `GET /api/v1/assets/{asset_id}`; `POST /api/v1/assets/{asset_id}/simplify`
 - `GET /api/v1/jobs?limit=20` (recent persisted jobs; read-only), `POST /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`, `POST /api/v1/jobs/{job_id}/cancel`
 - `GET /api/v1/artifacts/{artifact_id}`

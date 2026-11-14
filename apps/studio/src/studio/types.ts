@@ -22,6 +22,11 @@ export interface Asset {
   artifacts: Artifact[];
 }
 
+export interface AssetPage {
+  items: Asset[];
+  next_cursor: string | null;
+}
+
 export interface Operation {
   id: string;
   title: string;
