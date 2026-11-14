@@ -45,6 +45,10 @@ The Studio client source is not part of the Rust unit tests. Run `npm ci --ignor
 meshharbor import ./scene.glb
 meshharbor assets --limit 20
 
+# Read persisted job history without resuming or modifying jobs
+meshharbor jobs list --limit 20
+meshharbor jobs show job_<id>
+
 # Simplify an imported asset; the source stays intact
 meshharbor simplify asset_<id> --triangles 4000 --max-error 0.02 --output ./scene-simplified.glb
 
@@ -100,7 +104,7 @@ When `MESHHARBOR_API_TOKEN` is unset, a per-run temporary bearer token is genera
 - `GET /api/v1/jobs?limit=20` (recent persisted jobs; read-only), `POST /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`, `POST /api/v1/jobs/{job_id}/cancel`
 - `GET /api/v1/artifacts/{artifact_id}`
 
-`GET /api/v1/jobs?limit=20` lists the newest updated persisted job records (default 50, capped at 200). It is read-only: listing or checking a saved job never resumes or restarts work. Studio loads the latest 20 records on connection; manually checking an old active record only reads its last saved state. After an unexpected engine exit, a saved active state may be stale; use the explicit recovery command only after stopping every REST/MCP process that uses that data directory.
+`GET /api/v1/jobs?limit=20` lists the newest updated persisted job records (default 50, capped at 200). The CLI exposes the same history through `jobs list` and `jobs show <job_id>`; MCP exposes `list_jobs` and `get_job`. These queries are read-only: listing or checking a saved job never resumes or restarts work. Studio loads the latest 20 records on connection; manually checking an old active record only reads its last saved state. After an unexpected engine exit, a saved active state may be stale; use the explicit recovery command only after stopping every REST/MCP process that uses that data directory.
 
 Job requests support `mesh.simplify`, `mesh.cleanup`, `mesh.separate_parts`, `uv.unwrap`, `render.optimize`, `mesh.compress`, conditional `mesh.retopology`, `image.generate` (with optional `backend_id: "auto" | "pixal3d-mlx" | "pixal3d-cuda"`), and explicit runtime jobs. The low-level `uv.unwrap` operation is available through REST, CLI, and MCP but is not a standalone Studio tool. It accepts optional `resolution` (64–4096, default 1024) and `padding` (0–64, default 8). `mesh.retopology` is rejected unless a signature-verified, manifest-matched managed `quadriflow` sidecar is available; adjacent executables are ignored and this build has no verified release; it accepts optional `target_quads` (4–50,000, default 10,000) and produces both a geometry-only `quad_topology` OBJ artifact and a triangulated GLB preview. When the supported embedded PNG maps are present, only base-color and metallic/roughness textures are projected into that preview with distance/facing/coverage/ambiguity gates. `render.optimize` accepts `overdraw_threshold` (1.0–1.5, default 1.05). Generic high-to-low texture baking is not available. Model-install endpoints require explicit large-download and gated-access confirmation. The single operation slot serializes local work. Queued jobs can be cancelled; native simplification, runtime installation, downloads, and model inference cannot currently be interrupted safely after starting. Job state is persisted. After an unexpected exit, stop every REST/MCP process using the same data directory and run `meshharbor jobs recover-interrupted --confirm-no-running-meshharbor` to mark nonterminal jobs as failed. The command does not resume work or delete assets/download caches; inspect existing assets before retrying. The flag is an operator acknowledgement and MeshHarbor cannot verify that other processes are stopped. Image generation requires a ready backend and local model files; readiness does not prove quality or general GPU-memory fit.
 ## MCP
