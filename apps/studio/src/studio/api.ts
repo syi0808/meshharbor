@@ -4,6 +4,15 @@ export function quadTopologyArtifact(asset: Asset | null): Artifact | undefined 
   return asset?.artifacts.find((entry) => entry.kind === 'quad_topology' || entry.kind === 'quad_obj');
 }
 
+export function cancelJobNotice(job: Job): string {
+  if (job.state === 'cancelled') return 'The queued job was cancelled.';
+  if (job.state === 'queued') return 'This job is still queued. Try cancelling it again.';
+  if (job.state === 'running' || job.state === 'validating' || job.state === 'cancelling') {
+    return 'The job started before cancellation took effect. Running work cannot be interrupted safely.';
+  }
+  return 'The job finished before cancellation took effect.';
+}
+
 export class MeshHarborApi {
   private readonly dashboardHeaders = { 'X-MeshHarbor-Dashboard': 'local-ui-v1' };
 
