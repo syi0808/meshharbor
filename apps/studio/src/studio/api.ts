@@ -4,6 +4,19 @@ export function quadTopologyArtifact(asset: Asset | null): Artifact | undefined 
   return asset?.artifacts.find((entry) => entry.kind === 'quad_topology' || entry.kind === 'quad_obj');
 }
 
+export function cancelJobNotice(job: Job): string {
+  if (job.state === 'cancelled') return 'The queued job was cancelled.';
+  if (job.state === 'queued') return 'This job is still queued. Try cancelling it again.';
+  if (job.state === 'running' || job.state === 'validating' || job.state === 'cancelling') {
+    return 'The job started before cancellation took effect. Running work cannot be interrupted safely.';
+  }
+  return 'The job finished before cancellation took effect.';
+}
+
+export function isQueuedJobCancellable(job: Job | null): job is Job & { state: 'queued' } {
+  return job?.state === 'queued';
+}
+
 export class MeshHarborApi {
   private readonly dashboardHeaders = { 'X-MeshHarbor-Dashboard': 'local-ui-v1' };
 
@@ -159,8 +172,20 @@ export class MeshHarborApi {
     return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
   }
 
-  cancelJob(jobId: string): Promise<Job> {
-    return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+  async cancelJob(jobId: string): Promise<Job> {
+    try {
+      return await this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+    } catch (cancelError) {
+      // The worker may claim the queued job before the cancellation reaches the store.
+      // Refresh once so Studio can show the authoritative state rather than stale "queued" data.
+      try {
+        const current = await this.job(jobId);
+        if (current.state !== 'queued') return current;
+      } catch {
+        // Keep the original cancellation error if the status refresh also fails.
+      }
+      throw cancelError;
+    }
   }
 
   derivedAsset(assetId: string): Promise<Asset> {

@@ -4,18 +4,105 @@ import { readFile } from 'node:fs/promises';
 
 // Use the project's TypeScript compiler when installed (Node 20+), with a
 // native type-stripping fallback for minimal Node 24 test environments.
-let MeshHarborApi, quadTopologyArtifact;
+let MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable;
 try {
   const ts = await import('typescript');
   const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi, quadTopologyArtifact } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-  ({ MeshHarborApi, quadTopologyArtifact } = await import('./api.ts'));
+  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable } = await import('./api.ts'));
 }
+
+test('Studio offers cancellation only before a job leaves the queue', () => {
+  assert.equal(isQueuedJobCancellable({ state: 'queued' }), true);
+  for (const state of ['running', 'validating', 'cancelling', 'cancelled', 'succeeded', 'failed']) {
+    assert.equal(isQueuedJobCancellable({ state }), false, `${state} jobs must not be cancellable from the UI`);
+  }
+});
+
+test('cancellation notices describe queued, running, and finished outcomes', () => {
+  assert.equal(cancelJobNotice({ state: 'cancelled' }), 'The queued job was cancelled.');
+  assert.equal(cancelJobNotice({ state: 'queued' }), 'This job is still queued. Try cancelling it again.');
+  for (const state of ['running', 'validating', 'cancelling']) {
+    assert.match(cancelJobNotice({ state }), /cannot be interrupted safely/);
+  }
+  for (const state of ['succeeded', 'failed']) {
+    assert.match(cancelJobNotice({ state }), /finished before cancellation took effect/);
+  }
+});
+
+test('cancelJob reports a successfully cancelled queued job without an extra read', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ path: String(input), init });
+    if (String(input) === '/api/v1/jobs/job-cancel/cancel') {
+      return Response.json({ id: 'job-cancel', state: 'cancelled' });
+    }
+    throw new Error('Unexpected request: ' + input);
+  };
+  try {
+    const api = new MeshHarborApi();
+    const result = await api.cancelJob('job-cancel');
+    assert.equal(result.state, 'cancelled');
+    assert.deepEqual(calls.map(({ path }) => path), ['/api/v1/jobs/job-cancel/cancel']);
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal(new Headers(calls[0].init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('cancelJob refreshes server state if the worker wins the queued-cancel race', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ path: String(input), init });
+    if (String(input) === '/api/v1/jobs/job-race/cancel') {
+      return Response.json({ error: 'conflict: This operation has already started.' }, { status: 409 });
+    }
+    if (String(input) === '/api/v1/jobs/job-race') {
+      return Response.json({ id: 'job-race', operation: 'mesh.simplify', state: 'running', progress: 5 });
+    }
+    throw new Error('Unexpected request: ' + input);
+  };
+  try {
+    const api = new MeshHarborApi();
+    const latest = await api.cancelJob('job-race');
+    assert.equal(latest.state, 'running');
+    assert.deepEqual(calls.map(({ path }) => path), [
+      '/api/v1/jobs/job-race/cancel',
+      '/api/v1/jobs/job-race',
+    ]);
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal(new Headers(calls[1].init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('cancelJob preserves the server error when the job is still queued', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    if (String(input) === '/api/v1/jobs/job-queued/cancel') {
+      return Response.json({ error: 'conflict: cancellation was not applied.' }, { status: 409 });
+    }
+    if (String(input) === '/api/v1/jobs/job-queued') {
+      return Response.json({ id: 'job-queued', operation: 'runtime.pixal3d.setup', state: 'queued', progress: 0 });
+    }
+    throw new Error('Unexpected request: ' + input);
+  };
+  try {
+    const api = new MeshHarborApi();
+    await assert.rejects(api.cancelJob('job-queued'), /conflict: cancellation was not applied/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('QuadriFlow installer surface stays guarded when no reviewed release is available', async () => {
   const originalFetch = globalThis.fetch;
