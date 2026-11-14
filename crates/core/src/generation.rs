@@ -689,15 +689,20 @@ mod tests {
             weights: runtime_root.join("weights"),
         };
         let barrier = Arc::new(Barrier::new(CONCURRENCY));
-        let workers = (0..CONCURRENCY).map(|_| {
-            let runtime = runtime.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                runtime.prepare_entrypoint().unwrap()
+        let workers: Vec<_> = (0..CONCURRENCY)
+            .map(|_| {
+                let runtime = runtime.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    runtime.prepare_entrypoint().unwrap()
+                })
             })
-        });
-        let entries: Vec<_> = workers.map(|worker| worker.join().unwrap()).collect();
+            .collect();
+        let entries: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
         let paths: HashSet<PathBuf> = entries
             .iter()
             .map(|entry| entry.path().to_path_buf())
