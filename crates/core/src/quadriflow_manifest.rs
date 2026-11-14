@@ -1,26 +1,29 @@
 //! Structural validation for the QuadriFlow sidecar release manifest.
 //!
 //! Network and filesystem effects live in the separate quadriflow_installer
-//! module. This validator does not verify Sigstore signatures or claims. A
-//! non-empty manifest is not legal, provenance, or release approval; the
-//! embedded manifest remains empty until its release gates are complete.
+//! module. This module validates manifest structure and exact bundle-byte pins;
+//! the separate quadriflow_attestation module performs cryptographic and claim
+//! verification. A non-empty manifest is not legal, provenance, or release
+//! approval; the embedded manifest remains empty until its release gates pass.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
-const PINNED_SOURCE_REPOSITORY: &str = "https://github.com/hjwdzh/QuadriFlow";
-const PINNED_SOURCE_COMMIT: &str = "810b7a0967c35b0dc85b4464e3835e26a756c967";
+pub(crate) const PINNED_SOURCE_REPOSITORY: &str = "https://github.com/hjwdzh/QuadriFlow";
+pub(crate) const PINNED_SOURCE_COMMIT: &str = "810b7a0967c35b0dc85b4464e3835e26a756c967";
 const RELEASE_REPOSITORY: &str = "syi0808/meshharbor";
 const RELEASE_BASE_URL: &str = "https://github.com/syi0808/meshharbor/releases/download/";
 const BUILD_WORKFLOW_PATH: &str = ".github/workflows/quadriflow-candidate-build.yml";
-const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_NOTICES_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SBOM_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROVENANCE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SIGNATURE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_INLINE_BUNDLE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +51,9 @@ pub struct QuadriFlowReleaseArtifact {
     pub archive: QuadriFlowArchive,
     pub workflow: QuadriFlowWorkflowEvidence,
     pub payload: QuadriFlowPayload,
+    /// Exact base64-encoded Sigstore bundle bytes, pinned into the signed
+    /// application manifest so the signature can be checked before download.
+    pub attestation_bundle_base64: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +78,8 @@ pub struct QuadriFlowWorkflowEvidence {
     pub repository: String,
     pub path: String,
     pub run_id: u64,
+    /// GitHub Actions attempt number included in the signed SLSA invocation.
+    pub run_attempt: u64,
     /// Full lowercase commit SHA of the MeshHarbor workflow checkout.
     pub commit: String,
 }
@@ -127,7 +135,7 @@ impl QuadriFlowPlatform {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum QuadriFlowManifestError {
-    #[error("QuadriFlow release manifest is empty or exceeds the 1 MiB limit.")]
+    #[error("QuadriFlow release manifest is empty or exceeds the 2 MiB limit.")]
     ManifestSize,
     #[error("QuadriFlow release manifest JSON is invalid: {0}")]
     Json(String),
@@ -145,14 +153,19 @@ pub enum QuadriFlowManifestError {
     ArtifactSize,
     #[error("QuadriFlow artifact contains a malformed SHA-256 digest.")]
     Digest,
+    #[error(
+        "QuadriFlow attestation bundle is invalid or mismatched with its payload pin."
+    )]
+    AttestationBundle,
     #[error("QuadriFlow release payload has an unexpected size or SHA-256 digest.")]
     PayloadDigest,
 }
 
 /// Parses and validates the manifest's structure and pinned release metadata.
 ///
-/// This does not verify a GitHub/Sigstore attestation, inspect archive entries,
-/// download or install files, or imply that the release is approved for use.
+/// This does not cryptographically verify a Sigstore attestation, inspect
+/// archive entries, download or install files, or imply that the release is
+/// approved for use.
 pub fn parse_quadriflow_release_manifest(
     bytes: &[u8],
 ) -> Result<QuadriFlowReleaseManifest, QuadriFlowManifestError> {
@@ -256,6 +269,7 @@ fn validate_artifact(
     if artifact.workflow.repository != RELEASE_REPOSITORY
         || artifact.workflow.path != BUILD_WORKFLOW_PATH
         || artifact.workflow.run_id == 0
+        || artifact.workflow.run_attempt == 0
         || !valid_commit(&artifact.workflow.commit)
     {
         return Err(QuadriFlowManifestError::ArtifactMetadata);
@@ -282,6 +296,30 @@ fn validate_artifact(
         "provenance.sigstore.json",
         MAX_SIGNATURE_BYTES,
     )?;
+    validate_attestation_bundle_pin(artifact)?;
+    Ok(())
+}
+
+fn validate_attestation_bundle_pin(
+    artifact: &QuadriFlowReleaseArtifact,
+) -> Result<(), QuadriFlowManifestError> {
+    let encoded = artifact.attestation_bundle_base64.as_bytes();
+    if encoded.is_empty() || encoded.len() > MAX_INLINE_BUNDLE_BYTES.div_ceil(3) * 4 {
+        return Err(QuadriFlowManifestError::AttestationBundle);
+    }
+    let bytes = BASE64
+        .decode(encoded)
+        .map_err(|_| QuadriFlowManifestError::AttestationBundle)?;
+    if bytes.is_empty()
+        || bytes.len() > MAX_INLINE_BUNDLE_BYTES
+        || BASE64.encode(&bytes) != artifact.attestation_bundle_base64
+        || bytes.len() as u64 != artifact.payload.provenance_signature.size_bytes
+        || !valid_digest(&artifact.payload.provenance_signature.sha256)
+        || format!("{:x}", Sha256::digest(&bytes))
+            != artifact.payload.provenance_signature.sha256
+    {
+        return Err(QuadriFlowManifestError::AttestationBundle);
+    }
     Ok(())
 }
 
@@ -347,6 +385,7 @@ mod tests {
 
     fn test_artifact(platform: QuadriFlowPlatform) -> QuadriFlowReleaseArtifact {
         let filename = platform.archive_filename();
+        let attestation_bytes = b"{}";
         let payload_file = |path: &str| QuadriFlowPayloadFile {
             path: path.into(),
             sha256: "a".repeat(64),
@@ -365,6 +404,7 @@ mod tests {
                 repository: RELEASE_REPOSITORY.into(),
                 path: BUILD_WORKFLOW_PATH.into(),
                 run_id: 1,
+                run_attempt: 1,
                 commit: "c".repeat(40),
             },
             payload: QuadriFlowPayload {
@@ -372,8 +412,13 @@ mod tests {
                 third_party_notices: payload_file("THIRD-PARTY-NOTICES.md"),
                 sbom: payload_file("sbom.spdx.json"),
                 provenance: payload_file("provenance.json"),
-                provenance_signature: payload_file("provenance.sigstore.json"),
+                provenance_signature: QuadriFlowPayloadFile {
+                    path: "provenance.sigstore.json".into(),
+                    sha256: format!("{:x}", Sha256::digest(attestation_bytes)),
+                    size_bytes: attestation_bytes.len() as u64,
+                },
             },
+            attestation_bundle_base64: BASE64.encode(attestation_bytes),
         }
     }
 

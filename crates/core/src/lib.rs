@@ -8,6 +8,7 @@ mod glb;
 mod operation;
 mod parts;
 mod quadriflow;
+mod quadriflow_attestation;
 mod quadriflow_installer;
 mod quadriflow_manifest;
 mod retopology;

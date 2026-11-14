@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "MeshHarbor QuadriFlow Sidecar Release Manifest",
-  "description": "Strict structural schema only. Runtime validation also checks unique platforms. This schema does not verify signatures, attestations, archive contents, or release approval.",
+  "description": "Strict structural schema only. Runtime validation also checks unique platforms and exact inline-bundle pins. This schema does not verify signatures, attestations, archive contents, or release approval.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -74,6 +74,7 @@
         "repository",
         "path",
         "run_id",
+        "run_attempt",
         "commit"
       ],
       "properties": {
@@ -84,6 +85,10 @@
           "const": ".github/workflows/quadriflow-candidate-build.yml"
         },
         "run_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_attempt": {
           "type": "integer",
           "minimum": 1
         },
@@ -261,7 +266,8 @@
         "platform",
         "archive",
         "workflow",
-        "payload"
+        "payload",
+        "attestation_bundle_base64"
       ],
       "properties": {
         "platform": {
@@ -279,6 +285,13 @@
         },
         "payload": {
           "$ref": "#/$defs/payload"
+        },
+        "attestation_bundle_base64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 349528,
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+          "description": "Canonical base64 encoding of the exact provenance.sigstore.json bytes; runtime requires its decoded size and SHA-256 to match the payload pin."
         }
       }
     }

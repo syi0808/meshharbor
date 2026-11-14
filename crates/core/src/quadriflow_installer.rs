@@ -2,9 +2,9 @@
 //!
 //! The checked-in release manifest is empty, so the public installer stops before
 //! touching disk or starting a downloader. A future nonempty manifest must still
-//! be reviewed and committed with the application. SHA-256 pins protect downloads
-//! against transport substitution; this module does not verify Sigstore signatures
-//! or certify license/provenance claims.
+//! be reviewed and committed with the application. Its embedded Sigstore bundle
+//! and claims are verified before I/O; SHA-256 pins then protect downloaded bytes.
+//! Cryptographic provenance does not certify license clearance or release approval.
 
 use std::{
     collections::HashSet,
@@ -37,8 +37,10 @@ pub enum QuadriFlowInstallError {
     Io(#[from] io::Error),
     #[error("No approved QuadriFlow release artifacts are available in this build.")]
     NoReleaseArtifact,
-    #[error("QuadriFlow release signatures and provenance are not verified by this build.")]
+    #[error("QuadriFlow release signature verification is unavailable in this build.")]
     ReleaseVerificationUnavailable,
+    #[error("QuadriFlow release signature or provenance does not match the pinned policy.")]
+    ReleaseVerificationFailed,
     #[error("QuadriFlow does not publish a package for this host platform.")]
     UnsupportedPlatform,
     #[error("The QuadriFlow installer is already running for this data directory.")]
@@ -77,7 +79,8 @@ pub struct QuadriFlowBackendStatus {
 }
 
 /// Capability token required to resolve or execute a managed sidecar.
-/// The current build has no in-process attestation verifier and never issues it.
+/// This token is issued only after the complete manifest and signed provenance
+/// have passed the in-process verifier.
 struct VerifiedQuadriFlowManifest<'a> {
     manifest: &'a QuadriFlowReleaseManifest,
 }
@@ -151,8 +154,8 @@ impl Drop for PrivateTempDir {
 }
 
 /// Fail-closed entrypoint for installing a native QuadriFlow sidecar.
-/// A release must pass an in-process signature/provenance verifier before any
-/// filesystem or network side effect; this build has no such verifier.
+/// A release must pass the in-process signature/provenance verifier before any
+/// filesystem or network side effect. The bundled manifest is currently empty.
 pub fn install_bundled_quadriflow_sidecar(
     data_root: &Path,
 ) -> Result<QuadriFlowInstallResult, QuadriFlowInstallError> {
@@ -257,10 +260,16 @@ fn verified_release_manifest<'a>(
     if manifest.artifacts.is_empty() {
         return Err(QuadriFlowInstallError::NoReleaseArtifact);
     }
-    // A structurally valid manifest and self-declared SHA-256 values are not
-    // trust evidence. This build has no in-process Sigstore verifier, so it must
-    // not issue the capability token needed by install, readiness, or rollback.
-    Err(QuadriFlowInstallError::ReleaseVerificationUnavailable)
+    // The bundle bytes are app-pinned in the manifest, so this performs no
+    // network or filesystem I/O and must succeed before issuing the capability.
+    for artifact in &manifest.artifacts {
+        crate::quadriflow_attestation::verify_release_artifact(
+            &manifest.source.commit,
+            artifact,
+        )
+        .map_err(|_| QuadriFlowInstallError::ReleaseVerificationFailed)?;
+    }
+    Ok(VerifiedQuadriFlowManifest { manifest })
 }
 
 pub fn quadriflow_backend_status(data_root: &Path) -> QuadriFlowBackendStatus {
@@ -280,7 +289,7 @@ pub fn quadriflow_backend_status(data_root: &Path) -> QuadriFlowBackendStatus {
         };
     }
 
-    let (status, message, next_step) = match bundled_quadriflow_release_manifest() {
+    let (status, message, next_step, install_available) = match bundled_quadriflow_release_manifest() {
         Ok(manifest) if manifest.artifacts.is_empty() => (
             if host_platform().is_some() {
                 "release_unavailable"
@@ -289,16 +298,41 @@ pub fn quadriflow_backend_status(data_root: &Path) -> QuadriFlowBackendStatus {
             },
             "This build does not include an approved QuadriFlow release artifact.",
             "Wait for a reviewed, signed release with verified provenance. This build does not download or install unsigned or temporary CI artifacts.",
+            false,
         ),
-        Ok(_) => (
-            "release_verification_unavailable",
-            "A release record exists, but this build cannot verify its signature and provenance.",
-            "Do not install it yet. Add a supported signature/provenance verifier and complete release and license review first.",
-        ),
+        Ok(manifest) => match verified_release_manifest(&manifest) {
+            Ok(_) => match host_platform() {
+                Some(platform) if manifest.artifacts.iter().any(|artifact| artifact.platform == platform) => (
+                    "install_available",
+                    "A manifest-pinned QuadriFlow artifact has a verified public Sigstore signature and provenance.",
+                    "An installation request will recheck archive and payload hashes before activation.",
+                    true,
+                ),
+                Some(_) => (
+                    "platform_unavailable",
+                    "The signed QuadriFlow manifest has no artifact for this host platform.",
+                    "Use a supported host platform with a signed package in the manifest.",
+                    false,
+                ),
+                None => (
+                    "unsupported_platform",
+                    "QuadriFlow installation is not supported on this host platform.",
+                    "Use a supported host platform with a signed package in the manifest.",
+                    false,
+                ),
+            },
+            Err(_) => (
+                "release_verification_failed",
+                "A release record exists, but its signature or provenance does not match the pinned policy.",
+                "Installation is disabled. Review the manifest, signature, and signed source materials.",
+                false,
+            ),
+        },
         Err(_) => (
             "manifest_invalid",
             "The bundled QuadriFlow release manifest is invalid; installation is disabled.",
             "Use a build with a valid, reviewed release manifest.",
+            false,
         ),
     };
     QuadriFlowBackendStatus {
@@ -307,7 +341,7 @@ pub fn quadriflow_backend_status(data_root: &Path) -> QuadriFlowBackendStatus {
         available: false,
         managed: false,
         sidecar_source: None,
-        install_available: false,
+        install_available,
         message: message.into(),
         next_step: next_step.into(),
     }
@@ -1228,6 +1262,7 @@ fn archive_error(message: &str) -> QuadriFlowInstallError {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use super::*;
     use crate::{
         QuadriFlowArchive, QuadriFlowPayload, QuadriFlowPayloadFile, QuadriFlowSource,
@@ -1278,6 +1313,7 @@ mod tests {
                 repository: "syi0808/meshharbor".into(),
                 path: ".github/workflows/quadriflow-candidate-build.yml".into(),
                 run_id: 1,
+                run_attempt: 1,
                 commit: "a".repeat(40),
             },
             payload: QuadriFlowPayload {
@@ -1287,6 +1323,7 @@ mod tests {
                 provenance: payload("provenance.json", payload_bytes[3]),
                 provenance_signature: payload("provenance.sigstore.json", payload_bytes[4]),
             },
+            attestation_bundle_base64: BASE64.encode(payload_bytes[4]),
         };
         QuadriFlowReleaseManifest {
             schema_version: 1,
@@ -1406,12 +1443,12 @@ mod tests {
     }
 
     #[test]
-    fn nonempty_release_manifest_stays_blocked_without_signature_verification() {
+    fn nonempty_release_manifest_stays_blocked_without_valid_signature() {
         let platform = QuadriFlowPlatform::LinuxX86_64;
         let (manifest, _) = test_package(platform, "quadriflow-v1.0.0", b"binary");
         assert!(matches!(
             verified_release_manifest(&manifest),
-            Err(QuadriFlowInstallError::ReleaseVerificationUnavailable)
+            Err(QuadriFlowInstallError::ReleaseVerificationFailed)
         ));
     }
 

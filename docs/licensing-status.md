@@ -33,7 +33,7 @@ Before enabling inference, resolve at least:
 
 - DINOv3 license and gated weight access, and the applicable Tencent Pixal3D model/checkpoint terms.
 - NAF checkpoint commercial-use scope (upstream issue #13 remains open).
-- MLX `rembg` selection: the lock uses `rembg` 2.0.76/UÂ²-Net, while an unpinned install may choose 2.0.87 with BRIA RMBG-2.0 default (CC BY-NC absent a commercial agreement); pin the package and select an allowed model explicitly.
+- MLX `rembg` selection: the lock uses `rembg` 2.0.76/U²-Net, while an unpinned install may choose 2.0.87 with BRIA RMBG-2.0 default (CC BY-NC absent a commercial agreement); pin the package and select an allowed model explicitly.
 - CGAL linked-binary obligations, the complete native/Python package dependency license closure, and the exact OS/accelerator support matrix.
 - Any generated web bundle: `web/vendor.mjs` is source only; if run, its generated `@google/model-viewer` bundle is Apache-2.0 and needs corresponding notices. No bundle is present here.
 
@@ -55,5 +55,5 @@ The [retopology candidate report](retopology-candidate.md) records the platform-
 
 ## Scope of use today
 
-The operation catalog includes simplify, cleanup, shared-index part separation, render ordering, required mesh compression, and bounded xatlas atlas/rebake functions. QuadriFlow remeshing is wired through the core and API surfaces but is unavailable in this build: adjacent binaries are ignored, the release manifest is empty, and no in-process attestation verifier is integrated. The earlier source-build smoke results are platform-limited and do not establish real-asset or visual quality. Generic high-to-low texture baking remains unavailable. The separate MLX and CUDA runtime actions can download dependencies and model files only when explicitly requested, but neither setup nor inference was run here. This limited validation does not establish commercial clearance for the whole application or an inference backend.
+The operation catalog includes simplify, cleanup, shared-index part separation, render ordering, required mesh compression, and bounded xatlas atlas/rebake functions. QuadriFlow remeshing is wired through the core and API surfaces but is unavailable in this build: adjacent binaries are ignored and the release manifest is empty. The in-process Sigstore/provenance verifier is integrated, but no reviewed release artifact is embedded. The earlier source-build smoke results are platform-limited and do not establish real-asset or visual quality. Generic high-to-low texture baking remains unavailable. The separate MLX and CUDA runtime actions can download dependencies and model files only when explicitly requested, but neither setup nor inference was run here. This limited validation does not establish commercial clearance for the whole application or an inference backend.
 
