@@ -3,6 +3,9 @@ import {
   assetComparisonPairForSelection,
   assetComparisonPairFromJob,
   shouldAutoSelectComparisonResult,
+  importAssetBatch,
+  MAX_ASSET_IMPORT_FILES,
+  planAssetImportUiCompletion,
   cancelJobNotice,
   canInspectJobHistoryRecord,
   isActiveJob,
@@ -101,8 +104,11 @@ export function App() {
   const [operations, setOperations] = useState<Operation[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [assetSearchInput, setAssetSearchInput] = useState('');
+  const assetSearchInputRef = useRef('');
   const [assetFilters, setAssetFilters] = useState<AssetBrowserFilters>(EMPTY_ASSET_BROWSER_FILTERS);
   const assetFiltersRef = useRef(assetFilters);
+  const assetBrowserInteractionRevision = useRef(0);
+  const assetSelectionInteractionRevision = useRef(0);
   const [assetNextCursor, setAssetNextCursor] = useState<string | null>(null);
   const [assetPageLoading, setAssetPageLoading] = useState(false);
   const assetPageRequestGuard = useRef(new LatestRequestGuard());
@@ -138,6 +144,7 @@ export function App() {
   const [activeView, setActiveView] = useState<'source' | 'result'>('source');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const importBatchInFlight = useRef(false);
   const api = useMemo(() => new MeshHarborApi(), []);
   const selectedAsset = assets.find((asset) => asset.id === selectedId) ?? null;
   const activeJobInputAssetId = job && isActiveJob(job) ? job.input_asset_id ?? null : null;
@@ -176,10 +183,10 @@ export function App() {
     client: MeshHarborApi,
     filters: AssetBrowserFilters,
     append: boolean,
-  ) {
-    if (connection !== 'connected') return;
+  ): Promise<string | null> {
+    if (connection !== 'connected') return null;
     const cursor = append ? assetNextCursor : null;
-    if (append && !cursor) return;
+    if (append && !cursor) return null;
 
     const requestId = assetPageRequestGuard.current.begin();
     assetFiltersRef.current = filters;
@@ -189,7 +196,7 @@ export function App() {
     if (!append) setAssetNextCursor(null);
     try {
       const page = await client.assetPage(ASSET_PAGE_SIZE, cursor, toAssetPageFilters(filters));
-      if (!assetPageRequestGuard.current.isCurrent(requestId)) return;
+      if (!assetPageRequestGuard.current.isCurrent(requestId)) return null;
       setAssets((current) => {
         const selectedPair = comparisonPairRef.current
           ?? assetComparisonPairForSelection(current, selectedIdRef.current, null);
@@ -204,11 +211,14 @@ export function App() {
         return [...page.items, ...retained];
       });
       setAssetNextCursor(page.next_cursor);
+      return null;
     } catch (cause) {
-      if (!assetPageRequestGuard.current.isCurrent(requestId)) return;
-      setError(cause instanceof Error
+      if (!assetPageRequestGuard.current.isCurrent(requestId)) return null;
+      const message = cause instanceof Error
         ? 'Could not load the asset library. ' + cause.message
-        : 'Could not load the asset library.');
+        : 'Could not load the asset library.';
+      setError(message);
+      return message;
     } finally {
       if (assetPageRequestGuard.current.isCurrent(requestId)) setAssetPageLoading(false);
     }
@@ -220,6 +230,8 @@ export function App() {
 
   function applyAssetBrowserFilters(filters: AssetBrowserFilters) {
     const normalized = { ...filters, query: clampAssetSearchQuery(filters.query) };
+    assetBrowserInteractionRevision.current += 1;
+    assetSearchInputRef.current = normalized.query;
     setAssetSearchInput(normalized.query);
     void requestAssetPage(api, normalized, false);
   }
@@ -421,10 +433,15 @@ export function App() {
   }, [assetFilters]);
 
   useEffect(() => {
+    assetSearchInputRef.current = assetSearchInput;
+  }, [assetSearchInput]);
+
+  useEffect(() => {
     comparisonPairRef.current = comparisonPair;
   }, [comparisonPair]);
 
   function selectAssetId(assetId: string | null) {
+    assetSelectionInteractionRevision.current += 1;
     selectedIdRef.current = assetId;
     setSelectedId(assetId);
   }
@@ -636,40 +653,105 @@ export function App() {
   }
 
   async function importFiles(files: FileList | File[]) {
+    if (files.length === 0) return;
+    if (importBatchInFlight.current) {
+      setNotice('An import batch is already running. These additional files were not queued.');
+      return;
+    }
+    if (busy) {
+      setError('Wait for the current Studio operation to finish before importing files.');
+      return;
+    }
     if (connection !== 'connected') {
       setShowConnect(true);
       setError('Start the local MeshHarbor engine, then retry the import.');
       return;
     }
-    const file = Array.from(files).find((candidate) => {
-      const name = candidate.name.toLowerCase();
-      return name.endsWith('.glb') || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg');
-    });
-    if (!file) {
-      setError('Choose a .glb, .png, or .jpg image file.');
-      return;
-    }
-    if (file.size > 512 * 1024 * 1024) {
-      setError('This file is larger than the current 512 MiB import limit.');
-      return;
-    }
+
+    importBatchInFlight.current = true;
+    const started = {
+      selectedId: selectedIdRef.current,
+      filters: { ...assetFiltersRef.current },
+      searchInput: assetSearchInputRef.current,
+      browserInteractionRevision: assetBrowserInteractionRevision.current,
+      selectionInteractionRevision: assetSelectionInteractionRevision.current,
+    };
     setError(null);
     setNotice(null);
     setBusy(true);
     try {
-      const isImage = /\.(png|jpe?g)$/i.test(file.name);
-      const imported = isImage ? await api.importImage(file) : await api.importGlb(file);
-      setAssetSearchInput('');
-      assetFiltersRef.current = EMPTY_ASSET_BROWSER_FILTERS;
-      setAssetFilters(EMPTY_ASSET_BROWSER_FILTERS);
-      setAssets((current) => [imported, ...current.filter((asset) => asset.id !== imported.id)]);
-      selectAsset(imported);
-      await requestAssetPage(api, EMPTY_ASSET_BROWSER_FILTERS, false);
-      setReport(null);
-      setNotice(`${file.name} imported locally${isImage ? '. Generate a 3D asset from it when a Pixal3D runtime is ready.' : '.'}`);
+      const result = await importAssetBatch(files, async (file, kind) =>
+        kind === 'image' ? api.importImage(file) : api.importGlb(file),
+      (progress) => {
+        setNotice(`Importing ${progress.current} of ${progress.total}: ${progress.fileName}`);
+      });
+      let refreshError: string | null = null;
+      let filtersToRefresh = assetFiltersRef.current;
+      if (result.assets.length > 0) {
+        setAssets((current) => {
+          const importedIds = new Set(result.assets.map((asset) => asset.id));
+          return [...result.assets, ...current.filter((asset) => !importedIds.has(asset.id))];
+        });
+
+        const current = {
+          selectedId: selectedIdRef.current,
+          filters: { ...assetFiltersRef.current },
+          searchInput: assetSearchInputRef.current,
+          browserInteractionRevision: assetBrowserInteractionRevision.current,
+          selectionInteractionRevision: assetSelectionInteractionRevision.current,
+        };
+        const plan = planAssetImportUiCompletion(started, current);
+        if (plan.selectFirstImportedAsset) {
+          invalidateHistoryRequests();
+          comparisonPairRef.current = null;
+          setComparisonPair(null);
+          selectAssetId(result.assets[0].id);
+          setActiveView('source');
+          setReport(null);
+        }
+
+        if (plan.resetFilters) {
+          filtersToRefresh = EMPTY_ASSET_BROWSER_FILTERS;
+          assetSearchInputRef.current = '';
+          setAssetSearchInput('');
+        }
+      }
+      if (result.attemptedCount > 0) {
+        // Reconcile ambiguous failures where the server may have stored an asset
+        // before the response was lost, without ever replaying the upload.
+        refreshError = await requestAssetPage(api, filtersToRefresh, false);
+      }
+
+      const consideredCount = Math.min(files.length, MAX_ASSET_IMPORT_FILES);
+      const summaryParts = [
+        `Imported ${result.assets.length} of ${consideredCount} processed file${consideredCount === 1 ? '' : 's'} locally.`,
+      ];
+      const shownFailures = result.failures.slice(0, 3);
+      if (shownFailures.length > 0) {
+        const failureText = shownFailures.map((failure) => {
+          const detail = failure.message.length > 180 ? `${failure.message.slice(0, 180)}…` : failure.message;
+          return `${failure.fileName}: ${detail}`;
+        }).join(' ');
+        const moreFailures = result.failures.length - shownFailures.length;
+        summaryParts.push(`Could not import ${result.failures.length} file${result.failures.length === 1 ? '' : 's'}: ${failureText}${moreFailures > 0 ? ` And ${moreFailures} more.` : ''}`);
+      }
+      if (result.skippedCount > 0) {
+        summaryParts.push(`${result.skippedCount} additional file${result.skippedCount === 1 ? ' was' : 's were'} not processed; the per-batch limit is ${MAX_ASSET_IMPORT_FILES}.`);
+      }
+      if (result.assets.some((asset) => asset.kind === 'image')) {
+        summaryParts.push('Select an imported image to generate a 3D asset when a Pixal3D runtime is ready.');
+      }
+      if (refreshError) summaryParts.push(refreshError);
+      const summary = summaryParts.join(' ');
+      if (result.failures.length > 0 || result.skippedCount > 0 || refreshError) {
+        setError(summary);
+      } else {
+        setNotice(summary);
+      }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not import this file.');
+      setError(cause instanceof Error ? cause.message : 'Could not import these files.');
     } finally {
+      importBatchInFlight.current = false;
       setBusy(false);
     }
   }
@@ -899,13 +981,13 @@ export function App() {
 
         <main className="main-content">
           <div className="page-heading">
-            <div><div className="eyebrow">YOUR WORKSPACE</div><h1>Studio <span className="heading-dot">.</span></h1><p>Generate from an image or refine a mesh, all locally.</p></div>
+            <div><div className="eyebrow">YOUR WORKSPACE</div><h1>Studio <span className="heading-dot">.</span></h1><p>Generate from an image or refine a mesh, all locally. Import up to 10 files per batch.</p></div>
             <div className="import-actions">
-              <button className="button button-secondary import-button" onClick={() => fileInputRef.current?.click()} disabled={busy}><span className="button-plus">＋</span> Import GLB</button>
-              <button className="button button-secondary import-button" onClick={() => imageInputRef.current?.click()} disabled={busy}><span className="button-plus">＋</span> Import image</button>
+              <button className="button button-secondary import-button" onClick={() => fileInputRef.current?.click()} disabled={busy}><span className="button-plus">＋</span> Import GLBs</button>
+              <button className="button button-secondary import-button" onClick={() => imageInputRef.current?.click()} disabled={busy}><span className="button-plus">＋</span> Import images</button>
             </div>
-            <input ref={fileInputRef} className="sr-only" type="file" accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-            <input ref={imageInputRef} className="sr-only" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
+            <input ref={fileInputRef} className="sr-only" type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
+            <input ref={imageInputRef} className="sr-only" type="file" multiple accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           </div>
 
           {(error || notice) && <div className={`toast ${error ? 'toast-error' : 'toast-success'}`} role={error ? 'alert' : 'status'}><span className="toast-icon">{error ? '!' : '✓'}</span><span>{error ?? notice}</span><button onClick={() => { setError(null); closeNotice(); }} aria-label="Dismiss">×</button></div>}
@@ -967,7 +1049,11 @@ export function App() {
                       type="search"
                       maxLength={256}
                       value={assetSearchInput}
-                      onChange={(event) => setAssetSearchInput(event.currentTarget.value)}
+                      onChange={(event) => {
+                        assetBrowserInteractionRevision.current += 1;
+                        assetSearchInputRef.current = event.currentTarget.value;
+                        setAssetSearchInput(event.currentTarget.value);
+                      }}
                       placeholder="Try a model or image name"
                     />
                   </label>

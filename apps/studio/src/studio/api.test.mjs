@@ -4,18 +4,143 @@ import { readFile } from 'node:fs/promises';
 
 // Use the project's TypeScript compiler when installed (Node 20+), with a
 // native type-stripping fallback for minimal Node 24 test environments.
-let MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay;
+let MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion;
 try {
   const ts = await import('typescript');
   const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay } = await import('./api.ts'));
+  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion } = await import('./api.ts'));
 }
+
+test('multi-file import validates mixed files, uploads sequentially, keeps going after failures, and reports progress', async () => {
+  const files = [
+    { name: 'Model.GLB', size: 10 },
+    { name: 'notes.txt', size: 1 },
+    { name: 'too-large.png', size: MAX_IMAGE_IMPORT_BYTES + 1 },
+    { name: 'broken.jpg', size: 20 },
+    { name: 'texture.PNG', size: 30 },
+  ];
+  const uploadOrder = [];
+  const progress = [];
+  let activeUploads = 0;
+  let maxActiveUploads = 0;
+  const result = await importAssetBatch(files, async (file, kind) => {
+    uploadOrder.push([file.name, kind]);
+    activeUploads += 1;
+    maxActiveUploads = Math.max(maxActiveUploads, activeUploads);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    activeUploads -= 1;
+    if (file.name === 'broken.jpg') throw new Error('Server rejected the image.');
+    return { id: file.name };
+  }, (event) => progress.push(event));
+
+  assert.deepEqual(uploadOrder, [['Model.GLB', 'mesh'], ['broken.jpg', 'image'], ['texture.PNG', 'image']]);
+  assert.equal(maxActiveUploads, 1, 'files must be uploaded one at a time');
+  assert.deepEqual(result.assets, [{ id: 'Model.GLB' }, { id: 'texture.PNG' }]);
+  assert.deepEqual(result.failures.map(({ index, fileName, message }) => [index, fileName, message]), [
+    [1, 'notes.txt', 'Unsupported file type. Choose a .glb, .png, .jpg, or .jpeg file.'],
+    [2, 'too-large.png', 'File exceeds the 16 MiB image limit.'],
+    [3, 'broken.jpg', 'Server rejected the image.'],
+  ]);
+  assert.equal(result.skippedCount, 0);
+  assert.equal(result.attemptedCount, 3);
+  assert.deepEqual(progress, [
+    { current: 1, total: 3, fileName: 'Model.GLB' },
+    { current: 2, total: 3, fileName: 'broken.jpg' },
+    { current: 3, total: 3, fileName: 'texture.PNG' },
+  ]);
+});
+
+test('multi-file import caps work to the first ten entries and does not retry a failed POST', async () => {
+  const files = Array.from({ length: MAX_ASSET_IMPORT_FILES + 2 }, (_, index) => ({
+    name: `model-${index}.glb`,
+    size: 1,
+  }));
+  const uploadOrder = [];
+  const result = await importAssetBatch(files, async (file) => {
+    uploadOrder.push(file.name);
+    if (file.name === 'model-4.glb') throw new Error('temporary failure');
+    return file.name;
+  });
+
+  assert.equal(uploadOrder.length, MAX_ASSET_IMPORT_FILES);
+  assert.deepEqual(uploadOrder, files.slice(0, MAX_ASSET_IMPORT_FILES).map((file) => file.name));
+  assert.equal(result.assets.length, MAX_ASSET_IMPORT_FILES - 1);
+  assert.deepEqual(result.failures.map((failure) => failure.fileName), ['model-4.glb']);
+  assert.equal(result.skippedCount, 2);
+  assert.equal(result.attemptedCount, MAX_ASSET_IMPORT_FILES);
+});
+
+test('multi-file import reports attempted failures without retrying them', async () => {
+  let calls = 0;
+  const result = await importAssetBatch([{ name: 'unconfirmed.glb', size: 1 }], async () => {
+    calls += 1;
+    throw new Error('The response was lost after the server write.');
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.attemptedCount, 1);
+  assert.deepEqual(result.assets, []);
+  assert.deepEqual(result.failures.map((failure) => failure.fileName), ['unconfirmed.glb']);
+});
+
+test('multi-file import refuses empty and oversized assets before calling the uploader', async () => {
+  const files = [
+    { name: 'empty.glb', size: 0 },
+    { name: 'too-large.glb', size: MAX_GLB_IMPORT_BYTES + 1 },
+    { name: 'ok.jpg', size: MAX_IMAGE_IMPORT_BYTES },
+  ];
+  const calls = [];
+  const result = await importAssetBatch(files, async (file, kind) => {
+    calls.push([file.name, kind]);
+    return file.name;
+  });
+
+  assert.deepEqual(calls, [['ok.jpg', 'image']]);
+  assert.deepEqual(result.assets, ['ok.jpg']);
+  assert.deepEqual(result.failures.map(({ fileName, message }) => [fileName, message]), [
+    ['empty.glb', 'The file is empty.'],
+    ['too-large.glb', 'File exceeds the 512 MiB GLB limit.'],
+  ]);
+});
+
+test('asset import completion keeps browser filters and selection changed during a batch', () => {
+  const before = {
+    selectedId: 'asset-a',
+    filters: { query: 'old', kind: 'mesh', origin: 'original' },
+    searchInput: 'old draft',
+    browserInteractionRevision: 4,
+    selectionInteractionRevision: 2,
+  };
+  assert.deepEqual(planAssetImportUiCompletion(before, {
+    ...before,
+    selectedId: 'asset-b',
+    filters: { query: 'new', kind: 'image', origin: 'derived' },
+    searchInput: 'new draft',
+    browserInteractionRevision: 5,
+    selectionInteractionRevision: 3,
+  }), { resetFilters: false, selectFirstImportedAsset: false });
+
+  assert.deepEqual(planAssetImportUiCompletion(before, {
+    ...before,
+    filters: { ...before.filters },
+  }), { resetFilters: true, selectFirstImportedAsset: true });
+
+  assert.deepEqual(planAssetImportUiCompletion(before, {
+    ...before,
+    browserInteractionRevision: 5,
+  }), { resetFilters: false, selectFirstImportedAsset: true });
+
+  assert.deepEqual(planAssetImportUiCompletion(before, {
+    ...before,
+    selectionInteractionRevision: 3,
+  }), { resetFilters: true, selectFirstImportedAsset: false });
+});
 
 test('Studio offers cancellation only before a job leaves the queue', () => {
   assert.equal(isQueuedJobCancellable({ state: 'queued' }), true);
