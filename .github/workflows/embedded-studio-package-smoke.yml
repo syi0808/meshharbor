@@ -1,0 +1,75 @@
+name: Embedded Studio package smoke
+
+on:
+  push:
+    branches:
+      - main
+      - feat/embedded-studio-package-smoke
+    paths:
+      - ".github/workflows/embedded-studio-package-smoke.yml"
+      - ".github/workflows/studio-client-validation.yml"
+      - "apps/studio/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "runtimes/pixal3d/**"
+      - "scripts/smoke_embedded_studio.mjs"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/embedded-studio-package-smoke.yml"
+      - ".github/workflows/studio-client-validation.yml"
+      - "apps/studio/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "runtimes/pixal3d/**"
+      - "scripts/smoke_embedded_studio.mjs"
+
+permissions:
+  contents: read
+
+jobs:
+  packaged-studio-smoke:
+    name: Build and launch embedded Studio (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+          - platform: macos
+            runner: macos-15
+          - platform: windows
+            runner: windows-2022
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.22.3
+
+      - name: Install locked Studio dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: apps/studio
+
+      - name: Build Studio production bundle
+        run: npm run build
+        working-directory: apps/studio
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759
+
+      - name: Build release CLI with embedded Studio
+        run: cargo build --locked --release --package meshharbor --bin meshharbor
+
+      - name: Launch binary and verify embedded Studio assets
+        shell: bash
+        env:
+          MESHHARBOR_BINARY: target/release/meshharbor${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: node scripts/smoke_embedded_studio.mjs "$MESHHARBOR_BINARY"
