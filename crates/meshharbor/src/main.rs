@@ -2730,8 +2730,7 @@ mod tests {
                 command: JobsCommand::List { limit: 201 }
             }
         ));
-        let show =
-            Cli::try_parse_from(["meshharbor", "jobs", "show", "job_example"]).unwrap();
+        let show = Cli::try_parse_from(["meshharbor", "jobs", "show", "job_example"]).unwrap();
         assert!(matches!(
             show.command,
             Command::Jobs {
@@ -2791,8 +2790,10 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_list_jobs_returns_json_and_does_not_resume_saved_jobs() {
-        let root =
-            std::env::temp_dir().join(format!("meshharbor-mcp-job-history-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-mcp-job-history-{}",
+            uuid::Uuid::new_v4()
+        ));
         let core = OperationCore::open(&root).unwrap();
         let queued = core
             .store()
@@ -2832,17 +2833,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shown.state, meshharbor_core::JobState::Running);
-        assert!(serde_json::from_str::<Value>(
-            &server
-                .get_job(Parameters(JobIdArgs {
-                    job_id: "job_missing".into(),
-                }))
-                .await
-        )
-        .unwrap()["error"]
-            .as_str()
-            .unwrap()
-            .contains("job_missing"));
+        assert!(
+            serde_json::from_str::<Value>(
+                &server
+                    .get_job(Parameters(JobIdArgs {
+                        job_id: "job_missing".into(),
+                    }))
+                    .await
+            )
+            .unwrap()["error"]
+                .as_str()
+                .unwrap()
+                .contains("job_missing")
+        );
 
         drop(server);
         drop(core);
