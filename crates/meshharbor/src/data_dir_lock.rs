@@ -269,10 +269,9 @@ mod tests {
 
     #[test]
     fn runtime_install_lock_excludes_generation_but_allows_concurrent_readers() {
-        let root = temp_dir();
-        let other_root = root.with_extension("other");
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
 
-        let service = DataDirLock::try_acquire_for_service(&root).unwrap();
         let installer = DataDirLock::try_acquire_for_runtime(&root).unwrap();
         assert_eq!(
             DataDirLock::try_acquire_for_generation(&root)
@@ -286,9 +285,6 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::WouldBlock
         );
-        // Runtime actions on independent MeshHarbor data roots do not block one another.
-        let independent_reader = DataDirLock::try_acquire_for_generation(&other_root).unwrap();
-        drop(independent_reader);
         drop(installer);
 
         let first_reader = DataDirLock::try_acquire_for_generation(&root).unwrap();
@@ -301,9 +297,23 @@ mod tests {
         );
         drop(first_reader);
         drop(second_reader);
+
         let installer_after_readers = DataDirLock::try_acquire_for_runtime(&root).unwrap();
         drop(installer_after_readers);
-        drop(service);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_locks_are_scoped_to_each_data_directory() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
+        let other_root =
+            std::env::temp_dir().join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
+
+        let installer = DataDirLock::try_acquire_for_runtime(&root).unwrap();
+        let independent_reader = DataDirLock::try_acquire_for_generation(&other_root).unwrap();
+        drop(independent_reader);
+        drop(installer);
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(other_root).unwrap();
