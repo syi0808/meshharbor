@@ -224,7 +224,10 @@ mod tests {
         let _ = child.kill();
         child.wait().unwrap();
 
-        assert!(ready.exists(), "child process did not acquire its runtime lock");
+        assert!(
+            ready.exists(),
+            "child process did not acquire its runtime lock"
+        );
         assert_eq!(
             generation_error,
             Some(std::io::ErrorKind::WouldBlock),
