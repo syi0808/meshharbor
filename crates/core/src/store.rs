@@ -827,8 +827,8 @@ mod tests {
     fn imports_immutable_content_addressed_asset_and_lists_it() {
         let dir = temp_dir();
         let store = Store::open(&dir).unwrap();
-        let bytes = b"\x89PNG\r\n\x1a\nimage bytes";
-        let imported = store.import_asset("../draft.png", bytes).unwrap();
+        let bytes = crate::glb::test_png_with_dimensions(1, 1);
+        let imported = store.import_asset("../draft.png", &bytes).unwrap();
         assert_eq!(imported.name, "draft.png");
         assert_eq!(imported.kind, AssetKind::Image);
         assert_eq!(imported.artifacts.len(), 1);
@@ -852,15 +852,14 @@ mod tests {
     fn imports_derived_asset_and_secondary_artifact_atomically() {
         let dir = temp_dir();
         let store = Store::open(&dir).unwrap();
-        let source = store
-            .import_asset("source.png", b"\x89PNG\r\n\x1a\nimage bytes")
-            .unwrap();
-        let preview = b"\x89PNG\r\n\x1a\npreview bytes";
+        let source_bytes = crate::glb::test_png_with_dimensions(1, 1);
+        let source = store.import_asset("source.png", &source_bytes).unwrap();
+        let preview = crate::glb::test_png_with_dimensions(1, 1);
         let quad_obj = b"v 0 0 0\nf 1 2 3 4\n";
         let result = store
             .import_derived_asset_with_artifacts(
                 "retopology.png",
-                preview,
+                &preview,
                 &source.id,
                 serde_json::Value::Null,
                 &[("quad_topology", "model/obj", quad_obj)],
@@ -885,6 +884,22 @@ mod tests {
         let store = Store::open(&dir).unwrap();
         assert!(store.import_asset("", b"not a supported asset").is_err());
         assert!(store.import_asset("../", b"not a supported asset").is_err());
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_malformed_png_before_writing_artifacts_or_asset_rows() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+
+        let error = store
+            .import_asset("truncated.png", b"\x89PNG\r\n\x1a\n")
+            .unwrap_err();
+        assert!(matches!(error, CoreError::InvalidInput(_)));
+        assert!(store.list_assets(10).unwrap().is_empty());
+        assert!(fs::read_dir(&store.artifact_root).unwrap().next().is_none());
+
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }

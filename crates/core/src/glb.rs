@@ -7,8 +7,419 @@ use crate::{
 };
 
 const GLB_MAGIC: &[u8; 4] = b"glTF";
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const JSON_CHUNK: u32 = 0x4e4f_534a;
 const BIN_CHUNK: u32 = 0x004e_4942;
+
+/// Maximum total byte size accepted for any imported asset.
+pub const MAX_ASSET_BYTES: usize = 512 * 1024 * 1024;
+/// Maximum container size accepted for PNG and JPEG inputs.
+pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum pixel dimensions accepted for PNG and JPEG headers.
+pub const MAX_IMAGE_PIXELS: u64 = 16_000_000;
+
+const fn make_png_crc_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut index = 0usize;
+    while index < table.len() {
+        let mut value = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            value = if value & 1 == 1 {
+                (value >> 1) ^ 0xedb8_8320
+            } else {
+                value >> 1
+            };
+            bit += 1;
+        }
+        table[index] = value;
+        index += 1;
+    }
+    table
+}
+
+const PNG_CRC_TABLE: [u32; 256] = make_png_crc_table();
+
+fn png_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        let index = ((crc ^ u32::from(*byte)) & 0xff) as usize;
+        crc = PNG_CRC_TABLE[index] ^ (crc >> 8);
+    }
+    !crc
+}
+
+fn validate_asset_size(size: usize) -> Result<(), CoreError> {
+    if size > MAX_ASSET_BYTES {
+        return Err(CoreError::InvalidInput(format!(
+            "Asset exceeds the {} MiB input limit.",
+            MAX_ASSET_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(())
+}
+
+fn validate_image_size(size: usize) -> Result<(), CoreError> {
+    if size > MAX_IMAGE_BYTES {
+        return Err(CoreError::InvalidInput(format!(
+            "PNG and JPEG inputs must not exceed {} MiB.",
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(())
+}
+
+fn validate_image_dimensions(width: u32, height: u32) -> Result<(), CoreError> {
+    if width == 0 || height == 0 {
+        return Err(CoreError::InvalidInput(
+            "Image dimensions must be greater than zero.".into(),
+        ));
+    }
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| CoreError::InvalidInput("Image dimensions are too large.".into()))?;
+    if pixels > MAX_IMAGE_PIXELS {
+        return Err(CoreError::InvalidInput(format!(
+            "Images must not exceed {} megapixels.",
+            MAX_IMAGE_PIXELS / 1_000_000
+        )));
+    }
+    Ok(())
+}
+
+fn validate_png(bytes: &[u8]) -> Result<(), CoreError> {
+    validate_image_size(bytes.len())?;
+    if !bytes.starts_with(PNG_SIGNATURE) {
+        return Err(CoreError::InvalidInput("PNG signature is invalid.".into()));
+    }
+
+    let mut offset = PNG_SIGNATURE.len();
+    let mut dimensions = None;
+    let mut palette_seen = false;
+    let mut image_data_seen = false;
+    let mut image_data_ended = false;
+    let mut image_data_bytes = 0usize;
+
+    while offset < bytes.len() {
+        let header_end = offset
+            .checked_add(8)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| CoreError::InvalidInput("PNG chunk header is truncated.".into()))?;
+        let chunk_length = usize::try_from(u32::from_be_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .expect("four-byte slice"),
+        ))
+        .map_err(|_| CoreError::InvalidInput("PNG chunk length is not representable.".into()))?;
+        let chunk_data_end = header_end
+            .checked_add(chunk_length)
+            .filter(|end| {
+                end.checked_add(4)
+                    .is_some_and(|crc_end| crc_end <= bytes.len())
+            })
+            .ok_or_else(|| CoreError::InvalidInput("PNG chunk exceeds file bounds.".into()))?;
+        let chunk_end = chunk_data_end + 4;
+        let chunk_type = &bytes[offset + 4..header_end];
+        if !chunk_type.iter().all(u8::is_ascii_alphabetic) || chunk_type[2].is_ascii_lowercase() {
+            return Err(CoreError::InvalidInput("PNG chunk type is invalid.".into()));
+        }
+        let expected_crc = u32::from_be_bytes(
+            bytes[chunk_data_end..chunk_end]
+                .try_into()
+                .expect("four-byte CRC"),
+        );
+        if png_crc32(&bytes[offset + 4..chunk_data_end]) != expected_crc {
+            return Err(CoreError::InvalidInput(
+                "PNG chunk checksum is invalid.".into(),
+            ));
+        }
+        let chunk_data = &bytes[header_end..chunk_data_end];
+
+        if dimensions.is_none() {
+            if chunk_type != b"IHDR" || chunk_data.len() != 13 {
+                return Err(CoreError::InvalidInput(
+                    "PNG must begin with a 13-byte IHDR chunk.".into(),
+                ));
+            }
+            let width = u32::from_be_bytes(chunk_data[0..4].try_into().expect("four-byte width"));
+            let height = u32::from_be_bytes(chunk_data[4..8].try_into().expect("four-byte height"));
+            let bit_depth = chunk_data[8];
+            let color_type = chunk_data[9];
+            let valid_depth = match color_type {
+                0 => matches!(bit_depth, 1 | 2 | 4 | 8 | 16),
+                2 => matches!(bit_depth, 8 | 16),
+                3 => matches!(bit_depth, 1 | 2 | 4 | 8),
+                4 | 6 => matches!(bit_depth, 8 | 16),
+                _ => false,
+            };
+            if !valid_depth || chunk_data[10] != 0 || chunk_data[11] != 0 || chunk_data[12] > 1 {
+                return Err(CoreError::InvalidInput(
+                    "PNG IHDR fields are invalid.".into(),
+                ));
+            }
+            validate_image_dimensions(width, height)?;
+            dimensions = Some((width, height, bit_depth, color_type));
+        } else if chunk_type == b"IHDR" {
+            return Err(CoreError::InvalidInput(
+                "PNG contains duplicate IHDR chunks.".into(),
+            ));
+        }
+
+        if image_data_seen && chunk_type != b"IDAT" {
+            image_data_ended = true;
+        }
+        match chunk_type {
+            b"IHDR" => {}
+            b"PLTE" => {
+                let (_, _, bit_depth, color_type) = dimensions.expect("IHDR validated");
+                if palette_seen
+                    || image_data_seen
+                    || matches!(color_type, 0 | 4)
+                    || !(3..=768).contains(&chunk_data.len())
+                    || !chunk_data.len().is_multiple_of(3)
+                    || (color_type == 3 && chunk_data.len() / 3 > (1usize << bit_depth))
+                {
+                    return Err(CoreError::InvalidInput("PNG PLTE chunk is invalid.".into()));
+                }
+                palette_seen = true;
+            }
+            b"IDAT" => {
+                let (_, _, _, color_type) = dimensions.expect("IHDR validated");
+                if image_data_ended || (color_type == 3 && !palette_seen) {
+                    return Err(CoreError::InvalidInput(
+                        "PNG IDAT ordering is invalid.".into(),
+                    ));
+                }
+                image_data_seen = true;
+                image_data_bytes =
+                    image_data_bytes
+                        .checked_add(chunk_data.len())
+                        .ok_or_else(|| {
+                            CoreError::InvalidInput("PNG image data is too large.".into())
+                        })?;
+            }
+            b"IEND" => {
+                let (_, _, _, color_type) = dimensions.expect("IHDR validated");
+                if !chunk_data.is_empty()
+                    || !image_data_seen
+                    || image_data_bytes == 0
+                    || (color_type == 3 && !palette_seen)
+                    || chunk_end != bytes.len()
+                {
+                    return Err(CoreError::InvalidInput(
+                        "PNG IEND or image data is invalid.".into(),
+                    ));
+                }
+                return Ok(());
+            }
+            _ if chunk_type[0].is_ascii_uppercase() => {
+                return Err(CoreError::InvalidInput(
+                    "PNG contains an unsupported critical chunk.".into(),
+                ));
+            }
+            _ => {}
+        }
+        offset = chunk_end;
+    }
+
+    Err(CoreError::InvalidInput(
+        "PNG is truncated before its IEND chunk.".into(),
+    ))
+}
+
+fn is_jpeg_sof(marker: u8) -> bool {
+    matches!(
+        marker,
+        0xc0 | 0xc1 | 0xc2 | 0xc3 | 0xc5 | 0xc6 | 0xc7 | 0xc9 | 0xca | 0xcb | 0xcd | 0xce | 0xcf
+    )
+}
+
+fn jpeg_sof_details(data: &[u8]) -> Result<(u32, u32, Vec<u8>), CoreError> {
+    if data.len() < 6 || data[0] == 0 || data[0] > 16 {
+        return Err(CoreError::InvalidInput(
+            "JPEG frame header is invalid.".into(),
+        ));
+    }
+    let height = u32::from(u16::from_be_bytes([data[1], data[2]]));
+    let width = u32::from(u16::from_be_bytes([data[3], data[4]]));
+    let component_count = usize::from(data[5]);
+    if component_count == 0 || component_count > 4 || data.len() != 6 + component_count * 3 {
+        return Err(CoreError::InvalidInput(
+            "JPEG frame header is invalid.".into(),
+        ));
+    }
+    validate_image_dimensions(width, height)?;
+    let mut component_ids = Vec::with_capacity(component_count);
+    for component in data[6..].chunks_exact(3) {
+        if component_ids.contains(&component[0]) {
+            return Err(CoreError::InvalidInput(
+                "JPEG frame contains duplicate components.".into(),
+            ));
+        }
+        component_ids.push(component[0]);
+    }
+    Ok((width, height, component_ids))
+}
+
+fn validate_jpeg(bytes: &[u8]) -> Result<(), CoreError> {
+    validate_image_size(bytes.len())?;
+    if bytes.get(..2) != Some(&[0xff, 0xd8][..]) {
+        return Err(CoreError::InvalidInput("JPEG signature is invalid.".into()));
+    }
+
+    let mut offset = 2usize;
+    let mut frame_components: Option<Vec<u8>> = None;
+    let mut scan_seen = false;
+    loop {
+        if offset >= bytes.len() || bytes[offset] != 0xff {
+            return Err(CoreError::InvalidInput(
+                "JPEG marker stream is truncated or invalid.".into(),
+            ));
+        }
+        offset += 1;
+        while offset < bytes.len() && bytes[offset] == 0xff {
+            offset += 1;
+        }
+        let marker = *bytes
+            .get(offset)
+            .ok_or_else(|| CoreError::InvalidInput("JPEG marker is truncated.".into()))?;
+        offset += 1;
+
+        match marker {
+            0xd9 if frame_components.is_some() && scan_seen => {
+                if offset == bytes.len() {
+                    return Ok(());
+                }
+                return Err(CoreError::InvalidInput(
+                    "JPEG contains trailing data after EOI.".into(),
+                ));
+            }
+            0xd9 => {
+                return Err(CoreError::InvalidInput(
+                    "JPEG ends before a complete image scan.".into(),
+                ));
+            }
+            0xd8 => {
+                return Err(CoreError::InvalidInput(
+                    "JPEG contains an unexpected start marker.".into(),
+                ));
+            }
+            0x00 | 0xd0..=0xd7 => {
+                return Err(CoreError::InvalidInput("JPEG marker is invalid.".into()));
+            }
+            0x01 => continue,
+            _ => {}
+        }
+
+        let length_end = offset
+            .checked_add(2)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| CoreError::InvalidInput("JPEG segment length is truncated.".into()))?;
+        let segment_length = usize::from(u16::from_be_bytes(
+            bytes[offset..length_end].try_into().expect("length"),
+        ));
+        if segment_length < 2 {
+            return Err(CoreError::InvalidInput(
+                "JPEG segment length is invalid.".into(),
+            ));
+        }
+        let segment_end = offset
+            .checked_add(segment_length)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| CoreError::InvalidInput("JPEG segment exceeds file bounds.".into()))?;
+        let segment_data = &bytes[length_end..segment_end];
+
+        if is_jpeg_sof(marker) {
+            if frame_components.is_some() {
+                return Err(CoreError::InvalidInput(
+                    "JPEG contains duplicate frame headers.".into(),
+                ));
+            }
+            frame_components = Some(jpeg_sof_details(segment_data)?.2);
+        }
+
+        if marker == 0xda {
+            let components = frame_components.as_ref().ok_or_else(|| {
+                CoreError::InvalidInput("JPEG scan appears before its frame header.".into())
+            })?;
+            let scan_components = segment_data.first().copied().map(usize::from).unwrap_or(0);
+            if scan_components == 0
+                || scan_components > components.len()
+                || segment_data.len() != 4 + scan_components * 2
+            {
+                return Err(CoreError::InvalidInput(
+                    "JPEG scan header is invalid.".into(),
+                ));
+            }
+            let mut selected_components = Vec::with_capacity(scan_components);
+            for component in segment_data[1..1 + scan_components * 2].chunks_exact(2) {
+                if !components.contains(&component[0])
+                    || selected_components.contains(&component[0])
+                {
+                    return Err(CoreError::InvalidInput(
+                        "JPEG scan component list is invalid.".into(),
+                    ));
+                }
+                selected_components.push(component[0]);
+            }
+            scan_seen = true;
+            offset = segment_end;
+            let mut scan_data_bytes = 0usize;
+            loop {
+                let next_marker_offset = bytes[offset..]
+                    .iter()
+                    .position(|byte| *byte == 0xff)
+                    .map(|relative| offset + relative)
+                    .ok_or_else(|| {
+                        CoreError::InvalidInput("JPEG scan is truncated before EOI.".into())
+                    })?;
+                scan_data_bytes = scan_data_bytes
+                    .checked_add(next_marker_offset - offset)
+                    .ok_or_else(|| CoreError::InvalidInput("JPEG scan is too large.".into()))?;
+                let mut marker_offset = next_marker_offset + 1;
+                while marker_offset < bytes.len() && bytes[marker_offset] == 0xff {
+                    marker_offset += 1;
+                }
+                let scan_marker = *bytes.get(marker_offset).ok_or_else(|| {
+                    CoreError::InvalidInput("JPEG scan marker is truncated.".into())
+                })?;
+                match scan_marker {
+                    0x00 => {
+                        scan_data_bytes = scan_data_bytes.saturating_add(1);
+                        offset = marker_offset + 1;
+                    }
+                    0xd0..=0xd7 => {
+                        offset = marker_offset + 1;
+                    }
+                    0xd9 if scan_data_bytes > 0 => {
+                        if marker_offset + 1 == bytes.len() {
+                            return Ok(());
+                        }
+                        return Err(CoreError::InvalidInput(
+                            "JPEG contains trailing data after EOI.".into(),
+                        ));
+                    }
+                    0xd9 => {
+                        return Err(CoreError::InvalidInput(
+                            "JPEG scan contains no image data.".into(),
+                        ));
+                    }
+                    _ if scan_data_bytes > 0 => {
+                        offset = next_marker_offset;
+                        break;
+                    }
+                    _ => {
+                        return Err(CoreError::InvalidInput(
+                            "JPEG scan contains no image data.".into(),
+                        ));
+                    }
+                }
+            }
+        } else {
+            offset = segment_end;
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AssetDescriptor {
@@ -189,15 +600,45 @@ impl GlbFile {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_png_with_dimensions(width: u32, height: u32) -> Vec<u8> {
+    fn append_chunk(bytes: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        bytes.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+        let crc_start = bytes.len();
+        bytes.extend_from_slice(kind);
+        bytes.extend_from_slice(data);
+        bytes.extend_from_slice(&png_crc32(&bytes[crc_start..]).to_be_bytes());
+    }
+
+    let mut bytes = PNG_SIGNATURE.to_vec();
+    let mut ihdr = [0u8; 13];
+    ihdr[0..4].copy_from_slice(&width.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    append_chunk(&mut bytes, b"IHDR", &ihdr);
+
+    let idat = [
+        0x78, 0x01, 0x01, 0x05, 0x00, 0xfa, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00,
+        0x01,
+    ];
+    append_chunk(&mut bytes, b"IDAT", &idat);
+    append_chunk(&mut bytes, b"IEND", &[]);
+    bytes
+}
+
 pub fn inspect_asset(filename: &str, bytes: &[u8]) -> Result<AssetDescriptor, CoreError> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    validate_asset_size(bytes.len())?;
+    if bytes.starts_with(PNG_SIGNATURE) {
+        validate_png(bytes)?;
         return Ok(AssetDescriptor {
             kind: AssetKind::Image,
             mime_type: "image/png",
             metadata: json!({ "format": "png" }),
         });
     }
-    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+    if bytes.starts_with(&[0xff, 0xd8]) {
+        validate_jpeg(bytes)?;
         return Ok(AssetDescriptor {
             kind: AssetKind::Image,
             mime_type: "image/jpeg",
@@ -2357,6 +2798,55 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, CoreError> {
 mod tests {
     use super::*;
 
+    fn minimal_png(width: u32, height: u32) -> Vec<u8> {
+        test_png_with_dimensions(width, height)
+    }
+
+    fn append_jpeg_segment(bytes: &mut Vec<u8>, marker: u8, data: &[u8]) {
+        bytes.extend_from_slice(&[0xff, marker]);
+        bytes.extend_from_slice(&u16::try_from(data.len() + 2).unwrap().to_be_bytes());
+        bytes.extend_from_slice(data);
+    }
+
+    fn minimal_jpeg(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![0xff, 0xd8];
+
+        let mut quantization = vec![0u8; 65];
+        quantization[1..].fill(1);
+        append_jpeg_segment(&mut bytes, 0xdb, &quantization);
+
+        let width_bytes = width.to_be_bytes();
+        let height_bytes = height.to_be_bytes();
+        append_jpeg_segment(
+            &mut bytes,
+            0xc0,
+            &[
+                8,
+                height_bytes[0],
+                height_bytes[1],
+                width_bytes[0],
+                width_bytes[1],
+                1,
+                1,
+                0x11,
+                0,
+            ],
+        );
+
+        let bits = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut huffman = vec![0x00];
+        huffman.extend_from_slice(&bits);
+        huffman.push(0);
+        huffman.push(0x10);
+        huffman.extend_from_slice(&bits);
+        huffman.push(0);
+        append_jpeg_segment(&mut bytes, 0xc4, &huffman);
+
+        append_jpeg_segment(&mut bytes, 0xda, &[1, 1, 0, 0, 63, 0]);
+        bytes.extend_from_slice(&[0x3f, 0xff, 0xd9]);
+        bytes
+    }
+
     fn pack_glb(mut document: Value, mut binary: Vec<u8>) -> Vec<u8> {
         while !binary.len().is_multiple_of(4) {
             binary.push(0);
@@ -2561,21 +3051,46 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_images_by_signature() {
-        assert_eq!(
-            inspect_asset("photo.png", b"\x89PNG\r\n\x1a\nrest")
-                .unwrap()
-                .kind,
-            AssetKind::Image
-        );
-        assert_eq!(
-            inspect_asset("photo.jpg", &[0xff, 0xd8, 0xff, 0xe0])
-                .unwrap()
-                .mime_type,
-            "image/jpeg"
-        );
+    fn recognizes_structurally_complete_png_and_jpeg_images() {
+        let png = minimal_png(1, 1);
+        let png_asset = inspect_asset("photo.png", &png).unwrap();
+        assert_eq!(png_asset.kind, AssetKind::Image);
+        assert_eq!(png_asset.mime_type, "image/png");
+
+        let jpeg = minimal_jpeg(1, 1);
+        let jpeg_asset = inspect_asset("photo.jpg", &jpeg).unwrap();
+        assert_eq!(jpeg_asset.kind, AssetKind::Image);
+        assert_eq!(jpeg_asset.mime_type, "image/jpeg");
     }
 
+    #[test]
+    fn rejects_truncated_or_corrupt_image_containers() {
+        let png = minimal_png(1, 1);
+        assert!(inspect_asset("truncated.png", &png[..PNG_SIGNATURE.len()]).is_err());
+        assert!(inspect_asset("missing-iend.png", &png[..png.len() - 12]).is_err());
+
+        let mut corrupt_png = png;
+        corrupt_png[29] ^= 1;
+        assert!(inspect_asset("corrupt.png", &corrupt_png).is_err());
+
+        let jpeg = minimal_jpeg(1, 1);
+        assert!(inspect_asset("truncated.jpg", &jpeg[..jpeg.len() - 2]).is_err());
+
+        let mut trailing_jpeg = jpeg;
+        trailing_jpeg.push(0);
+        assert!(inspect_asset("trailing.jpg", &trailing_jpeg).is_err());
+    }
+
+    #[test]
+    fn rejects_images_above_declared_size_and_pixel_limits() {
+        assert!(validate_image_size(MAX_IMAGE_BYTES).is_ok());
+        assert!(validate_image_size(MAX_IMAGE_BYTES + 1).is_err());
+        assert!(validate_asset_size(MAX_ASSET_BYTES).is_ok());
+        assert!(validate_asset_size(MAX_ASSET_BYTES + 1).is_err());
+
+        assert!(inspect_asset("too-large.png", &minimal_png(16_000_001, 1)).is_err());
+        assert!(inspect_asset("too-large.jpg", &minimal_jpeg(u16::MAX, u16::MAX)).is_err());
+    }
     #[test]
     fn parses_glb_and_counts_triangle_indices() {
         let bytes = grid_glb(2);

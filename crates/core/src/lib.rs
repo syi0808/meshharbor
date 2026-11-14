@@ -19,9 +19,9 @@ mod uv_bootstrap;
 pub use cuda_runtime::Pixal3dCudaRuntimeManager;
 pub use generation::{GenerationOptions, GenerationResult, Pixal3dMlxRuntime, RuntimeReadiness};
 pub use glb::{
-    AssetDescriptor, CompressionReport, MeshCleanupReport, RenderOptimizationReport,
-    SimplificationReport, cleanup_glb, compress_mesh_glb, inspect_asset, optimize_render_glb,
-    retopology_glb, simplify_glb,
+    AssetDescriptor, CompressionReport, MAX_ASSET_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS,
+    MeshCleanupReport, RenderOptimizationReport, SimplificationReport, cleanup_glb,
+    compress_mesh_glb, inspect_asset, optimize_render_glb, retopology_glb, simplify_glb,
 };
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
 pub use operation::{
