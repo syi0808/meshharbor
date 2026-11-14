@@ -11,8 +11,8 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -683,15 +683,35 @@ mod tests {
         let png = crate::glb::test_png_with_dimensions(1, 1);
         let sha256 = sha256_hex(&png);
         assert!(
+            validate_stored_source_image("source.png", "image/png", &sha256, &sha256, &png).is_ok()
+        );
+    }
+
+    #[test]
+    fn asset_and_artifact_hashes_are_checked_independently() {
+        let png = crate::glb::test_png_with_dimensions(1, 1);
+        let sha256 = sha256_hex(&png);
+
+        assert!(matches!(
+            validate_stored_source_image(
+                "source.png",
+                "image/png",
+                "different-asset-digest",
+                &sha256,
+                &png
+            ),
+            Err(CoreError::Conflict(_))
+        ));
+        assert!(matches!(
             validate_stored_source_image(
                 "source.png",
                 "image/png",
                 &sha256,
-                &sha256,
+                "different-artifact-digest",
                 &png
-            )
-            .is_ok()
-        );
+            ),
+            Err(CoreError::Conflict(_))
+        ));
     }
 
     #[test]
@@ -699,14 +719,9 @@ mod tests {
         let mut corrupt = crate::glb::test_png_with_dimensions(1, 1);
         corrupt[29] ^= 1;
         let sha256 = sha256_hex(&corrupt);
-        let error = validate_stored_source_image(
-            "legacy.png",
-            "image/png",
-            &sha256,
-            &sha256,
-            &corrupt,
-        )
-        .unwrap_err();
+        let error =
+            validate_stored_source_image("legacy.png", "image/png", &sha256, &sha256, &corrupt)
+                .unwrap_err();
         assert!(matches!(error, CoreError::InvalidInput(_)));
     }
 
