@@ -3293,16 +3293,12 @@ mod tests {
         let moved = root.join("original.partial");
         let replacement = b"replacement from a competing writer";
 
-        let error = write_cli_output_with(
-            &destination,
-            b"original output",
-            |file, path, bytes| {
-                std::io::Write::write_all(file, &bytes[..8])?;
-                std::fs::rename(path, &moved)?;
-                std::fs::write(path, replacement)?;
-                Err(std::io::Error::other("injected write failure"))
-            },
-        )
+        let error = write_cli_output_with(&destination, b"original output", |file, path, bytes| {
+            std::io::Write::write_all(file, &bytes[..8])?;
+            std::fs::rename(path, &moved)?;
+            std::fs::write(path, replacement)?;
+            Err(std::io::Error::other("injected write failure"))
+        })
         .unwrap_err();
         match error {
             CoreError::Io(error) => assert!(error.to_string().contains("may be incomplete")),
