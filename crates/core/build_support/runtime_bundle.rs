@@ -717,5 +717,12 @@ mod tests {
         let prepared = fixture.prepare().unwrap();
         assert!(prepared.generated_source.contains("PIXAL3D_CUDA_FILES"));
         assert!(!prepared.generated_source.contains("generated.pyc"));
+        assert!(prepared.watched_files.contains(&fixture.asset_path()));
+        assert!(
+            prepared
+                .watched_directories
+                .iter()
+                .any(|directory| directory.ends_with("upstream"))
+        );
     }
 }
