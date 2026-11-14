@@ -17,4 +17,6 @@ uuid.workspace = true
 meshharbor-atlas-baker = { path = "../atlas-baker" }
 sigstore-verify = "=0.15.1"
 
-
+[build-dependencies]
+serde_json.workspace = true
+sha2.workspace = true

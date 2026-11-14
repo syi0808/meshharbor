@@ -51,3 +51,56 @@ pub use retopology::{
 };
 pub use runtime::{Pixal3dRuntimeManager, RuntimeSetupReport};
 pub use store::{Artifact, Asset, AssetKind, CoreError, CoreResult, Job, JobState, Store};
+
+#[cfg(test)]
+#[path = "../build_support/runtime_bundle.rs"]
+mod runtime_bundle_build_tests;
+
+#[cfg(test)]
+mod runtime_bundle_integrity_tests {
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn compiled_runtime_assets_match_the_pinned_allowlist() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../runtime_bundle_manifest.json")).unwrap();
+        let files = manifest["files"].as_array().unwrap();
+        let mut expected = BTreeMap::new();
+        for file in files {
+            let backend = file["backend"].as_str().unwrap();
+            let path = file["path"].as_str().unwrap();
+            let key = format!("{backend}/{path}");
+            let hash = file["sha256"].as_str().unwrap().to_owned();
+            let size = file["size_bytes"].as_u64().unwrap();
+            assert!(
+                expected.insert(key.clone(), (hash, size)).is_none(),
+                "duplicate {key}"
+            );
+        }
+
+        let mut compiled = BTreeMap::new();
+        for (backend, assets) in [
+            ("cuda", crate::runtime_bundle::PIXAL3D_CUDA_FILES),
+            ("mlx", crate::runtime_bundle::PIXAL3D_MLX_FILES),
+        ] {
+            for (path, bytes) in assets {
+                let key = format!("{backend}/{path}");
+                let actual = (sha256_hex(bytes), bytes.len() as u64);
+                assert!(
+                    compiled.insert(key.clone(), actual).is_none(),
+                    "duplicate {key}"
+                );
+            }
+        }
+
+        assert_eq!(compiled, expected);
+    }
+}
