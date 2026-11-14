@@ -329,7 +329,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Request a guarded installation of the pinned QuadriFlow backend. The current build has an empty release manifest and does not verify release signatures/provenance, so it fails closed without downloading or writing a QuadriFlow installation. Unsigned temporary Actions artifacts are never installed."
+        description = "Request a guarded installation of the pinned QuadriFlow backend. An in-process verifier checks Sigstore signature/provenance and the executable digest against the trusted manifest before any download or installation; the current manifest is empty, so this request fails closed without network or backend-directory writes. Unsigned temporary Actions artifacts are never installed."
     )]
     async fn install_quadriflow_backend(&self) -> String {
         let core = self.core.clone();
