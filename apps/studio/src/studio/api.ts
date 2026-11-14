@@ -30,6 +30,12 @@ export function canInspectJobHistoryRecord(
   return !isActiveJob(trackedJob) || trackedJob.id === historyJob.id;
 }
 
+export function preferTrackedTerminalJob(trackedJob: Job | null, historyJob: Job): Job {
+  return trackedJob?.id === historyJob.id && !isActiveJob(trackedJob)
+    ? trackedJob
+    : historyJob;
+}
+
 export function shouldDeferTrackedJobCompletion(trackedJob: Job | null, historyJob: Job): boolean {
   return isActiveJob(trackedJob)
     && trackedJob.id === historyJob.id

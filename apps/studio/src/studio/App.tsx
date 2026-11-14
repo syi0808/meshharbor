@@ -6,6 +6,7 @@ import {
   isQueuedJobCancellable,
   jobPollRetryDelay,
   LatestRequestGuard,
+  preferTrackedTerminalJob,
   shouldDeferTrackedJobCompletion,
   MeshHarborApi,
   quadTopologyArtifact,
@@ -125,17 +126,18 @@ export function App() {
     setError(null);
     setNotice(null);
     try {
-      const latest = await api.job(jobId);
+      const response = await api.job(jobId);
       if (!historySelectionGuard.current.isCurrent(requestId)) return;
-      if (shouldDeferTrackedJobCompletion(jobRef.current, latest)) {
+      if (shouldDeferTrackedJobCompletion(jobRef.current, response)) {
         recentJobsRequestGuard.current.invalidate();
-        setRecentJobs((current) => [latest, ...current.filter((record) => record.id !== latest.id)]
+        setRecentJobs((current) => [response, ...current.filter((record) => record.id !== response.id)]
           .sort((left, right) => Number(right.updated_at) - Number(left.updated_at)
             || right.id.localeCompare(left.id))
           .slice(0, 20));
         setNotice('The live status monitor will apply this result and refresh runtime readiness. No status tracking was stopped.');
         return;
       }
+      const latest = preferTrackedTerminalJob(jobRef.current, response);
       if (!canInspectJobHistoryRecord(jobRef.current, latest)) {
         setNotice('Wait for the active job to finish before opening a different saved result. Its progress and cancellation controls will remain attached.');
         return;
@@ -159,13 +161,12 @@ export function App() {
         .slice(0, 20));
 
       if (active) {
-        if (jobRef.current?.id === latest.id) setJob(latest);
         if (latest.input_asset_id) {
           setSelectedId(latest.input_asset_id);
           setActiveView('source');
         }
         setNotice(jobRef.current?.id === latest.id
-          ? `Refreshing the current ${latest.operation} job. Its state is persisted locally.`
+          ? `The live monitor remains attached to the current ${latest.operation} job; this check did not replace its tracking.`
           : `Last saved state: ${latest.state} (${latest.progress}%). This read-only check did not resume work. Refresh to check again. A saved active state may be stale after an unexpected engine exit; stop every REST/MCP process using this data directory and run meshharbor jobs recover-interrupted --confirm-no-running-meshharbor before retrying.`);
         return;
       }
