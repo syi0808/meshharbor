@@ -623,10 +623,8 @@ mod tests {
 
     #[test]
     fn prepared_entrypoints_are_isolated_per_generation_source() {
-        let root = std::env::temp_dir().join(format!(
-            "meshharbor-mlx-entrypoints-{}",
-            Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-mlx-entrypoints-{}", Uuid::new_v4()));
         let runtime_root = root.join("runtime");
         let source_one = root.join("source-one");
         let source_two = root.join("source-two");
@@ -663,8 +661,14 @@ mod tests {
         let prepared_two = std::fs::read_to_string(entrypoint_two.path()).unwrap();
         assert_eq!(prepared_one, expected_managed_source(&source_one_text));
         assert_eq!(prepared_two, expected_managed_source(&source_two_text));
-        assert_eq!(std::fs::read_to_string(&upstream_one).unwrap(), source_one_text);
-        assert_eq!(std::fs::read_to_string(&upstream_two).unwrap(), source_two_text);
+        assert_eq!(
+            std::fs::read_to_string(&upstream_one).unwrap(),
+            source_one_text
+        );
+        assert_eq!(
+            std::fs::read_to_string(&upstream_two).unwrap(),
+            source_two_text
+        );
 
         drop(entrypoint_one);
         assert!(!path_one.exists());
@@ -680,10 +684,8 @@ mod tests {
         use std::sync::{Arc, Barrier};
 
         const CONCURRENCY: usize = 8;
-        let root = std::env::temp_dir().join(format!(
-            "meshharbor-mlx-entrypoint-race-{}",
-            Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-mlx-entrypoint-race-{}", Uuid::new_v4()));
         let runtime_root = root.join("runtime");
         let source_root = root.join("source");
         std::fs::create_dir_all(&runtime_root).unwrap();
@@ -721,7 +723,10 @@ mod tests {
             let prepared = std::fs::read_to_string(entry.path()).unwrap();
             assert_eq!(prepared, expected);
         }
-        let paths: Vec<_> = entries.iter().map(|entry| entry.path().to_path_buf()).collect();
+        let paths: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.path().to_path_buf())
+            .collect();
         drop(entries);
         assert!(paths.iter().all(|path| !path.exists()));
         std::fs::remove_dir_all(root).unwrap();
