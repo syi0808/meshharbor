@@ -2966,7 +2966,8 @@ mod tests {
         assert_eq!(uv_custom["resolution"], 2048);
         assert_eq!(uv_custom["padding"], 12);
         let render = process_mesh_cli_parameters("render.optimize", None, None, None, Some(1.2));
-        assert_eq!(render["overdraw_threshold"], 1.2);
+        let forwarded_threshold = render["overdraw_threshold"].as_f64().unwrap();
+        assert!((forwarded_threshold - 1.2).abs() < 0.000001);
     }
 
     #[test]
