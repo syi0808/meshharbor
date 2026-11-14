@@ -139,6 +139,13 @@ enum BackendCommand {
 
 #[derive(Debug, Subcommand)]
 enum JobsCommand {
+    /// List recent persisted job records without resuming or changing them.
+    List {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Show the last persisted state for one job without resuming it.
+    Show { job_id: String },
     /// Mark unfinished jobs as failed after stopping every MeshHarbor process using this data directory.
     RecoverInterrupted {
         #[arg(
@@ -228,6 +235,12 @@ struct GenerateArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct AssetListArgs {
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct JobListArgs {
     #[serde(default = "default_limit")]
     limit: usize,
 }
@@ -356,6 +369,17 @@ impl McpServer {
             Ok(assets) => serde_json::to_string_pretty(&assets)
                 .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
             Err(error) => format!("{{\"error\":\"{}\"}}", error),
+        }
+    }
+
+    #[tool(
+        description = "List the newest persisted MeshHarbor jobs (default 50, maximum 200). This is read-only: it never resumes or modifies a job."
+    )]
+    async fn list_jobs(&self, params: Parameters<JobListArgs>) -> String {
+        match read_job_history(&self.core, params.0.limit) {
+            Ok(jobs) => serde_json::to_string_pretty(&jobs)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+            Err(error) => json!({"error": error.to_string()}).to_string(),
         }
     }
 
@@ -586,10 +610,9 @@ impl McpServer {
         description = "Get the latest state, progress, result, and failure details for a MeshHarbor job."
     )]
     async fn get_job(&self, params: Parameters<JobIdArgs>) -> String {
-        match self.core.store().get_job(&params.0.job_id) {
-            Ok(Some(job)) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-            Ok(None) => json!({"error":"Job was not found."}).to_string(),
+        match read_job_record(&self.core, &params.0.job_id) {
+            Ok(job) => serde_json::to_string_pretty(&job)
+                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
             Err(error) => json!({"error": error.to_string()}).to_string(),
         }
     }
@@ -815,6 +838,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Jobs { command } => match command {
+            JobsCommand::List { limit } => {
+                let core = OperationCore::open(&root)?;
+                let jobs = read_job_history(&core, limit)?;
+                println!("{}", serde_json::to_string_pretty(&jobs)?);
+            }
+            JobsCommand::Show { job_id } => {
+                let core = OperationCore::open(&root)?;
+                let job = read_job_record(&core, &job_id)?;
+                println!("{}", serde_json::to_string_pretty(&job)?);
+            }
             JobsCommand::RecoverInterrupted { .. } => {
                 let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_recovery(&root)?;
                 let core = OperationCore::open(&root)?;
@@ -1320,29 +1353,34 @@ async fn api_create_job(
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
+fn read_job_history(
+    core: &OperationCore,
+    limit: usize,
+) -> Result<Vec<meshharbor_core::Job>, CoreError> {
+    core.store().list_jobs(limit.clamp(1, 200))
+}
+
+fn read_job_record(core: &OperationCore, job_id: &str) -> Result<meshharbor_core::Job, CoreError> {
+    core.store()
+        .get_job(job_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("Job '{job_id}' was not found.")))
+}
+
 async fn api_list_jobs(
     State(state): State<AppState>,
     Query(query): Query<LimitQuery>,
 ) -> Result<Json<Vec<meshharbor_core::Job>>, ApiError> {
-    Ok(Json(
-        state.core.store().list_jobs(query.limit.unwrap_or(50))?,
-    ))
+    Ok(Json(read_job_history(
+        &state.core,
+        query.limit.unwrap_or(50),
+    )?))
 }
 
 async fn api_get_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<meshharbor_core::Job>, ApiError> {
-    state
-        .core
-        .store()
-        .get_job(&job_id)?
-        .map(Json)
-        .ok_or_else(|| {
-            ApiError(CoreError::NotFound(format!(
-                "Job '{job_id}' was not found."
-            )))
-        })
+    Ok(Json(read_job_record(&state.core, &job_id)?))
 }
 
 async fn api_cancel_job(
@@ -2672,6 +2710,148 @@ mod tests {
         let installer_after_readers = acquire_runtime_write_lock(&root).unwrap();
         drop(installer_after_readers);
         drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn jobs_cli_parses_read_only_history_commands() {
+        let default_list = Cli::try_parse_from(["meshharbor", "jobs", "list"]).unwrap();
+        assert!(matches!(
+            default_list.command,
+            Command::Jobs {
+                command: JobsCommand::List { limit: 50 }
+            }
+        ));
+        let bounded_list =
+            Cli::try_parse_from(["meshharbor", "jobs", "list", "--limit", "201"]).unwrap();
+        assert!(matches!(
+            bounded_list.command,
+            Command::Jobs {
+                command: JobsCommand::List { limit: 201 }
+            }
+        ));
+        let show =
+            Cli::try_parse_from(["meshharbor", "jobs", "show", "job_example"]).unwrap();
+        assert!(matches!(
+            show.command,
+            Command::Jobs {
+                command: JobsCommand::Show { job_id }
+            } if job_id == "job_example"
+        ));
+    }
+
+    #[test]
+    fn job_history_queries_are_read_only_and_persist_across_reopen() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-job-history-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let queued = core
+            .store()
+            .create_job("mesh.cleanup", None, &json!({}))
+            .unwrap();
+        let running = core
+            .store()
+            .create_job("mesh.simplify", None, &json!({}))
+            .unwrap();
+        core.store()
+            .update_job(
+                &running.id,
+                meshharbor_core::JobState::Running,
+                25,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let before = read_job_history(&core, 200).unwrap();
+        assert_eq!(read_job_history(&core, 0).unwrap().len(), 1);
+        assert_eq!(
+            read_job_record(&core, "job_missing")
+                .unwrap_err()
+                .to_string(),
+            "not found: Job 'job_missing' was not found."
+        );
+        for job in &before {
+            let current = read_job_record(&core, &job.id).unwrap();
+            assert_eq!(current.state, job.state);
+            assert_eq!(current.progress, job.progress);
+            assert_eq!(current.updated_at, job.updated_at);
+        }
+
+        drop(core);
+        let reopened = OperationCore::open(&root).unwrap();
+        let persisted = read_job_history(&reopened, 200).unwrap();
+        assert!(persisted.iter().any(|job| job.id == queued.id));
+        let persisted_running = read_job_record(&reopened, &running.id).unwrap();
+        assert_eq!(persisted_running.state, meshharbor_core::JobState::Running);
+        assert_eq!(persisted_running.progress, 25);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_list_jobs_returns_json_and_does_not_resume_saved_jobs() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-mcp-job-history-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let queued = core
+            .store()
+            .create_job("mesh.cleanup", None, &json!({}))
+            .unwrap();
+        let running = core
+            .store()
+            .create_job("mesh.simplify", None, &json!({}))
+            .unwrap();
+        core.store()
+            .update_job(
+                &running.id,
+                meshharbor_core::JobState::Running,
+                25,
+                None,
+                None,
+            )
+            .unwrap();
+        let server = McpServer::new(core.clone(), Arc::new(Semaphore::new(1)));
+
+        let response = server
+            .list_jobs(Parameters(JobListArgs { limit: 200 }))
+            .await;
+        let listed: Vec<meshharbor_core::Job> = serde_json::from_str(&response).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|job| job.id == queued.id));
+        let listed_running = listed.iter().find(|job| job.id == running.id).unwrap();
+        assert_eq!(listed_running.state, meshharbor_core::JobState::Running);
+        assert_eq!(listed_running.progress, 25);
+
+        let shown: meshharbor_core::Job = serde_json::from_str(
+            &server
+                .get_job(Parameters(JobIdArgs {
+                    job_id: running.id.clone(),
+                }))
+                .await,
+        )
+        .unwrap();
+        assert_eq!(shown.state, meshharbor_core::JobState::Running);
+        assert!(serde_json::from_str::<Value>(
+            &server
+                .get_job(Parameters(JobIdArgs {
+                    job_id: "job_missing".into(),
+                }))
+                .await
+        )
+        .unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("job_missing"));
+
+        drop(server);
+        drop(core);
+        let reopened = OperationCore::open(&root).unwrap();
+        assert_eq!(
+            read_job_record(&reopened, &running.id).unwrap().state,
+            meshharbor_core::JobState::Running
+        );
+        drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
 
