@@ -837,11 +837,7 @@ fn verify_existing_content_addressed(
     expected_sha256: &str,
 ) -> CoreResult<()> {
     let description = format!("Content-addressed artifact '{expected_sha256}'");
-    let existing = read_bounded_artifact_path(
-        path,
-        expected_bytes.len() as u64,
-        &description,
-    )?;
+    let existing = read_bounded_artifact_path(path, expected_bytes.len() as u64, &description)?;
     if existing != expected_bytes {
         return Err(CoreError::Conflict(format!(
             "{description} does not match the expected content; existing data was left untouched."
@@ -1039,16 +1035,17 @@ mod tests {
             connection
                 .execute(
                     "UPDATE artifacts SET byte_size=?1 WHERE id=?2",
-                    rusqlite::params![
-                        MAX_STORED_ARTIFACT_BYTES as i64 + 1,
-                        &artifact.id
-                    ],
+                    rusqlite::params![MAX_STORED_ARTIFACT_BYTES as i64 + 1, &artifact.id],
                 )
                 .unwrap();
         }
 
         let error = store.read_artifact(&artifact.id).unwrap_err();
-        assert!(error.to_string().contains("above the 512 MiB artifact limit"));
+        assert!(
+            error
+                .to_string()
+                .contains("above the 512 MiB artifact limit")
+        );
 
         drop(store);
         fs::remove_dir_all(dir).unwrap();
@@ -1067,7 +1064,11 @@ mod tests {
         fs::write(&path, &corrupted).unwrap();
 
         let error = store.import_asset("same-content.png", &bytes).unwrap_err();
-        assert!(error.to_string().contains("existing data was left untouched"));
+        assert!(
+            error
+                .to_string()
+                .contains("existing data was left untouched")
+        );
         assert_eq!(fs::read(&path).unwrap(), corrupted);
         assert_eq!(store.list_assets(10).unwrap().len(), 1);
 
