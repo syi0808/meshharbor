@@ -702,7 +702,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-
     #[cfg(unix)]
     fn write_test_script(path: &Path, contents: &str) {
         use std::os::unix::fs::PermissionsExt;
@@ -797,7 +796,10 @@ esac
             .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU")
             .unwrap();
         assert_eq!(report.backend_id, "pixal3d-cuda");
-        assert_eq!(report.status, "python_environment_ready_models_not_installed");
+        assert_eq!(
+            report.status,
+            "python_environment_ready_models_not_installed"
+        );
         assert!(report.runtime_root.starts_with(&data_root));
         assert!(report.python.starts_with(&runtime_root));
         assert!(report.lockfile.is_file());
@@ -807,10 +809,13 @@ esac
         let uv_log = std::fs::read_to_string(manager.cache_path().join("uv.log")).unwrap();
         assert!(uv_log.lines().all(|line| {
             let fields: Vec<_> = line.split('|').collect();
-            fields.len() == 5 && fields[2].is_empty() && fields[3].is_empty()
+            fields.len() == 5
+                && fields[2].is_empty()
+                && fields[3].is_empty()
                 && fields[4].starts_with(&manager.home_path().to_string_lossy().to_string())
         }));
-        let python_log = std::fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
+        let python_log =
+            std::fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
         assert!(python_log.lines().all(|line| {
             let fields: Vec<_> = line.split('|').collect();
             fields.len() == 4
@@ -874,17 +879,22 @@ exit 0
         python_script = python_script.replace("PAYLOAD_PLACEHOLDER", &payload);
         write_test_script(&fake_python, &python_script);
 
-        let partial = manager
-            .hf_home()
-            .join("hub/.cache/download/partial");
+        let partial = manager.hf_home().join("hub/.cache/download/partial");
         assert!(manager.install_models_with_python(&fake_python).is_err());
-        assert_eq!(std::fs::read_to_string(&partial).unwrap(), "partial checkpoint bytes");
+        assert_eq!(
+            std::fs::read_to_string(&partial).unwrap(),
+            "partial checkpoint bytes"
+        );
 
         let report = manager.install_models_with_python(&fake_python).unwrap();
         assert_eq!(report.status, "model_files_ready");
         assert!(manager.readiness().models_downloaded);
-        assert_eq!(std::fs::read_to_string(&partial).unwrap(), "partial checkpoint bytes");
-        let python_log = std::fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&partial).unwrap(),
+            "partial checkpoint bytes"
+        );
+        let python_log =
+            std::fs::read_to_string(manager.home_path().join("python-env.log")).unwrap();
         assert!(python_log.lines().all(|line| {
             let fields: Vec<_> = line.split('|').collect();
             fields.len() == 4
@@ -900,5 +910,4 @@ exit 0
         assert!(runtime_root.starts_with(&data_root));
         std::fs::remove_dir_all(root).unwrap();
     }
-
 }
