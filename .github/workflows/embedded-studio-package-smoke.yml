@@ -88,6 +88,11 @@ jobs:
           CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
         run: cargo build --locked --release --package meshharbor --bin meshharbor
 
+      - name: Test data-directory lock behavior
+        env:
+          CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
+        run: cargo test --locked --release --package meshharbor --bin meshharbor data_dir_lock::tests
+
       - name: Launch binary and verify embedded Studio assets
         shell: bash
         env:

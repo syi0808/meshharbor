@@ -28,6 +28,10 @@ include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
 
 mod data_dir_lock;
 
+/// Prevents fork/exec lock tests from inheriting another test's live advisory-lock descriptor.
+#[cfg(test)]
+pub(crate) static DATA_DIR_LOCK_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Parser)]
 #[command(
     name = "meshharbor",
@@ -741,6 +745,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_faces,
             output,
         } => {
+            let _runtime_lock = acquire_generation_runtime_lock(&root)?;
             let core = OperationCore::open(&root)?;
             let result = core.generate_pixal3d_image(
                 &asset_id,
@@ -796,6 +801,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Command::Runtime { command } => {
+            let _runtime_lock = acquire_runtime_write_lock(&root)?;
             let core = OperationCore::open(&root)?;
             match command {
                 RuntimeCommand::Setup => {
@@ -1576,8 +1582,10 @@ async fn start_generation_job(
         }
 
         let worker_core = core.clone();
+        let worker_data_dir = core.store().root().to_path_buf();
         let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
         let result = task::spawn_blocking(move || {
+            let _runtime_lock = acquire_generation_runtime_lock(&worker_data_dir)?;
             worker_core.generate_pixal3d_image(&worker_asset_id, options)
         })
         .await;
@@ -1664,6 +1672,36 @@ impl RuntimeJobKind {
     }
 }
 
+fn map_runtime_lock_error(error: std::io::Error, message: &str) -> CoreError {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        CoreError::Conflict(message.into())
+    } else {
+        CoreError::Io(error)
+    }
+}
+
+fn acquire_runtime_write_lock(
+    root: &std::path::Path,
+) -> Result<data_dir_lock::DataDirLock, CoreError> {
+    data_dir_lock::DataDirLock::try_acquire_for_runtime(root).map_err(|error| {
+        map_runtime_lock_error(
+            error,
+            "Another MeshHarbor operation is using managed runtime files or shared caches in this data directory. Wait for it to finish and retry.",
+        )
+    })
+}
+
+fn acquire_generation_runtime_lock(
+    root: &std::path::Path,
+) -> Result<data_dir_lock::DataDirLock, CoreError> {
+    data_dir_lock::DataDirLock::try_acquire_for_generation(root).map_err(|error| {
+        map_runtime_lock_error(
+            error,
+            "A MeshHarbor runtime setup, download, login, or conversion is changing this data directory. Retry generation after it finishes.",
+        )
+    })
+}
+
 async fn start_runtime_job(
     core: OperationCore,
     scheduler: Arc<Semaphore>,
@@ -1693,22 +1731,26 @@ async fn start_runtime_job(
         }
 
         let worker_core = core.clone();
-        let result = task::spawn_blocking(move || match kind {
-            RuntimeJobKind::Setup => worker_core
-                .setup_pixal3d_mlx_environment()
-                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-            RuntimeJobKind::InstallModels => worker_core
-                .install_pixal3d_mlx_models(true, true)
-                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-            RuntimeJobKind::ConvertNaf => worker_core
-                .convert_pixal3d_mlx_naf()
-                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-            RuntimeJobKind::CudaSetup => worker_core
-                .setup_pixal3d_cuda_environment()
-                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-            RuntimeJobKind::CudaInstallModels => worker_core
-                .install_pixal3d_cuda_models(true, true)
-                .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+        let worker_data_dir = core.store().root().to_path_buf();
+        let result = task::spawn_blocking(move || {
+            let _runtime_lock = acquire_runtime_write_lock(&worker_data_dir)?;
+            match kind {
+                RuntimeJobKind::Setup => worker_core
+                    .setup_pixal3d_mlx_environment()
+                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+                RuntimeJobKind::InstallModels => worker_core
+                    .install_pixal3d_mlx_models(true, true)
+                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+                RuntimeJobKind::ConvertNaf => worker_core
+                    .convert_pixal3d_mlx_naf()
+                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+                RuntimeJobKind::CudaSetup => worker_core
+                    .setup_pixal3d_cuda_environment()
+                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+                RuntimeJobKind::CudaInstallModels => worker_core
+                    .install_pixal3d_cuda_models(true, true)
+                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+            }
         })
         .await;
 
@@ -2320,6 +2362,39 @@ mod tests {
                 .join("share")
                 .join("meshharbor")
         );
+    }
+
+    #[test]
+    fn runtime_lock_conflicts_are_retryable_and_services_can_coexist() {
+        let _lock_test_guard = DATA_DIR_LOCK_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-runtime-lock-{}", uuid::Uuid::new_v4()));
+        let service = data_dir_lock::DataDirLock::try_acquire_for_service(&root).unwrap();
+        let installer = acquire_runtime_write_lock(&root).unwrap();
+
+        let generation_error = acquire_generation_runtime_lock(&root).unwrap_err();
+        assert!(matches!(
+            generation_error,
+            CoreError::Conflict(message) if message.contains("Retry generation after it finishes")
+        ));
+        drop(installer);
+
+        let first_reader = acquire_generation_runtime_lock(&root).unwrap();
+        let second_reader = acquire_generation_runtime_lock(&root).unwrap();
+        let install_error = acquire_runtime_write_lock(&root).unwrap_err();
+        assert!(matches!(
+            install_error,
+            CoreError::Conflict(message) if message.contains("Wait for it to finish and retry")
+        ));
+        drop(first_reader);
+        drop(second_reader);
+
+        let installer_after_readers = acquire_runtime_write_lock(&root).unwrap();
+        drop(installer_after_readers);
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
