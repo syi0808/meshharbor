@@ -12,7 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use clap::{Parser, Subcommand};
-use meshharbor_core::{CoreError, GenerationOptions, OperationCore};
+use meshharbor_core::{CoreError, GenerationOptions, MAX_ASSET_BYTES, OperationCore};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -21,7 +21,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::{fs, net::TcpListener, sync::Semaphore, task};
+use tokio::{fs, io::AsyncReadExt, net::TcpListener, sync::Semaphore, task};
 use tracing_subscriber::EnvFilter;
 
 include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
@@ -54,9 +54,9 @@ enum Command {
     },
     /// Start the stdio MCP server.
     Mcp,
-    /// Import a PNG, JPEG, or GLB asset into the local store.
+    /// Import a PNG, JPEG, or GLB asset (up to 512 MiB; images up to 16 MiB/16 MP).
     Import { file: PathBuf },
-    /// Inspect a supported asset file without importing it.
+    /// Inspect a supported asset file (up to 512 MiB; images up to 16 MiB/16 MP).
     Inspect { file: PathBuf },
     /// List assets currently in the local store.
     Assets {
@@ -240,7 +240,7 @@ struct JobIdArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ImportArgs {
     filename: String,
-    /// Base64-encoded PNG, JPEG, or GLB bytes.
+    /// Base64-encoded PNG, JPEG, or GLB bytes (decoded asset size limited to 512 MiB).
     bytes_base64: String,
 }
 
@@ -360,7 +360,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Import base64-encoded PNG, JPEG, or GLB bytes into the local MeshHarbor store. This does not download assets or models from the network."
+        description = "Import base64-encoded PNG, JPEG, or GLB bytes into the local MeshHarbor store (512 MiB maximum; PNG/JPEG 16 MiB and 16 MP maximum). This does not download assets or models from the network."
     )]
     async fn import_asset(&self, params: Parameters<ImportArgs>) -> String {
         let decoded = match decode_base64(&params.0.bytes_base64) {
@@ -617,6 +617,27 @@ impl McpServer {
 #[tool_handler]
 impl ServerHandler for McpServer {}
 
+async fn read_bounded_asset(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CoreError> {
+    let read_limit = u64::try_from(max_bytes)
+        .ok()
+        .and_then(|limit| limit.checked_add(1))
+        .ok_or_else(|| CoreError::InvalidInput("Asset size limit is too large.".into()))?;
+    let file = fs::File::open(path).await?;
+    let mut file = file.take(read_limit);
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await?;
+    if bytes.len() > max_bytes {
+        return Err(CoreError::InvalidInput(format!(
+            "Asset exceeds the {} MiB input limit.",
+            max_bytes / (1024 * 1024)
+        )));
+    }
+    Ok(bytes)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -654,7 +675,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             service.waiting().await?;
         }
         Command::Import { file } => {
-            let bytes = fs::read(&file).await?;
+            let bytes = read_bounded_asset(&file, MAX_ASSET_BYTES).await?;
             let name = file
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -663,7 +684,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&asset)?);
         }
         Command::Inspect { file } => {
-            let bytes = fs::read(&file).await?;
+            let bytes = read_bounded_asset(&file, MAX_ASSET_BYTES).await?;
             let name = file
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -892,7 +913,9 @@ fn api_router(state: AppState, token: String) -> Router {
         .route("/api/v1/operations", get(api_operations))
         .route(
             "/api/v1/assets",
-            get(api_list_assets).post(api_import_asset),
+            get(api_list_assets)
+                .post(api_import_asset)
+                .layer(DefaultBodyLimit::max(MAX_ASSET_BYTES)),
         )
         .route("/api/v1/assets/{asset_id}", get(api_get_asset))
         .route("/api/v1/assets/{asset_id}/simplify", post(api_simplify))
@@ -900,7 +923,6 @@ fn api_router(state: AppState, token: String) -> Router {
         .route("/api/v1/jobs/{job_id}", get(api_get_job))
         .route("/api/v1/jobs/{job_id}/cancel", post(api_cancel_job))
         .route("/api/v1/artifacts/{artifact_id}", get(api_read_artifact))
-        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
         .fallback(api_studio_fallback)
         .layer(middleware::from_fn_with_state(token, authenticate))
         .with_state(state)
@@ -1177,10 +1199,11 @@ async fn api_import_asset(
     Query(query): Query<UploadQuery>,
     body: Bytes,
 ) -> Result<Json<meshharbor_core::Asset>, ApiError> {
-    if body.len() > 512 * 1024 * 1024 {
-        return Err(ApiError(CoreError::InvalidInput(
-            "Asset exceeds 512 MiB request limit.".into(),
-        )));
+    if body.len() > MAX_ASSET_BYTES {
+        return Err(ApiError(CoreError::InvalidInput(format!(
+            "Asset exceeds the {} MiB request limit.",
+            MAX_ASSET_BYTES / (1024 * 1024)
+        ))));
     }
     Ok(Json(state.core.import_asset(&query.filename, &body)?))
 }
@@ -2355,13 +2378,37 @@ fn is_api_path(path: &str) -> bool {
     path == "/api/v1" || path.starts_with("/api/v1/")
 }
 
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
 fn decode_base64(encoded: &str) -> Result<Vec<u8>, String> {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    decode_base64_with_limit(encoded, MAX_ASSET_BYTES)
+}
+
+fn decode_base64_with_limit(encoded: &str, max_decoded_bytes: usize) -> Result<Vec<u8>, String> {
     let raw = encoded.as_bytes();
     if !raw.len().is_multiple_of(4) {
         return Err("Base64 input length must be divisible by four.".into());
     }
-    let mut output = Vec::with_capacity(raw.len() / 4 * 3);
+    let max_encoded_bytes = max_decoded_bytes
+        .div_ceil(3)
+        .checked_mul(4)
+        .ok_or_else(|| "Base64 size limit is too large.".to_string())?;
+    if raw.len() > max_encoded_bytes {
+        return Err(format!(
+            "Base64 asset exceeds the {max_decoded_bytes}-byte limit."
+        ));
+    }
+
+    let mut output = Vec::with_capacity((raw.len() / 4 * 3).min(max_decoded_bytes));
     for (block_index, block) in raw.as_chunks::<4>().0.iter().enumerate() {
         let last = block_index + 1 == raw.len() / 4;
         let mut values = [0u8; 4];
@@ -2376,15 +2423,22 @@ fn decode_base64(encoded: &str) -> Result<Vec<u8>, String> {
                 if padding > 0 {
                     return Err("Base64 data appears after padding.".into());
                 }
-                values[index] = ALPHABET
-                    .iter()
-                    .position(|candidate| candidate == byte)
-                    .ok_or_else(|| "Base64 contains a non-alphabet character.".to_string())?
-                    as u8;
+                values[index] = base64_value(*byte)
+                    .ok_or_else(|| "Base64 contains a non-alphabet character.".to_string())?;
             }
         }
         if padding > 2 {
             return Err("Base64 padding is invalid.".into());
+        }
+        let bytes_to_append = 3 - padding;
+        if output
+            .len()
+            .checked_add(bytes_to_append)
+            .is_none_or(|length| length > max_decoded_bytes)
+        {
+            return Err(format!(
+                "Base64 asset exceeds the {max_decoded_bytes}-byte limit."
+            ));
         }
         let n = ((values[0] as u32) << 18)
             | ((values[1] as u32) << 12)
@@ -2404,6 +2458,76 @@ fn decode_base64(encoded: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn minimal_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x01, 0x01, 0x05, 0x00, 0xfa, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00,
+            0x01, 0x64, 0x78, 0x95, 0x38, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+            0x42, 0x60, 0x82,
+        ]
+    }
+
+    #[test]
+    fn base64_asset_decoding_honors_size_limit() {
+        assert_eq!(decode_base64("AQID").unwrap(), [1, 2, 3]);
+        assert_eq!(decode_base64("AQI=").unwrap(), [1, 2]);
+        assert!(decode_base64_with_limit("AQID", 2).is_err());
+        assert!(decode_base64("A===").is_err());
+    }
+
+    #[tokio::test]
+    async fn cli_asset_reader_never_reads_past_configured_limit() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-bounded-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("asset.bin");
+        std::fs::write(&path, b"12345").unwrap();
+
+        assert_eq!(read_bounded_asset(&path, 5).await.unwrap(), b"12345");
+        assert!(matches!(
+            read_bounded_asset(&path, 4).await.unwrap_err(),
+            CoreError::InvalidInput(_)
+        ));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn api_rejects_malformed_png_without_persisting_an_asset() {
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-invalid-upload-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let core = OperationCore::open(&root).unwrap();
+        let app = api_router(
+            AppState {
+                core,
+                scheduler: Arc::new(Semaphore::new(1)),
+            },
+            "token".into(),
+        );
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/assets?filename=truncated.png")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::AUTHORIZATION, "Bearer token")
+                    .body(Body::from(b"\x89PNG\r\n\x1a\n".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let reopened = OperationCore::open(&root).unwrap();
+        assert!(reopened.store().list_assets(10).unwrap().is_empty());
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -2830,7 +2954,7 @@ mod tests {
                     .uri("/api/v1/assets?filename=originless.png")
                     .header(header::HOST, "localhost:7432")
                     .header(header::AUTHORIZATION, "Bearer correct horse")
-                    .body(Body::from(b"\x89PNG\r\n\x1a\ndashboard".to_vec()))
+                    .body(Body::from(minimal_png()))
                     .unwrap(),
             )
             .await
@@ -2913,7 +3037,7 @@ mod tests {
                     .header(header::HOST, "localhost:7432")
                     .header(header::ORIGIN, "http://localhost:7432")
                     .header("x-meshharbor-dashboard", "local-ui-v1")
-                    .body(Body::from(b"\x89PNG\r\n\x1a\ndashboard".to_vec()))
+                    .body(Body::from(minimal_png()))
                     .unwrap(),
             )
             .await
@@ -2944,7 +3068,7 @@ mod tests {
                     .header(header::HOST, "localhost:7432")
                     .header(header::ORIGIN, "http://localhost:7432")
                     .header(header::AUTHORIZATION, "Bearer correct horse")
-                    .body(Body::from(b"\x89PNG\r\n\x1a\nexample".to_vec()))
+                    .body(Body::from(minimal_png()))
                     .unwrap(),
             )
             .await
@@ -3218,9 +3342,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("meshharbor-generate-api-{}", uuid::Uuid::new_v4()));
         let core = OperationCore::open(&root).unwrap();
-        let source = core
-            .import_asset("source.png", b"\x89PNG\r\n\x1a\nlocal-test")
-            .unwrap();
+        let source = core.import_asset("source.png", &minimal_png()).unwrap();
         let app = api_router(
             AppState {
                 core,
@@ -3513,9 +3635,7 @@ mod tests {
             std::env::temp_dir().join(format!("meshharbor-export-image-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let core = OperationCore::open(root.join("store")).unwrap();
-        let image = core
-            .import_asset("source.png", b"\x89PNG\r\n\x1a\nexport-test")
-            .unwrap();
+        let image = core.import_asset("source.png", &minimal_png()).unwrap();
         let destination = root.join("store/exports/not-a-mesh.glb");
         let error = export_glb_file(&core, &image.id, &destination).unwrap_err();
         assert!(matches!(error, CoreError::InvalidInput(_)));

@@ -4,7 +4,7 @@
 //! `runtime.rs`; inference itself remains offline and never authenticates.
 
 use std::{
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Instant,
@@ -12,9 +12,12 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{Asset, AssetKind, CoreError, CoreResult, OperationCore, inspect_asset};
+use crate::{
+    Asset, AssetKind, CoreError, CoreResult, MAX_IMAGE_BYTES, OperationCore, inspect_asset,
+};
 use crate::{cuda_runtime::Pixal3dCudaRuntimeManager, runtime::Pixal3dRuntimeManager};
 
 const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
@@ -438,6 +441,50 @@ struct GenerationCommandReport {
     elapsed_ms: u128,
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn validate_stored_source_image(
+    filename: &str,
+    recorded_mime_type: &str,
+    recorded_asset_sha256: &str,
+    recorded_artifact_sha256: &str,
+    bytes: &[u8],
+) -> CoreResult<()> {
+    let actual_sha256 = sha256_hex(bytes);
+    if actual_sha256 != recorded_asset_sha256 || actual_sha256 != recorded_artifact_sha256 {
+        return Err(CoreError::Conflict(
+            "Stored image content no longer matches its recorded SHA-256; re-import it.".into(),
+        ));
+    }
+
+    let descriptor = inspect_asset(filename, bytes)?;
+    if descriptor.kind != AssetKind::Image || descriptor.mime_type != recorded_mime_type {
+        return Err(CoreError::InvalidInput(
+            "Stored image no longer matches its recorded PNG/JPEG format; re-import it.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_bounded_source_image(path: &Path) -> CoreResult<Vec<u8>> {
+    let read_limit = u64::try_from(MAX_IMAGE_BYTES)
+        .ok()
+        .and_then(|limit| limit.checked_add(1))
+        .ok_or_else(|| CoreError::InvalidInput("Image size limit is too large.".into()))?;
+    let mut file = std::fs::File::open(path)?.take(read_limit);
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(CoreError::InvalidInput(format!(
+            "Stored image exceeds the {} MiB generation limit; re-import a smaller PNG or JPEG.",
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(bytes)
+}
+
 /// Generates a textured GLB from a previously imported local image using the
 /// explicitly selected, already prepared Pixal3D backend.
 pub(crate) fn generate_pixal3d_image(
@@ -459,7 +506,15 @@ pub(crate) fn generate_pixal3d_image(
         .iter()
         .find(|artifact| artifact.kind == "source")
         .ok_or_else(|| CoreError::NotFound("Image source artifact is missing.".into()))?;
-    let input_bytes = core.store().read_artifact(&source_artifact.id)?.bytes;
+    let artifact_path = core.store().artifact_path(&source_artifact.id)?;
+    let input_bytes = read_bounded_source_image(&artifact_path)?;
+    validate_stored_source_image(
+        &source.name,
+        &source.mime_type,
+        &source.sha256,
+        &source_artifact.sha256,
+        &input_bytes,
+    )?;
 
     let selected_backend_id = match options.backend_id.as_str() {
         "auto" => {
@@ -566,6 +621,18 @@ impl Drop for WorkDir {
 mod tests {
     use super::*;
 
+    fn imported_image_with_source_path(core: &OperationCore) -> (Asset, PathBuf) {
+        let png = crate::glb::test_png_with_dimensions(1, 1);
+        let asset = core.store().import_asset("legacy.png", &png).unwrap();
+        let source = asset
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "source")
+            .unwrap();
+        let path = core.store().artifact_path(&source.id).unwrap();
+        (asset, path)
+    }
+
     fn expected_managed_source(source: &str) -> String {
         const UPSTREAM_NAF_PATH: &str = "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")";
         const MANAGED_NAF_PATH: &str = concat!(
@@ -574,6 +641,124 @@ mod tests {
             "    naf_path = os.path.join(naf_weights_dir, \"naf_release.safetensors\")"
         );
         source.replace(UPSTREAM_NAF_PATH, MANAGED_NAF_PATH)
+    }
+
+    #[test]
+    fn generation_rejects_changed_stored_images_before_either_backend() {
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-legacy-image-validation-{}",
+            Uuid::new_v4()
+        ));
+        let core = OperationCore::open(&root).unwrap();
+        let (asset, path) = imported_image_with_source_path(&core);
+        let changed = crate::glb::test_png_with_dimensions(2, 1);
+        std::fs::write(path, changed).unwrap();
+
+        for backend_id in ["pixal3d-mlx", "pixal3d-cuda"] {
+            let result = generate_pixal3d_image(
+                &core,
+                &asset.id,
+                GenerationOptions {
+                    backend_id: backend_id.into(),
+                    ..GenerationOptions::default()
+                },
+            );
+            assert!(
+                matches!(result, Err(CoreError::Conflict(_))),
+                "{backend_id} must reject changed stored image bytes before backend startup"
+            );
+        }
+        assert!(
+            std::fs::read_dir(core.store().staging_root())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recorded_hashes_and_valid_image_format_are_accepted() {
+        let png = crate::glb::test_png_with_dimensions(1, 1);
+        let sha256 = sha256_hex(&png);
+        assert!(
+            validate_stored_source_image("source.png", "image/png", &sha256, &sha256, &png).is_ok()
+        );
+    }
+
+    #[test]
+    fn asset_and_artifact_hashes_are_checked_independently() {
+        let png = crate::glb::test_png_with_dimensions(1, 1);
+        let sha256 = sha256_hex(&png);
+
+        assert!(matches!(
+            validate_stored_source_image(
+                "source.png",
+                "image/png",
+                "different-asset-digest",
+                &sha256,
+                &png
+            ),
+            Err(CoreError::Conflict(_))
+        ));
+        assert!(matches!(
+            validate_stored_source_image(
+                "source.png",
+                "image/png",
+                &sha256,
+                "different-artifact-digest",
+                &png
+            ),
+            Err(CoreError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn matching_hash_does_not_make_malformed_legacy_image_valid() {
+        let mut corrupt = crate::glb::test_png_with_dimensions(1, 1);
+        corrupt[29] ^= 1;
+        let sha256 = sha256_hex(&corrupt);
+        let error =
+            validate_stored_source_image("legacy.png", "image/png", &sha256, &sha256, &corrupt)
+                .unwrap_err();
+        assert!(matches!(error, CoreError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn generation_bounds_oversized_stored_images_before_either_backend() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-legacy-image-size-{}", Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let (asset, path) = imported_image_with_source_path(&core);
+        std::fs::File::create(path)
+            .unwrap()
+            .set_len((MAX_IMAGE_BYTES + 1) as u64)
+            .unwrap();
+
+        for backend_id in ["pixal3d-mlx", "pixal3d-cuda"] {
+            let result = generate_pixal3d_image(
+                &core,
+                &asset.id,
+                GenerationOptions {
+                    backend_id: backend_id.into(),
+                    ..GenerationOptions::default()
+                },
+            );
+            assert!(
+                matches!(result, Err(CoreError::InvalidInput(_))),
+                "{backend_id} must reject over-limit stored images before backend startup"
+            );
+        }
+        assert!(
+            std::fs::read_dir(core.store().staging_root())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert_eq!(core.store().list_assets(10).unwrap().len(), 1);
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
