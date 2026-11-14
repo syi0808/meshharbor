@@ -1865,6 +1865,48 @@ fn canonical_cli_output_path(path: &std::path::Path) -> Result<PathBuf, CoreErro
     Ok(canonical_parent.join(file_name))
 }
 
+#[cfg(windows)]
+fn cli_output_destinations_alias(
+    first: &std::path::Path,
+    second: &std::path::Path,
+) -> Result<bool, CoreError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let first: Vec<u16> = first.as_os_str().encode_wide().collect();
+    let second: Vec<u16> = second.as_os_str().encode_wide().collect();
+    let first_len = i32::try_from(first.len()).map_err(|_| {
+        CoreError::InvalidInput("CLI output path is too long to compare safely.".into())
+    })?;
+    let second_len = i32::try_from(second.len()).map_err(|_| {
+        CoreError::InvalidInput("CLI output path is too long to compare safely.".into())
+    })?;
+
+    // CompareStringOrdinal compares Windows file names without linguistic rules.
+    // Its lengths exclude terminating NULs, and 1 requests case-insensitive comparison.
+    let result = unsafe {
+        windows_sys::Win32::Globalization::CompareStringOrdinal(
+            first.as_ptr(),
+            first_len,
+            second.as_ptr(),
+            second_len,
+            1,
+        )
+    };
+    match result {
+        1 | 3 => Ok(false),
+        2 => Ok(true),
+        _ => Err(CoreError::Io(std::io::Error::last_os_error())),
+    }
+}
+
+#[cfg(not(windows))]
+fn cli_output_destinations_alias(
+    first: &std::path::Path,
+    second: &std::path::Path,
+) -> Result<bool, CoreError> {
+    Ok(first == second)
+}
+
 fn preflight_cli_output_paths(
     output_path: Option<&std::path::Path>,
     quad_output_path: Option<&std::path::Path>,
@@ -1873,11 +1915,11 @@ fn preflight_cli_output_paths(
     let quad_destination = quad_output_path
         .map(canonical_cli_output_path)
         .transpose()?;
-    if output_destination
-        .as_ref()
-        .zip(quad_destination.as_ref())
-        .is_some_and(|(output, quad)| output == quad)
-    {
+    let destinations_alias = match (&output_destination, &quad_destination) {
+        (Some(output), Some(quad)) => cli_output_destinations_alias(output, quad)?,
+        _ => false,
+    };
+    if destinations_alias {
         return Err(CoreError::InvalidInput(
             "--output and --quad-output must name different destinations.".into(),
         ));
@@ -3306,6 +3348,23 @@ mod tests {
         }
         assert_eq!(std::fs::read(&destination).unwrap(), replacement);
         assert_eq!(std::fs::read(&moved).unwrap(), b"original");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cli_output_paths_reject_windows_case_only_aliases() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-cli-case-alias-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = root.join("mesh.glb");
+        let quad_output = root.join("MESH.GLB");
+
+        let error = preflight_cli_output_paths(Some(&output), Some(&quad_output)).unwrap_err();
+        assert!(matches!(error, CoreError::InvalidInput(_)));
+        assert!(!output.exists());
+        assert!(!quad_output.exists());
 
         std::fs::remove_dir_all(root).unwrap();
     }
