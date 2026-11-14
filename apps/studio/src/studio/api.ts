@@ -30,6 +30,12 @@ export function canInspectJobHistoryRecord(
   return !isActiveJob(trackedJob) || trackedJob.id === historyJob.id;
 }
 
+export function shouldDeferTrackedJobCompletion(trackedJob: Job | null, historyJob: Job): boolean {
+  return isActiveJob(trackedJob)
+    && trackedJob.id === historyJob.id
+    && !isActiveJob(historyJob);
+}
+
 export class LatestRequestGuard {
   private sequence = 0;
 

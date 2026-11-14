@@ -6,6 +6,7 @@ import {
   isQueuedJobCancellable,
   jobPollRetryDelay,
   LatestRequestGuard,
+  shouldDeferTrackedJobCompletion,
   MeshHarborApi,
   quadTopologyArtifact,
 } from './api';
@@ -126,6 +127,15 @@ export function App() {
     try {
       const latest = await api.job(jobId);
       if (!historySelectionGuard.current.isCurrent(requestId)) return;
+      if (shouldDeferTrackedJobCompletion(jobRef.current, latest)) {
+        recentJobsRequestGuard.current.invalidate();
+        setRecentJobs((current) => [latest, ...current.filter((record) => record.id !== latest.id)]
+          .sort((left, right) => Number(right.updated_at) - Number(left.updated_at)
+            || right.id.localeCompare(left.id))
+          .slice(0, 20));
+        setNotice('The live status monitor will apply this result and refresh runtime readiness. No status tracking was stopped.');
+        return;
+      }
       if (!canInspectJobHistoryRecord(jobRef.current, latest)) {
         setNotice('Wait for the active job to finish before opening a different saved result. Its progress and cancellation controls will remain attached.');
         return;

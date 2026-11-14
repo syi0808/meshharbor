@@ -4,17 +4,17 @@ import { readFile } from 'node:fs/promises';
 
 // Use the project's TypeScript compiler when installed (Node 20+), with a
 // native type-stripping fallback for minimal Node 24 test environments.
-let MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, LatestRequestGuard, jobPollRetryDelay;
+let MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay;
 try {
   const ts = await import('typescript');
   const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, LatestRequestGuard, jobPollRetryDelay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, LatestRequestGuard, jobPollRetryDelay } = await import('./api.ts'));
+  ({ MeshHarborApi, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay } = await import('./api.ts'));
 }
 
 test('Studio offers cancellation only before a job leaves the queue', () => {
@@ -31,6 +31,15 @@ test('history inspection cannot replace a live tracked job', () => {
   assert.equal(canInspectJobHistoryRecord(tracked, saved), false);
   assert.equal(canInspectJobHistoryRecord(tracked, tracked), true);
   assert.equal(canInspectJobHistoryRecord({ ...tracked, state: 'succeeded' }, saved), true);
+});
+
+test('checking terminal state defers tracked job completion to the poller', () => {
+  const tracked = { id: 'runtime-job', operation: 'runtime.pixal3d.setup', state: 'running' };
+  const completed = { ...tracked, state: 'succeeded' };
+  assert.equal(shouldDeferTrackedJobCompletion(tracked, completed), true);
+  assert.equal(shouldDeferTrackedJobCompletion(tracked, { ...completed, id: 'other' }), false);
+  assert.equal(shouldDeferTrackedJobCompletion(completed, completed), false);
+  assert.equal(shouldDeferTrackedJobCompletion(tracked, { ...tracked, state: 'running' }), false);
 });
 
 test('latest-request guard discards superseded and invalidated results', () => {
