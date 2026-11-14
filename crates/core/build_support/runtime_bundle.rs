@@ -537,10 +537,25 @@ mod tests {
     #[test]
     fn modified_pinned_source_fails_hash_verification() {
         let fixture = Fixture::new(b"pinned");
-        fixture.write_asset(b"changed");
+        fixture.write_asset(b"edited");
 
         let error = fixture.prepare().unwrap_err();
         assert!(error.contains("SHA-256 mismatch"));
+        assert!(
+            !fixture
+                .output
+                .join("runtime-assets/cuda/upstream/pixalcuda/cli.py")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn resized_pinned_source_fails_size_verification() {
+        let fixture = Fixture::new(b"pinned");
+        fixture.write_asset(b"changed");
+
+        let error = fixture.prepare().unwrap_err();
+        assert!(error.contains("size mismatch"));
         assert!(
             !fixture
                 .output
