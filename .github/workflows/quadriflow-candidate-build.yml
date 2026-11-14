@@ -42,7 +42,7 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_candidate == true }}
     uses: ./.github/workflows/quadriflow-candidate-build-reusable.yml
     with:
-      runner: macos-14
+      runner: macos-15
       platform: macos-aarch64
       replica: primary
       source_commit: ${{ github.sha }}
@@ -54,7 +54,7 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_candidate == true }}
     uses: ./.github/workflows/quadriflow-candidate-build-reusable.yml
     with:
-      runner: macos-14
+      runner: macos-15
       platform: macos-aarch64
       replica: independent
       source_commit: ${{ github.sha }}
