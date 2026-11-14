@@ -1749,25 +1749,61 @@ fn export_glb_file(
 }
 
 fn default_data_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("MESHHARBOR_HOME") {
-        return PathBuf::from(path);
+    default_data_dir_for(
+        std::env::consts::OS,
+        |name| std::env::var_os(name),
+        std::env::temp_dir(),
+    )
+}
+
+fn default_data_dir_for(
+    os: &str,
+    mut read_var: impl FnMut(&str) -> Option<std::ffi::OsString>,
+    fallback: PathBuf,
+) -> PathBuf {
+    fn non_empty_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+        value.filter(|path| !path.is_empty()).map(PathBuf::from)
     }
-    #[cfg(target_os = "windows")]
-    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(path).join("MeshHarbor");
+
+    if let Some(path) = non_empty_path(read_var("MESHHARBOR_HOME")) {
+        return path;
     }
-    #[cfg(target_os = "macos")]
-    if let Some(path) = std::env::var_os("HOME") {
-        return PathBuf::from(path).join("Library/Application Support/MeshHarbor");
+
+    match os {
+        "windows" => {
+            if let Some(path) = non_empty_path(read_var("LOCALAPPDATA")) {
+                return path.join("MeshHarbor");
+            }
+            if let Some(path) = non_empty_path(read_var("USERPROFILE")) {
+                return path.join("AppData").join("Local").join("MeshHarbor");
+            }
+            if let Some(path) = non_empty_path(read_var("HOME")) {
+                return path.join("AppData").join("Local").join("MeshHarbor");
+            }
+            fallback.join("MeshHarbor")
+        }
+        "macos" => non_empty_path(read_var("HOME"))
+            .map(|path| {
+                path.join("Library")
+                    .join("Application Support")
+                    .join("MeshHarbor")
+            })
+            .unwrap_or_else(|| {
+                fallback
+                    .join("Library")
+                    .join("Application Support")
+                    .join("MeshHarbor")
+            }),
+        _ => {
+            if let Some(path) = non_empty_path(read_var("XDG_DATA_HOME")) {
+                return path.join("meshharbor");
+            }
+            if let Some(path) = non_empty_path(read_var("HOME")) {
+                return path.join(".local").join("share").join("meshharbor");
+            }
+            fallback.join(".local").join("share").join("meshharbor")
+        }
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(path).join("meshharbor");
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".local/share/meshharbor")
 }
 
 fn default_max_error() -> f32 {
@@ -1883,6 +1919,78 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    fn data_dir_for_test(os: &str, vars: &[(&str, &str)]) -> PathBuf {
+        use std::{collections::HashMap, ffi::OsString};
+
+        let vars = vars
+            .iter()
+            .map(|(name, value)| (*name, OsString::from(*value)))
+            .collect::<HashMap<_, _>>();
+        default_data_dir_for(
+            os,
+            |name| vars.get(name).cloned(),
+            PathBuf::from("/temporary"),
+        )
+    }
+
+    #[test]
+    fn data_directory_override_takes_priority_and_empty_values_are_ignored() {
+        assert_eq!(
+            data_dir_for_test(
+                "windows",
+                &[
+                    ("MESHHARBOR_HOME", "/explicit"),
+                    ("LOCALAPPDATA", "/local-data"),
+                ],
+            ),
+            PathBuf::from("/explicit")
+        );
+        assert_eq!(
+            data_dir_for_test(
+                "windows",
+                &[("MESHHARBOR_HOME", ""), ("LOCALAPPDATA", "/local-data")],
+            ),
+            PathBuf::from("/local-data").join("MeshHarbor")
+        );
+    }
+
+    #[test]
+    fn windows_data_directory_falls_back_to_the_user_profile() {
+        assert_eq!(
+            data_dir_for_test("windows", &[("USERPROFILE", "/profile")]),
+            PathBuf::from("/profile")
+                .join("AppData")
+                .join("Local")
+                .join("MeshHarbor")
+        );
+        assert_eq!(
+            data_dir_for_test("windows", &[("LOCALAPPDATA", ""), ("USERPROFILE", "")]),
+            PathBuf::from("/temporary").join("MeshHarbor")
+        );
+    }
+
+    #[test]
+    fn macos_and_linux_data_directories_use_their_platform_defaults() {
+        assert_eq!(
+            data_dir_for_test("macos", &[("HOME", "/profile")]),
+            PathBuf::from("/profile")
+                .join("Library")
+                .join("Application Support")
+                .join("MeshHarbor")
+        );
+        assert_eq!(
+            data_dir_for_test("linux", &[("XDG_DATA_HOME", "/xdg")]),
+            PathBuf::from("/xdg").join("meshharbor")
+        );
+        assert_eq!(
+            data_dir_for_test("linux", &[("XDG_DATA_HOME", ""), ("HOME", "/profile")]),
+            PathBuf::from("/profile")
+                .join(".local")
+                .join("share")
+                .join("meshharbor")
+        );
+    }
 
     #[test]
     fn interrupted_job_recovery_requires_an_explicit_stopped_process_acknowledgement() {
