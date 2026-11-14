@@ -566,6 +566,16 @@ impl Drop for WorkDir {
 mod tests {
     use super::*;
 
+    fn expected_managed_source(source: &str) -> String {
+        const UPSTREAM_NAF_PATH: &str = "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")";
+        const MANAGED_NAF_PATH: &str = concat!(
+            "    naf_weights_dir = os.environ.get(\"MESHHARBOR_PIXAL3D_WEIGHTS_DIR\", ",
+            "os.path.join(os.path.dirname(__file__), \"weights\"))\n",
+            "    naf_path = os.path.join(naf_weights_dir, \"naf_release.safetensors\")"
+        );
+        source.replace(UPSTREAM_NAF_PATH, MANAGED_NAF_PATH)
+    }
+
     #[test]
     fn options_constrain_to_reviewed_mlx_profile() {
         let root = std::env::temp_dir().join(format!("meshharbor-mlx-profile-{}", Uuid::new_v4()));
@@ -604,7 +614,7 @@ mod tests {
         let entrypoint = runtime.prepare_entrypoint().unwrap();
         let entrypoint_path = entrypoint.path().to_path_buf();
         let patched = std::fs::read_to_string(entrypoint.path()).unwrap();
-        assert!(patched.contains("MESHHARBOR_PIXAL3D_WEIGHTS_DIR"));
+        assert_eq!(patched, expected_managed_source(source));
         assert_eq!(std::fs::read_to_string(upstream).unwrap(), source);
         drop(entrypoint);
         assert!(!entrypoint_path.exists());
@@ -651,10 +661,8 @@ mod tests {
         assert_ne!(path_one, path_two);
         let prepared_one = std::fs::read_to_string(entrypoint_one.path()).unwrap();
         let prepared_two = std::fs::read_to_string(entrypoint_two.path()).unwrap();
-        assert!(prepared_one.contains("# source-one marker"));
-        assert!(prepared_two.contains("# source-two marker"));
-        assert!(prepared_one.contains("MESHHARBOR_PIXAL3D_WEIGHTS_DIR"));
-        assert!(prepared_two.contains("MESHHARBOR_PIXAL3D_WEIGHTS_DIR"));
+        assert_eq!(prepared_one, expected_managed_source(&source_one_text));
+        assert_eq!(prepared_two, expected_managed_source(&source_two_text));
         assert_eq!(std::fs::read_to_string(&upstream_one).unwrap(), source_one_text);
         assert_eq!(std::fs::read_to_string(&upstream_two).unwrap(), source_two_text);
 
@@ -703,6 +711,7 @@ mod tests {
             .into_iter()
             .map(|worker| worker.join().unwrap())
             .collect();
+        let expected = expected_managed_source(source);
         let paths: HashSet<PathBuf> = entries
             .iter()
             .map(|entry| entry.path().to_path_buf())
@@ -710,8 +719,7 @@ mod tests {
         assert_eq!(paths.len(), CONCURRENCY);
         for entry in &entries {
             let prepared = std::fs::read_to_string(entry.path()).unwrap();
-            assert!(prepared.contains("# concurrent marker"));
-            assert!(prepared.contains("MESHHARBOR_PIXAL3D_WEIGHTS_DIR"));
+            assert_eq!(prepared, expected);
         }
         let paths: Vec<_> = entries.iter().map(|entry| entry.path().to_path_buf()).collect();
         drop(entries);
