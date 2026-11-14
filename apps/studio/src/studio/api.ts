@@ -13,7 +13,7 @@ export function cancelJobNotice(job: Job): string {
   return 'The job finished before cancellation took effect.';
 }
 
-export function isQueuedJobCancellable(job: Job | null): boolean {
+export function isQueuedJobCancellable(job: Job | null): job is Job & { state: 'queued' } {
   return job?.state === 'queued';
 }
 
