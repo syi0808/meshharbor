@@ -1,4 +1,7 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 #[path = "build_support/runtime_bundle.rs"]
 mod runtime_bundle;
@@ -26,10 +29,10 @@ fn main() {
     .unwrap_or_else(|error| panic!("runtime bundle verification failed: {error}"));
 
     for directory in prepared.watched_directories {
-        println!("cargo:rerun-if-changed={}", directory.display());
+        emit_rerun_if_changed(&manifest_dir, &directory);
     }
     for file in prepared.watched_files {
-        println!("cargo:rerun-if-changed={}", file.display());
+        emit_rerun_if_changed(&manifest_dir, &file);
     }
 
     fs::write(
@@ -37,4 +40,17 @@ fn main() {
         prepared.generated_source,
     )
     .expect("write verified embedded runtime manifest");
+}
+
+fn emit_rerun_if_changed(manifest_dir: &Path, path: &Path) {
+    let relative = path
+        .strip_prefix(manifest_dir)
+        .expect("runtime bundle watch path is under the crate manifest directory");
+    let relative = relative
+        .to_str()
+        .expect("runtime bundle watch paths must be UTF-8");
+    if relative.chars().any(char::is_control) {
+        panic!("runtime bundle watch path contains a control character");
+    }
+    println!("cargo:rerun-if-changed={relative}");
 }

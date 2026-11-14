@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashSet},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 const BACKENDS: [&str; 2] = ["cuda", "mlx"];
@@ -165,7 +165,10 @@ pub fn prepare_bundle(
             .join(&asset.backend)
             .join(&asset.path);
         let metadata = fs::symlink_metadata(&source_path).map_err(|error| {
-            format!("Could not inspect runtime asset {}: {error}", source_path.display())
+            format!(
+                "Could not inspect runtime asset {}: {error}",
+                source_path.display()
+            )
         })?;
         if !metadata.file_type().is_file() {
             return Err(format!(
@@ -175,7 +178,10 @@ pub fn prepare_bundle(
         }
 
         let bytes = fs::read(&source_path).map_err(|error| {
-            format!("Could not read runtime asset {}: {error}", source_path.display())
+            format!(
+                "Could not read runtime asset {}: {error}",
+                source_path.display()
+            )
         })?;
         if bytes.len() as u64 != asset.size_bytes {
             return Err(format!(
@@ -215,7 +221,10 @@ pub fn prepare_bundle(
                 .join(&asset.backend)
                 .join(&asset.path);
             let parent = staged_path.parent().ok_or_else(|| {
-                format!("Runtime asset has no staging directory: {}.", staged_path.display())
+                format!(
+                    "Runtime asset has no staging directory: {}.",
+                    staged_path.display()
+                )
             })?;
             fs::create_dir_all(parent).map_err(|error| {
                 format!("Could not create runtime asset staging directory: {error}")
@@ -282,6 +291,11 @@ fn scan_directory(
     watched_directories: &mut BTreeSet<PathBuf>,
     unlisted: &mut BTreeSet<String>,
 ) -> Result<(), String> {
+    let relative_directory = runtime_relative_path(backend_root, directory)?;
+    if relative_directory != "upstream" && relative_directory != "managed" {
+        validate_asset_path(&relative_directory)?;
+    }
+
     let metadata = fs::symlink_metadata(directory).map_err(|error| {
         format!(
             "Could not inspect runtime directory {}: {error}",
@@ -311,7 +325,10 @@ fn scan_directory(
         let path = entry.path();
         let file_name = entry.file_name();
         let file_type = entry.file_type().map_err(|error| {
-            format!("Could not inspect runtime asset {}: {error}", path.display())
+            format!(
+                "Could not inspect runtime asset {}: {error}",
+                path.display()
+            )
         })?;
         if file_type.is_dir() {
             if file_name.to_str() == Some("__pycache__") {
@@ -330,12 +347,8 @@ fn scan_directory(
             if path.extension().and_then(|extension| extension.to_str()) == Some("pyc") {
                 continue;
             }
-            let relative = path
-                .strip_prefix(backend_root)
-                .map_err(|error| format!("Runtime asset escaped its backend root: {error}"))?
-                .to_str()
-                .ok_or_else(|| format!("Runtime asset path is not UTF-8: {}.", path.display()))?
-                .replace('\\', "/");
+            let relative = runtime_relative_path(backend_root, &path)?;
+            validate_asset_path(&relative)?;
             let key = format!("{backend}/{relative}");
             if !allowed.contains(&key) {
                 unlisted.insert(key);
@@ -349,6 +362,23 @@ fn scan_directory(
         }
     }
     Ok(())
+}
+
+fn runtime_relative_path(backend_root: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
+        .strip_prefix(backend_root)
+        .map_err(|error| format!("Runtime asset escaped its backend root: {error}"))?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) => components.push(
+                name.to_str()
+                    .ok_or_else(|| format!("Runtime asset path is not UTF-8: {path:?}"))?,
+            ),
+            _ => return Err("Runtime asset path must be relative.".into()),
+        }
+    }
+    Ok(components.join("/"))
 }
 
 fn is_reserved_windows_device_name(component: &str) -> bool {
@@ -487,9 +517,7 @@ mod tests {
     fn unlisted_private_asset_fails_before_any_bytes_are_staged() {
         let fixture = Fixture::new(b"pinned");
         fs::write(
-            fixture
-                .root
-                .join("runtimes/pixal3d/cuda/upstream/.env"),
+            fixture.root.join("runtimes/pixal3d/cuda/upstream/.env"),
             b"private-token",
         )
         .unwrap();
@@ -556,6 +584,47 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn backslash_filename_does_not_alias_an_allowlisted_path() {
+        let fixture = Fixture::new(b"pinned");
+        let unexpected = fixture
+            .root
+            .join("runtimes/pixal3d/cuda/upstream")
+            .join("pixalcuda\\cli.py");
+        fs::write(unexpected, b"unlisted").unwrap();
+
+        let error = fixture.prepare().unwrap_err();
+        assert!(error.contains("Invalid runtime bundle path"));
+        assert!(
+            !fixture
+                .output
+                .join("runtime-assets/cuda/upstream/pixalcuda/cli.py")
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn newline_directory_names_are_rejected_before_they_can_become_cargo_directives() {
+        let fixture = Fixture::new(b"pinned");
+        let injected = fixture
+            .root
+            .join("runtimes/pixal3d/cuda/upstream")
+            .join("empty\ncargo:rustc-env=MESHHARBOR_INJECTED=yes");
+        fs::create_dir_all(&injected).unwrap();
+
+        let error = fixture.prepare().unwrap_err();
+        assert!(error.to_lowercase().contains("path"));
+        assert!(!error.contains('\n'));
+        assert!(
+            !fixture
+                .output
+                .join("runtime-assets/cuda/upstream/pixalcuda/cli.py")
+                .exists()
+        );
+    }
+
     #[test]
     fn runtime_asset_paths_are_unique() {
         let fixture = Fixture::new(b"pinned");
@@ -576,7 +645,11 @@ mod tests {
                 }
             ]
         });
-        fs::write(&fixture.manifest, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        fs::write(
+            &fixture.manifest,
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
 
         let error = fixture.prepare().unwrap_err();
         assert!(error.contains("Duplicate runtime bundle manifest entry"));
