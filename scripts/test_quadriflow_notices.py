@@ -96,6 +96,16 @@ class NoticeTests(unittest.TestCase):
         with patch.object(q, "MAX_FILES", 0), self.assertRaises(ValueError):
             q.build(self.inventory, self.root / "three", 0)
 
+        (self.source / "NOTICE.txt").write_text("Second notice\n", encoding="utf-8")
+        self.inventory["packages"][0]["notices"] = ["LICENSE.txt", "NOTICE.txt"]
+        self.inventory["packages"].append({
+            **self.inventory["packages"][0],
+            "id": "second-package",
+            "name": "SecondPackage",
+        })
+        with patch.object(q, "MAX_FILES", 2), self.assertRaisesRegex(ValueError, "global limits"):
+            q.build(self.inventory, self.root / "four", 0)
+
     def test_wrong_revision(self):
         self.inventory["source_commit"] = "0" * 40
         with self.assertRaises(ValueError):
@@ -138,9 +148,15 @@ class NoticeTests(unittest.TestCase):
                 q.build(self.inventory, self.root / "out", epoch)
 
     def test_unresolved_license_ref(self):
-        self.inventory["packages"][0]["license_declared"] = "LicenseRef-Unresolved"
-        with self.assertRaises(ValueError):
-            q.build(self.inventory, self.root / "out", 0)
+        for index, expression in enumerate((
+            "LicenseRef-Unresolved",
+            "MIT AND LicenseRef-Unresolved",
+            "MIT AND licenseref-Unresolved",
+        )):
+            with self.subTest(expression=expression):
+                self.inventory["packages"][0]["license_declared"] = expression
+                with self.assertRaises(ValueError):
+                    q.build(self.inventory, self.root / f"out-{index}", 0)
 
     def test_bounded_discovery(self):
         with patch.object(q, "MAX_SCAN_ENTRIES", 0), self.assertRaises(ValueError):

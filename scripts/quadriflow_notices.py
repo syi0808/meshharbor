@@ -203,7 +203,7 @@ def build(inventory, output, epoch):
             or not declared.strip()
             or declared != declared.strip()
             or not SPDX_EXPRESSION_CHARS.fullmatch(declared)
-            or declared.startswith("LicenseRef-")
+            or re.search(r"LicenseRef-", declared, re.IGNORECASE)
         ):
             raise ValueError("license expression missing, unsafe, or unresolved LicenseRef")
         if declared == "NOASSERTION":

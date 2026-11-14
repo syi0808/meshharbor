@@ -407,7 +407,7 @@ private:
 
 BakedTextures bake_projected_textures(
     const Image &source_base, const Image &source_mr,
-    const float *target_positions, const float *target_normals,
+    const float *target_positions, const float *target_normals, uint32_t target_vertex_count,
     const float *source_positions, const float *source_uv, uint32_t source_vertex_count,
     const uint32_t *source_indices, uint32_t source_index_count,
     const std::vector<std::array<float, 2>> &atlas_uv,
@@ -463,15 +463,15 @@ BakedTextures bake_projected_textures(
             const size_t pixel = size_t(py) * width + px;
             if (covered[pixel]) continue;
             ++result.projection_attempted;
-            const uint32_t source_ids[3] = {xref[ids[0]], xref[ids[1]], xref[ids[2]]};
-            if (source_ids[0] >= source_vertex_count || source_ids[1] >= source_vertex_count || source_ids[2] >= source_vertex_count)
+            const uint32_t target_ids[3] = {xref[ids[0]], xref[ids[1]], xref[ids[2]]};
+            if (target_ids[0] >= target_vertex_count || target_ids[1] >= target_vertex_count || target_ids[2] >= target_vertex_count)
                 throw std::runtime_error("xatlas returned an out-of-range target vertex reference");
             auto target_position = [&](int corner) {
-                const uint32_t id = xref[ids[corner]];
+                const uint32_t id = target_ids[corner];
                 return Vec3{target_positions[size_t(id) * 3], target_positions[size_t(id) * 3 + 1], target_positions[size_t(id) * 3 + 2]};
             };
             auto target_normal = [&](int corner) {
-                const uint32_t id = xref[ids[corner]];
+                const uint32_t id = target_ids[corner];
                 return Vec3{target_normals[size_t(id) * 3], target_normals[size_t(id) * 3 + 1], target_normals[size_t(id) * 3 + 2]};
             };
             const Vec3 target_point = add3(scale3(target_position(0), a), add3(scale3(target_position(1), b), scale3(target_position(2), c)));
@@ -651,7 +651,7 @@ extern "C" int meshharbor_atlas_bake(
             for (uint32_t i = 0; i < vertex_count; ++i) direct_uv[i] = {original_uv[2 * i], original_uv[2 * i + 1]};
         }
         BakedTextures baked = projected
-            ? bake_projected_textures(source_base, source_mr, positions, normals,
+            ? bake_projected_textures(source_base, source_mr, positions, normals, vertex_count,
                 source_positions, source_uv, source_vertex_count, source_indices, source_index_count,
                 atlas_uv, xref, chart_ids, atlas_indices, atlas->image, width, height,
                 max_distance_ratio, min_coverage)

@@ -452,7 +452,8 @@ impl Store {
             return Ok(None);
         };
         let mut artifact_statement = conn.prepare(
-            "SELECT id,kind,sha256,byte_size,mime_type FROM artifacts WHERE asset_id=?1 ORDER BY created_at,id",
+            "SELECT id,kind,sha256,byte_size,mime_type FROM artifacts WHERE asset_id=?1
+             ORDER BY CASE WHEN sha256=(SELECT sha256 FROM assets WHERE id=?1) THEN 0 ELSE 1 END, created_at,id",
         )?;
         let artifact_rows = artifact_statement.query_map([&id], |row| {
             Ok(Artifact {
@@ -846,6 +847,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.artifacts.len(), 2);
+        assert_eq!(result.artifacts[0].sha256, result.sha256);
+        assert_eq!(result.artifacts[0].kind, "derived");
         let obj = result
             .artifacts
             .iter()

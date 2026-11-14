@@ -258,7 +258,7 @@ def validate_candidate(
     if not isinstance(provenance, dict):
         raise CandidateProvenanceError("candidate provenance must be an object")
     for key, value in expected.items():
-        if provenance.get(key) != value:
+        if key not in provenance or provenance[key] != value:
             raise CandidateProvenanceError(
                 f"candidate provenance {key} does not match the pinned policy"
             )

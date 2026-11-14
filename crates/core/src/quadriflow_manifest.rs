@@ -214,8 +214,8 @@ pub fn validate_quadriflow_release_manifest(
 }
 
 /// Returns the embedded release manifest after structural validation.
-/// The checked-in manifest currently has no artifacts and is therefore not
-/// installable. The function returns an error rather than assuming validity.
+/// An empty manifest is valid but not installable; the installer enforces
+/// installability separately after validating the listed release evidence.
 pub fn bundled_quadriflow_release_manifest()
 -> Result<QuadriFlowReleaseManifest, QuadriFlowManifestError> {
     parse_quadriflow_release_manifest(include_bytes!("../../../registry/backends/quadriflow.json"))

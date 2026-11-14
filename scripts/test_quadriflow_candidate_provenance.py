@@ -149,6 +149,23 @@ class CandidateProvenanceTests(unittest.TestCase):
             self.prepare(output)
         self.assertEqual(output.read_text(encoding="utf-8"), "keep")
 
+    def test_rejects_missing_smoke_test_provenance_key(self):
+        self.write_status()
+        self.write_provenance()
+        provenance_path = self.candidate_dir / "provenance.json"
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        del provenance["smoke_test"]
+        provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+        with self.assertRaisesRegex(candidate.CandidateProvenanceError, "smoke_test"):
+            candidate.validate_candidate(
+                self.candidate_dir,
+                self.executable,
+                self.platform,
+                self.source_commit,
+                self.workflow_commit,
+                "primary",
+            )
+
     def test_rejects_untrusted_provenance_material_changes(self):
         self.write_status()
         self.write_provenance(replica="primary", upstream_commit="c" * 40)

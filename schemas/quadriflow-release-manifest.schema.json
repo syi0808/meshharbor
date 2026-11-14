@@ -251,7 +251,7 @@
                   "const": "provenance.sigstore.json"
                 },
                 "size_bytes": {
-                  "maximum": 4194304
+                  "maximum": 262144
                 }
               }
             }

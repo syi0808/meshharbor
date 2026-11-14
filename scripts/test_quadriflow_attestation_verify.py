@@ -21,10 +21,12 @@ class CandidateVerifierTests(unittest.TestCase):
         self.binary.write_bytes(b"synthetic executable bytes")
         (self.candidate / "CANDIDATE-STATUS.json").write_text(
             json.dumps({
+                "schema_version": 1,
                 "candidate_only": True,
                 "installable": False,
                 "release_ready": False,
                 "dependency_closure_verified": False,
+                "quadriFlow_executable_run": False,
             }),
             encoding="utf-8",
         )
@@ -144,6 +146,9 @@ class CandidateVerifierTests(unittest.TestCase):
         return calls, run
 
     def test_fixed_policy_is_passed_and_verified_bundle_is_copied(self):
+        nested_notice = self.candidate / "third-party-notices" / "meshharbor" / "NOTICE.txt"
+        nested_notice.parent.mkdir(parents=True)
+        nested_notice.write_text("test notice\n", encoding="utf-8")
         calls, fake = self.fake_run()
         with patch.object(q, "_run", side_effect=fake):
             report = self.verify_attestation(
@@ -182,6 +187,7 @@ class CandidateVerifierTests(unittest.TestCase):
         checksum_lines = (self.candidate / "SHA256SUMS").read_text(encoding="ascii").splitlines()
         self.assertTrue(any("provenance.sigstore.json" in line for line in checksum_lines))
         self.assertTrue(any("verification.json" in line for line in checksum_lines))
+        self.assertTrue(any("third-party-notices/meshharbor/NOTICE.txt" in line for line in checksum_lines))
 
 
     def test_accepts_verified_bundle_staged_inside_candidate_directory(self):
@@ -353,6 +359,22 @@ class CandidateVerifierTests(unittest.TestCase):
                         )
                 self.assertFalse((self.candidate / "provenance.sigstore.json").exists())
 
+    def test_checksum_failure_removes_new_report_and_bundle_for_retry(self):
+        calls, fake = self.fake_run()
+        with patch.object(q, "_run", side_effect=fake), patch.object(
+            q, "_write_checksums", side_effect=q.VerificationError("checksum finalization failed")
+        ):
+            with self.assertRaisesRegex(q.VerificationError, "checksum finalization"):
+                self.verify_attestation(
+                    self.binary,
+                    self.bundle,
+                    self.source_commit,
+                    self.workflow_commit,
+                    self.output,
+                )
+        self.assertFalse((self.candidate / "provenance.sigstore.json").exists())
+        self.assertFalse(self.output.exists())
+
     def test_cli_failure_does_not_write_bundle_or_report(self):
         calls, fake = self.fake_run(verify_returncode=1)
         with patch.object(q, "_run", side_effect=fake):
@@ -388,6 +410,49 @@ class CandidateVerifierTests(unittest.TestCase):
                     self.output,
                 )
         self.assertEqual(calls, [])
+
+    def test_rejects_candidate_status_without_schema_or_execution_gate(self):
+        invalid_statuses = (
+            {
+                "candidate_only": True,
+                "installable": False,
+                "release_ready": False,
+                "dependency_closure_verified": False,
+                "quadriFlow_executable_run": False,
+            },
+            {
+                "schema_version": 1,
+                "candidate_only": True,
+                "installable": False,
+                "release_ready": False,
+                "dependency_closure_verified": False,
+                "quadriFlow_executable_run": True,
+            },
+            {
+                "schema_version": True,
+                "candidate_only": True,
+                "installable": False,
+                "release_ready": False,
+                "dependency_closure_verified": False,
+                "quadriFlow_executable_run": False,
+            },
+        )
+        for status in invalid_statuses:
+            with self.subTest(status=status):
+                (self.candidate / "CANDIDATE-STATUS.json").write_text(
+                    json.dumps(status), encoding="utf-8"
+                )
+                calls, fake = self.fake_run()
+                with patch.object(q, "_run", side_effect=fake):
+                    with self.assertRaisesRegex(q.VerificationError, "non-release gates"):
+                        self.verify_attestation(
+                            self.binary,
+                            self.bundle,
+                            self.source_commit,
+                            self.workflow_commit,
+                            self.output,
+                        )
+                self.assertEqual(calls, [])
 
     def test_rejects_malformed_commits_before_cli(self):
         calls, fake = self.fake_run()

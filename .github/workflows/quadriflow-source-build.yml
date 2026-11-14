@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out MeshHarbor
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Install native build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -55,19 +55,19 @@ jobs:
           "VCPKG_INSTALLATION_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
 
       - name: Set up Rust for the output validator
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
 
       - name: Build pinned upstream and validate one synthetic cube
         run: python scripts/quadriflow-platform-smoke.py
 
       - name: Upload smoke binary and provenance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: quadriflow-smoke-${{ matrix.platform }}-${{ runner.arch }}
           path: ${{ runner.temp }}/quadriflow-platform-smoke/artifact/
@@ -81,7 +81,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out MeshHarbor
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Install native build dependencies (Windows)
         shell: pwsh
@@ -94,19 +94,19 @@ jobs:
           "VCPKG_INSTALLATION_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
 
       - name: Set up Rust for the output validator
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
 
       - name: Build pinned upstream and validate one synthetic cube
         run: python scripts/quadriflow-platform-smoke.py
 
       - name: Upload smoke binary and provenance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: quadriflow-smoke-windows-${{ runner.arch }}
           path: ${{ runner.temp }}/quadriflow-platform-smoke/artifact/
@@ -119,25 +119,25 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out MeshHarbor
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Install native build dependencies
         run: brew install eigen boost
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
 
       - name: Set up Rust for the output validator
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
 
       - name: Build pinned upstream and validate one synthetic cube
         run: python scripts/quadriflow-platform-smoke.py
 
       - name: Upload smoke binary and provenance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: quadriflow-smoke-macos-${{ runner.arch }}
           path: ${{ runner.temp }}/quadriflow-platform-smoke/artifact/

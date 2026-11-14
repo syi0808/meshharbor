@@ -367,10 +367,17 @@ def _validate_cli_result(
 def _write_new(path: Path, data: bytes) -> None:
     if path.exists() or path.is_symlink():
         raise VerificationError(f"refusing to overwrite {path.name}")
+    created = False
     try:
         with path.open("xb") as handle:
+            created = True
             handle.write(data)
     except OSError as error:
+        if created:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise VerificationError(f"could not write {path.name}") from error
 
 
@@ -380,10 +387,13 @@ def _candidate_status(candidate_dir: Path) -> None:
     status = _json_bytes(data, "candidate status")
     if (
         not isinstance(status, dict)
+        or type(status.get("schema_version")) is not int
+        or status.get("schema_version") != 1
         or status.get("candidate_only") is not True
         or status.get("installable") is not False
         or status.get("release_ready") is not False
         or status.get("dependency_closure_verified") is not False
+        or status.get("quadriFlow_executable_run") is not False
     ):
         raise VerificationError("candidate status is missing the required non-release gates")
 
@@ -392,24 +402,23 @@ def _write_checksums(candidate_dir: Path) -> None:
     entries: list[tuple[str, str]] = []
     total = 0
     count = 0
-    for directory, subdirs, filenames in os.walk(candidate_dir, followlinks=False):
-        for name in subdirs:
-            if (Path(directory) / name).is_symlink():
-                raise VerificationError("candidate directory contains a symlink")
-        for name in filenames:
-            path = Path(directory) / name
-            if path.is_symlink() or not path.is_file():
-                raise VerificationError("candidate directory contains a non-regular file")
-            if path.name == "SHA256SUMS":
-                continue
-            size = path.stat().st_size
-            total += size
-            count += 1
-            if count > MAX_CANDIDATE_FILES or total > MAX_CANDIDATE_BYTES:
-                raise VerificationError("candidate directory exceeds checksum limits")
-            digest = _sha256(path.read_bytes())
-            relative = path.relative_to(candidate_dir).as_posix()
-            entries.append((relative, digest))
+    for path in sorted(candidate_dir.rglob("*")):
+        if path.is_symlink():
+            raise VerificationError("candidate directory contains a symlink")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise VerificationError("candidate directory contains a non-regular file")
+        if path == candidate_dir / "SHA256SUMS":
+            continue
+        size = path.stat().st_size
+        total += size
+        count += 1
+        if count > MAX_CANDIDATE_FILES or total > MAX_CANDIDATE_BYTES:
+            raise VerificationError("candidate directory exceeds checksum limits")
+        digest = _sha256(path.read_bytes())
+        relative = path.relative_to(candidate_dir).as_posix()
+        entries.append((relative, digest))
 
     lines = [f"{digest}  {name}" for name, digest in sorted(entries)]
     sums_path = candidate_dir / "SHA256SUMS"
@@ -497,50 +506,63 @@ def verify_attestation(
         raise VerificationError("Sigstore bundle changed during verification")
 
     bundle_copy = candidate_dir / "provenance.sigstore.json"
-    if bundle_copy != bundle:
-        if bundle_copy.exists() or bundle_copy.is_symlink():
-            raise VerificationError("candidate already contains a Sigstore bundle")
-        _write_new(bundle_copy, bundle_bytes)
-    if _sha256(bundle_copy.read_bytes()) != _sha256(bundle_bytes):
-        raise VerificationError("copied Sigstore bundle did not match verified bytes")
+    bundle_copy_created = False
+    report_created = False
+    try:
+        if bundle_copy != bundle:
+            if bundle_copy.exists() or bundle_copy.is_symlink():
+                raise VerificationError("candidate already contains a Sigstore bundle")
+            _write_new(bundle_copy, bundle_bytes)
+            bundle_copy_created = True
+        if _sha256(bundle_copy.read_bytes()) != _sha256(bundle_bytes):
+            raise VerificationError("copied Sigstore bundle did not match verified bytes")
 
-    report: dict[str, Any] = {
-        "schema_version": 1,
-        "verifier": "GitHub CLI gh attestation verify on a clean GitHub-hosted runner",
-        "verifier_version": gh_version,
-        "github_host": "github.com",
-        "trusted_root": "obtained by gh attestation trusted-root and passed through TUF verification",
-        "artifact": {"name": artifact.name, "sha256": _sha256(artifact_bytes)},
-        "bundle": {"name": bundle_copy.name, "sha256": _sha256(bundle_bytes)},
-        "platform": platform_value,
-        "workflow_run_id": workflow_run_id,
-        "workflow_run_attempt": workflow_run_attempt,
-        "materials": {
-            "meshharbor_source_commit": source_commit,
-            "quadriflow_repository": UPSTREAM_REPOSITORY,
-            "quadriflow_commit": UPSTREAM_COMMIT,
-            "build_recipe_sha256": _build_recipe_sha256(),
-        },
-        "policy": {
-            "repository": REPOSITORY,
-            "repository_id": REPOSITORY_ID,
-            "owner_id": OWNER_ID,
-            "source_ref": SOURCE_REF,
-            "source_commit": source_commit,
-            "signer_workflow": f"{REPOSITORY}/{WORKFLOW_PATH}",
-            "workflow_commit": workflow_commit,
-            "workflow_trigger": "workflow_dispatch",
-            "runner_environment": "github-hosted",
-            "oidc_issuer": OIDC_ISSUER,
-            "predicate_type": PREDICATE_TYPE,
-        },
-        "verified_timestamp_count": timestamp_count,
-        "verified_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "installer_ready": False,
-    }
-    _write_new(output, (json.dumps(report, sort_keys=True, indent=2) + "\n").encode("utf-8"))
-    _write_checksums(candidate_dir)
-    return report
+        report: dict[str, Any] = {
+            "schema_version": 1,
+            "verifier": "GitHub CLI gh attestation verify on a clean GitHub-hosted runner",
+            "verifier_version": gh_version,
+            "github_host": "github.com",
+            "trusted_root": "obtained by gh attestation trusted-root and passed through TUF verification",
+            "artifact": {"name": artifact.name, "sha256": _sha256(artifact_bytes)},
+            "bundle": {"name": bundle_copy.name, "sha256": _sha256(bundle_bytes)},
+            "platform": platform_value,
+            "workflow_run_id": workflow_run_id,
+            "workflow_run_attempt": workflow_run_attempt,
+            "materials": {
+                "meshharbor_source_commit": source_commit,
+                "quadriflow_repository": UPSTREAM_REPOSITORY,
+                "quadriflow_commit": UPSTREAM_COMMIT,
+                "build_recipe_sha256": _build_recipe_sha256(),
+            },
+            "policy": {
+                "repository": REPOSITORY,
+                "repository_id": REPOSITORY_ID,
+                "owner_id": OWNER_ID,
+                "source_ref": SOURCE_REF,
+                "source_commit": source_commit,
+                "signer_workflow": f"{REPOSITORY}/{WORKFLOW_PATH}",
+                "workflow_commit": workflow_commit,
+                "workflow_trigger": "workflow_dispatch",
+                "runner_environment": "github-hosted",
+                "oidc_issuer": OIDC_ISSUER,
+                "predicate_type": PREDICATE_TYPE,
+            },
+            "verified_timestamp_count": timestamp_count,
+            "verified_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "installer_ready": False,
+        }
+        _write_new(output, (json.dumps(report, sort_keys=True, indent=2) + "\n").encode("utf-8"))
+        report_created = True
+        _write_checksums(candidate_dir)
+        return report
+    except Exception:
+        for path, created in ((output, report_created), (bundle_copy, bundle_copy_created)):
+            if created:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        raise
 
 
 def build_parser() -> argparse.ArgumentParser:

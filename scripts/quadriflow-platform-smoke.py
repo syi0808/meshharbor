@@ -33,6 +33,23 @@ BUILD_OPTIONS = [
 ]
 
 
+def write_checksum_manifest(artifact_dir: Path) -> None:
+    entries = []
+    for path in sorted(artifact_dir.rglob("*")):
+        if path.is_symlink():
+            raise RuntimeError("artifact directory contains a symlink")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError("artifact directory contains a non-regular file")
+        if path == artifact_dir / "SHA256SUMS":
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        relative = path.relative_to(artifact_dir).as_posix()
+        entries.append(f"{digest}  {relative}")
+    (artifact_dir / "SHA256SUMS").write_text("\n".join(entries) + "\n", encoding="ascii")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -298,13 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(candidate_status, indent=2) + "\n", encoding="utf-8"
     )
 
-    checksums = []
-    for path in sorted(artifact_dir.iterdir()):
-        if path.name == "SHA256SUMS" or not path.is_file():
-            continue
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        checksums.append(f"{digest}  {path.name}")
-    (artifact_dir / "SHA256SUMS").write_text("\n".join(checksums) + "\n", encoding="ascii")
+    write_checksum_manifest(artifact_dir)
     print(f"\nArtifact evidence ready at {artifact_dir}", flush=True)
     return 0
 
