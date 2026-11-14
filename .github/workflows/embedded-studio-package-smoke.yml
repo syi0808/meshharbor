@@ -66,6 +66,8 @@ jobs:
         uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759
 
       - name: Build release CLI with embedded Studio
+        env:
+          CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
         run: cargo build --locked --release --package meshharbor --bin meshharbor
 
       - name: Launch binary and verify embedded Studio assets
