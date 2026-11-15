@@ -272,6 +272,12 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
 
         self.assertIn("artifact-ids: 14166790603", workflow)
         self.assertIn("run-id: 43721747855", workflow)
+        api_commands = [
+            line.strip() for line in workflow.splitlines() if "gh api " in line
+        ]
+        self.assertEqual(len(api_commands), 2)
+        self.assertTrue(all('gh api "repos/' in line for line in api_commands))
+        self.assertNotIn('gh api "/repos/', workflow)
         self.assertIn("quadriflow_attestation_verify.py verify", workflow)
         self.assertIn("python scripts/quadriflow_candidate_native_smoke.py", workflow)
         self.assertLess(
