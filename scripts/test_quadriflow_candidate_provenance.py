@@ -90,6 +90,10 @@ class CandidateProvenanceTests(unittest.TestCase):
 
         self.assertEqual(predicate["buildDefinition"]["buildType"], candidate.BUILD_TYPE)
         self.assertEqual(
+            predicate["runDetails"]["builder"],
+            {"id": candidate.RUNNER_BUILDER_ID},
+        )
+        self.assertEqual(
             predicate["buildDefinition"]["externalParameters"]["workflow"],
             {
                 "repository": candidate.REPOSITORY_URI,

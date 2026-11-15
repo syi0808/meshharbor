@@ -35,6 +35,7 @@ const WORKFLOW_IDENTITY: &str = concat!(
     "https://github.com/syi0808/meshharbor",
     "/.github/workflows/quadriflow-candidate-build.yml@refs/heads/main"
 );
+const RUNNER_BUILDER_ID: &str = "https://github.com/actions/runner/github-hosted";
 const OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const WORKFLOW_BUILD_TYPE: &str =
     "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1";
@@ -423,7 +424,7 @@ fn validate_run_details(
     workflow: &QuadriFlowWorkflowEvidence,
 ) -> VerifyResult<()> {
     require_exact_keys(run_details, &["builder", "metadata"])?;
-    let expected_builder = serde_json::json!({"id": WORKFLOW_IDENTITY});
+    let expected_builder = serde_json::json!({"id": RUNNER_BUILDER_ID});
     if run_details.get("builder") != Some(&expected_builder) {
         return Err(AttestationVerificationError);
     }
@@ -710,7 +711,7 @@ mod tests {
                     ],
                 },
                 "runDetails": {
-                    "builder": {"id": WORKFLOW_IDENTITY},
+                    "builder": {"id": RUNNER_BUILDER_ID},
                     "metadata": {
                         "invocationId": format!(
                             "{MESH_HARBOR_REPOSITORY_URI}/actions/runs/{}/attempts/{}",
@@ -728,6 +729,7 @@ mod tests {
         let policy = workflow_certificate_policy(&artifact.workflow);
 
         assert_eq!(policy.repository_name, MESH_HARBOR_REPOSITORY_NAME);
+        assert_eq!(policy.identity, WORKFLOW_IDENTITY);
         assert_eq!(
             policy.token_subject,
             TokenSubjectPolicy::Required(MESH_HARBOR_TOKEN_SUBJECT)
@@ -859,6 +861,11 @@ mod tests {
         let artifact = test_artifact();
         let valid = valid_slsa_statement(&artifact);
         assert!(validate_slsa_statement(&valid, PINNED_SOURCE_COMMIT, &artifact).is_ok());
+
+        let mut wrong_builder = valid.clone();
+        wrong_builder["predicate"]["runDetails"]["builder"]["id"] =
+            Value::String(WORKFLOW_IDENTITY.to_owned());
+        assert!(validate_slsa_statement(&wrong_builder, PINNED_SOURCE_COMMIT, &artifact).is_err());
 
         let mut wrong_independent_digest = valid.clone();
         wrong_independent_digest["predicate"]["buildDefinition"]["internalParameters"]["meshharbor_reproducibility"]

@@ -20,10 +20,7 @@ REPOSITORY = "syi0808/meshharbor"
 REPOSITORY_URI = "https://github.com/syi0808/meshharbor"
 SOURCE_REF = "refs/heads/main"
 WORKFLOW_PATH = ".github/workflows/quadriflow-candidate-build.yml"
-WORKFLOW_SAN = (
-    "https://github.com/syi0808/meshharbor/"
-    ".github/workflows/quadriflow-candidate-build.yml@refs/heads/main"
-)
+RUNNER_BUILDER_ID = "https://github.com/actions/runner/github-hosted"
 UPSTREAM_REPOSITORY = "https://github.com/hjwdzh/QuadriFlow.git"
 UPSTREAM_COMMIT = "810b7a0967c35b0dc85b4464e3835e26a756c967"
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
@@ -193,7 +190,7 @@ def create_predicate(
             "resolvedDependencies": dependencies,
         },
         "runDetails": {
-            "builder": {"id": WORKFLOW_SAN},
+            "builder": {"id": RUNNER_BUILDER_ID},
             "metadata": {
                 "invocationId": (
                     f"{REPOSITORY_URI}/actions/runs/{run_id}/attempts/{run_attempt}"

@@ -167,6 +167,8 @@ class CandidateVerifierTests(unittest.TestCase):
         self.assertIn(q.REPOSITORY, command)
         self.assertIn("--cert-identity", command)
         self.assertEqual(command[command.index("--cert-identity") + 1], q.WORKFLOW_SAN)
+        self.assertEqual(q.RUNNER_BUILDER_ID, candidate_provenance.RUNNER_BUILDER_ID)
+        self.assertNotEqual(q.RUNNER_BUILDER_ID, q.WORKFLOW_SAN)
         self.assertNotIn("--signer-repo", command)
         self.assertNotIn("--signer-workflow", command)
         self.assertIn("--source-ref", command)
@@ -306,6 +308,9 @@ class CandidateVerifierTests(unittest.TestCase):
             hashlib.sha256(self.binary.read_bytes()).hexdigest(),
         )
         mutations = []
+        wrong_builder = copy.deepcopy(valid)
+        wrong_builder["runDetails"]["builder"]["id"] = q.WORKFLOW_SAN
+        mutations.append(wrong_builder)
         wrong_workflow = copy.deepcopy(valid)
         wrong_workflow["buildDefinition"]["externalParameters"]["workflow"]["path"] = (
             ".github/workflows/other.yml"
