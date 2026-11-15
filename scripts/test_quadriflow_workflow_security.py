@@ -128,6 +128,7 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
             "artifact-ids: ${{ steps.select_signed_artifact.outputs.artifact_id }}",
             self.native,
         )
+        self.assertIn("merge-multiple: true", self.native)
         self.assertIn("quadriflow_attestation_verify.py verify", self.native)
         self.assertIn("quadriflow_candidate_native_smoke.py", self.native)
         self.assertIn("cargo test -p meshharbor-core --locked --test quadriflow_output", self.native)
