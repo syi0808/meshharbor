@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/syi0808/meshharbor/blob/main/schemas/quadriflow-apt-package-evidence.schema.json",
+  "title": "MeshHarbor explicit apt package identity and copyright evidence",
+  "description": "A bounded offline snapshot for explicitly named installed Debian binary packages. It is not a dependency-closure report, source-origin attestation, license clearance, or release approval.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_kind",
+    "capture_status",
+    "scope",
+    "dependency_closure_verified",
+    "repository_origin_verified",
+    "release_ready",
+    "limitations",
+    "packages"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_kind": { "const": "apt-dpkg-package-identity-and-copyright-snapshot" },
+    "capture_status": { "const": "complete_for_explicit_packages" },
+    "scope": { "const": "explicit-package-list-only" },
+    "dependency_closure_verified": { "const": false },
+    "repository_origin_verified": { "const": false },
+    "release_ready": { "const": false },
+    "limitations": {
+      "const": [
+        "The caller-supplied package list is not verified as a complete dependency closure.",
+        "Repository origin and downloaded .deb/source archive checksums are not captured.",
+        "Copyright notice hashes are inventory evidence, not license clearance or redistribution approval."
+      ]
+    },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/package" }
+    }
+  },
+  "$defs": {
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binary_package",
+        "binary_version",
+        "architecture",
+        "package_status",
+        "source_package",
+        "source_version",
+        "copyright_notice"
+      ],
+      "properties": {
+        "binary_package": { "$ref": "#/$defs/packageName" },
+        "binary_version": { "$ref": "#/$defs/version" },
+        "architecture": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+        "package_status": { "const": "installed" },
+        "source_package": { "$ref": "#/$defs/packageName" },
+        "source_version": { "$ref": "#/$defs/version" },
+        "copyright_notice": { "$ref": "#/$defs/copyrightNotice" }
+      }
+    },
+    "packageName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.+-]{0,127}(?::[a-z0-9][a-z0-9-]{0,31})?$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9.+:~-]{1,256}$"
+    },
+    "copyrightNotice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_path",
+        "resolved_path",
+        "evidence_path",
+        "owner_packages",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "requested_path": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.+-]{0,127}/copyright$" },
+        "resolved_path": { "type": "string", "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._+ -]{0,255}/)+copyright$" },
+        "evidence_path": { "type": "string", "pattern": "^notices/[a-z0-9][a-z0-9.+_-]{0,160}/copyright$" },
+        "owner_packages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/packageName" }
+        },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 2097152 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}
