@@ -1,0 +1,158 @@
+name: Reverify fixed Windows QuadriFlow candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_fixed_windows_candidate:
+        description: Verify only the existing signed Windows candidate from run 43721747855
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify-fixed-windows-candidate:
+    name: Windows read-only verification of fixed signed candidate
+    if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_fixed_windows_candidate == true }}
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      MESHHARBOR_ORIGINAL_SOURCE_COMMIT: "9288f601578f8c9b5735a1b255b661f6ebcd1c50"
+      MESHHARBOR_ORIGINAL_WORKFLOW_COMMIT: "9288f601578f8c9b5735a1b255b661f6ebcd1c50"
+      MESHHARBOR_ORIGINAL_RUN_ID: "43721747855"
+      MESHHARBOR_ORIGINAL_RUN_ATTEMPT: "1"
+      MESHHARBOR_WINDOWS_ARTIFACT_ID: "14166790603"
+      MESHHARBOR_WINDOWS_ARTIFACT_NAME: "quadriflow-signed-windows-x86_64"
+      MESHHARBOR_WINDOWS_ARTIFACT_SIZE: "1120743"
+      MESHHARBOR_WINDOWS_ARTIFACT_SHA256: "b099d0f64cdddbef091bdfae9cbecc914e3888b280ab796b390f364c26ed562e"
+      MESHHARBOR_BUILD_RECIPE_SHA256: "6d798982935a78308f4251ffa7ba51a3af1c2218d597a67211887795f8849b5d"
+    steps:
+      - name: Check out the verifier source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up pinned Python runtime
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12.8"
+
+      - name: Validate the fixed original run, artifact, and recipe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$MESHHARBOR_ORIGINAL_RUN_ID" > "$RUNNER_TEMP/original-run.json"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$MESHHARBOR_ORIGINAL_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/original-artifacts.json"
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          run = json.loads(Path(os.environ["RUNNER_TEMP"], "original-run.json").read_text(encoding="utf-8"))
+          artifacts = json.loads(Path(os.environ["RUNNER_TEMP"], "original-artifacts.json").read_text(encoding="utf-8"))
+          expected_run_id = int(os.environ["MESHHARBOR_ORIGINAL_RUN_ID"])
+          source_commit = os.environ["MESHHARBOR_ORIGINAL_SOURCE_COMMIT"]
+          expected_run = {
+              "head_branch": "main",
+              "head_sha": source_commit,
+              "event": "workflow_dispatch",
+              "path": ".github/workflows/quadriflow-candidate-build.yml",
+              "run_attempt": int(os.environ["MESHHARBOR_ORIGINAL_RUN_ATTEMPT"]),
+              "status": "completed",
+              "conclusion": "failure",
+          }
+          for key, expected in expected_run.items():
+              if run.get(key) != expected:
+                  raise SystemExit(f"Original run {key} did not match the fixed candidate")
+          if int(run.get("id", 0)) != expected_run_id:
+              raise SystemExit("Original workflow run ID did not match the fixed candidate")
+
+          artifact_id = int(os.environ["MESHHARBOR_WINDOWS_ARTIFACT_ID"])
+          matches = [item for item in artifacts.get("artifacts", []) if item.get("id") == artifact_id]
+          if len(matches) != 1:
+              raise SystemExit("The fixed signed Windows artifact ID was not unique in the original run")
+          artifact = matches[0]
+          expected_artifact = {
+              "name": os.environ["MESHHARBOR_WINDOWS_ARTIFACT_NAME"],
+              "size_in_bytes": int(os.environ["MESHHARBOR_WINDOWS_ARTIFACT_SIZE"]),
+              "digest": "sha256:" + os.environ["MESHHARBOR_WINDOWS_ARTIFACT_SHA256"],
+              "expired": False,
+          }
+          for key, expected in expected_artifact.items():
+              if artifact.get(key) != expected:
+                  raise SystemExit(f"Fixed Windows artifact {key} did not match the reviewed archive")
+          artifact_run = artifact.get("workflow_run")
+          if not isinstance(artifact_run, dict) or artifact_run.get("id") != expected_run_id:
+              raise SystemExit("Fixed Windows artifact did not come from the original workflow run")
+          if artifact_run.get("head_sha") != source_commit or artifact_run.get("head_branch") != "main":
+              raise SystemExit("Fixed Windows artifact source did not match the original main commit")
+
+          recipe_path = Path("scripts/quadriflow-platform-smoke.py")
+          recipe_digest = hashlib.sha256(recipe_path.read_bytes()).hexdigest()
+          if recipe_digest != os.environ["MESHHARBOR_BUILD_RECIPE_SHA256"]:
+              raise SystemExit("The checked-out recipe did not match the original attested source bytes")
+          PY
+
+      - name: Download only the fixed signed Windows artifact by immutable ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: 14166790603
+          merge-multiple: true
+          path: ${{ runner.temp }}/quadriflow-fixed-windows-candidate
+          repository: ${{ github.repository }}
+          run-id: 43721747855
+          github-token: ${{ github.token }}
+
+      - name: Verify the original signature, workflow, source, materials, and executable digest before smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_DIR: ${{ runner.temp }}/quadriflow-fixed-windows-candidate
+        run: >-
+          python scripts/quadriflow_attestation_verify.py verify
+          --artifact "$CANDIDATE_DIR/quadriflow.exe"
+          --bundle "$CANDIDATE_DIR/provenance.sigstore.json"
+          --source-commit "$MESHHARBOR_ORIGINAL_SOURCE_COMMIT"
+          --workflow-commit "$MESHHARBOR_ORIGINAL_WORKFLOW_COMMIT"
+          --workflow-run-id "$MESHHARBOR_ORIGINAL_RUN_ID"
+          --workflow-run-attempt "$MESHHARBOR_ORIGINAL_RUN_ATTEMPT"
+          --platform windows-x86_64
+          --output "$CANDIDATE_DIR/verification.json"
+
+      - name: Run the fixed signed candidate through the existing native smoke
+        env:
+          CANDIDATE_DIR: ${{ runner.temp }}/quadriflow-fixed-windows-candidate
+          NATIVE_SMOKE_DIR: ${{ runner.temp }}/quadriflow-fixed-windows-smoke
+          MESHHARBOR_PLATFORM: windows-x86_64
+          MESHHARBOR_SOURCE_COMMIT: "9288f601578f8c9b5735a1b255b661f6ebcd1c50"
+          MESHHARBOR_WORKFLOW_COMMIT: "9288f601578f8c9b5735a1b255b661f6ebcd1c50"
+          MESHHARBOR_WORKFLOW_RUN_ID: "43721747855"
+          MESHHARBOR_WORKFLOW_RUN_ATTEMPT: "1"
+        run: >-
+          python scripts/quadriflow_candidate_native_smoke.py
+          --artifact-dir "$CANDIDATE_DIR"
+          --output-dir "$NATIVE_SMOKE_DIR"
+          --platform "$MESHHARBOR_PLATFORM"
+          --source-commit "$MESHHARBOR_SOURCE_COMMIT"
+          --workflow-commit "$MESHHARBOR_WORKFLOW_COMMIT"
+          --workflow-run-id "$MESHHARBOR_WORKFLOW_RUN_ID"
+          --workflow-run-attempt "$MESHHARBOR_WORKFLOW_RUN_ATTEMPT"
+
+      - name: Ensure the candidate did not modify the checked-out source
+        run: |
+          if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+            git status --short
+            echo "Candidate modified the source checkout during native smoke" >&2
+            exit 1
+          fi

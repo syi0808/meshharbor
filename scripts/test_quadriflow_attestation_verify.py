@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -145,6 +146,101 @@ class CandidateVerifierTests(unittest.TestCase):
             self.fail(f"unexpected command: {argv}")
         return calls, run
 
+    def test_build_recipe_checkout_matches_canonical_blob_with_autocrlf(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        recipe_relative = "scripts/quadriflow-platform-smoke.py"
+        recipe_path = repository_root / recipe_relative
+        recipe_bytes = recipe_path.read_bytes()
+        canonical_blob = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "cat-file",
+                "blob",
+                f"HEAD:{recipe_relative}",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=15,
+        ).stdout
+        self.assertEqual(recipe_bytes, canonical_blob)
+        expected_digest = hashlib.sha256(canonical_blob).hexdigest()
+        self.assertEqual(q._build_recipe_sha256(), expected_digest)
+
+        predicate = candidate_provenance.create_predicate(
+            repository_root,
+            self.source_commit,
+            self.workflow_commit,
+            self.workflow_run_id,
+            self.workflow_run_attempt,
+            self.platform,
+            hashlib.sha256(self.binary.read_bytes()).hexdigest(),
+        )
+        recipe_dependency = next(
+            item
+            for item in predicate["buildDefinition"]["resolvedDependencies"]
+            if item["uri"].endswith(f"/{recipe_relative}")
+        )
+        self.assertEqual(recipe_dependency["digest"]["sha256"], expected_digest)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            (checkout / ".gitattributes").write_bytes(
+                (repository_root / ".gitattributes").read_bytes()
+            )
+            checked_out_recipe = checkout / recipe_relative
+            checked_out_recipe.parent.mkdir(parents=True)
+            checked_out_recipe.write_bytes(recipe_bytes)
+
+            def git(*arguments):
+                return subprocess.run(
+                    ["git", *arguments],
+                    cwd=checkout,
+                    check=True,
+                    capture_output=True,
+                    timeout=15,
+                )
+
+            git("init", "--quiet")
+            git("config", "user.name", "MeshHarbor test")
+            git("config", "user.email", "meshharbor@example.invalid")
+            git("config", "core.autocrlf", "true")
+            git("add", ".gitattributes", recipe_relative)
+            git("commit", "--quiet", "-m", "Test pinned recipe line endings")
+            simulated_blob = git(
+                "cat-file", "blob", f"HEAD:{recipe_relative}"
+            ).stdout
+            self.assertEqual(simulated_blob, canonical_blob)
+
+            checked_out_recipe.unlink()
+            git("checkout", "--force", "HEAD")
+            self.assertEqual(checked_out_recipe.read_bytes(), simulated_blob)
+            attributes = git(
+                "check-attr", "text", "eol", "--", recipe_relative
+            ).stdout.decode("utf-8")
+            self.assertIn(f"{recipe_relative}: text: set", attributes)
+            self.assertIn(f"{recipe_relative}: eol: lf", attributes)
+
+            simulated_predicate = candidate_provenance.create_predicate(
+                checkout,
+                self.source_commit,
+                self.workflow_commit,
+                self.workflow_run_id,
+                self.workflow_run_attempt,
+                self.platform,
+                hashlib.sha256(self.binary.read_bytes()).hexdigest(),
+            )
+            simulated_recipe = next(
+                item
+                for item in simulated_predicate["buildDefinition"]["resolvedDependencies"]
+                if item["uri"].endswith(f"/{recipe_relative}")
+            )
+            self.assertEqual(
+                simulated_recipe["digest"]["sha256"],
+                hashlib.sha256(simulated_blob).hexdigest(),
+            )
+
     def test_fixed_policy_is_passed_and_verified_bundle_is_copied(self):
         nested_notice = self.candidate / "third-party-notices" / "meshharbor" / "NOTICE.txt"
         nested_notice.parent.mkdir(parents=True)
@@ -190,7 +286,6 @@ class CandidateVerifierTests(unittest.TestCase):
         self.assertTrue(any("provenance.sigstore.json" in line for line in checksum_lines))
         self.assertTrue(any("verification.json" in line for line in checksum_lines))
         self.assertTrue(any("third-party-notices/meshharbor/NOTICE.txt" in line for line in checksum_lines))
-
 
     def test_accepts_verified_bundle_staged_inside_candidate_directory(self):
         staged_bundle = self.candidate / "provenance.sigstore.json"
