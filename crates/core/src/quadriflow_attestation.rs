@@ -865,9 +865,7 @@ mod tests {
         let mut wrong_builder = valid.clone();
         wrong_builder["predicate"]["runDetails"]["builder"]["id"] =
             Value::String(WORKFLOW_IDENTITY.to_owned());
-        assert!(
-            validate_slsa_statement(&wrong_builder, PINNED_SOURCE_COMMIT, &artifact).is_err()
-        );
+        assert!(validate_slsa_statement(&wrong_builder, PINNED_SOURCE_COMMIT, &artifact).is_err());
 
         let mut wrong_independent_digest = valid.clone();
         wrong_independent_digest["predicate"]["buildDefinition"]["internalParameters"]["meshharbor_reproducibility"]
