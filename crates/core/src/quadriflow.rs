@@ -730,6 +730,24 @@ pub(crate) fn quadriflow_retopology_glb_at(
     options: QuadRetopologyOptions,
     data_root: &Path,
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
+    quadriflow_retopology_glb_with_runner(bytes, options, || {
+        let worker = quadriflow_sidecar_path(data_root)?;
+        Some(
+            move |input_path: &Path, output_path: &Path, target_quads: u32| {
+                execute_quadriflow_worker(&worker, input_path, output_path, target_quads)
+            },
+        )
+    })
+}
+
+fn quadriflow_retopology_glb_with_runner<F>(
+    bytes: &[u8],
+    options: QuadRetopologyOptions,
+    resolve_runner: impl FnOnce() -> Option<F>,
+) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)>
+where
+    F: FnOnce(&Path, &Path, u32) -> CoreResult<()>,
+{
     validate_quad_target(options.target_quads)?;
 
     let (positions, indices, project_appearance) = match extract_retopology_geometry(bytes) {
@@ -758,7 +776,7 @@ pub(crate) fn quadriflow_retopology_glb_at(
     validate_remesh_request(&validation)?;
 
     let input_obj = triangle_geometry_obj(&positions, &indices)?;
-    let worker = quadriflow_sidecar_path(data_root).ok_or_else(|| {
+    let run_worker = resolve_runner().ok_or_else(|| {
         CoreError::OperationUnavailable(
             "No signature-verified, manifest-matched managed QuadriFlow sidecar is available."
                 .into(),
@@ -769,51 +787,7 @@ pub(crate) fn quadriflow_retopology_glb_at(
     let output_path = temp.0.join("output.obj");
     fs::write(&input_path, input_obj)?;
 
-    let mut child = Command::new(&worker)
-        .arg("-i")
-        .arg(&input_path)
-        .arg("-o")
-        .arg(&output_path)
-        .arg("-f")
-        .arg(options.target_quads.to_string())
-        .arg("-seed")
-        .arg("0")
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            CoreError::OperationUnavailable(format!(
-                "Could not start the verified managed QuadriFlow sidecar: {error}"
-            ))
-        })?;
-
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error.into());
-            }
-        }
-        if started.elapsed() >= QUADRIFLOW_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(CoreError::OperationUnavailable(
-                "QuadriFlow exceeded its 180-second process limit.".into(),
-            ));
-        }
-        thread::sleep(QUADRIFLOW_POLL_INTERVAL);
-    };
-    if !status.success() {
-        return Err(CoreError::OperationUnavailable(format!(
-            "Packaged QuadriFlow exited with {status}."
-        )));
-    }
+    run_worker(&input_path, &output_path, options.target_quads)?;
 
     let output_size = fs::metadata(&output_path)?.len();
     if output_size == 0 || output_size > MAX_OBJ_BYTES as u64 {
@@ -861,6 +835,61 @@ pub(crate) fn quadriflow_retopology_glb_at(
         warnings,
     };
     Ok((preview_glb, quad_obj, report))
+}
+
+fn execute_quadriflow_worker(
+    worker: &Path,
+    input_path: &Path,
+    output_path: &Path,
+    target_quads: u32,
+) -> CoreResult<()> {
+    let mut child = Command::new(worker)
+        .arg("-i")
+        .arg(input_path)
+        .arg("-o")
+        .arg(output_path)
+        .arg("-f")
+        .arg(target_quads.to_string())
+        .arg("-seed")
+        .arg("0")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            CoreError::OperationUnavailable(format!(
+                "Could not start the verified managed QuadriFlow sidecar: {error}"
+            ))
+        })?;
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+        }
+        if started.elapsed() >= QUADRIFLOW_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CoreError::OperationUnavailable(
+                "QuadriFlow exceeded its 180-second process limit.".into(),
+            ));
+        }
+        thread::sleep(QUADRIFLOW_POLL_INTERVAL);
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CoreError::OperationUnavailable(format!(
+            "Packaged QuadriFlow exited with {status}."
+        )))
+    }
 }
 
 fn quadriflow_sidecar_path(data_root: &Path) -> Option<PathBuf> {
@@ -986,6 +1015,147 @@ f 4 1 5 8\n";
             [1.0, 1.0, 1.0],
             [-1.0, 1.0, 1.0],
         ]
+    }
+
+    fn cube_triangle_glb() -> Vec<u8> {
+        let positions = cube_positions();
+        let triangle_indices = [
+            0u16, 3, 2, 0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2,
+            7, 6, 3, 0, 4, 3, 4, 7,
+        ];
+        let mut binary = Vec::new();
+        let mut views = Vec::new();
+        let position_values: Vec<f32> = positions.into_iter().flatten().collect();
+        let position_view = append_view(
+            &mut binary,
+            &mut views,
+            &floats(&position_values),
+            Some(34962),
+        );
+        let index_bytes: Vec<u8> = triangle_indices
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let index_view = append_view(&mut binary, &mut views, &index_bytes, Some(34963));
+        let document = json!({
+            "asset":{"version":"2.0"},
+            "buffers":[{"byteLength":binary.len()}],
+            "bufferViews":views,
+            "accessors":[
+                {"bufferView":position_view,"componentType":5126,"count":8,"type":"VEC3","min":[-1.0,-1.0,-1.0],"max":[1.0,1.0,1.0]},
+                {"bufferView":index_view,"componentType":5123,"count":36,"type":"SCALAR","min":[0],"max":[7]}
+            ],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"mode":4}]}],
+            "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0
+        });
+        let mut json_bytes = serde_json::to_vec(&document).unwrap();
+        while !json_bytes.len().is_multiple_of(4) {
+            json_bytes.push(b' ');
+        }
+        while !binary.len().is_multiple_of(4) {
+            binary.push(0);
+        }
+        let total_length = 12 + 8 + json_bytes.len() + 8 + binary.len();
+        let mut glb = Vec::with_capacity(total_length);
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total_length as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(binary.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        glb.extend_from_slice(&binary);
+        glb
+    }
+
+    fn closed_textured_cube_glb() -> Vec<u8> {
+        let positions = cube_positions();
+        let position_values: Vec<f32> = positions.into_iter().flatten().collect();
+        let normal_values: Vec<f32> = cube_positions()
+            .iter()
+            .flat_map(|position| {
+                let length = (position[0] * position[0]
+                    + position[1] * position[1]
+                    + position[2] * position[2])
+                    .sqrt();
+                [
+                    position[0] / length,
+                    position[1] / length,
+                    position[2] / length,
+                ]
+            })
+            .collect();
+        let uv_values: Vec<f32> = cube_positions()
+            .iter()
+            .flat_map(|position| {
+                [
+                    (position[0] + 2.0 * position[1] + 3.0 * position[2] + 6.0) / 12.0,
+                    (2.0 * position[0] - 3.0 * position[1] + position[2] + 6.0) / 12.0,
+                ]
+            })
+            .collect();
+        let triangle_indices = [
+            0u16, 3, 2, 0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2,
+            7, 6, 3, 0, 4, 3, 4, 7,
+        ];
+        let mut binary = Vec::new();
+        let mut views = Vec::new();
+        let position_view = append_view(
+            &mut binary,
+            &mut views,
+            &floats(&position_values),
+            Some(34962),
+        );
+        let normal_view = append_view(
+            &mut binary,
+            &mut views,
+            &floats(&normal_values),
+            Some(34962),
+        );
+        let uv_view = append_view(&mut binary, &mut views, &floats(&uv_values), Some(34962));
+        let index_bytes: Vec<u8> = triangle_indices
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let index_view = append_view(&mut binary, &mut views, &index_bytes, Some(34963));
+        let base_view = append_view(&mut binary, &mut views, BASE_PNG, None);
+        let mr_view = append_view(&mut binary, &mut views, MR_PNG, None);
+        let document = json!({
+            "asset":{"version":"2.0"},
+            "buffers":[{"byteLength":binary.len()}],
+            "bufferViews":views,
+            "accessors":[
+                {"bufferView":position_view,"componentType":5126,"count":8,"type":"VEC3","min":[-1.0,-1.0,-1.0],"max":[1.0,1.0,1.0]},
+                {"bufferView":normal_view,"componentType":5126,"count":8,"type":"VEC3"},
+                {"bufferView":uv_view,"componentType":5126,"count":8,"type":"VEC2"},
+                {"bufferView":index_view,"componentType":5123,"count":36,"type":"SCALAR","min":[0],"max":[7]}
+            ],
+            "images":[{"bufferView":base_view,"mimeType":"image/png"},{"bufferView":mr_view,"mimeType":"image/png"}],
+            "textures":[{"source":0},{"source":1}],
+            "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0},"metallicRoughnessTexture":{"index":1}}}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":0,"mode":4}]}],
+            "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0
+        });
+        let mut json_bytes = serde_json::to_vec(&document).unwrap();
+        while !json_bytes.len().is_multiple_of(4) {
+            json_bytes.push(b' ');
+        }
+        while !binary.len().is_multiple_of(4) {
+            binary.push(0);
+        }
+        let total_length = 12 + 8 + json_bytes.len() + 8 + binary.len();
+        let mut glb = Vec::with_capacity(total_length);
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total_length as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(binary.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        glb.extend_from_slice(&binary);
+        glb
     }
 
     const BASE_PNG: &[u8] = &[
@@ -1148,6 +1318,94 @@ f 4 1 5 8\n";
         let inspected = crate::inspect_asset("cube-preview.glb", &preview).unwrap();
         assert_eq!(inspected.kind, crate::AssetKind::Mesh);
         assert_eq!(inspected.metadata["triangles"], 12);
+    }
+
+    #[test]
+    fn fixture_runner_exercises_the_complete_quad_result_pipeline_without_a_native_binary() {
+        let source = cube_triangle_glb();
+        let original_source = source.clone();
+        let (preview, quad_obj, report) = quadriflow_retopology_glb_with_runner(
+            &source,
+            QuadRetopologyOptions { target_quads: 6 },
+            || {
+                Some(|input_path: &Path, output_path: &Path, target_quads: u32| {
+                    assert_eq!(target_quads, 6);
+                    let input = fs::read_to_string(input_path).unwrap();
+                    assert_eq!(
+                        input.lines().filter(|line| line.starts_with("v ")).count(),
+                        8
+                    );
+                    assert_eq!(
+                        input.lines().filter(|line| line.starts_with("f ")).count(),
+                        12
+                    );
+                    assert!(!input.contains("vt "));
+                    assert!(!input.contains("vn "));
+                    fs::write(output_path, CUBE_OBJ).unwrap();
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source, original_source);
+        assert_eq!(quad_obj, CUBE_OBJ.as_bytes());
+        assert_eq!(report.algorithm, "quadriflow_quad_retopology");
+        assert_eq!(report.input_vertices, 8);
+        assert_eq!(report.input_triangles, 12);
+        assert_eq!(report.requested_quads, 6);
+        assert_eq!(report.output_quads, 6);
+        assert_eq!(report.preview_triangles, 12);
+        assert!(report.appearance_projection.is_none());
+
+        let descriptor = crate::inspect_asset("quadriflow-fixture-preview.glb", &preview).unwrap();
+        assert_eq!(descriptor.kind, crate::AssetKind::Mesh);
+        assert_eq!(descriptor.metadata["triangles"], 12);
+    }
+
+    #[test]
+    fn textured_closed_mesh_keeps_quad_obj_separate_and_rebakes_preview_maps() {
+        let (preview, quad_obj, report) = quadriflow_retopology_glb_with_runner(
+            &closed_textured_cube_glb(),
+            QuadRetopologyOptions { target_quads: 6 },
+            || {
+                Some(
+                    |_input_path: &Path, output_path: &Path, target_quads: u32| {
+                        assert_eq!(target_quads, 6);
+                        fs::write(output_path, CUBE_OBJ).unwrap();
+                        Ok(())
+                    },
+                )
+            },
+        )
+        .unwrap();
+
+        assert_eq!(quad_obj, CUBE_OBJ.as_bytes());
+        assert_eq!(report.output_quads, 6);
+        let projection = report.appearance_projection.unwrap();
+        assert!(projection.projection_coverage >= 0.995);
+        assert_eq!(
+            projection.rebaked_maps,
+            ["baseColorTexture", "metallicRoughnessTexture"]
+        );
+
+        let document = preview_json(&preview);
+        assert_eq!(document["images"].as_array().unwrap().len(), 2);
+        assert_eq!(document["textures"].as_array().unwrap().len(), 2);
+        assert_eq!(document["meshes"][0]["primitives"][0]["mode"], 4);
+        let descriptor = crate::inspect_asset("quadriflow-textured-preview.glb", &preview).unwrap();
+        assert_eq!(descriptor.kind, crate::AssetKind::Mesh);
+        assert_eq!(descriptor.metadata["triangles"], report.preview_triangles);
+        let quad_text = std::str::from_utf8(&quad_obj).unwrap();
+        assert_eq!(
+            quad_text
+                .lines()
+                .filter(|line| line.starts_with("f "))
+                .count(),
+            6
+        );
+        assert!(!quad_text.contains("vt "));
+        assert!(!quad_text.contains("vn "));
     }
 
     #[test]
