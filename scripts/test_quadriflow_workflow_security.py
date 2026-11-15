@@ -33,6 +33,7 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         cls.build_workflow = BUILD_WORKFLOW.read_text(encoding="utf-8")
         cls.build = "\n".join(_job_block(cls.workflow, job) for job in BUILD_JOB_IDS)
         cls.sign = _job_block(cls.workflow, "sign-candidate")
+        cls.pre_sign_gate = _job_block(cls.workflow, "pre-sign-gate")
         cls.verify = _job_block(cls.workflow, "verify-candidate")
         cls.native = _job_block(cls.workflow, "native-smoke")
 
@@ -88,6 +89,39 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         self.assertIn("--independent-candidate-dir", self.sign)
         self.assertIn("quadriflow-candidate/primary", self.sign)
         self.assertIn("quadriflow-candidate/independent", self.sign)
+
+    def test_signing_waits_for_read_only_all_platform_pair_gate(self):
+        gate = self.pre_sign_gate
+        self.assertIn("contents: read", gate)
+        self.assertNotIn("id-token: write", gate)
+        self.assertNotIn("attestations: write", gate)
+        self.assertNotIn("uses: actions/attest@", gate)
+        self.assertIn("quadriflow_candidate_provenance.py prepare", gate)
+        self.assertEqual(gate.count("artifact-ids: ${{"), 6)
+        self.assertIn("len(set(artifact_ids))", gate)
+        self.assertIn('re.fullmatch(r"[1-9][0-9]*", value)', gate)
+
+        for job_id in BUILD_JOB_IDS:
+            self.assertIn(job_id, gate)
+            self.assertIn(f"needs.{job_id}.outputs.artifact_id", gate)
+        for platform in ("linux-x86_64", "macos-aarch64", "windows-x86_64"):
+            self.assertIn(f"--platform {platform}", gate)
+        for provenance_arg in (
+            "--source-commit",
+            "--workflow-commit",
+            "--workflow-run-id",
+            "--workflow-run-attempt",
+            "--independent-candidate-dir",
+        ):
+            self.assertIn(provenance_arg, gate)
+
+        self.assertIn("- pre-sign-gate", self.sign)
+        self.assertIn("--independent-candidate-dir", self.sign)
+        self.assertIn("quadriflow_candidate_provenance.py", self.sign)
+        self.assertNotRegex(
+            gate,
+            r"(?m)^\s*run:\s*.*\bquadriflow(?:\.exe)?\b",
+        )
 
     def test_fresh_signer_does_not_run_build_recipe_or_candidate_binary(self):
         self.assertIn("id-token: write", self.sign)

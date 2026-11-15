@@ -85,6 +85,143 @@ jobs:
       workflow_commit: ${{ github.workflow_sha }}
       build_trigger: ${{ github.event_name }}
 
+  pre-sign-gate:
+    needs:
+      - build_linux_primary
+      - build_linux_independent
+      - build_macos_primary
+      - build_macos_independent
+      - build_windows_primary
+      - build_windows_independent
+    if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_candidate == true }}
+    name: Verify all platform build pairs before signing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the exact workflow source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up pinned Python runtime
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12.8"
+
+      - name: Validate all six immutable build artifact IDs
+        env:
+          LINUX_PRIMARY_ARTIFACT_ID: ${{ needs.build_linux_primary.outputs.artifact_id }}
+          LINUX_INDEPENDENT_ARTIFACT_ID: ${{ needs.build_linux_independent.outputs.artifact_id }}
+          MACOS_PRIMARY_ARTIFACT_ID: ${{ needs.build_macos_primary.outputs.artifact_id }}
+          MACOS_INDEPENDENT_ARTIFACT_ID: ${{ needs.build_macos_independent.outputs.artifact_id }}
+          WINDOWS_PRIMARY_ARTIFACT_ID: ${{ needs.build_windows_primary.outputs.artifact_id }}
+          WINDOWS_INDEPENDENT_ARTIFACT_ID: ${{ needs.build_windows_independent.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+
+          names = (
+              "LINUX_PRIMARY_ARTIFACT_ID",
+              "LINUX_INDEPENDENT_ARTIFACT_ID",
+              "MACOS_PRIMARY_ARTIFACT_ID",
+              "MACOS_INDEPENDENT_ARTIFACT_ID",
+              "WINDOWS_PRIMARY_ARTIFACT_ID",
+              "WINDOWS_INDEPENDENT_ARTIFACT_ID",
+          )
+          artifact_ids = [os.environ[name] for name in names]
+          if any(re.fullmatch(r"[1-9][0-9]*", value) is None for value in artifact_ids):
+              raise SystemExit("All six build jobs must return positive decimal artifact IDs")
+          if len(set(artifact_ids)) != len(artifact_ids):
+              raise SystemExit("All six build jobs must return distinct immutable artifact IDs")
+          PY
+          mkdir -p "$RUNNER_TEMP/quadriflow-pre-sign-gate/materials"
+
+      - name: Download Linux primary build by immutable artifact ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build_linux_primary.outputs.artifact_id }}
+          path: ${{ runner.temp }}/quadriflow-pre-sign-gate/linux-primary
+
+      - name: Download Linux independent build by immutable artifact ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build_linux_independent.outputs.artifact_id }}
+          path: ${{ runner.temp }}/quadriflow-pre-sign-gate/linux-independent
+
+      - name: Download macOS primary build by immutable artifact ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build_macos_primary.outputs.artifact_id }}
+          path: ${{ runner.temp }}/quadriflow-pre-sign-gate/macos-primary
+
+      - name: Download macOS independent build by immutable artifact ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build_macos_independent.outputs.artifact_id }}
+          path: ${{ runner.temp }}/quadriflow-pre-sign-gate/macos-independent
+
+      - name: Download Windows primary build by immutable artifact ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build_windows_primary.outputs.artifact_id }}
+          path: ${{ runner.temp }}/quadriflow-pre-sign-gate/windows-primary
+
+      - name: Download Windows independent build by immutable artifact ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build_windows_independent.outputs.artifact_id }}
+          path: ${{ runner.temp }}/quadriflow-pre-sign-gate/windows-independent
+
+      - name: Validate all platform provenance and byte-identical replica pairs without executing candidates
+        env:
+          MESHHARBOR_SOURCE_COMMIT: ${{ github.sha }}
+          MESHHARBOR_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          MESHHARBOR_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          MESHHARBOR_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python scripts/quadriflow_candidate_provenance.py prepare \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --candidate-dir "$RUNNER_TEMP/quadriflow-pre-sign-gate/linux-primary" \
+            --independent-candidate-dir "$RUNNER_TEMP/quadriflow-pre-sign-gate/linux-independent" \
+            --executable quadriflow \
+            --source-commit "$MESHHARBOR_SOURCE_COMMIT" \
+            --workflow-commit "$MESHHARBOR_WORKFLOW_COMMIT" \
+            --workflow-run-id "$MESHHARBOR_WORKFLOW_RUN_ID" \
+            --workflow-run-attempt "$MESHHARBOR_WORKFLOW_RUN_ATTEMPT" \
+            --platform linux-x86_64 \
+            --output "$RUNNER_TEMP/quadriflow-pre-sign-gate/materials/linux-provenance.json"
+          python scripts/quadriflow_candidate_provenance.py prepare \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --candidate-dir "$RUNNER_TEMP/quadriflow-pre-sign-gate/macos-primary" \
+            --independent-candidate-dir "$RUNNER_TEMP/quadriflow-pre-sign-gate/macos-independent" \
+            --executable quadriflow \
+            --source-commit "$MESHHARBOR_SOURCE_COMMIT" \
+            --workflow-commit "$MESHHARBOR_WORKFLOW_COMMIT" \
+            --workflow-run-id "$MESHHARBOR_WORKFLOW_RUN_ID" \
+            --workflow-run-attempt "$MESHHARBOR_WORKFLOW_RUN_ATTEMPT" \
+            --platform macos-aarch64 \
+            --output "$RUNNER_TEMP/quadriflow-pre-sign-gate/materials/macos-provenance.json"
+          python scripts/quadriflow_candidate_provenance.py prepare \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --candidate-dir "$RUNNER_TEMP/quadriflow-pre-sign-gate/windows-primary" \
+            --independent-candidate-dir "$RUNNER_TEMP/quadriflow-pre-sign-gate/windows-independent" \
+            --executable quadriflow.exe \
+            --source-commit "$MESHHARBOR_SOURCE_COMMIT" \
+            --workflow-commit "$MESHHARBOR_WORKFLOW_COMMIT" \
+            --workflow-run-id "$MESHHARBOR_WORKFLOW_RUN_ID" \
+            --workflow-run-attempt "$MESHHARBOR_WORKFLOW_RUN_ATTEMPT" \
+            --platform windows-x86_64 \
+            --output "$RUNNER_TEMP/quadriflow-pre-sign-gate/materials/windows-provenance.json"
+
   sign-candidate:
     needs:
       - build_linux_primary
@@ -93,6 +230,7 @@ jobs:
       - build_macos_independent
       - build_windows_primary
       - build_windows_independent
+      - pre-sign-gate
     if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_candidate == true }}
     name: ${{ matrix.platform }} isolated candidate signer
     strategy:
