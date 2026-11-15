@@ -32,6 +32,21 @@ BUILD_OPTIONS = [
     "-DLEMON_ENABLE_SOPLEX=OFF",
 ]
 
+WINDOWS_BUILD_OPTIONS = [
+    "-DVCPKG_TARGET_TRIPLET=x64-windows-static",
+    "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW",
+    "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>",
+    # The signer still requires exact byte identity across independent builds.
+    "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/Brepro",
+]
+
+
+def _windows_cmake_options(vcpkg_root: str | Path) -> list[str]:
+    return [
+        f"-DCMAKE_TOOLCHAIN_FILE={Path(vcpkg_root) / 'scripts' / 'buildsystems' / 'vcpkg.cmake'}",
+        *WINDOWS_BUILD_OPTIONS,
+    ]
+
 
 def write_checksum_manifest(artifact_dir: Path) -> None:
     entries = []
@@ -164,14 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                 vcpkg_root = os.environ.get("VCPKG_INSTALLATION_ROOT") or os.environ.get("VCPKG_ROOT")
                 if not vcpkg_root:
                     raise RuntimeError("Windows runner did not provide VCPKG_INSTALLATION_ROOT")
-                platform_build_options.extend(
-                    [
-                        f"-DCMAKE_TOOLCHAIN_FILE={Path(vcpkg_root) / 'scripts' / 'buildsystems' / 'vcpkg.cmake'}",
-                        "-DVCPKG_TARGET_TRIPLET=x64-windows-static",
-                        "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW",
-                        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>",
-                    ]
-                )
+                platform_build_options.extend(_windows_cmake_options(vcpkg_root))
                 cmake_command.extend(platform_build_options)
             # Normalize common timestamp/locale sources; signer still requires
             # byte-identical output from the separately scheduled runner.

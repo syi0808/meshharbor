@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import quadriflow_candidate_provenance as candidate
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,6 +20,22 @@ class BuildModeTests(unittest.TestCase):
 
     def test_existing_smoke_default_is_unchanged(self):
         self.assertFalse(MODULE.build_parser().parse_args([]).build_only)
+
+    def test_windows_release_link_uses_reproducible_pe_option(self):
+        linker_flag = "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/Brepro"
+        options = MODULE._windows_cmake_options(Path("vcpkg"))
+
+        self.assertIn(linker_flag, options)
+        self.assertEqual(options[1:], MODULE.WINDOWS_BUILD_OPTIONS)
+        self.assertEqual(
+            candidate._expected_build_options("windows-x86_64"),
+            [*MODULE.BUILD_OPTIONS, *MODULE.WINDOWS_BUILD_OPTIONS],
+        )
+        for platform in ("linux-x86_64", "macos-aarch64"):
+            self.assertNotIn(
+                linker_flag,
+                candidate._expected_build_options(platform),
+            )
 
     def test_checksum_manifest_includes_nested_notice_files(self):
         with tempfile.TemporaryDirectory() as temporary:
