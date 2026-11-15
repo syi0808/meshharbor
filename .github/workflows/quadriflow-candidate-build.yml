@@ -148,36 +148,42 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           artifact-ids: ${{ needs.build_linux_primary.outputs.artifact_id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/quadriflow-pre-sign-gate/linux-primary
 
       - name: Download Linux independent build by immutable artifact ID
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           artifact-ids: ${{ needs.build_linux_independent.outputs.artifact_id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/quadriflow-pre-sign-gate/linux-independent
 
       - name: Download macOS primary build by immutable artifact ID
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           artifact-ids: ${{ needs.build_macos_primary.outputs.artifact_id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/quadriflow-pre-sign-gate/macos-primary
 
       - name: Download macOS independent build by immutable artifact ID
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           artifact-ids: ${{ needs.build_macos_independent.outputs.artifact_id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/quadriflow-pre-sign-gate/macos-independent
 
       - name: Download Windows primary build by immutable artifact ID
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           artifact-ids: ${{ needs.build_windows_primary.outputs.artifact_id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/quadriflow-pre-sign-gate/windows-primary
 
       - name: Download Windows independent build by immutable artifact ID
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           artifact-ids: ${{ needs.build_windows_independent.outputs.artifact_id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/quadriflow-pre-sign-gate/windows-independent
 
       - name: Validate all platform provenance and byte-identical replica pairs without executing candidates

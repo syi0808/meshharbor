@@ -26,6 +26,20 @@ def _job_block(workflow: str, name: str) -> str:
     return remainder[:end]
 
 
+def _artifact_id_download_steps(job: str) -> list[str]:
+    starts = list(re.finditer(r"(?m)^      - name: ", job))
+    steps = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(job)
+        step = job[start.start():end]
+        if (
+            "uses: actions/download-artifact@" in step
+            and "artifact-ids: ${{" in step
+        ):
+            steps.append(step)
+    return steps
+
+
 class CandidateWorkflowSecurityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -89,6 +103,21 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         self.assertIn("--independent-candidate-dir", self.sign)
         self.assertIn("quadriflow-candidate/primary", self.sign)
         self.assertIn("quadriflow-candidate/independent", self.sign)
+
+
+    def test_id_based_artifact_downloads_flatten_to_expected_roots(self):
+        for label, job, expected_count in (
+            ("pre-sign gate", self.pre_sign_gate, 6),
+            ("signer", self.sign, 2),
+            ("native smoke", self.native, 1),
+        ):
+            with self.subTest(job=label):
+                downloads = _artifact_id_download_steps(job)
+                self.assertEqual(len(downloads), expected_count)
+                self.assertTrue(
+                    all("merge-multiple: true" in step for step in downloads),
+                    f"{label} must extract artifact members into the configured path",
+                )
 
     def test_signing_waits_for_read_only_all_platform_pair_gate(self):
         gate = self.pre_sign_gate
