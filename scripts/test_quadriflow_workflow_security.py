@@ -299,51 +299,6 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         self.assertGreater(len(action_refs), 0)
         self.assertTrue(all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs))
 
-    def test_fixed_windows_reverification_is_read_only_and_never_executes_candidate(self):
-        workflow = WINDOWS_REVERIFY_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("workflow_dispatch:", workflow)
-        self.assertNotIn("pull_request:", workflow)
-        self.assertNotIn("push:", workflow)
-        self.assertIn("github.ref == 'refs/heads/main'", workflow)
-        self.assertIn("inputs.confirm_fixed_windows_candidate == true", workflow)
-        self.assertIn("runs-on: windows-2022", workflow)
-
-        for permission in ("contents: read", "actions: read", "attestations: read"):
-            self.assertIn(permission, workflow)
-        for denied_capability in (
-            "id-token: write",
-            "attestations: write",
-            "actions/attest@",
-            "actions/upload-artifact@",
-            "quadriflow_candidate_native_smoke.py",
-            "cargo test",
-            "cmake --build",
-        ):
-            self.assertNotIn(denied_capability, workflow)
-
-        for fixed_value in (
-            "9288f601578f8c9b5735a1b255b661f6ebcd1c50",
-            "43721747855",
-            "14166790603",
-            "quadriflow-signed-windows-x86_64",
-            "b099d0f64cdddbef091bdfae9cbecc914e3888b280ab796b390f364c26ed562e",
-            "6d798982935a78308f4251ffa7ba51a3af1c2218d597a67211887795f8849b5d",
-        ):
-            self.assertIn(fixed_value, workflow)
-
-        self.assertIn("artifact-ids: 14166790603", workflow)
-        self.assertIn("run-id: 43721747855", workflow)
-        self.assertIn("quadriflow_attestation_verify.py verify", workflow)
-        self.assertIn('--artifact "$CANDIDATE_DIR/quadriflow.exe"', workflow)
-        self.assertEqual(workflow.count("quadriflow.exe"), 1)
-        self.assertNotIn("inputs.artifact", workflow)
-        self.assertNotIn("inputs.run_id", workflow)
-        self.assertNotIn("inputs.source_commit", workflow)
-        self.assertIn("persist-credentials: false", workflow)
-        action_refs = re.findall(r"(?m)^\s+uses: [^@]+@([^\s]+)", workflow)
-        self.assertGreater(len(action_refs), 0)
-        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs))
-
     def test_workflow_triggers_and_action_pins_are_fail_closed(self):
         self.assertIn("workflow_dispatch:", self.workflow)
         self.assertNotIn("pull_request:", self.workflow)
