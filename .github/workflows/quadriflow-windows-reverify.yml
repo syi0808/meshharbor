@@ -52,8 +52,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$MESHHARBOR_ORIGINAL_RUN_ID" > "$RUNNER_TEMP/original-run.json"
-          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$MESHHARBOR_ORIGINAL_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/original-artifacts.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$MESHHARBOR_ORIGINAL_RUN_ID" > "$RUNNER_TEMP/original-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$MESHHARBOR_ORIGINAL_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/original-artifacts.json"
           python - <<'PY'
           import hashlib
           import json
