@@ -206,6 +206,10 @@ class CandidateVerifierTests(unittest.TestCase):
             git("config", "user.name", "MeshHarbor test")
             git("config", "user.email", "meshharbor@example.invalid")
             git("config", "core.autocrlf", "true")
+            hooks_dir = checkout / "empty-hooks"
+            hooks_dir.mkdir()
+            git("config", "core.hooksPath", str(hooks_dir))
+            git("config", "commit.gpgsign", "false")
             git("add", ".gitattributes", recipe_relative)
             git("commit", "--quiet", "-m", "Test pinned recipe line endings")
             simulated_blob = git(
