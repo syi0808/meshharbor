@@ -32,6 +32,7 @@ WORKFLOW_SAN = (
     "https://github.com/syi0808/meshharbor/"
     ".github/workflows/quadriflow-candidate-build.yml@refs/heads/main"
 )
+RUNNER_BUILDER_ID = "https://github.com/actions/runner/github-hosted"
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 GITHUB_WORKFLOW_BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
@@ -198,8 +199,8 @@ def _validate_predicate(
     run_details = predicate.get("runDetails")
     if not isinstance(run_details, dict):
         raise VerificationError("SLSA run details are missing")
-    if run_details.get("builder") != {"id": WORKFLOW_SAN}:
-        raise VerificationError("SLSA builder identity did not match the pinned workflow")
+    if run_details.get("builder") != {"id": RUNNER_BUILDER_ID}:
+        raise VerificationError("SLSA builder identity did not match the pinned runner platform")
     metadata = run_details.get("metadata")
     expected_invocation = (
         f"{REPOSITORY_URI}/actions/runs/{workflow_run_id}/attempts/{workflow_run_attempt}"
