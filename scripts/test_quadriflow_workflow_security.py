@@ -145,6 +145,19 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         self.assertNotIn("GH_TOKEN:", run_step)
         self.assertNotIn("GITHUB_TOKEN:", run_step)
 
+    def test_setup_python_cache_input_omitted_when_caching_is_disabled(self):
+        for workflow in (self.workflow, self.build_workflow):
+            lines = workflow.splitlines()
+            for index, line in enumerate(lines):
+                if "uses: actions/setup-python@" not in line:
+                    continue
+                following = lines[index + 1:index + 6]
+                self.assertNotRegex(
+                    "\n".join(following),
+                    r"(?im)^\s*cache:\s*false\s*$",
+                    "setup-python rejects a boolean false cache input; omit it to disable caching",
+                )
+
     def test_run_block_scalars_have_indented_command_bodies(self):
         for workflow in (self.workflow, self.build_workflow):
             lines = workflow.splitlines()
