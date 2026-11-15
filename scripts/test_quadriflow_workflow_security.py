@@ -7,6 +7,7 @@ import unittest
 WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "quadriflow-candidate-build.yml"
 BUILD_WORKFLOW = WORKFLOWS / "quadriflow-candidate-build-reusable.yml"
+WINDOWS_REVERIFY_WORKFLOW = WORKFLOWS / "quadriflow-windows-reverify.yml"
 BUILD_JOB_IDS = (
     "build_linux_primary",
     "build_linux_independent",
@@ -103,7 +104,6 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         self.assertIn("--independent-candidate-dir", self.sign)
         self.assertIn("quadriflow-candidate/primary", self.sign)
         self.assertIn("quadriflow-candidate/independent", self.sign)
-
 
     def test_id_based_artifact_downloads_flatten_to_expected_roots(self):
         for label, job, expected_count in (
@@ -238,6 +238,66 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
                     len(match.group(1)),
                     f"block scalar at line {index + 1} has no indented body",
                 )
+
+    def test_fixed_windows_reverification_executes_only_after_verification(self):
+        workflow = WINDOWS_REVERIFY_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertNotIn("pull_request:", workflow)
+        self.assertNotIn("push:", workflow)
+        self.assertIn("github.ref == 'refs/heads/main'", workflow)
+        self.assertIn("inputs.confirm_fixed_windows_candidate == true", workflow)
+        self.assertIn("runs-on: windows-2022", workflow)
+
+        for permission in ("contents: read", "actions: read", "attestations: read"):
+            self.assertIn(permission, workflow)
+        for denied_capability in (
+            "id-token: write",
+            "attestations: write",
+            "actions/attest@",
+            "actions/upload-artifact@",
+            "cargo test",
+            "cmake --build",
+        ):
+            self.assertNotIn(denied_capability, workflow)
+
+        for fixed_value in (
+            "9288f601578f8c9b5735a1b255b661f6ebcd1c50",
+            "43721747855",
+            "14166790603",
+            "quadriflow-signed-windows-x86_64",
+            "b099d0f64cdddbef091bdfae9cbecc914e3888b280ab796b390f364c26ed562e",
+            "6d798982935a78308f4251ffa7ba51a3af1c2218d597a67211887795f8849b5d",
+        ):
+            self.assertIn(fixed_value, workflow)
+
+        self.assertIn("artifact-ids: 14166790603", workflow)
+        self.assertIn("run-id: 43721747855", workflow)
+        self.assertIn("quadriflow_attestation_verify.py verify", workflow)
+        self.assertIn("python scripts/quadriflow_candidate_native_smoke.py", workflow)
+        self.assertLess(
+            workflow.index("Verify the original signature"),
+            workflow.index(
+                "Run the fixed signed candidate through the existing native smoke"
+            ),
+        )
+        self.assertIn('--artifact-dir "$CANDIDATE_DIR"', workflow)
+        self.assertIn('--platform "$MESHHARBOR_PLATFORM"', workflow)
+        self.assertIn("MESHHARBOR_PLATFORM: windows-x86_64", workflow)
+        self.assertEqual(
+            workflow.count("python scripts/quadriflow_candidate_native_smoke.py"), 1
+        )
+        self.assertIn("Ensure the candidate did not modify the checked-out source", workflow)
+        self.assertIn('--artifact "$CANDIDATE_DIR/quadriflow.exe"', workflow)
+        self.assertEqual(workflow.count("quadriflow.exe"), 1)
+        self.assertNotIn("inputs.artifact", workflow)
+        self.assertNotIn("inputs.run_id", workflow)
+        self.assertNotIn("inputs.source_commit", workflow)
+        input_references = re.findall(r"inputs[.]([A-Za-z0-9_]+)", workflow)
+        self.assertEqual(input_references, ["confirm_fixed_windows_candidate"])
+        self.assertIn("persist-credentials: false", workflow)
+        action_refs = re.findall(r"(?m)^\s+uses: [^@]+@([^\s]+)", workflow)
+        self.assertGreater(len(action_refs), 0)
+        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs))
 
     def test_workflow_triggers_and_action_pins_are_fail_closed(self):
         self.assertIn("workflow_dispatch:", self.workflow)
