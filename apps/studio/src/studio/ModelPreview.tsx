@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { applyTriangleWireframe, restorePreviewMaterials } from './preview-display';
 import type { Asset } from './types';
 
 interface Props {
@@ -51,14 +52,30 @@ function ImagePreview({ asset, loadModel, onError }: Props & { asset: Asset }) {
 
 function MeshPreview({ asset, loadModel, onError }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const wireframePreviewRef = useRef<{
+    meshes: THREE.Mesh[];
+    originalMaterials: Map<THREE.Mesh, THREE.Material | THREE.Material[]>;
+    material: THREE.MeshBasicMaterial;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [modelReady, setModelReady] = useState(false);
+  const [wireframe, setWireframe] = useState(false);
 
   useEffect(() => {
+    wireframePreviewRef.current = null;
+    setWireframe(false);
+    setModelReady(false);
+    setLoading(false);
     const host = hostRef.current;
     if (!host || !asset || asset.kind !== 'mesh') return;
 
     let disposed = false;
     let model: THREE.Group | null = null;
+    let wireframePreview: {
+      meshes: THREE.Mesh[];
+      originalMaterials: Map<THREE.Mesh, THREE.Material | THREE.Material[]>;
+      material: THREE.MeshBasicMaterial;
+    } | null = null;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#eef0ec');
     const camera = new THREE.PerspectiveCamera(36, 1, 0.01, 1000);
@@ -121,6 +138,16 @@ function MeshPreview({ asset, loadModel, onError }: Props) {
           return;
         }
         model = gltf.scene;
+        const meshes: THREE.Mesh[] = [];
+        model.traverse((node) => {
+          if (node instanceof THREE.Mesh) meshes.push(node);
+        });
+        wireframePreview = {
+          meshes,
+          originalMaterials: new Map(),
+          material: new THREE.MeshBasicMaterial({ color: '#263a32', wireframe: true, toneMapped: false }),
+        };
+        wireframePreviewRef.current = wireframePreview;
         const bounds = new THREE.Box3().setFromObject(model);
         const size = bounds.getSize(new THREE.Vector3());
         const center = bounds.getCenter(new THREE.Vector3());
@@ -135,6 +162,7 @@ function MeshPreview({ asset, loadModel, onError }: Props) {
         controls.minDistance = maxDim * 0.2;
         controls.maxDistance = maxDim * 12;
         scene.add(model);
+        setModelReady(meshes.length > 0);
       })
       .catch((error: unknown) => onError(error instanceof Error ? error.message : 'Could not load the asset.'))
       .finally(() => {
@@ -146,15 +174,36 @@ function MeshPreview({ asset, loadModel, onError }: Props) {
       cancelAnimationFrame(frame);
       observer.disconnect();
       controls.dispose();
+      if (wireframePreviewRef.current === wireframePreview) wireframePreviewRef.current = null;
+      if (wireframePreview) {
+        restorePreviewMaterials(wireframePreview.originalMaterials);
+        wireframePreview.material.dispose();
+      }
       if (model) disposeGroup(model);
       renderer.dispose();
       host.replaceChildren();
     };
   }, [asset?.id, loadModel, onError]);
 
+  useEffect(() => {
+    const preview = wireframePreviewRef.current;
+    if (!preview) return;
+    if (wireframe) {
+      applyTriangleWireframe(preview.meshes, preview.material, preview.originalMaterials);
+    } else {
+      restorePreviewMaterials(preview.originalMaterials);
+    }
+  }, [wireframe, modelReady]);
+
   return (
     <div className="preview-stage">
       <div className="preview-canvas" ref={hostRef} aria-label="Interactive 3D model preview" />
+      {modelReady && (
+        <div className="preview-display-toggle" role="group" aria-label="3D preview display">
+          <button type="button" aria-pressed={!wireframe} onClick={() => setWireframe(false)}>Material view</button>
+          <button type="button" aria-pressed={wireframe} onClick={() => setWireframe(true)}>Triangle wireframe</button>
+        </div>
+      )}
       {!asset && (
         <div className="preview-empty">
           <div className="empty-orbit orbit-one" />

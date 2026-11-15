@@ -81,3 +81,5 @@
 .report-warnings{border-top-color:#f0eadc}
 .report-warnings li{color:#876d48}
 @media (max-width:600px){.report-lineage{flex-direction:column;align-items:flex-start;gap:6px}.report-lineage code{max-width:190px}.report-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:11px 12px}.report-job-id{max-width:42%;font-size:8px}}
+
+.preview-display-toggle{position:absolute;z-index:2;top:12px;left:12px;display:flex;gap:2px;padding:3px;background:#ffffffdf;border:1px solid #fff;border-radius:7px;box-shadow:0 2px 8px #263c2d12;backdrop-filter:blur(8px)}.preview-display-toggle button{border:0;border-radius:4px;background:transparent;padding:7px 9px;color:#76807c;font-size:9px;font-weight:600;white-space:nowrap;cursor:pointer}.preview-display-toggle button[aria-pressed=true]{background:#1a785f;color:#fff}
