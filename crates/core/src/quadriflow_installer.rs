@@ -1529,6 +1529,77 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "run by scripts/test_quadriflow_ustar_package.py against its generated archive"]
+    fn package_recipe_round_trips_through_installer_parser() {
+        let archive_path = std::env::var_os("MESHHARBOR_TEST_QUADRIFLOW_PACKAGE_ARCHIVE")
+            .expect("the package round-trip driver must provide its synthetic archive");
+        let archive = fs::read(archive_path).expect("synthetic USTAR archive should be readable");
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/fixtures/quadriflow-package-roundtrip");
+        let executable = fs::read(fixtures.join("synthetic-executable.bin")).unwrap();
+        let notices = fs::read(fixtures.join("synthetic-notices.txt")).unwrap();
+        let sbom = fs::read(fixtures.join("synthetic-sbom.json")).unwrap();
+        let provenance = fs::read(fixtures.join("synthetic-provenance.json")).unwrap();
+        let signature = fs::read(fixtures.join("synthetic-signature.json")).unwrap();
+        let payloads = [
+            executable.as_slice(),
+            notices.as_slice(),
+            sbom.as_slice(),
+            provenance.as_slice(),
+            signature.as_slice(),
+        ];
+        let platform = match std::env::var("MESHHARBOR_TEST_QUADRIFLOW_PACKAGE_PLATFORM").as_deref()
+        {
+            Ok("linux-x86_64") => QuadriFlowPlatform::LinuxX86_64,
+            Ok("macos-aarch64") => QuadriFlowPlatform::MacosAarch64,
+            Ok("windows-x86_64") => QuadriFlowPlatform::WindowsX86_64,
+            _ => panic!("the package round-trip driver must provide a supported platform"),
+        };
+        let manifest = artifact(
+            platform,
+            "quadriflow-v0.0.0-roundtrip-test",
+            payloads,
+            &archive,
+        );
+        let root = TestRoot::new();
+        let result = install_test_manifest_with_fetcher(
+            &root.0,
+            &manifest,
+            platform,
+            |_, _, destination| {
+                fs::write(destination, &archive)?;
+                Ok(())
+            },
+        )
+        .expect("the installer should parse and install the package recipe output");
+
+        let version_dir = result
+            .executable
+            .parent()
+            .and_then(Path::parent)
+            .expect("installed executable should be under bin/ in a version directory");
+        assert_eq!(fs::read(&result.executable).unwrap(), executable);
+        assert_eq!(
+            fs::read(version_dir.join("THIRD-PARTY-NOTICES.md")).unwrap(),
+            notices
+        );
+        assert_eq!(fs::read(version_dir.join("sbom.spdx.json")).unwrap(), sbom);
+        assert_eq!(
+            fs::read(version_dir.join("provenance.json")).unwrap(),
+            provenance
+        );
+        assert_eq!(
+            fs::read(version_dir.join("provenance.sigstore.json")).unwrap(),
+            signature
+        );
+        assert!(
+            resolve_installed(&root.0, platform, &test_verified_manifest(&manifest))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn rejects_traversal_link_duplicate_and_bad_payload_hashes() {
         let root = TestRoot::new();
         let platform = QuadriFlowPlatform::LinuxX86_64;
