@@ -63,3 +63,21 @@
 .asset-load-more{display:flex;justify-content:center;padding-top:10px}
 .asset-load-more .asset-filter-button{min-width:150px}
 @media (max-width:600px){.asset-search{align-items:stretch}.asset-search-input{flex:1}.asset-filters label{min-width:calc(50% - 6px)}.asset-reset{margin-left:auto}}
+
+.report-job-id{max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:9px;color:#77877d}
+.report-lineage{display:flex;flex-wrap:wrap;gap:7px 18px;padding:10px 0 3px;color:#89958d;font-size:9px}
+.report-lineage span{display:flex;align-items:center;gap:5px;min-width:0}
+.report-lineage code{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:8px;color:#66766c;background:#f4f7f3;border-radius:3px;padding:3px 5px}
+.report-unavailable{margin:8px 0 0;color:#92754f;font-size:9px;line-height:1.5}
+.report-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:12px 17px;padding:14px 0 2px}
+.report-metric{display:flex;flex-direction:column;gap:4px;min-width:0}
+.report-metric span{font-size:9px;color:#98a19c}
+.report-metric strong{overflow-wrap:anywhere;font-family:var(--mono);font-size:10px;font-weight:500;color:#526058}
+.report-list,.report-warnings{margin-top:12px;padding-top:10px;border-top:1px solid #edf0ec}
+.report-list>strong,.report-warnings>strong{font-size:10px;font-weight:600;color:#59675e}
+.report-list p,.report-warnings p{margin:6px 0 0;font-size:9px;line-height:1.5;color:#8f9a93}
+.report-list ul,.report-warnings ul{margin:6px 0 0;padding-left:17px;font-size:9px;line-height:1.6;color:#738078}
+.report-list li,.report-warnings li{overflow-wrap:anywhere;white-space:pre-wrap}
+.report-warnings{border-top-color:#f0eadc}
+.report-warnings li{color:#876d48}
+@media (max-width:600px){.report-lineage{flex-direction:column;align-items:flex-start;gap:6px}.report-lineage code{max-width:190px}.report-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:11px 12px}.report-job-id{max-width:42%;font-size:8px}}

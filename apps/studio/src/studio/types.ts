@@ -77,7 +77,16 @@ export interface Job {
   state: 'queued' | 'running' | 'validating' | 'succeeded' | 'failed' | 'cancelling' | 'cancelled';
   input_asset_id?: string | null;
   progress: number;
-  result?: { asset_id?: string; report?: Record<string, unknown>; backend_id?: string } | null;
+  result?: {
+    asset_id?: string;
+    report?: Record<string, unknown>;
+    backend_id?: string;
+    seed?: number;
+    resolution?: number;
+    texture_size?: number;
+    target_faces?: number;
+    elapsed_ms?: number;
+  } | null;
   error?: { message?: string } | null;
   created_at: string;
   updated_at: string;

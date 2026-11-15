@@ -4,17 +4,17 @@ import { readFile } from 'node:fs/promises';
 
 // Use the project's TypeScript compiler when installed (Node 20+), with a
 // native type-stripping fallback for minimal Node 24 test environments.
-let MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion;
+let MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion, jobResultCardModel, jobReportMatchesAsset;
 try {
   const ts = await import('typescript');
   const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion, jobResultCardModel, jobReportMatchesAsset } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion } = await import('./api.ts'));
+  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion, jobResultCardModel, jobReportMatchesAsset } = await import('./api.ts'));
 }
 
 test('multi-file import validates mixed files, uploads sequentially, keeps going after failures, and reports progress', async () => {
@@ -621,4 +621,193 @@ test('retopology submits a job and downloads quad OBJ separately from GLB previe
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+
+test('operation result cards expose operation-specific metrics and every report warning', () => {
+  const fixtures = [
+    {
+      operation: 'image.generate',
+      result: {
+        asset_id: 'asset-result', backend_id: 'pixal3d-mlx', seed: 42, resolution: 512,
+        texture_size: 1024, target_faces: 100000, elapsed_ms: 12345,
+      },
+      labels: ['Backend', 'Seed', 'Resolution', 'Texture size', 'Target faces', 'Elapsed time'],
+      expectedWarnings: [],
+      expectedWarningsState: 'unavailable',
+      expectedWarningsMessage: 'Image generation does not include a warning list in its saved result.',
+    },
+    {
+      operation: 'mesh.simplify',
+      report: {
+        triangles_before: 100, triangles_after: 60, target_triangles: 55,
+        geometric_error: 0.0123, optimized_primitives: 2, preserved: ['positions'],
+        warnings: ['Simplification note.', '<b>warning-looking markup</b>'],
+      },
+      labels: ['Triangles before', 'Triangles after', 'Target triangles', 'Geometric error', 'Optimized primitives'],
+      expectedWarnings: ['Simplification note.', '<b>warning-looking markup</b>'],
+    },
+    {
+      operation: 'mesh.cleanup',
+      report: {
+        triangles_before: 100, triangles_after: 95, repeated_index_triangles_removed: 1,
+        zero_area_triangles_removed: 2, duplicate_triangles_removed: 2, modified_primitives: 1,
+        preserved: ['materials'], warnings: ['Cleanup warning.'],
+      },
+      labels: ['Repeated-index triangles removed', 'Zero-area triangles removed', 'Duplicate triangles removed', 'Modified primitives'],
+      expectedWarnings: ['Cleanup warning.'],
+    },
+    {
+      operation: 'render.optimize',
+      report: {
+        triangles: 100, processed_primitives: 4, reordered_primitives: 3,
+        skipped_translucent_primitives: 1, vertex_cache_size: 16,
+        vertex_cache_misses_before: 40, vertex_cache_misses_after: 25, overdraw_threshold: 1.05,
+        preserved: ['translucent order'], warnings: ['Render warning.'],
+      },
+      labels: ['Triangles', 'Processed primitives', 'Reordered primitives', 'Translucent primitives skipped', 'Vertex cache size', 'Cache misses before', 'Cache misses after', 'Overdraw threshold'],
+      expectedWarnings: ['Render warning.'],
+    },
+    {
+      operation: 'mesh.compress',
+      report: {
+        input_bytes: 4096, output_bytes: 2048, compressed_buffer_views: 2,
+        uncompressed_buffer_views: 1, bytes_saved: 2048, extension: 'KHR_meshopt_compression',
+        extension_required: true, warnings: ['Compression warning.'],
+      },
+      labels: ['Input size', 'Output size', 'Bytes saved', 'Compressed buffer views', 'Uncompressed buffer views', 'Required extension', 'Extension required'],
+      expectedWarnings: ['Compression warning.'],
+    },
+    {
+      operation: 'mesh.separate_parts',
+      report: {
+        triangles_before: 3, connected_parts: 2, triangles_per_part: [2, 1],
+        method: 'indexed_components', warnings: ['Parts warning.'],
+      },
+      labels: ['Triangles before', 'Connected parts', 'Method'],
+      expectedWarnings: ['Parts warning.'],
+    },
+    {
+      operation: 'uv.unwrap',
+      report: {
+        source_triangles: 8, output_triangles: 8, source_vertices: 12, output_vertices: 18,
+        atlas_width: 1024, atlas_height: 1024, chart_count: 4, covered_texels: 5000,
+        gutter_texels: 200, preserved_attributes: ['positions'], rebaked_maps: ['baseColor'],
+        warnings: ['UV warning.'],
+      },
+      labels: ['Source triangles', 'Output triangles', 'Source vertices', 'Output vertices', 'Atlas width', 'Atlas height', 'Charts', 'Covered texels', 'Gutter texels'],
+      expectedWarnings: ['UV warning.'],
+    },
+    {
+      operation: 'mesh.retopology',
+      report: {
+        algorithm: 'QuadriFlow', input_vertices: 20, input_triangles: 10, requested_quads: 5,
+        output_vertices: 8, output_quads: 5, preview_triangles: 10, warnings: ['Retopology warning.'],
+        appearance_projection: {
+          source_triangles: 10, target_triangles: 10, output_triangles: 10, output_vertices: 8,
+          atlas_width: 512, atlas_height: 512, chart_count: 2, covered_texels: 2000, gutter_texels: 50,
+          projection_attempted_texels: 1000, projection_covered_texels: 875, projection_coverage: 0.875,
+          ambiguous_texels: 4, maximum_projection_distance: 0.02, projection_distance_limit: 0.04,
+          rebaked_maps: ['baseColor'], warnings: ['Projection warning.'],
+        },
+      },
+      labels: ['Input vertices', 'Input triangles', 'Requested quads', 'Output vertices', 'Output quads', 'Preview triangles', 'Algorithm', 'Appearance · Projection coverage'],
+      expectedWarnings: ['Retopology warning.', 'Appearance projection: Projection warning.'],
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const model = jobResultCardModel({
+      id: 'job-result-1',
+      operation: fixture.operation,
+      state: 'succeeded',
+      input_asset_id: 'asset-input',
+      progress: 100,
+      result: fixture.result ?? { asset_id: 'asset-result', report: fixture.report },
+      created_at: '1',
+      updated_at: '2',
+    });
+    assert.ok(model, fixture.operation);
+    assert.equal(model.reportAvailable, true);
+    assert.ok(fixture.labels.every((label) => model.metrics.some((metric) => metric.label === label)), fixture.operation);
+    assert.deepEqual(model.warnings, fixture.expectedWarnings, fixture.operation);
+    assert.equal(model.warningsState, fixture.expectedWarningsState ?? 'available', fixture.operation);
+    if (fixture.expectedWarningsMessage) assert.equal(model.warningsMessage, fixture.expectedWarningsMessage);
+    assert.equal(model.jobId, 'job-result-1');
+    assert.equal(model.inputAssetId, 'asset-input');
+    assert.equal(model.resultAssetId, 'asset-result');
+  }
+});
+
+test('result cards fail closed for missing, malformed, non-finite, and unsafe metrics without inventing zeroes', () => {
+  const malformed = jobResultCardModel({
+    id: 'job-malformed',
+    operation: 'mesh.cleanup',
+    state: 'succeeded',
+    progress: 100,
+    result: {
+      report: {
+        triangles_before: '12',
+        triangles_after: Number.POSITIVE_INFINITY,
+        repeated_index_triangles_removed: Number.MAX_SAFE_INTEGER + 1,
+        warnings: [],
+      },
+    },
+    created_at: '1',
+    updated_at: '2',
+  });
+  assert.ok(malformed);
+  assert.equal(malformed.metrics.find((metric) => metric.label === 'Triangles before').value, 'Not reported');
+  assert.equal(malformed.metrics.find((metric) => metric.label === 'Triangles after').value, 'Not reported');
+  assert.equal(malformed.metrics.find((metric) => metric.label === 'Repeated-index triangles removed').value, 'Not reported');
+  assert.equal(malformed.metrics.find((metric) => metric.label === 'Duplicate triangles removed').value, 'Not reported');
+  assert.equal(malformed.warningsState, 'empty');
+  assert.deepEqual(malformed.warnings, []);
+  assert.equal(malformed.lists[0].state, 'unavailable');
+
+  const missing = jobResultCardModel({
+    id: 'job-missing',
+    operation: 'mesh.cleanup',
+    state: 'succeeded',
+    progress: 100,
+    result: null,
+    created_at: '1',
+    updated_at: '2',
+  });
+  assert.ok(missing);
+  assert.equal(missing.reportAvailable, false);
+  assert.ok(missing.metrics.every((metric) => metric.value === 'Not reported'));
+  assert.equal(missing.warningsState, 'unavailable');
+  assert.equal(jobResultCardModel({ id: 'active', operation: 'mesh.cleanup', state: 'running' }), null);
+  assert.equal(jobResultCardModel({ id: 'unknown', operation: 'runtime.setup', state: 'succeeded' }), null);
+});
+
+test('result cards keep all warnings, bound metric lists, and preserve job asset lineage', () => {
+  const warnings = Array.from({ length: 300 }, (_, index) => `Warning ${index + 1}`);
+  const parts = Array.from({ length: 300 }, (_, index) => index + 1);
+  const job = {
+    id: 'job-parts',
+    operation: 'mesh.separate_parts',
+    state: 'succeeded',
+    input_asset_id: 'input-1',
+    progress: 100,
+    result: {
+      asset_id: 'result-1',
+      report: { triangles_before: 300, connected_parts: 300, triangles_per_part: parts, method: 'indexed_components', warnings },
+    },
+    created_at: '1',
+    updated_at: '2',
+  };
+  const model = jobResultCardModel(job);
+  assert.ok(model);
+  assert.equal(model.warnings.length, 300);
+  assert.equal(model.warnings[299], 'Warning 300');
+  assert.equal(model.lists[0].values.length, 256);
+  assert.equal(model.lists[0].omittedCount, 44);
+  assert.equal(model.lists[0].state, 'partial');
+  assert.equal(jobReportMatchesAsset(job, 'input-1'), true);
+  assert.equal(jobReportMatchesAsset(job, 'result-1'), true);
+  assert.equal(jobReportMatchesAsset(job, 'another-asset'), false);
+  assert.equal(jobReportMatchesAsset(job, null), false);
+  assert.equal(jobReportMatchesAsset({ ...job, state: 'failed' }, 'input-1'), false);
 });
