@@ -34,6 +34,7 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         cls.build = "\n".join(_job_block(cls.workflow, job) for job in BUILD_JOB_IDS)
         cls.sign = _job_block(cls.workflow, "sign-candidate")
         cls.verify = _job_block(cls.workflow, "verify-candidate")
+        cls.native = _job_block(cls.workflow, "native-smoke")
 
     def test_build_jobs_have_no_signing_capability_or_attestation_action(self):
         self.assertIn("contents: read", self.workflow)
@@ -109,6 +110,40 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         self.assertIn("--workflow-run-id", self.verify)
         self.assertIn("--workflow-run-attempt", self.verify)
         self.assertIn("--platform", self.verify)
+
+    def test_native_smoke_uses_same_immutable_signed_bytes_without_signing_capability(self):
+        self.assertIn("needs: verify-candidate", self.native)
+        self.assertIn("runs-on: ${{ matrix.runner }}", self.native)
+        self.assertIn("actions: read", self.native)
+        self.assertIn("attestations: read", self.native)
+        self.assertIn("contents: read", self.native)
+        self.assertNotIn("id-token: write", self.native)
+        self.assertNotIn("attestations: write", self.native)
+        self.assertIn("linux-x86_64", self.native)
+        self.assertIn("macos-aarch64", self.native)
+        self.assertIn("windows-x86_64", self.native)
+        self.assertIn("gh api", self.native)
+        self.assertIn("quadriflow_artifact_id.py", self.native)
+        self.assertIn(
+            "artifact-ids: ${{ steps.select_signed_artifact.outputs.artifact_id }}",
+            self.native,
+        )
+        self.assertIn("merge-multiple: true", self.native)
+        self.assertIn("quadriflow_attestation_verify.py verify", self.native)
+        self.assertIn("quadriflow_candidate_native_smoke.py", self.native)
+        self.assertIn("cargo test -p meshharbor-core --locked --test quadriflow_output", self.native)
+        self.assertIn("quadriflow-native-smoke-${{ matrix.platform }}", self.native)
+        self.assertIn("path: ${{ runner.temp }}/quadriflow-native-smoke/*.json", self.native)
+        self.assertNotIn("binutils", self.native.lower())
+        self.assertNotIn("--build-only", self.native)
+
+        run_marker = "      - name: Run the already-verified candidate with a minimal environment\n"
+        run_start = self.native.index(run_marker)
+        run_rest = self.native[run_start + len(run_marker):]
+        next_step = re.search(r"(?m)^      - name: ", run_rest)
+        run_step = run_rest[: next_step.start()] if next_step else run_rest
+        self.assertNotIn("GH_TOKEN:", run_step)
+        self.assertNotIn("GITHUB_TOKEN:", run_step)
 
     def test_run_block_scalars_have_indented_command_bodies(self):
         for workflow in (self.workflow, self.build_workflow):
