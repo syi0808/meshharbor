@@ -1,10 +1,10 @@
-export interface PreviewMaterialTarget<Material> {
-  material: Material | Material[];
+export interface PreviewMaterialTarget {
+  material: unknown;
 }
 
 export function applyTriangleWireframe<
+  Mesh extends PreviewMaterialTarget,
   Material,
-  Mesh extends PreviewMaterialTarget<Material>,
 >(
   meshes: readonly Mesh[],
   wireframeMaterial: Material,
@@ -24,8 +24,7 @@ export function applyTriangleWireframe<
 }
 
 export function restorePreviewMaterials<
-  Material,
-  Mesh extends PreviewMaterialTarget<Material>,
+  Mesh extends PreviewMaterialTarget,
 >(originalMaterials: Map<Mesh, Mesh['material']>) {
   for (const [mesh, material] of originalMaterials) {
     mesh.material = material;
