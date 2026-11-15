@@ -32,6 +32,20 @@ The existing fixture-runner unit tests exercise the core's GLB-to-OBJ-input, out
 
 Action references in the candidate and reusable build workflows are pinned to immutable commits: checkout v4.2.2 (`11bd71901bbe5b1630ceea73d27597364c9af683`), setup-python v5.6.0 (`a26af69be951a213d495a4c3e4e4022e16d87065`), attest v4.2.2 (`1e69f48acb82d1966a394da916b4c1698aa569d6`), upload-artifact v4.6.2 (`ea165f8d65b6e75b540449e92b4886f43607fa02`), and download-artifact v4.3.0 (`d3f86a106a0bac45b974a628896c90dbdf5c8093`). The source commit and build flags are fixed. Hosted runner images and apt/Homebrew/vcpkg dependency state are still mutable and are recorded only as diagnostics. The two-build check is a fail-closed guard against a single candidate artifact being substituted with bytes that do not reproduce from the same checked-in recipe; it is not a hermetic reproducible-build guarantee or an independent cryptographic attestation from each builder. It also cannot protect against a compromised workflow/source change, compromised GitHub Actions control plane, or both build jobs being compromised. The common pre-sign gate in run #43721747855 did establish that each platform's two selected candidate artifacts matched byte-for-byte for that run. This is evidence for those exact outputs, not a hermetic reproducible-build guarantee; a future mismatch must still block signing rather than be worked around. Full dependency closure and platform packaging remain release blockers.
 
+## Local USTAR assembly round-trip (not a release)
+
+`scripts/quadriflow_ustar_package.py` assembles the installer's exact five-file payload into an uncompressed POSIX USTAR archive. It accepts only a caller-provided directory containing the platform executable plus `THIRD-PARTY-NOTICES.md`, `sbom.spdx.json`, `provenance.json`, and `provenance.sigstore.json`; it rejects symlinks, missing or extra files, empty payloads, and an existing output path. It fixes owner, mode, and timestamp metadata for deterministic archive bytes and prints the archive size and SHA-256. It does not build or execute QuadriFlow, verify the signature or SBOM, establish dependency closure/license clearance, update the product manifest, or make an archive installable. Its `installable`, `release_ready`, and `dependency_closure_verified` report fields remain false.
+
+The local/CI contract test creates only synthetic fixture data, runs the archive recipe twice, and passes the resulting bytes through `install_manifest_with_fetcher` and the same Rust USTAR parser used by the installer. It verifies the extracted executable and all four metadata payloads against their source bytes. The parser is invoked through a test-only manifest capability and a local fake fetcher; no network access, signature validation, release manifest override, sidecar execution, or product clean-install claim is involved. `retopology-worker.yml` already discovers this test with its `test_quadriflow_*.py` Python unittest suite.
+
+Run this isolated round-trip locally with:
+
+```sh
+python3 -m unittest scripts.test_quadriflow_ustar_package
+```
+
+The checked-in fixture files explicitly say they are synthetic and are not an executable, third-party notices, or valid signature. A production archive still requires reviewed, exact payloads and release approvals; this test is only an assembly/parser contract check while the bundled manifest remains empty.
+
 ## Notice/SBOM evidence helper
 
 `scripts/quadriflow_notices.py` is an offline, Python standard-library-only tool. It accepts a caller-supplied inventory and writes to a new output directory:
