@@ -89,8 +89,29 @@ jobs:
           python scripts/quadriflow_windows_archive_qa.py --candidate (Join-Path $root 'candidate.zip') --eigen (Join-Path $root 'eigen.tar.gz') --boost (Join-Path $root 'boost.txt') --pcg (Join-Path $root 'pcg32.h') --apache (Join-Path $root 'apache.txt') --output (Join-Path $root 'stage')
           if ($LASTEXITCODE -ne 0) { throw 'Exact Windows archive reconstruction failed' }
 
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759
+
+      - name: Prepare pinned NASM for the Rust test's AWS-LC build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'nasm-3.02-win64.zip'
+          Invoke-WebRequest -Uri 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' -OutFile $archive -TimeoutSec 60
+          $expected = '161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7'
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'NASM archive checksum mismatch' }
+          $nasmRoot = Join-Path $env:RUNNER_TEMP 'nasm-toolchain'
+          Expand-Archive -LiteralPath $archive -DestinationPath $nasmRoot
+          $nasmDirectory = Join-Path $nasmRoot 'nasm-3.02'
+          $nasmExecutable = Join-Path $nasmDirectory 'nasm.exe'
+          if (!(Test-Path -LiteralPath $nasmExecutable -PathType Leaf)) { throw 'Pinned NASM executable is missing' }
+          & $nasmExecutable -v
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned NASM did not run' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $nasmDirectory
+
       - name: Verify, extract into a private root, and run the fixed native cube
         env:
+          CFLAGS: /std:c11
           MESHHARBOR_TEST_SIGNED_ARCHIVE_SHA256: 9037e53b8bdcc4192638bc5afdd5efa64a7b1c0ae0cc2e3aaa1731418bfee8f6
         run: |
           $ErrorActionPreference = 'Stop'

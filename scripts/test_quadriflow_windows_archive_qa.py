@@ -26,8 +26,11 @@ class FixedWindowsArchiveInputTests(unittest.TestCase):
 
     def test_declared_windows_package_pin_matches_review_scope(self):
         self.assertEqual(qa.PLATFORM, "windows-x86_64")
-        self.assertNotEqual(qa.EXPECTED_ARCHIVE_SHA256, qa.EXE_SHA)
-        self.assertGreater(qa.EXPECTED_ARCHIVE_BYTES, 0)
+        self.assertEqual(qa.EXPECTED_ARCHIVE_BYTES, 4_239_360)
+        self.assertEqual(
+            qa.EXPECTED_ARCHIVE_SHA256,
+            "9037e53b8bdcc4192638bc5afdd5efa64a7b1c0ae0cc2e3aaa1731418bfee8f6",
+        )
 
 
 if __name__ == "__main__":
