@@ -740,6 +740,72 @@ pub(crate) fn quadriflow_retopology_glb_at(
     })
 }
 
+// A GLB vertex index identifies an entire attribute tuple. UV or normal seams
+// can therefore expose coincident boundary edges even when the shape is closed.
+// Rejoin only exact positions on boundary vertices, in the worker copy only.
+// This neither moves vertices nor removes faces, and the caller must run the
+// full topology validator again before using the result.
+fn rejoin_coincident_boundary_vertices(request: &mut RemeshRequest) -> bool {
+    if request
+        .positions
+        .iter()
+        .flatten()
+        .any(|value| !value.is_finite())
+        || request
+            .indices
+            .iter()
+            .any(|&index| index as usize >= request.positions.len())
+        || !request.indices.len().is_multiple_of(3)
+    {
+        return false;
+    }
+    let mut edge_counts = HashMap::<(u32, u32), u8>::new();
+    for triangle in request.indices.chunks_exact(3) {
+        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+        for (a, b) in [(a, b), (b, c), (c, a)] {
+            let count = edge_counts.entry((a.min(b), a.max(b))).or_default();
+            *count += 1;
+            if *count > 2 {
+                return false;
+            }
+        }
+    }
+    let mut boundary_vertices = vec![false; request.positions.len()];
+    for ((a, b), count) in edge_counts {
+        if count == 1 {
+            boundary_vertices[a as usize] = true;
+            boundary_vertices[b as usize] = true;
+        }
+    }
+    let mut representatives = HashMap::<[u32; 3], u32>::new();
+    let mut positions = Vec::with_capacity(request.positions.len());
+    let mut remap = Vec::with_capacity(request.positions.len());
+    for (&position, is_boundary) in request.positions.iter().zip(boundary_vertices) {
+        let old_next = positions.len() as u32;
+        let (position, new_index) = if is_boundary {
+            let normalized = position.map(|value| if value == 0.0 { 0.0 } else { value });
+            let index = *representatives
+                .entry(normalized.map(f32::to_bits))
+                .or_insert(old_next);
+            (normalized, index)
+        } else {
+            (position, old_next)
+        };
+        if new_index == old_next {
+            positions.push(position);
+        }
+        remap.push(new_index);
+    }
+    if positions.len() == request.positions.len() {
+        return false;
+    }
+    request.positions = positions;
+    for index in &mut request.indices {
+        *index = remap[*index as usize];
+    }
+    true
+}
+
 fn quadriflow_retopology_glb_with_runner<F>(
     bytes: &[u8],
     options: QuadRetopologyOptions,
@@ -762,10 +828,11 @@ where
             (source.positions, source.indices, true)
         }
     };
-    let validation = RemeshRequest {
+    let input_vertices = positions.len() as u64;
+    let mut validation = RemeshRequest {
         protocol_version: crate::REMESH_PROTOCOL_VERSION,
-        positions: positions.clone(),
-        indices: indices.clone(),
+        positions,
+        indices,
         // This conservative validation budget is independent of the QuadriFlow face target.
         // It rejects pathological input surface density before starting a native process.
         options: RetopologyOptions {
@@ -773,8 +840,17 @@ where
             iterations: 1,
         },
     };
-    validate_remesh_request(&validation)?;
-
+    let mut joined_seam_vertices = false;
+    if let Err(original_error) = validate_remesh_request(&validation) {
+        if !project_appearance || !rejoin_coincident_boundary_vertices(&mut validation) {
+            return Err(original_error);
+        }
+        validate_remesh_request(&validation)?;
+        joined_seam_vertices = true;
+    }
+    let RemeshRequest {
+        positions, indices, ..
+    } = validation;
     let input_obj = triangle_geometry_obj(&positions, &indices)?;
     let run_worker = resolve_runner().ok_or_else(|| {
         CoreError::OperationUnavailable(
@@ -805,6 +881,11 @@ where
         "The OBJ preserves editable quad topology only; the GLB is a triangulated viewer preview."
             .into(),
     );
+    if joined_seam_vertices {
+        warnings.push(
+            "Coincident boundary vertices were joined only in the solver geometry; projection used the original UVs and textures.".into(),
+        );
+    }
     if project_appearance {
         warnings.extend([
             "The preview projects only embedded base-color and metallic-roughness PNGs; UVs, colors, and other vertex streams are not transferred to the OBJ.".into(),
@@ -815,7 +896,7 @@ where
     }
     warnings.extend([
         "This candidate does not certify self-intersection freedom or a measured surface-error tolerance; inspect the result before production use.".into(),
-        "The only native end-to-end QuadriFlow smoke test used a synthetic cube; broad model quality and platform packaging remain unverified.".into(),
+        "Native QuadriFlow validation is limited to selected QA fixtures; broad model quality and platform packaging remain unverified.".into(),
     ]);
     if parsed_report.output_quads != u64::from(options.target_quads) {
         warnings.push(format!(
@@ -825,7 +906,7 @@ where
     }
     let report = QuadRetopologyReport {
         algorithm: "quadriflow_quad_retopology".into(),
-        input_vertices: positions.len() as u64,
+        input_vertices,
         input_triangles: (indices.len() / 3) as u64,
         requested_quads: options.target_quads,
         output_vertices: parsed_report.output_vertices,
@@ -1017,12 +1098,17 @@ f 4 1 5 8\n";
         ]
     }
 
-    fn cube_triangle_glb() -> Vec<u8> {
+    fn cube_triangle_glb(open: bool) -> Vec<u8> {
         let positions = cube_positions();
         let triangle_indices = [
             0u16, 3, 2, 0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2,
             7, 6, 3, 0, 4, 3, 4, 7,
         ];
+        let index_count = if open {
+            triangle_indices.len() - 3
+        } else {
+            triangle_indices.len()
+        };
         let mut binary = Vec::new();
         let mut views = Vec::new();
         let position_values: Vec<f32> = positions.into_iter().flatten().collect();
@@ -1034,6 +1120,7 @@ f 4 1 5 8\n";
         );
         let index_bytes: Vec<u8> = triangle_indices
             .into_iter()
+            .take(index_count)
             .flat_map(u16::to_le_bytes)
             .collect();
         let index_view = append_view(&mut binary, &mut views, &index_bytes, Some(34963));
@@ -1043,7 +1130,7 @@ f 4 1 5 8\n";
             "bufferViews":views,
             "accessors":[
                 {"bufferView":position_view,"componentType":5126,"count":8,"type":"VEC3","min":[-1.0,-1.0,-1.0],"max":[1.0,1.0,1.0]},
-                {"bufferView":index_view,"componentType":5123,"count":36,"type":"SCALAR","min":[0],"max":[7]}
+                {"bufferView":index_view,"componentType":5123,"count":index_count,"type":"SCALAR","min":[0],"max":[7]}
             ],
             "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"mode":4}]}],
             "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0
@@ -1069,10 +1156,10 @@ f 4 1 5 8\n";
         glb
     }
 
-    fn closed_textured_cube_glb() -> Vec<u8> {
+    fn closed_textured_cube_glb(split_uv_seam: bool) -> Vec<u8> {
         let positions = cube_positions();
-        let position_values: Vec<f32> = positions.into_iter().flatten().collect();
-        let normal_values: Vec<f32> = cube_positions()
+        let mut position_values: Vec<f32> = positions.into_iter().flatten().collect();
+        let mut normal_values: Vec<f32> = cube_positions()
             .iter()
             .flat_map(|position| {
                 let length = (position[0] * position[0]
@@ -1086,7 +1173,7 @@ f 4 1 5 8\n";
                 ]
             })
             .collect();
-        let uv_values: Vec<f32> = cube_positions()
+        let mut uv_values: Vec<f32> = cube_positions()
             .iter()
             .flat_map(|position| {
                 [
@@ -1095,10 +1182,23 @@ f 4 1 5 8\n";
                 ]
             })
             .collect();
-        let triangle_indices = [
+        let mut triangle_indices = [
             0u16, 3, 2, 0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2,
             7, 6, 3, 0, 4, 3, 4, 7,
         ];
+        if split_uv_seam {
+            for index in 0..4 {
+                position_values.extend_from_within(3 * index..3 * index + 3);
+                normal_values.extend_from_within(3 * index..3 * index + 3);
+                let [u, v] = [uv_values[2 * index], uv_values[2 * index + 1]];
+                uv_values.extend([0.1 + 0.8 * u, 0.1 + 0.8 * v]);
+            }
+            for index in &mut triangle_indices[..6] {
+                *index += 8;
+            }
+        }
+        let vertex_count = position_values.len() / 3;
+        let max_index = vertex_count - 1;
         let mut binary = Vec::new();
         let mut views = Vec::new();
         let position_view = append_view(
@@ -1126,10 +1226,10 @@ f 4 1 5 8\n";
             "buffers":[{"byteLength":binary.len()}],
             "bufferViews":views,
             "accessors":[
-                {"bufferView":position_view,"componentType":5126,"count":8,"type":"VEC3","min":[-1.0,-1.0,-1.0],"max":[1.0,1.0,1.0]},
-                {"bufferView":normal_view,"componentType":5126,"count":8,"type":"VEC3"},
-                {"bufferView":uv_view,"componentType":5126,"count":8,"type":"VEC2"},
-                {"bufferView":index_view,"componentType":5123,"count":36,"type":"SCALAR","min":[0],"max":[7]}
+                {"bufferView":position_view,"componentType":5126,"count":vertex_count,"type":"VEC3","min":[-1.0,-1.0,-1.0],"max":[1.0,1.0,1.0]},
+                {"bufferView":normal_view,"componentType":5126,"count":vertex_count,"type":"VEC3"},
+                {"bufferView":uv_view,"componentType":5126,"count":vertex_count,"type":"VEC2"},
+                {"bufferView":index_view,"componentType":5123,"count":36,"type":"SCALAR","min":[0],"max":[max_index]}
             ],
             "images":[{"bufferView":base_view,"mimeType":"image/png"},{"bufferView":mr_view,"mimeType":"image/png"}],
             "textures":[{"source":0},{"source":1}],
@@ -1322,7 +1422,7 @@ f 4 1 5 8\n";
 
     #[test]
     fn fixture_runner_exercises_the_complete_quad_result_pipeline_without_a_native_binary() {
-        let source = cube_triangle_glb();
+        let source = cube_triangle_glb(false);
         let original_source = source.clone();
         let (preview, quad_obj, report) = quadriflow_retopology_glb_with_runner(
             &source,
@@ -1364,9 +1464,129 @@ f 4 1 5 8\n";
     }
 
     #[test]
+    fn open_geometry_only_input_does_not_resolve_a_runner() {
+        let error =
+            quadriflow_retopology_glb_with_runner::<fn(&Path, &Path, u32) -> CoreResult<()>>(
+                &cube_triangle_glb(true),
+                QuadRetopologyOptions { target_quads: 6 },
+                || panic!("open geometry-only input must not resolve a sidecar"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("closed, watertight"));
+    }
+
+    #[test]
+    fn texture_seam_splits_only_the_appearance_geometry() {
+        let source = closed_textured_cube_glb(true);
+        let original_source = source.clone();
+        let original_projection =
+            meshharbor_atlas_baker::extract_projection_source_mesh(&source).unwrap();
+        assert_eq!(original_projection.positions.len(), 12);
+        assert_ne!(original_projection.uv[0], original_projection.uv[8]);
+
+        let (_, quad_obj, report) = quadriflow_retopology_glb_with_runner(
+            &source,
+            QuadRetopologyOptions { target_quads: 6 },
+            || {
+                Some(|input_path: &Path, output_path: &Path, _: u32| {
+                    let obj = fs::read_to_string(input_path).unwrap();
+                    assert_eq!(obj.lines().filter(|line| line.starts_with("v ")).count(), 8);
+                    assert_eq!(
+                        obj.lines().filter(|line| line.starts_with("f ")).count(),
+                        12
+                    );
+                    assert!(obj.contains("f 1 4 3\n"));
+                    assert!(!obj.contains("vt "));
+                    fs::write(output_path, CUBE_OBJ).unwrap();
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(source, original_source);
+        assert_eq!(quad_obj, CUBE_OBJ.as_bytes());
+        assert_eq!(report.input_vertices, 12);
+        assert_eq!(report.input_triangles, 12);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("original UVs"))
+        );
+        let projection = report.appearance_projection.unwrap();
+        assert!(projection.projection_coverage >= 0.995);
+        assert_eq!(
+            projection.rebaked_maps,
+            ["baseColorTexture", "metallicRoughnessTexture"]
+        );
+    }
+
+    fn seam_request(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> RemeshRequest {
+        RemeshRequest {
+            protocol_version: crate::REMESH_PROTOCOL_VERSION,
+            positions,
+            indices,
+            options: RetopologyOptions {
+                target_edge_ratio: 0.25,
+                iterations: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn joins_signed_zero_but_not_nearby_cracks() {
+        let positions = vec![
+            [-0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [-0.0, -0.0, 0.0],
+            [1.0, 0.0, -0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let indices = vec![4, 6, 5, 0, 1, 3, 0, 3, 2, 1, 2, 3];
+        let mut request = seam_request(positions.clone(), indices.clone());
+        assert!(validate_remesh_request(&request).is_err());
+        assert!(rejoin_coincident_boundary_vertices(&mut request));
+        assert!(validate_remesh_request(&request).is_ok());
+        assert_eq!(request.positions, positions[..4]);
+        assert_eq!(request.positions[0][0].to_bits(), 0);
+        assert_eq!(request.indices, [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3]);
+
+        let mut positions = positions;
+        positions[5][0] = 1.0_f32.next_up();
+        let mut request = seam_request(positions, indices);
+        assert!(rejoin_coincident_boundary_vertices(&mut request));
+        assert_eq!(request.positions.len(), 5);
+        assert!(validate_remesh_request(&request).is_err());
+    }
+
+    #[test]
+    fn merging_will_not_make_duplicate_faces_valid() {
+        let mut request = seam_request(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            vec![0, 1, 2, 3, 5, 4],
+        );
+        assert!(rejoin_coincident_boundary_vertices(&mut request));
+        assert!(
+            validate_remesh_request(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate triangles")
+        );
+    }
+
+    #[test]
     fn textured_closed_mesh_keeps_quad_obj_separate_and_rebakes_preview_maps() {
         let (preview, quad_obj, report) = quadriflow_retopology_glb_with_runner(
-            &closed_textured_cube_glb(),
+            &closed_textured_cube_glb(false),
             QuadRetopologyOptions { target_quads: 6 },
             || {
                 Some(
