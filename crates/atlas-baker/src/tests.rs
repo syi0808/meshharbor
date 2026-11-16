@@ -277,20 +277,28 @@ fn projected_bake_fails_closed_when_target_exceeds_distance_gate() {
         [0.0, 1.0, 0.2],
     ];
     let target_normals = [[0.0, 0.0, 1.0]; 4];
-    assert!(
-        bake_projected_mesh(
-            &source,
-            &target_positions,
-            &target_normals,
-            &[0, 1, 2, 0, 2, 3],
-            AtlasBakeOptions {
-                resolution: 128,
-                padding: 4,
-            },
-            0.02,
-        )
-        .is_err()
-    );
+    let error = bake_projected_mesh(
+        &source,
+        &target_positions,
+        &target_normals,
+        &[0, 1, 2, 0, 2, 3],
+        AtlasBakeOptions {
+            resolution: 128,
+            padding: 4,
+        },
+        0.02,
+    )
+    .unwrap_err();
+    let AtlasBakeError::Native(message) = error else {
+        panic!("expected native coverage rejection, got {error}");
+    };
+    assert!(message.contains("coverage is below the configured safety threshold"));
+    let (projected, attempted) = projection_failure_counts(&message);
+    assert!(attempted > 0);
+    assert_eq!(projected, 0);
+    assert_eq!(projection_failure_count(&message, "ambiguous="), 0);
+    assert_eq!(projection_failure_count(&message, "no-hit="), attempted);
+    assert_eq!(projection_failure_count(&message, "backface="), 0);
 }
 
 #[test]
@@ -315,9 +323,46 @@ fn projected_bake_rejects_ambiguous_opposing_thin_shells() {
         0.02,
     )
     .unwrap_err();
-    assert!(
-        matches!(error, AtlasBakeError::Native(message) if message.contains("ambiguous opposing surfaces"))
+    let AtlasBakeError::Native(message) = error else {
+        panic!("expected native ambiguity rejection, got {error}");
+    };
+    assert!(message.contains("ambiguous opposing surfaces"));
+    let (projected, attempted) = projection_failure_counts(&message);
+    let ambiguous = projection_failure_count(&message, "ambiguous=");
+    assert!(ambiguous > 0);
+    assert_eq!(
+        projected
+            + ambiguous
+            + projection_failure_count(&message, "no-normal=")
+            + projection_failure_count(&message, "no-hit=")
+            + projection_failure_count(&message, "backface="),
+        attempted
     );
+}
+
+fn projection_failure_count(message: &str, key: &str) -> u64 {
+    message
+        .split_once(key)
+        .unwrap_or_else(|| panic!("missing {key} in: {message}"))
+        .1
+        .split([',', ']'])
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn projection_failure_counts(message: &str) -> (u64, u64) {
+    let (projected, attempted) = message
+        .split_once("[projected=")
+        .unwrap()
+        .1
+        .split_once(',')
+        .unwrap()
+        .0
+        .split_once('/')
+        .unwrap();
+    (projected.parse().unwrap(), attempted.parse().unwrap())
 }
 
 #[test]
