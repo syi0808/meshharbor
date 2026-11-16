@@ -169,7 +169,6 @@ def collect(build_root, roots, depfiles, expected_units, *, dependency_base=None
         mapped[label] = canonical
     sorted_roots = sorted(mapped.items(), key=lambda item: len(item[1].parts), reverse=True)
     dependency_base = build_root if dependency_base is None else canonical_root(dependency_base)
-    _match_root(dependency_base, sorted_roots)
 
     files, objects, total, references, path_bytes = {}, {}, 0, 0, 0
     for depfile in depfiles:

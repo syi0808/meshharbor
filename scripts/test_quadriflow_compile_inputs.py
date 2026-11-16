@@ -58,7 +58,12 @@ class CompileInputTests(unittest.TestCase):
         (self.build / "other.o").touch()
         second = self.build / "other.o.d"
         second.write_text("other.o: ../source/main.cpp\n")
-        a = q.collect(self.build, self.roots, [self.record, second], 2)
+        with patch.object(q, "hash_input", wraps=q.hash_input) as hash_input:
+            a = q.collect(self.build, self.roots, [self.record, second], 2)
+            self.assertEqual(hash_input.call_count, 2)
+            self.assertEqual(
+                [call.args[0] for call in hash_input.call_args_list].count(self.unit), 1,
+            )
         b = q.collect(self.build, self.roots[::-1], [second, self.record], 2)
         self.assertEqual(json.dumps(a, sort_keys=True), json.dumps(b, sort_keys=True))
         self.assertEqual(len(a["inputs"]), 2)
@@ -77,6 +82,13 @@ class CompileInputTests(unittest.TestCase):
         self.assertEqual(report["objects"]["subdir/main.o"]["inputs"], ["build/subdir/generated.h"])
         self.assertEqual(report["inputs"]["build/subdir/generated.h"]["sha256"],
                          hashlib.sha256(b"right file").hexdigest())
+        self.record.write_text("subdir/main.o: source/main.cpp\n")
+        from_parent = q.collect(
+            self.build, self.roots, [self.record], 1, dependency_base=self.build.parent,
+        )
+        self.assertEqual(from_parent["objects"]["subdir/main.o"]["inputs"], ["src/main.cpp"])
+        (self.build.parent / "unclaimed.h").touch()
+        self.record.write_text("subdir/main.o: unclaimed.h\n")
         with self.assertRaisesRegex(ValueError, "outside all declared roots"):
             q.collect(
                 self.build, self.roots, [self.record], 1, dependency_base=self.build.parent,
