@@ -625,6 +625,7 @@ fn output_error(message: impl Into<String>) -> CoreError {
     CoreError::OperationUnavailable(message.into())
 }
 
+pub(crate) const MAX_QUADRIFLOW_INPUT_GLB_BYTES: usize = 64 * 1024 * 1024;
 const MAX_INPUT_OBJ_BYTES: usize = 64 * 1024 * 1024;
 const MAX_QUAD_TARGET: u32 = 50_000;
 const QUADRIFLOW_TIMEOUT: Duration = Duration::from_secs(180);
@@ -643,6 +644,18 @@ impl Default for QuadRetopologyOptions {
             target_quads: 10_000,
         }
     }
+}
+
+/// Eligibility of the source mesh alone. This is not backend readiness,
+/// a guarantee of solver success, or a texture quality forecast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct QuadRetopologyPreflight {
+    pub input_vertices: u64,
+    pub input_triangles: u64,
+    pub solver_vertices: u64,
+    pub requested_quads: u32,
+    pub coincident_boundary_vertices_joined: bool,
+    pub appearance_projection_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -806,16 +819,21 @@ fn rejoin_coincident_boundary_vertices(request: &mut RemeshRequest) -> bool {
     true
 }
 
-fn quadriflow_retopology_glb_with_runner<F>(
+struct PreparedQuadriFlowInput {
+    validation: RemeshRequest,
+    report: QuadRetopologyPreflight,
+}
+
+fn prepare_quadriflow_input(
     bytes: &[u8],
     options: QuadRetopologyOptions,
-    resolve_runner: impl FnOnce() -> Option<F>,
-) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)>
-where
-    F: FnOnce(&Path, &Path, u32) -> CoreResult<()>,
-{
+) -> CoreResult<PreparedQuadriFlowInput> {
     validate_quad_target(options.target_quads)?;
-
+    if bytes.len() > MAX_QUADRIFLOW_INPUT_GLB_BYTES {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts GLB files up to 64 MiB.".into(),
+        ));
+    }
     let (positions, indices, project_appearance) = match extract_retopology_geometry(bytes) {
         Ok((positions, indices)) => (positions, indices, false),
         Err(_) => {
@@ -848,6 +866,42 @@ where
         validate_remesh_request(&validation)?;
         joined_seam_vertices = true;
     }
+    let report = QuadRetopologyPreflight {
+        input_vertices,
+        input_triangles: (validation.indices.len() / 3) as u64,
+        solver_vertices: validation.positions.len() as u64,
+        requested_quads: options.target_quads,
+        coincident_boundary_vertices_joined: joined_seam_vertices,
+        appearance_projection_required: project_appearance,
+    };
+    Ok(PreparedQuadriFlowInput { validation, report })
+}
+
+/// Validate the same geometry and source appearance rules as the actual
+/// Retopology operation without resolving, starting or installing a backend.
+pub fn quadriflow_preflight_glb(
+    bytes: &[u8],
+    options: QuadRetopologyOptions,
+) -> CoreResult<QuadRetopologyPreflight> {
+    Ok(prepare_quadriflow_input(bytes, options)?.report)
+}
+
+fn quadriflow_retopology_glb_with_runner<F>(
+    bytes: &[u8],
+    options: QuadRetopologyOptions,
+    resolve_runner: impl FnOnce() -> Option<F>,
+) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)>
+where
+    F: FnOnce(&Path, &Path, u32) -> CoreResult<()>,
+{
+    let PreparedQuadriFlowInput { validation, report } = prepare_quadriflow_input(bytes, options)?;
+    let QuadRetopologyPreflight {
+        input_vertices,
+        input_triangles,
+        coincident_boundary_vertices_joined: joined_seam_vertices,
+        appearance_projection_required: project_appearance,
+        ..
+    } = report;
     let RemeshRequest {
         positions, indices, ..
     } = validation;
@@ -907,7 +961,7 @@ where
     let report = QuadRetopologyReport {
         algorithm: "quadriflow_quad_retopology".into(),
         input_vertices,
-        input_triangles: (indices.len() / 3) as u64,
+        input_triangles,
         requested_quads: options.target_quads,
         output_vertices: parsed_report.output_vertices,
         output_quads: parsed_report.output_quads,
@@ -1471,6 +1525,52 @@ f 4 1 5 8\n";
         let descriptor = crate::inspect_asset("quadriflow-fixture-preview.glb", &preview).unwrap();
         assert_eq!(descriptor.kind, crate::AssetKind::Mesh);
         assert_eq!(descriptor.metadata["triangles"], 12);
+    }
+
+    #[test]
+    fn preflight_checks_matching_geometry_without_a_backend() {
+        let flat =
+            quadriflow_preflight_glb(&cube_triangle_glb(false), QuadRetopologyOptions::default())
+                .unwrap();
+        assert_eq!(
+            flat,
+            QuadRetopologyPreflight {
+                input_vertices: 8,
+                input_triangles: 12,
+                solver_vertices: 8,
+                requested_quads: 10_000,
+                coincident_boundary_vertices_joined: false,
+                appearance_projection_required: false,
+            },
+        );
+        let with_seams = quadriflow_preflight_glb(
+            &closed_textured_cube_glb(true),
+            QuadRetopologyOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(with_seams.input_vertices, 12);
+        assert_eq!(with_seams.input_triangles, 12);
+        assert_eq!(with_seams.solver_vertices, 8);
+        assert!(with_seams.coincident_boundary_vertices_joined);
+        assert!(with_seams.appearance_projection_required);
+    }
+
+    #[test]
+    fn preflight_repeats_actual_input_rejection_before_worker_resolution() {
+        let open = cube_triangle_glb(true);
+        let preflight_error =
+            quadriflow_preflight_glb(&open, QuadRetopologyOptions { target_quads: 6 })
+                .unwrap_err()
+                .to_string();
+        let worker_error = quadriflow_retopology_glb_with_runner::<
+            fn(&Path, &Path, u32) -> CoreResult<()>,
+        >(&open, QuadRetopologyOptions { target_quads: 6 }, || {
+            panic!("invalid geometry cannot resolve the native worker")
+        })
+        .unwrap_err()
+        .to_string();
+        assert_eq!(preflight_error, worker_error);
+        assert!(preflight_error.contains("closed, watertight"));
     }
 
     #[test]

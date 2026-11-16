@@ -104,14 +104,7 @@ impl OperationCore {
                 "Simplification requires a GLB mesh asset.".into(),
             ));
         }
-        let source_artifact = source
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.kind == "source")
-            .or_else(|| source.artifacts.first())
-            .ok_or_else(|| {
-                CoreError::NotFound(format!("Asset '{asset_id}' has no stored artifact."))
-            })?;
+        let source_artifact = mesh_source_artifact(&source)?;
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
         let (output, report) = simplify_glb(&bytes, target_triangles, max_error)?;
         let name = derived_name(&source.name);
@@ -128,14 +121,7 @@ impl OperationCore {
         Ok(SimplificationResult { asset, report })
     }
 
-    /// Run a local mesh operation and persist its output as a separate derived asset.
-    /// The immutable source artifact is never overwritten.
-    pub fn process_mesh_asset(
-        &self,
-        asset_id: &str,
-        operation: &str,
-        parameters: Value,
-    ) -> CoreResult<MeshOperationResult> {
+    fn mesh_processing_source(&self, asset_id: &str) -> CoreResult<Asset> {
         let source = self
             .store
             .get_asset(asset_id)?
@@ -145,14 +131,33 @@ impl OperationCore {
                 "Mesh processing requires a GLB mesh asset.".into(),
             ));
         }
-        let source_artifact = source
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.kind == "source")
-            .or_else(|| source.artifacts.first())
-            .ok_or_else(|| {
-                CoreError::NotFound(format!("Asset '{asset_id}' has no stored artifact."))
-            })?;
+        Ok(source)
+    }
+
+    /// Check source eligibility using the same preparation as retopology.
+    /// Does not consult or execute a backend, create a job, or store an output.
+    pub fn preflight_retopology_asset(
+        &self,
+        asset_id: &str,
+        options: crate::QuadRetopologyOptions,
+    ) -> CoreResult<crate::QuadRetopologyPreflight> {
+        let source = self.mesh_processing_source(asset_id)?;
+        let source_artifact = mesh_source_artifact(&source)?;
+        validate_retopology_source_size(source_artifact.byte_size)?;
+        let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
+        crate::quadriflow_preflight_glb(&bytes, options)
+    }
+
+    /// Run a local mesh operation and persist its output as a separate derived asset.
+    /// The immutable source artifact is never overwritten.
+    pub fn process_mesh_asset(
+        &self,
+        asset_id: &str,
+        operation: &str,
+        parameters: Value,
+    ) -> CoreResult<MeshOperationResult> {
+        let source = self.mesh_processing_source(asset_id)?;
+        let source_artifact = mesh_source_artifact(&source)?;
         if operation == "mesh.separate_parts" {
             crate::parts::validate_part_glb_size(source_artifact.byte_size)?;
         }
@@ -164,11 +169,7 @@ impl OperationCore {
                     backend.message, backend.next_step
                 )));
             }
-            if source_artifact.byte_size > 64 * 1024 * 1024 {
-                return Err(CoreError::OperationUnavailable(
-                    "Retopology accepts GLB files up to 64 MiB.".into(),
-                ));
-            }
+            validate_retopology_source_size(source_artifact.byte_size)?;
         }
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
         if operation == "mesh.retopology" {
@@ -435,6 +436,26 @@ fn reject_unused_parameters(parameters: &Value, operation: &str) -> CoreResult<(
         return Err(CoreError::InvalidInput(format!(
             "{operation} does not accept parameters."
         )));
+    }
+    Ok(())
+}
+
+fn mesh_source_artifact(source: &Asset) -> CoreResult<&crate::Artifact> {
+    source
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "source")
+        .or_else(|| source.artifacts.first())
+        .ok_or_else(|| {
+            CoreError::NotFound(format!("Asset '{}' has no stored artifact.", source.id))
+        })
+}
+
+fn validate_retopology_source_size(byte_size: u64) -> CoreResult<()> {
+    if byte_size > crate::quadriflow::MAX_QUADRIFLOW_INPUT_GLB_BYTES as u64 {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology accepts GLB files up to 64 MiB.".into(),
+        ));
     }
     Ok(())
 }

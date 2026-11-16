@@ -587,6 +587,34 @@ test('Studio submits atlas options and part separation through the shared job AP
   }
 });
 
+test('retopology preflight checks the mesh without creating a job', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const report = {
+    input_vertices: 12, input_triangles: 12, solver_vertices: 8, requested_quads: 10_000,
+    coincident_boundary_vertices_joined: true, appearance_projection_required: true,
+  };
+  globalThis.fetch = async (path, init) => {
+    calls.push({ path, init });
+    return Response.json(report);
+  };
+  try {
+    const api = new MeshHarborApi();
+    assert.deepEqual(await api.preflightRetopology('source/id'), report);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].path, '/api/v1/assets/source%2Fid/retopology-preflight');
+    assert.equal(calls[0].init.method, 'POST');
+    const headers = new Headers(calls[0].init.headers);
+    assert.equal(headers.get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
+    assert.equal(headers.get('Authorization'), null);
+    assert.deepEqual(JSON.parse(calls[0].init.body), {});
+    globalThis.fetch = async () => Response.json({ error: 'Water-tightness check failed.' }, { status: 422 });
+    await assert.rejects(api.preflightRetopology('open'), /Water-tightness check failed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('retopology submits a job and downloads quad OBJ separately from GLB preview', async () => {
   const quad = { id: 'quad/one', kind: 'quad_topology', mime_type: 'model/obj' };
   const glb = { id: 'preview', kind: 'derived', mime_type: 'model/gltf-binary' };
