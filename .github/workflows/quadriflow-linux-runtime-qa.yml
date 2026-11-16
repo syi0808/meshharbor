@@ -1,0 +1,202 @@
+name: Check fixed QuadriFlow on stock Ubuntu
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_fixed_linux_candidate:
+        description: Run only the already-signed Linux candidate from run 43721747855
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify-fixed-linux-candidate:
+    name: Stock Ubuntu 24.04 runtime-only QA
+    if: ${{ github.repository == 'syi0808/meshharbor' && github.ref == 'refs/heads/main' && inputs.confirm_fixed_linux_candidate == true }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      MESHHARBOR_ORIGINAL_SOURCE_COMMIT: "9288f601578f8c9b5735a1b255b661f6ebcd1c50"
+      MESHHARBOR_ORIGINAL_WORKFLOW_COMMIT: "9288f601578f8c9b5735a1b255b661f6ebcd1c50"
+      MESHHARBOR_ORIGINAL_RUN_ID: "43721747855"
+      MESHHARBOR_ORIGINAL_RUN_ATTEMPT: "1"
+      MESHHARBOR_LINUX_ARTIFACT_ID: "14166189219"
+      MESHHARBOR_LINUX_ARTIFACT_NAME: "quadriflow-candidate-linux-x86_64-X64"
+      MESHHARBOR_LINUX_ARTIFACT_SIZE: "419171"
+      MESHHARBOR_LINUX_ARTIFACT_SHA256: "6f64f2a243117e049836b760767a153fe2a3698fcbc532e246d1821db80f90cc"
+      MESHHARBOR_BUILD_RECIPE_SHA256: "6d798982935a78308f4251ffa7ba51a3af1c2218d597a67211887795f8849b5d"
+    steps:
+      - name: Check out the verifier source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up pinned Python runtime
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12.8"
+
+      - name: Validate the fixed original run, artifact, and recipe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$MESHHARBOR_ORIGINAL_RUN_ID" > "$RUNNER_TEMP/original-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$MESHHARBOR_ORIGINAL_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/original-artifacts.json"
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          run = json.loads(Path(os.environ["RUNNER_TEMP"], "original-run.json").read_text(encoding="utf-8"))
+          artifacts = json.loads(Path(os.environ["RUNNER_TEMP"], "original-artifacts.json").read_text(encoding="utf-8"))
+          expected_run_id = int(os.environ["MESHHARBOR_ORIGINAL_RUN_ID"])
+          source_commit = os.environ["MESHHARBOR_ORIGINAL_SOURCE_COMMIT"]
+          expected_run = {
+              "head_branch": "main",
+              "head_sha": source_commit,
+              "event": "workflow_dispatch",
+              "path": ".github/workflows/quadriflow-candidate-build.yml",
+              "run_attempt": int(os.environ["MESHHARBOR_ORIGINAL_RUN_ATTEMPT"]),
+              "status": "completed",
+              "conclusion": "failure",
+          }
+          for key, expected in expected_run.items():
+              if run.get(key) != expected:
+                  raise SystemExit(f"Original run {key} did not match the fixed candidate")
+          if int(run.get("id", 0)) != expected_run_id:
+              raise SystemExit("Original workflow run ID did not match the fixed candidate")
+
+          artifact_id = int(os.environ["MESHHARBOR_LINUX_ARTIFACT_ID"])
+          matches = [item for item in artifacts.get("artifacts", []) if item.get("id") == artifact_id]
+          if len(matches) != 1:
+              raise SystemExit("The fixed Linux verification artifact ID was not unique in the original run")
+          artifact = matches[0]
+          expected_artifact = {
+              "name": os.environ["MESHHARBOR_LINUX_ARTIFACT_NAME"],
+              "size_in_bytes": int(os.environ["MESHHARBOR_LINUX_ARTIFACT_SIZE"]),
+              "digest": "sha256:" + os.environ["MESHHARBOR_LINUX_ARTIFACT_SHA256"],
+              "expired": False,
+          }
+          for key, expected in expected_artifact.items():
+              if artifact.get(key) != expected:
+                  raise SystemExit(f"Fixed Linux artifact {key} did not match the reviewed archive")
+          artifact_run = artifact.get("workflow_run")
+          if not isinstance(artifact_run, dict) or artifact_run.get("id") != expected_run_id:
+              raise SystemExit("Fixed Linux artifact did not come from the original workflow run")
+          if artifact_run.get("head_sha") != source_commit or artifact_run.get("head_branch") != "main":
+              raise SystemExit("Fixed Linux artifact source did not match the original main commit")
+
+          recipe_path = Path("scripts/quadriflow-platform-smoke.py")
+          recipe_digest = hashlib.sha256(recipe_path.read_bytes()).hexdigest()
+          if recipe_digest != os.environ["MESHHARBOR_BUILD_RECIPE_SHA256"]:
+              raise SystemExit("The checked-out recipe did not match the original attested source bytes")
+          PY
+
+      - name: Download only the fixed previously verified Linux artifact by immutable ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: 14166189219
+          merge-multiple: true
+          path: ${{ runner.temp }}/quadriflow-fixed-linux-candidate
+          repository: ${{ github.repository }}
+          run-id: 43721747855
+          github-token: ${{ github.token }}
+
+      - name: Verify the original signature, workflow, source, materials, and executable digest before smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_DIR: ${{ runner.temp }}/quadriflow-fixed-linux-candidate
+        run: >-
+          python scripts/quadriflow_attestation_verify.py verify
+          --artifact "$CANDIDATE_DIR/quadriflow"
+          --bundle "$CANDIDATE_DIR/provenance.sigstore.json"
+          --source-commit "$MESHHARBOR_ORIGINAL_SOURCE_COMMIT"
+          --workflow-commit "$MESHHARBOR_ORIGINAL_WORKFLOW_COMMIT"
+          --workflow-run-id "$MESHHARBOR_ORIGINAL_RUN_ID"
+          --workflow-run-attempt "$MESHHARBOR_ORIGINAL_RUN_ATTEMPT"
+          --platform linux-x86_64
+          --output "$RUNNER_TEMP/quadriflow-linux-reverification.json"
+
+      - name: Run the verified candidate in an unmodified Ubuntu 24.04 container
+        env:
+          CANDIDATE_DIR: ${{ runner.temp }}/quadriflow-fixed-linux-candidate
+          UBUNTU_IMAGE: docker.io/library/ubuntu@sha256:a2d43bffc46670d7108bb3c0468c67c5557c4c92e83e1e34cbff1322ad1b94dc
+        run: |
+          set -euo pipefail
+          exe="$CANDIDATE_DIR/quadriflow"
+          bundle="$CANDIDATE_DIR/provenance.sigstore.json"
+          fixture="$GITHUB_WORKSPACE/crates/core/tests/fixtures/quadriflow_cube_triangles.obj"
+          test -f "$exe"
+          test ! -L "$exe"
+          test -f "$bundle"
+          test ! -L "$bundle"
+          test -f "$fixture"
+          test ! -L "$fixture"
+          printf '%s  %s\n' \
+            a925c519b1339d8152705376622bde4817f66e307800c12f1a3ce61d7e25a1e9 "$exe" \
+            8d136440a73a2ee0e68f136edf075d43fbafb938252d899e26e36beba6fd009e "$bundle" \
+            b8dc26f8c3ac17b60d29c8145531c52254a3da511fdb9271185c781dc2e4d956 "$fixture" \
+            | sha256sum --check
+          chmod u+x "$exe"
+          docker pull --platform linux/amd64 "$UBUNTU_IMAGE"
+          docker image inspect --format '{{.Os}}/{{.Architecture}}' "$UBUNTU_IMAGE" | grep -Fx linux/amd64
+          scratch="$(mktemp -d "$RUNNER_TEMP/quadriflow-ubuntu-runtime.XXXXXX")"
+          container_name="quadri-runtime-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'docker rm -f "$container_name" >/dev/null 2>&1 || true' EXIT
+          docker create --name "$container_name" --platform linux/amd64 --pull never \
+            --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --pids-limit 32 --memory 256m --cpus 1 \
+            --ulimit fsize=1048576:1048576 \
+            --env HOME=/nonexistent --env LANG=C --env LC_ALL=C --env TZ=UTC \
+            --mount "type=bind,src=$exe,dst=/candidate/quadriflow,readonly" \
+            --mount "type=bind,src=$fixture,dst=/candidate/cube-triangles.obj,readonly" \
+            --tmpfs /output:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+            --workdir /output "$UBUNTU_IMAGE" /bin/sh -eu -c '
+              . /etc/os-release
+              test "$ID" = ubuntu && test "$VERSION_ID" = 24.04
+              for package in build-essential gcc g++ make libeigen3-dev libboost-dev libboost1.83-dev; do
+                status="$(dpkg-query -W -f="\${db:Status-Status}" "$package" 2>/dev/null || :)"
+                if [ "$status" = installed ]; then
+                  echo "Unexpected development package: $package" >&2
+                  exit 1
+                fi
+              done
+              printf "Installed package count: " >&2
+              dpkg-query -W -f="\${db:Status-Status}\n" | grep -c -x installed >&2
+              for package in libc6 libstdc++6 libgcc-s1; do
+                dpkg-query -W "$package" >&2 2>/dev/null || :
+              done
+              if ! /candidate/quadriflow -i /candidate/cube-triangles.obj -o /output/cube-quad.obj -f 12 -seed 0 > /output/worker.log 2>&1; then
+                head -c 4096 /output/worker.log | sed "s/^/[quadri] /" >&2
+                exit 1
+              fi
+              test -f /output/cube-quad.obj
+              test ! -L /output/cube-quad.obj
+              test -s /output/cube-quad.obj
+              head -c 1048577 /output/cube-quad.obj
+            '
+          if ! timeout 90s docker start --attach "$container_name" > "$scratch/cube-quad.obj"; then
+            echo "QuadriFlow did not execute successfully in the unmodified runtime image; see loader or worker error above." >&2
+            exit 1
+          fi
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container_name")" -eq 0
+          test -f "$scratch/cube-quad.obj"
+          test ! -L "$scratch/cube-quad.obj"
+          test -s "$scratch/cube-quad.obj"
+          test "$(wc -c < "$scratch/cube-quad.obj")" -le 1048576
+          printf '%s  %s\n' 021f46b872796ea5b3b36ae0b755f64d7831131eab066a2b069fdfd523becbc8 "$scratch/cube-quad.obj" | sha256sum --check
+          printf '%s  %s\n' a925c519b1339d8152705376622bde4817f66e307800c12f1a3ce61d7e25a1e9 "$exe" | sha256sum --check
+          echo "Runtime-only smoke passed; this is not a MeshHarbor installation or textured-asset test."
