@@ -54,10 +54,68 @@ class NoticeTests(unittest.TestCase):
         sbom = json.loads(a["sbom.spdx.json"])
         self.assertEqual(sbom["spdxVersion"], "SPDX-2.3")
         self.assertEqual(sbom["creationInfo"]["created"], "1970-01-01T00:00:00Z")
-        self.assertEqual(sbom["files"][0]["licenseInfoInFile"], ["NOASSERTION"])
+        self.assertEqual(sbom["files"][0]["licenseInfoInFiles"], ["NOASSERTION"])
         for line in a["SHA256SUMS"].decode().splitlines():
             digest, name = line.split("  ", 1)
             self.assertEqual(digest, hashlib.sha256(a[name]).hexdigest())
+
+    def test_archive_evidence_is_opt_in_and_names_only_actual_tar_members(self):
+        source = self.source / "LICENSE.txt"
+        raw = b"Upstream text `inline`\r\n````\r\nFinal line: no newline"
+        source.write_bytes(raw)
+        first_dir = self.root / "first"
+        second_dir = self.root / "second"
+        q.build(self.inventory, first_dir, 0, archive_evidence=True)
+        q.build(self.inventory, second_dir, 0, archive_evidence=True)
+        q.build(self.inventory, self.root / "default", 0)
+        self.assertFalse((self.root / "default/archive-evidence").exists())
+
+        evidence = first_dir / "archive-evidence"
+        self.assertEqual(
+            sorted(path.name for path in evidence.iterdir()),
+            ["THIRD-PARTY-NOTICES.md", "sbom.spdx.json"],
+        )
+        for member in evidence.iterdir():
+            self.assertEqual(member.read_bytes(), (second_dir / "archive-evidence" / member.name).read_bytes())
+        archive_notice = (evidence / "THIRD-PARTY-NOTICES.md").read_bytes()
+        self.assertIn(b"`````text\n" + raw + b"\n`````\n", archive_notice)
+        self.assertIn(hashlib.sha256(raw).hexdigest().encode(), archive_notice)
+        self.assertEqual(source.read_bytes(), raw)
+        archive_sbom = json.loads((evidence / "sbom.spdx.json").read_bytes())
+        loose_sbom = json.loads((first_dir / "sbom.spdx.json").read_bytes())
+        self.assertNotEqual(archive_sbom["documentNamespace"], loose_sbom["documentNamespace"])
+        self.assertEqual(archive_sbom["packages"], loose_sbom["packages"])
+        self.assertFalse(archive_sbom["packages"][0]["filesAnalyzed"])
+        self.assertIn("No binary dependency closure", archive_sbom["comment"])
+        self.assertEqual(
+            [entry["fileName"] for entry in archive_sbom["files"]],
+            ["./THIRD-PARTY-NOTICES.md"],
+        )
+        self.assertEqual(archive_sbom["files"][0]["checksums"], [{
+            "algorithm": "SHA256", "checksumValue": hashlib.sha256(archive_notice).hexdigest()
+        }])
+        self.assertEqual(archive_sbom["files"][0]["licenseConcluded"], "NOASSERTION")
+        self.assertEqual(
+            {record["relatedSpdxElement"] for record in archive_sbom["relationships"]},
+            {"SPDXRef-File-CombinedNotices", "SPDXRef-Package-quadriflow"},
+        )
+        self.assertTrue(all(
+            rel["spdxElementId"] == "SPDXRef-DOCUMENT" and rel["relationshipType"] == "DESCRIBES"
+            for rel in archive_sbom["relationships"]
+        ))
+        self.assertIn("archive-evidence/THIRD-PARTY-NOTICES.md", (first_dir / "SHA256SUMS").read_text())
+        self.assertIn("archive-evidence/sbom.spdx.json", (first_dir / "SHA256SUMS").read_text())
+
+    def test_archive_payload_caps_fail_before_writing_output(self):
+        for limit, message in [
+            ("MAX_ARCHIVE_NOTICE_BYTES", "combined notice exceeds"),
+            ("MAX_ARCHIVE_SBOM_BYTES", "archive SPDX exceeds"),
+        ]:
+            with self.subTest(limit=limit), patch.object(q, limit, 20):
+                out = self.root / limit
+                with self.assertRaisesRegex(ValueError, message):
+                    q.build(self.inventory, out, 0, archive_evidence=True)
+                self.assertFalse(out.exists())
 
     def test_existing_output_preserved(self):
         out = self.root / "out"
@@ -105,6 +163,26 @@ class NoticeTests(unittest.TestCase):
         })
         with patch.object(q, "MAX_FILES", 2), self.assertRaisesRegex(ValueError, "global limits"):
             q.build(self.inventory, self.root / "four", 0)
+
+    def test_large_distro_notice_is_preserved_and_limit_still_enforced(self):
+        license_path = self.source / "LICENSE.txt"
+        size = 2_175_464  # Ubuntu noble-updates libboost1.83-dev copyright size
+        license_data = b"a" * (size - 1) + b"\n"
+        license_path.write_bytes(license_data)
+        out = self.root / "distro-notice"
+        report = q.build(self.inventory, out, 0)
+        copied = out / "third-party-notices/quadriflow/LICENSE.txt"
+        self.assertEqual(copied.read_bytes(), license_data)
+        self.assertEqual(
+            report["packages"][0]["notices"][0]["sha256"], hashlib.sha256(license_data).hexdigest()
+        )
+        self.assertFalse(report["release_ready"])
+
+        license_path.write_bytes(b"x" * (q.MAX_FILE_BYTES + 1))
+        rejected = self.root / "oversize"
+        with self.assertRaisesRegex(ValueError, "notice exceeds per-file limit"):
+            q.build(self.inventory, rejected, 0)
+        self.assertFalse(rejected.exists())
 
     def test_wrong_revision(self):
         self.inventory["source_commit"] = "0" * 40

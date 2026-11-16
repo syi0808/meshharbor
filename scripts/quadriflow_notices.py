@@ -21,11 +21,14 @@ import uuid
 
 PIN = "810b7a0967c35b0dc85b4464e3835e26a756c967"
 MAX_FILES = 512
-MAX_FILE_BYTES = 2 * 1024 * 1024
+# An unmodified Ubuntu Boost 1.83 copyright notice is over 2 MiB.
+MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_BYTES = 16 * 1024 * 1024
 MAX_SCAN_ENTRIES = 20_000
 MAX_METADATA_TEXT = 4_096
 MAX_NOTICE_INDEX_BYTES = 2 * 1024 * 1024
+MAX_ARCHIVE_NOTICE_BYTES = 8 * 1024 * 1024
+MAX_ARCHIVE_SBOM_BYTES = 16 * 1024 * 1024
 ID = re.compile(r"^[a-z0-9][a-z0-9.-]{0,79}$")
 PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,119}$")
 SPDX_EXPRESSION_CHARS = re.compile(r"^[A-Za-z0-9.+() -]+$")
@@ -147,7 +150,90 @@ def safe_metadata_text(value, field):
     return value
 
 
-def build(inventory, output, epoch):
+def _archive_evidence(report, spdx, raw_payloads):
+    """Map the review tree to the two files that the USTAR contract can contain."""
+    combined = bytearray()
+
+    def append(data):
+        if len(data) > MAX_ARCHIVE_NOTICE_BYTES - len(combined):
+            raise ValueError("combined notice exceeds the installer's 8 MiB payload limit")
+        combined.extend(data)
+
+    append(
+        b"# Third-party notices\n\n"
+        b"Byte-preserved notices from a declared input inventory. This does not establish "
+        b"binary dependency closure, a license conclusion, or release readiness.\n"
+    )
+    for package in report["packages"]:
+        append(f"\n## {package['id']}\n".encode("ascii"))
+        for index, notice in enumerate(package["notices"], start=1):
+            data = raw_payloads[notice["path"]]
+            digest = hashlib.sha256(data).hexdigest()
+            if len(data) != notice["bytes"] or digest != notice["sha256"]:
+                raise ValueError("reviewed notice bytes do not match the evidence inventory")
+            # Only a run of backticks at the start of a line can end a fenced
+            # block. Choose a longer fence so the actual source text is inert.
+            fence_len = max(
+                (len(match.group(1)) + 1
+                 for match in re.finditer(rb"(?:\A|[\r\n]) {0,3}(`{3,})", data)),
+                default=3,
+            )
+            if 2 * fence_len > MAX_ARCHIVE_NOTICE_BYTES - len(combined):
+                raise ValueError("combined notice exceeds the installer's 8 MiB payload limit")
+            fence = b"`" * fence_len
+            path = json.dumps(notice["path"], ensure_ascii=True).replace("`", "\\u0060")
+            append(f"\n### Notice {index}\n\n".encode("ascii"))
+            append(f"- Source path: `{path}`\n".encode("ascii"))
+            append(f"- Bytes: {len(data)}; SHA-256: `{digest}`\n\n".encode("ascii"))
+            append(fence + b"text\n")
+            append(data)
+            # This line separator is outside the byte-preserved notice.
+            append(b"\n" + fence + b"\n")
+
+    notice_bytes = bytes(combined)
+    digest = hashlib.sha256(notice_bytes).hexdigest()
+    file_id = "SPDXRef-File-CombinedNotices"
+    namespace = hashlib.sha256(
+        canonical({"input_evidence": report, "combined_notice_sha256": digest})
+    ).hexdigest()
+    archive_spdx = {
+        **spdx,
+        "name": "QuadriFlow sidecar declared input notices (archive layout)",
+        "documentNamespace": "https://meshharbor.invalid/spdx/" + str(
+            uuid.uuid5(uuid.NAMESPACE_URL, namespace)
+        ),
+        "files": [{
+            "SPDXID": file_id,
+            "fileName": "./THIRD-PARTY-NOTICES.md",
+            "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
+            "licenseConcluded": "NOASSERTION",
+            "licenseInfoInFiles": ["NOASSERTION"],
+            "copyrightText": "NOASSERTION",
+        }],
+        "relationships": [
+            relationship for relationship in spdx["relationships"]
+            if relationship["spdxElementId"] == "SPDXRef-DOCUMENT"
+            and relationship["relationshipType"] == "DESCRIBES"
+        ] + [{
+            "spdxElementId": "SPDXRef-DOCUMENT",
+            "relationshipType": "DESCRIBES",
+            "relatedSpdxElement": file_id,
+        }],
+        "comment": (
+            "Declared input notice evidence only. No binary dependency closure, "
+            "copyright or license conclusion, or release readiness is asserted."
+        ),
+    }
+    archive_sbom_bytes = canonical(archive_spdx)
+    if len(archive_sbom_bytes) > MAX_ARCHIVE_SBOM_BYTES:
+        raise ValueError("archive SPDX exceeds the installer's 16 MiB payload limit")
+    return {
+        "archive-evidence/THIRD-PARTY-NOTICES.md": notice_bytes,
+        "archive-evidence/sbom.spdx.json": archive_sbom_bytes,
+    }
+
+
+def build(inventory, output, epoch, *, archive_evidence=False):
     if not isinstance(inventory, dict):
         raise ValueError("inventory must be a JSON object")
     if set(inventory) != {"source_commit", "packages"}:
@@ -234,7 +320,7 @@ def build(inventory, output, epoch):
                     "fileName": "./" + destination,
                     "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
                     "licenseConcluded": "NOASSERTION",
-                    "licenseInfoInFile": ["NOASSERTION"],
+                    "licenseInfoInFiles": ["NOASSERTION"],
                     "copyrightText": "NOASSERTION",
                 }
             )
@@ -304,6 +390,8 @@ def build(inventory, output, epoch):
     index_bytes = ("\n".join(notice_index).rstrip() + "\n").encode("utf-8")
     if len(index_bytes) > MAX_NOTICE_INDEX_BYTES:
         raise ValueError("third-party notice index exceeds size limit")
+    if archive_evidence:
+        payloads.update(_archive_evidence(report, sbom, payloads))
     payloads["THIRD-PARTY-NOTICES.md"] = index_bytes
     payloads["notice-inventory.json"] = canonical(report)
     payloads["sbom.spdx.json"] = canonical(sbom)
@@ -345,13 +433,20 @@ def main():
     parser.add_argument("inventory", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--source-date-epoch", type=int, required=True)
+    parser.add_argument(
+        "--archive-evidence",
+        action="store_true",
+        help="also emit the combined notice and matching archive-layout SPDX (not release approval)",
+    )
     args = parser.parse_args()
     with args.inventory.open("rb") as handle:
         raw = handle.read(1024 * 1024 + 1)
     if len(raw) > 1024 * 1024:
         parser.error("inventory exceeds 1 MiB")
     inventory = json.loads(raw, object_pairs_hook=strict_json_object)
-    report = build(inventory, args.output, args.source_date_epoch)
+    report = build(
+        inventory, args.output, args.source_date_epoch, archive_evidence=args.archive_evidence
+    )
     print(json.dumps({"packages": len(report["packages"]), "release_ready": False}))
 
 
