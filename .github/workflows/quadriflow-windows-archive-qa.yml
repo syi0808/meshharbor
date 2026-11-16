@@ -1,0 +1,127 @@
+name: QuadriFlow Windows archive QA
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_fixed_windows_archive:
+        description: Run only the reviewed Windows local-archive rehearsal (no release)
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: quadriflow-fixed-windows-archive-qa
+  cancel-in-progress: false
+
+jobs:
+  windows-local-archive-qa:
+    if: github.repository == 'syi0808/meshharbor' && github.ref == 'refs/heads/main' && inputs.confirm_fixed_windows_archive
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the reviewed workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Fetch the fixed already-signed Windows candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $qaRoot = Join-Path $env:RUNNER_TEMP 'qf-windows-archive-qa'
+          New-Item -ItemType Directory -Path $qaRoot | Out-Null
+          $env:QF_WINDOWS_QA_ROOT = $qaRoot
+          $artifact = 'repos/syi0808/meshharbor/actions/artifacts/14166033549'
+          $metadataText = gh api --method GET $artifact
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read exact candidate metadata' }
+          $metadata = ($metadataText -join [Environment]::NewLine) | ConvertFrom-Json
+          if ($metadata.expires_at -is [datetime]) {
+            $expiry = [DateTimeOffset] $metadata.expires_at
+          } else {
+            $expiry = [DateTimeOffset]::Parse($metadata.expires_at)
+          }
+          if ($metadata.id -ne 14166033549 -or
+              $metadata.name -ne 'quadriflow-candidate-windows-x86_64-X64' -or
+              $metadata.workflow_run.id -ne 43721747855 -or
+              $metadata.workflow_run.head_sha -ne '9288f601578f8c9b5735a1b255b661f6ebcd1c50' -or
+              $metadata.size_in_bytes -ne 1121767 -or
+              $metadata.digest -ne 'sha256:cab09fe8a31e247f7c176e3a63eff074c07e581a44e50b36762f3bed4a9384d5' -or
+              $metadata.expired -ne $false -or
+              $expiry -le [DateTimeOffset]::UtcNow) {
+            throw 'The pinned original candidate is absent, expired, or unexpected'
+          }
+          # Python captures binary stdout exactly, independent of PowerShell's
+          # native redirection settings. gh follows the GitHub API ZIP redirect.
+          @'
+          import os
+          from pathlib import Path
+          import subprocess
+          root = Path(os.environ["QF_WINDOWS_QA_ROOT"])
+          endpoint = "repos/syi0808/meshharbor/actions/artifacts/14166033549/zip"
+          with (root / "candidate.zip").open("xb") as destination:
+              subprocess.run(["gh", "api", "--method", "GET", endpoint],
+                             stdout=destination, check=True, timeout=120)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch exact candidate ZIP' }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "QF_WINDOWS_QA_ROOT=$qaRoot"
+
+      - name: Reconstruct the previously byte-reviewed local archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:QF_WINDOWS_QA_ROOT
+          function Get-PublicInput($url, $name, $limit) {
+            curl.exe --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --max-time 60 --max-filesize $limit $url --output (Join-Path $root $name)
+            if ($LASTEXITCODE -ne 0) { throw "Could not fetch public QA input $name" }
+          }
+          Get-PublicInput 'https://gitlab.com/libeigen/eigen/-/archive/5.0.1/eigen-5.0.1.tar.gz' 'eigen.tar.gz' 16777216
+          Get-PublicInput 'https://raw.githubusercontent.com/boostorg/boost/refs/tags/boost-1.92.0/LICENSE_1_0.txt' 'boost.txt' 16384
+          Get-PublicInput 'https://raw.githubusercontent.com/hjwdzh/QuadriFlow/810b7a0967c35b0dc85b4464e3835e26a756c967/3rd/pcg32/pcg32/pcg32.h' 'pcg32.h' 16384
+          Get-PublicInput 'https://www.apache.org/licenses/LICENSE-2.0.txt' 'apache.txt' 32768
+          python scripts/quadriflow_windows_archive_qa.py --candidate (Join-Path $root 'candidate.zip') --eigen (Join-Path $root 'eigen.tar.gz') --boost (Join-Path $root 'boost.txt') --pcg (Join-Path $root 'pcg32.h') --apache (Join-Path $root 'apache.txt') --output (Join-Path $root 'stage')
+          if ($LASTEXITCODE -ne 0) { throw 'Exact Windows archive reconstruction failed' }
+
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759
+
+      - name: Prepare pinned NASM for the Rust test's AWS-LC build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'nasm-3.02-win64.zip'
+          curl.exe --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --max-time 60 --max-filesize 16777216 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' --output $archive
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the bounded NASM archive' }
+          $expected = '161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7'
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'NASM archive checksum mismatch' }
+          $nasmRoot = Join-Path $env:RUNNER_TEMP 'nasm-toolchain'
+          Expand-Archive -LiteralPath $archive -DestinationPath $nasmRoot
+          $nasmDirectory = Join-Path $nasmRoot 'nasm-3.02'
+          $nasmExecutable = Join-Path $nasmDirectory 'nasm.exe'
+          if (!(Test-Path -LiteralPath $nasmExecutable -PathType Leaf)) { throw 'Pinned NASM executable is missing' }
+          & $nasmExecutable -v
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned NASM did not run' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $nasmDirectory
+
+      - name: Verify, extract into a private root, and run the fixed native cube
+        env:
+          CFLAGS: /std:c11
+          MESHHARBOR_TEST_SIGNED_ARCHIVE_SHA256: 9037e53b8bdcc4192638bc5afdd5efa64a7b1c0ae0cc2e3aaa1731418bfee8f6
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:QF_WINDOWS_QA_ROOT 'stage'
+          $qaTemp = Join-Path $env:QF_WINDOWS_QA_ROOT 't'
+          New-Item -ItemType Directory -Path $qaTemp | Out-Null
+          $env:TEMP = $qaTemp
+          $env:TMP = $qaTemp
+          $env:MESHHARBOR_TEST_SIGNED_ARCHIVE_MANIFEST = Join-Path $stage 'local-only-manifest.json'
+          $env:MESHHARBOR_TEST_SIGNED_ARCHIVE = Join-Path $stage 'windows-rehearsal.tar'
+          cargo test --locked -p meshharbor-core --lib quadriflow_installer::tests::rehearse_signed_native_archive_and_run_fixed_cube -- --ignored --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows local-archive QA failed' }
