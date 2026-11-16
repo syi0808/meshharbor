@@ -104,14 +104,7 @@ impl OperationCore {
                 "Simplification requires a GLB mesh asset.".into(),
             ));
         }
-        let source_artifact = source
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.kind == "source")
-            .or_else(|| source.artifacts.first())
-            .ok_or_else(|| {
-                CoreError::NotFound(format!("Asset '{asset_id}' has no stored artifact."))
-            })?;
+        let source_artifact = mesh_source_artifact(&source)?;
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
         let (output, report) = simplify_glb(&bytes, target_triangles, max_error)?;
         let name = derived_name(&source.name);
@@ -128,8 +121,6 @@ impl OperationCore {
         Ok(SimplificationResult { asset, report })
     }
 
-    /// Run a local mesh operation and persist its output as a separate derived asset.
-    /// The immutable source artifact is never overwritten.
     fn mesh_processing_source(&self, asset_id: &str) -> CoreResult<Asset> {
         let source = self
             .store
@@ -157,6 +148,8 @@ impl OperationCore {
         crate::quadriflow_preflight_glb(&bytes, options)
     }
 
+    /// Run a local mesh operation and persist its output as a separate derived asset.
+    /// The immutable source artifact is never overwritten.
     pub fn process_mesh_asset(
         &self,
         asset_id: &str,
