@@ -123,6 +123,37 @@ Every referenced file needs a caller-declared canonical root. Use the actual res
 
 This tool accepts a limited POSIX compiler dependency-file format, not MSBuild tracking logs or Windows paths. It does not account for link inputs, runtime libraries, compiler execution tools, package receipts, or whether the input list covers all code paths or every translation unit. Its closure, installation, and release flags remain false. Historical candidate signatures do not attest this new diagnostic.
 
+## Materials receipt comparison (diagnostics only)
+
+`scripts/quadriflow_candidate_materials.py normalize <receipt.json>` turns
+a bounded caller-declared v1 receipt into deterministic JSON. Each input
+has `schema_version: 1`, a supported `platform`, explicit `materials`,
+a `coverage` map and `observations`. The fixed source identities are
+`meshharbor-source` and `quadriflow-source` (Git SHA-1), and `build-recipe`
+(SHA-256). Additional material pins identify compiler evidence, linker
+evidence, runtime evidence, package archives or toolchain bytes. Each material
+has a stable lowercase `id`, `kind`, `algorithm`, and lowercase `digest`;
+package and toolchain identities also require an exact `version` token.
+Absolute host paths and arbitrary report data are not fields in this format.
+
+Set `coverage` for `compiler`, `linker`, `runtime`, `package`, and
+`toolchain` to `observed`, `partial`, `unsupported`, or `not-collected`.
+`observed` requires a pin in its category; it does not mean every input
+was found. `observations` holds the `replica` role, `run_id`,
+`run_attempt`, and `runner_image` token separately from material identity.
+
+`compare <primary.json> <independent.json>` checks the same invocation,
+platform, and distinct replica roles, then compares coverage and sorted
+exact material pins. It reports both comparisons separately and exits with
+status 1 if either comparison differs. A different runner-image observation alone does not
+make the semantic fingerprints differ; a change in the reported material
+does. The result does not verify underlying file bytes, package signatures,
+receipt independence, or inputs that were not reported. Both commands
+always report diagnostic-only, not release eligible, and dependency closure
+unverified. The existing candidate workflows and signature/installer policy
+do not consume these receipts. Published historical signatures do not bind
+these new observations.
+
 ## Reproducibility and release gates
 
 The older smoke workflow installs native dependencies from moving apt, Homebrew, and vcpkg state and uses version-tag action references. The manual candidate workflow pins its actions and Python version, but native compiler/dependency state and hosted runner images remain mutable. Recorded tool/package versions are diagnostic, not lockfiles. A release pipeline therefore still needs pinned compiler/CMake versions, a pinned vcpkg baseline or exact formula/package snapshots, a pinned Linux image and packages, deterministic archive creation, and repeat builds with matching hashes before it can claim reproducibility.
