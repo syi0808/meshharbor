@@ -64,6 +64,24 @@ class CompileInputTests(unittest.TestCase):
         self.assertEqual(len(a["inputs"]), 2)
         self.assertEqual(len(a["objects"]), 2)
 
+    def test_top_level_object_and_subdirectory_prerequisite_have_separate_bases(self):
+        subdir = self.build / "subdir"
+        subdir.mkdir()
+        (subdir / "main.o").touch()
+        (subdir / "generated.h").write_bytes(b"right file")
+        (self.build / "generated.h").write_bytes(b"decoy file")
+        self.record.write_text("subdir/main.o: generated.h\n")
+        report = q.collect(
+            self.build, self.roots, [self.record], 1, dependency_base=subdir,
+        )
+        self.assertEqual(report["objects"]["subdir/main.o"]["inputs"], ["build/subdir/generated.h"])
+        self.assertEqual(report["inputs"]["build/subdir/generated.h"]["sha256"],
+                         hashlib.sha256(b"right file").hexdigest())
+        with self.assertRaisesRegex(ValueError, "outside all declared roots"):
+            q.collect(
+                self.build, self.roots, [self.record], 1, dependency_base=self.build.parent,
+            )
+
     def test_duplicate_output_and_wrong_expected_count_fail(self):
         with self.assertRaisesRegex(ValueError, "unit count"):
             q.collect(self.build, self.roots, [self.record], 2)

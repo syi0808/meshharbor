@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Collect diagnostic-only POSIX compiler inputs from explicit GCC/Clang depfiles.
 
-Run after a successful, quiescent build. Supply the working directory used for
-relative depfile paths as --build-root, the expected number of translation
-units, each depfile, and canonical roots covering the observed files. This
+Run after a successful, quiescent build. Supply the base of relative object
+targets as --build-root, the expected translation-unit count, each depfile,
+and canonical roots covering the files. Use --dependency-base if relative
+prerequisites were emitted from a different common working directory. This
 records compile-time input bytes, not build provenance, linked objects,
 runtime dependencies, or a complete build closure. No command is executed.
 """
@@ -150,7 +151,7 @@ def hash_input(path, remaining):
     return {"size_bytes": size, "sha256": digest.hexdigest()}
 
 
-def collect(build_root, roots, depfiles, expected_units):
+def collect(build_root, roots, depfiles, expected_units, *, dependency_base=None):
     if type(expected_units) is not int or not 1 <= expected_units <= MAX_UNITS:
         raise ValueError("expected unit count is outside the supported range")
     if len(depfiles) != expected_units:
@@ -167,6 +168,8 @@ def collect(build_root, roots, depfiles, expected_units):
             raise ValueError("duplicate declared root directory")
         mapped[label] = canonical
     sorted_roots = sorted(mapped.items(), key=lambda item: len(item[1].parts), reverse=True)
+    dependency_base = build_root if dependency_base is None else canonical_root(dependency_base)
+    _match_root(dependency_base, sorted_roots)
 
     files, objects, total, references, path_bytes = {}, {}, 0, 0, 0
     for depfile in depfiles:
@@ -179,7 +182,7 @@ def collect(build_root, roots, depfiles, expected_units):
         inputs = set()
         source = None
         for dep in deps:
-            label, rel_path, physical = identify(dep, build_root, sorted_roots)
+            label, rel_path, physical = identify(dep, dependency_base, sorted_roots)
             name = f"{label}/{rel_path}"
             if source is None:
                 source = name
@@ -221,6 +224,11 @@ def _root_argument(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-root", type=Path, required=True)
+    parser.add_argument(
+        "--dependency-base",
+        type=Path,
+        help="canonical working directory for relative prerequisites, if not the build root",
+    )
     parser.add_argument("--root", type=_root_argument, action="append", default=[])
     parser.add_argument("--depfile", type=Path, action="append", required=True)
     parser.add_argument("--expected-units", type=int, required=True)
@@ -228,7 +236,10 @@ def main(argv=None):
     if os.name != "posix":
         parser.error("only POSIX compiler depfiles are supported")
     try:
-        evidence = collect(args.build_root, args.root, args.depfile, args.expected_units)
+        evidence = collect(
+            args.build_root, args.root, args.depfile, args.expected_units,
+            dependency_base=args.dependency_base,
+        )
     except (OSError, RuntimeError):
         # OSError may include an input or host filesystem path.
         parser.error("could not read or resolve a declared input")
