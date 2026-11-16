@@ -6,6 +6,9 @@ on:
     paths:
       - .github/workflows/quadriflow-linux-reproduction.yml
       - scripts/quadriflow-linux-reproduction.sh
+      - scripts/quadriflow-linux-link-launcher.sh
+      - scripts/quadriflow_link_observation.py
+      - scripts/test_quadriflow_link_observation.py
       - scripts/quadriflow-platform-smoke.py
       - scripts/quadriflow_compile_inputs.py
   workflow_dispatch:
@@ -26,6 +29,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Test GNU linker observations on a small native fixture
+        run: python3 -m unittest discover -s scripts -p test_quadriflow_link_observation.py
       - id: build
         run: bash scripts/quadriflow-linux-reproduction.sh primary
 
@@ -41,6 +46,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Test GNU linker observations on a small native fixture
+        run: python3 -m unittest discover -s scripts -p test_quadriflow_link_observation.py
       - id: build
         run: bash scripts/quadriflow-linux-reproduction.sh independent
 
@@ -50,13 +57,13 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Require identical executable, compiler observations and sampled tools
+      - name: Require identical executable, observed build inputs and sampled tools
         env:
           PRIMARY: ${{ needs.primary.outputs.digests }}
           INDEPENDENT: ${{ needs.independent.outputs.digests }}
         run: |
           set -euo pipefail
-          format='^elf=[a-f0-9]{64}:quadriflow=[a-f0-9]{64}:lemon=[a-f0-9]{64}:tools=[a-f0-9]{64}$'
+          format='^elf=[a-f0-9]{64}:quadriflow=[a-f0-9]{64}:lemon=[a-f0-9]{64}:tools=[a-f0-9]{64}:link=[a-f0-9]{64}$'
           if [[ ! $PRIMARY =~ $format || ! $INDEPENDENT =~ $format ]]; then
             echo 'Missing or malformed replica digest output.' >&2
             exit 1

@@ -52,12 +52,14 @@ cc=$(command -v gcc)
 cxx=$(command -v g++)
 cmake -S "$source" -B "$build" -G 'Unix Makefiles' "${recipe[@]:2}" \
   -DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cxx" \
+  "-DCMAKE_CXX_LINKER_LAUNCHER=bash;$PWD/scripts/quadriflow-linux-link-launcher.sh;$root/quad-link.trace" \
   -DCMAKE_C_FLAGS="-ffile-prefix-map=$root=/meshharbor/quadbuild" \
   -DCMAKE_CXX_FLAGS="-ffile-prefix-map=$root=/meshharbor/quadbuild" \
   -DBoost_NO_BOOST_CMAKE=ON -DBoost_NO_SYSTEM_PATHS=ON \
   -DBOOST_INCLUDEDIR="$root/boost/usr/include" \
   -DEIGEN_INCLUDE_DIR="$root/eigen/usr/include/eigen3"
 cmake --build "$build" --target quadriflow --parallel 2
+test -s "$root/quad-link.trace"
 if LC_ALL=C grep -aqF -- "$root" "$build/quadriflow"; then
   echo 'Executable still contains the replica-specific build root.' >&2
   exit 1
@@ -87,8 +89,11 @@ observe lemon.json "$lemon/CMakeFiles/lemon.dir" "$lemon" 7
 # Require actual use of both extracted packages rather than only checking the .debs.
 grep -q '"boost/' "$root/quadriflow.json"
 grep -q '"eigen/' "$root/quadriflow.json"
+python3 scripts/quadriflow_link_observation.py --build "$build" \
+  --trace "$root/quad-link.trace" --elf "$build/quadriflow" \
+  --root system-lib=/usr/lib --root system-loader=/usr/lib64 > "$root/link.json"
 
-# The replica output carries only four hashes, never raw reports or native bytes.
+# The replica output carries only five hashes, never raw reports or native bytes.
 # This samples toolchain executables, not a complete build or link closure.
 sha() { sha256sum -- "$1" | cut -d ' ' -f 1; }
 {
@@ -96,12 +101,12 @@ sha() { sha256sum -- "$1" | cut -d ' ' -f 1; }
     "$("$cc" -print-prog-name=cc1)" "$("$cxx" -print-prog-name=cc1plus)" \
     "$(command -v "$("$cxx" -print-prog-name=as)")" \
     "$(command -v "$("$cxx" -print-prog-name=ld)")" \
-    "$(command -v "$("$cxx" -print-prog-name=ar)")"; do
+    "$(command -v "$("$cxx" -print-prog-name=ar)")" "$(command -v readelf)"; do
     sha "$tool"
   done
 } > "$root/tool-inputs.sha256"
 echo "Host image (observation only): ${ImageOS:-unknown} ${ImageVersion:-unknown}"
-evidence="elf=$(sha "$build/quadriflow"):quadriflow=$(sha "$root/quadriflow.json"):lemon=$(sha "$root/lemon.json"):tools=$(sha "$root/tool-inputs.sha256")"
+evidence="elf=$(sha "$build/quadriflow"):quadriflow=$(sha "$root/quadriflow.json"):lemon=$(sha "$root/lemon.json"):tools=$(sha "$root/tool-inputs.sha256"):link=$(sha "$root/link.json")"
 printf '%s\n' "$evidence"
 if [[ -n ${GITHUB_OUTPUT:-} ]]; then
   printf 'digests=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
