@@ -82,9 +82,29 @@ The source revision field is a caller assertion; the tool does not inspect Git. 
 
 Inputs and files are bounded (512 packages/notices, 4 MiB per notice, 16 MiB total notice bytes, 20,000 candidate scan entries). It rejects symlinks, traversal, control characters, binary/empty content, nonportable names, and case-insensitive output collisions. It creates a new output directory exclusively and does not overwrite one. Output parents and inventory roots must be canonical real directories; on macOS, resolve the `/tmp` alias before using it. Deterministic JSON/checksum content uses the supplied timestamp; directory metadata and native compiler outputs are not normalized, so this does not make the overall build reproducible.
 
-For an archive-layout rehearsal, pass `--archive-evidence` to additionally create `archive-evidence/THIRD-PARTY-NOTICES.md` and `archive-evidence/sbom.spdx.json`. The first embeds the original notice bytes with boundaries, sizes, and hashes; the second references only the combined notice file actually present in the five-payload USTAR layout, not the loose review-tree files. These optional payloads are capped at the installer's 8 MiB notice and 16 MiB SPDX limits. The standard review-tree files remain separate. Use only the archive-evidence pair, not the review-tree index and SPDX, when rehearsing that archive layout.
+For an archive-layout rehearsal, pass `--archive-evidence` to additionally create `archive-evidence/THIRD-PARTY-NOTICES.md` and `archive-evidence/sbom.spdx.json`. The first embeds the original notice bytes with boundaries, sizes, and hashes; the second references only the combined notice file actually present in the five-payload USTAR layout, not the loose review-tree files. These optional payloads are capped at the installer's 8 MiB notice and 16 MiB SPDX limits. The standard review-tree files remain separate. Do not pass the review-tree output directory to the assembler. In a new staging directory, copy only the two files from `archive-evidence/` to the top level, alongside the platform executable, `provenance.json`, and `provenance.sigstore.json`. Pass that five-file directory to the USTAR assembler.
 
 The helper intentionally records `release_ready=false` and `dependency_closure_verified=false`. Its SPDX-shaped output is not checked by an external SPDX validator, license-expression grammar is not fully parsed, and no legal approval is implied. A release pipeline must review the actual linked dependency closure and independently validate the SPDX output.
+
+## Compile-input footprint (POSIX diagnostics only)
+
+After a successful, quiescent GCC/Clang build with Make-format compiler dependency files, `scripts/quadriflow_compile_inputs.py` can hash the files recorded in a caller-selected set of translation units. It does not run any tools, build anything, inspect a package manager, or change the signed build recipe. For a CMake Unix Makefiles build, check that the actual compiler produced target `.o.d` files before use; use the real compiler working directory as `--build-root`. A complete expected object list still needs independent review. Dependency files generated with `-MMD` omit system headers, so use compiler output that includes system dependencies when reviewing them. The helper cannot infer the compiler flags from a depfile alone.
+
+Example of one record; list every depfile and adjust the expected count for the actual target:
+
+```sh
+python3 scripts/quadriflow_compile_inputs.py \
+  --build-root /canonical/build \
+  --root upstream=/canonical/upstream \
+  --root system-headers=/usr/include \
+  --root compiler-headers=/canonical/compiler/include \
+  --depfile /canonical/build/CMakeFiles/quadriflow.dir/src/main.cpp.o.d \
+  --expected-units 1 > compile-inputs.json
+```
+
+Every referenced file needs a caller-declared canonical root. Use the actual resolved package roots if review requires attributing files to package versions; root labels alone are caller assertions. The most specific root wins. Unknown/missing paths, root-crossing symlinks, duplicate object records, incomplete count, and unsupported Make language fail closed. The JSON reports relative path identifiers and SHA-256/byte sizes, not physical root paths. Do not give it arbitrary untrusted file lists or allow concurrent changes to the build tree while collecting.
+
+This tool accepts a limited POSIX compiler dependency-file format, not MSBuild tracking logs or Windows paths. It does not account for link inputs, runtime libraries, compiler execution tools, package receipts, or whether the input list covers all code paths or every translation unit. Its closure, installation, and release flags remain false. Historical candidate signatures do not attest this new diagnostic.
 
 ## Reproducibility and release gates
 
