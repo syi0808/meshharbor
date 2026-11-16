@@ -165,13 +165,18 @@ Ubuntu snapshot packages before extracting their headers. Each maps its
 private build root to the same compiler path prefix and builds an unsigned
 ELF without running it.
 
-Only four SHA-256 values pass to the comparison job: the ELF, the QuadriFlow
-and LEMON compiler-input reports, and a fixed-order sample of host tools.
-Missing or unequal digests fail the comparison. The runner image identifier
-is logged separately; it is not treated as a build material. This checks
-only the inputs actually observed during this run. It does not pin the
-whole runner image, collect resolved link/runtime files, prove dependency
-closure, or replace either existing candidate build. The workflow does not
+The actual final link is captured with GNU ld double tracing. A local
+receipt distinguishes files the linker opened from archive members it
+selected and direct ELF loader requirements (PT_INTERP and DT_NEEDED).
+It does not execute the ELF or resolve what the runtime loader would choose.
+
+Only five SHA-256 values pass to the comparison job: the ELF, the QuadriFlow
+and LEMON compiler-input reports, the link/ELF observation, and a fixed-order
+sample of host tools. Missing or unequal digests fail the comparison. The
+runner image identifier is logged separately; it is not treated as a build
+material. This checks only observed inputs, not a pinned runner image,
+complete link or runtime closure, or either existing candidate build.
+The workflow does not
 upload binaries, attest, sign, publish, or enable auto-installation.
 
 ## Reproducibility and release gates
