@@ -1,4 +1,4 @@
-import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeInfo } from './types';
 
 export const MAX_ASSET_IMPORT_FILES = 10;
 export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
@@ -732,6 +732,13 @@ export class MeshHarborApi {
         input: { asset_id: assetId },
         parameters: { target_triangles: targetTriangles, max_error: maxError },
       }),
+    });
+  }
+
+  preflightRetopology(assetId: string): Promise<RetopologyPreflight> {
+    return this.request(`/api/v1/assets/${encodeURIComponent(assetId)}/retopology-preflight`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     });
   }
 

@@ -29,8 +29,9 @@ pub use operation::{
 };
 pub use parts::{PartSeparationReport, separate_components};
 pub use quadriflow::{
-    QuadMesh, QuadMeshReport, QuadRetopologyOptions, QuadRetopologyReport, parse_quad_obj_output,
-    quad_mesh_preview_glb, quadriflow_retopology_glb, quadriflow_sidecar_available,
+    QuadMesh, QuadMeshReport, QuadRetopologyOptions, QuadRetopologyPreflight, QuadRetopologyReport,
+    parse_quad_obj_output, quad_mesh_preview_glb, quadriflow_preflight_glb,
+    quadriflow_retopology_glb, quadriflow_sidecar_available,
 };
 pub use quadriflow_installer::{
     QuadriFlowBackendStatus, QuadriFlowInstallError, QuadriFlowInstallResult,

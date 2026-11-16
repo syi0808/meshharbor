@@ -176,6 +176,8 @@ export function App() {
   const quadArtifact = quadTopologyArtifact(selectedAsset);
   const retopologyAvailable = operations.find((operation) => operation.id === 'mesh.retopology')?.implemented === true;
   const quadriflowBackend = runtime?.quadriflow_backend;
+  const [checkingRetopology, setCheckingRetopology] = useState(false);
+  const [retopologyCheck, setRetopologyCheck] = useState<{ assetId: string; message: string } | null>(null);
   const [installingBackend, setInstallingBackend] = useState(false);
   const isRunning = isActiveJob(job);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
@@ -779,6 +781,23 @@ export function App() {
     }
   }
 
+  async function checkRetopologyInput() {
+    if (!selectedAsset || selectedAsset.kind !== 'mesh' || checkingRetopology) return;
+    const assetId = selectedAsset.id;
+    setCheckingRetopology(true);
+    setRetopologyCheck(null);
+    try {
+      const report = await api.preflightRetopology(assetId);
+      const input = report.appearance_projection_required ? 'Textured input' : 'Geometry-only input';
+      const seams = report.coincident_boundary_vertices_joined ? ' Exact seams can be joined for the solver without changing the source.' : '';
+      setRetopologyCheck({ assetId, message: `${input} passed the input checks (${report.input_triangles.toLocaleString()} triangles).${seams} The solver was not run.` });
+    } catch (cause) {
+      setRetopologyCheck({ assetId, message: cause instanceof Error ? cause.message : 'Could not check the retopology input.' });
+    } finally {
+      setCheckingRetopology(false);
+    }
+  }
+
   async function runMeshOperation(operation: StudioMeshOperationId) {
     if (!selectedAsset || selectedAsset.kind !== 'mesh') return;
     invalidateHistoryRequests();
@@ -1258,7 +1277,7 @@ export function App() {
                   <div className="operation-symbol"><span className="capability-spark">⌘</span></div>
                   <div><div className="operation-kicker">MESH TOOLS</div><h2>Refine &amp; export</h2></div>
                 </div>
-                <p className="operation-description">Each operation creates a new asset. Your source file is never overwritten.</p>
+                <p className="operation-description">Mesh processing creates a new asset. Input checks are read-only. Your source file is never overwritten.</p>
                 <div className="mesh-tool-list">
                   {meshOperationOptions.map((tool) => {
                     const available = operations.find((operation) => operation.id === tool.id)?.implemented === true;
@@ -1267,6 +1286,20 @@ export function App() {
                       <div className="mesh-tool-item" key={tool.id}>
                         <strong>{tool.title}</strong>
                         <p>{tool.description}</p>
+                        {tool.id === 'mesh.retopology' && (
+                          <>
+                            <button
+                              className="button button-secondary mesh-tool-button"
+                              disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || busy || checkingRetopology || connection !== 'connected' || isRunning}
+                              onClick={() => void checkRetopologyInput()}
+                            >
+                              {checkingRetopology ? 'Checking input…' : 'Check retopology input'}
+                            </button>
+                            {retopologyCheck && retopologyCheck.assetId === selectedAsset?.id && (
+                              <p role="status">{retopologyCheck.message}</p>
+                            )}
+                          </>
+                        )}
                         {processing ? (
                           <div className="job-progress">
                             <div className="job-progress-top">
@@ -1280,7 +1313,7 @@ export function App() {
                         ) : (
                           <button
                             className="button button-secondary mesh-tool-button"
-                            disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || !available || busy || connection !== 'connected' || isRunning}
+                            disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || !available || busy || checkingRetopology || connection !== 'connected' || isRunning}
                             onClick={() => void runMeshOperation(tool.id)}
                           >
                             Run {tool.title}<span className="button-arrow">→</span>

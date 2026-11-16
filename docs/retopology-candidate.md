@@ -14,7 +14,7 @@ The core commits both artifacts in one database transaction. REST artifact downl
 
 ## Geometry and operation contract
 
-The operation accepts one embedded-buffer GLB containing one closed, static, indexed TRIANGLES primitive. Geometry-only input uses POSITION-only float32 data. The optional textured path additionally requires float32 TEXCOORD_0, optional NORMAL, one PBR material, and embedded PNG base-color and metallic/roughness maps. The textured path allows up to 32 scene nodes only when they form one untransformed parent chain ending at the sole mesh leaf. It rejects other scene hierarchies, animation/skinning, morph targets, extensions, extra meshes or primitives, node transforms, tangents, vertex colors, external images, unsupported material maps, and other attributes. The source asset remains immutable. The sidecar receives geometry only; its original quad topology is stored as a geometry-only OBJ. The GLB preview is triangulated because glTF/GLB has no quad primitive mode.
+The operation accepts one embedded-buffer GLB containing one closed, static, indexed TRIANGLES primitive. Geometry-only input uses POSITION-only float32 data. The optional textured path additionally requires float32 TEXCOORD_0, optional NORMAL, one PBR material, and embedded PNG base-color and metallic/roughness maps. It rejects animation/skinning, morph targets, extensions, extra nodes/meshes/primitives, node transforms, tangents, vertex colors, external images, unsupported material maps, and other attributes. The source asset remains immutable. The sidecar receives geometry only; its original quad topology is stored as a geometry-only OBJ. The GLB preview is triangulated because glTF/GLB has no quad primitive mode.
 
 For supported textured input, MeshHarbor creates a fresh xatlas UV layout for the retopologized geometry and projects the original base-color/metallic-roughness maps through a BVH nearest-surface query. It fails closed if the distance cap is exceeded (2% of the source bounds diagonal), the source-facing-normal dot falls below 0.25, opposing near-equal surfaces make projection ambiguous, or coverage falls below 99.5%. The target atlas is capped at 16 million texels and input images are capped at 16 million pixels. Only those two maps appear in the preview; the OBJ has no UVs or appearance. Passing these gates does not establish perceptual texture quality, thin-feature retention, or correspondence on arbitrary topology.
 
@@ -23,6 +23,18 @@ Input validation requires closed, consistently oriented, edge- and vertex-manifo
 Current limits are 64 MiB input GLB, 100,000 input vertices, 200,000 input triangles, a requested target of 4–50,000 quads (default 10,000), 64 MiB output OBJ, 250,000 output vertices, 500,000 output quads, and 180 seconds. QuadriFlow's target count is approximate.
 
 The output parser enforces UTF-8 and byte/record/count bounds, finite positions in a broad source-bounds envelope, four distinct in-range vertices per triangulable quad, duplicate-face rejection, nonzero face area, closed and consistently oriented edge manifoldness, and connected vertex links. It creates smooth-normal triangle GLB previews and optionally projects the two supported maps under the gates above. It does **not** certify self-intersection freedom, a Hausdorff/surface-error tolerance, thin-feature retention, or high-to-low texture fidelity. The UI and operation report label this limitation; inspect experimental output before production use.
+
+## Check an asset without installing QuadriFlow
+
+In Studio, select a mesh and choose **Check retopology input** even if the backend is unavailable.
+From the CLI after importing the GLB, run `meshharbor retopology-preflight <asset-id> --target-quads 1500`.
+REST clients can POST `{"target_quads":1500}` to
+`/api/v1/assets/<asset-id>/retopology-preflight` under the normal local API authorization.
+Use the MCP `preflight_retopology` tool with `asset_id` and optional `target_quads` for the same check.
+The default target is 10,000. The response checks source eligibility only:
+it does not resolve a native backend, create a job or asset, run the solver,
+or guarantee valid results or projected appearance. If the server is already
+processing another job, retry the check after the operation ends.
 
 ## Verified exact-signed-candidate smoke evidence
 

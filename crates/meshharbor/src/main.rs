@@ -74,6 +74,13 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Check an imported GLB for retopology without installing or running a backend.
+    RetopologyPreflight {
+        asset_id: String,
+        /// Approximate requested quad count (4 to 50,000).
+        #[arg(long)]
+        target_quads: Option<u32>,
+    },
     /// Run a supported local mesh operation. For retopology, --output writes the triangle GLB preview and --quad-output preserves the editable OBJ quads.
     /// Part separation limits: 64 MiB GLB, 4 MiB JSON, 1,000,000 vertices, 3,000,000 indices, and 256 output parts.
     ProcessMesh {
@@ -215,6 +222,12 @@ struct SimplifyArgs {
     target_triangles: u64,
     #[serde(default = "default_max_error")]
     max_error: f32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RetopologyPreflightArgs {
+    asset_id: String,
+    target_quads: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -368,6 +381,25 @@ impl McpServer {
             Err(error) => {
                 json!({"error": format!("QuadriFlow installer worker failed: {error}")}).to_string()
             }
+        }
+    }
+
+    #[tool(
+        description = "Check one local GLB for quad retopology before installing or starting a backend. This is read-only and creates no job or asset. Passing confirms source eligibility only, not solver success or texture quality."
+    )]
+    async fn preflight_retopology(&self, params: Parameters<RetopologyPreflightArgs>) -> String {
+        let args = params.0;
+        match run_retopology_preflight(
+            self.core.clone(),
+            self.scheduler.clone(),
+            args.asset_id,
+            retopology_options(args.target_quads),
+        )
+        .await
+        {
+            Ok(report) => serde_json::to_string_pretty(&report)
+                .unwrap_or_else(|error| json!({"error": error.to_string()}).to_string()),
+            Err(error) => json!({"error": error.to_string()}).to_string(),
         }
     }
 
@@ -753,6 +785,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        Command::RetopologyPreflight {
+            asset_id,
+            target_quads,
+        } => {
+            let core = OperationCore::open(&root)?;
+            let result =
+                core.preflight_retopology_asset(&asset_id, retopology_options(target_quads))?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         Command::ProcessMesh {
             asset_id,
             operation,
@@ -972,6 +1013,10 @@ fn api_router(state: AppState, token: String) -> Router {
         .route("/api/v1/assets/page", get(api_list_asset_page))
         .route("/api/v1/assets/{asset_id}", get(api_get_asset))
         .route("/api/v1/assets/{asset_id}/simplify", post(api_simplify))
+        .route(
+            "/api/v1/assets/{asset_id}/retopology-preflight",
+            post(api_retopology_preflight).layer(DefaultBodyLimit::max(1024)),
+        )
         .route("/api/v1/jobs", get(api_list_jobs).post(api_create_job))
         .route("/api/v1/jobs/{job_id}", get(api_get_job))
         .route("/api/v1/jobs/{job_id}/cancel", post(api_cancel_job))
@@ -1155,6 +1200,43 @@ async fn api_health() -> Json<Value> {
 }
 async fn api_runtime(State(state): State<AppState>) -> Json<meshharbor_core::RuntimeDoctor> {
     Json(state.core.runtime_doctor())
+}
+
+fn retopology_options(target_quads: Option<u32>) -> meshharbor_core::QuadRetopologyOptions {
+    let mut options = meshharbor_core::QuadRetopologyOptions::default();
+    if let Some(target_quads) = target_quads {
+        options.target_quads = target_quads;
+    }
+    options
+}
+
+async fn run_retopology_preflight(
+    core: OperationCore,
+    scheduler: Arc<Semaphore>,
+    asset_id: String,
+    options: meshharbor_core::QuadRetopologyOptions,
+) -> Result<meshharbor_core::QuadRetopologyPreflight, CoreError> {
+    let permit = scheduler.try_acquire_owned().map_err(|_| {
+        CoreError::Conflict(
+            "MeshHarbor is busy. Retry the retopology check after the current operation.".into(),
+        )
+    })?;
+    task::spawn_blocking(move || {
+        let _permit = permit;
+        core.preflight_retopology_asset(&asset_id, options)
+    })
+    .await
+    .map_err(|_| CoreError::OperationUnavailable("Retopology preflight worker failed.".into()))?
+}
+
+async fn api_retopology_preflight(
+    State(state): State<AppState>,
+    Path(asset_id): Path<String>,
+    Json(options): Json<meshharbor_core::QuadRetopologyOptions>,
+) -> Result<Json<meshharbor_core::QuadRetopologyPreflight>, ApiError> {
+    Ok(Json(
+        run_retopology_preflight(state.core, state.scheduler, asset_id, options).await?,
+    ))
 }
 
 async fn api_quadriflow_backend_status(
@@ -3330,6 +3412,89 @@ mod tests {
                 "unexpectedly accepted {authority:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn preflight_works_without_a_backend_and_does_not_create_jobs() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-preflight-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let asset = core
+            .import_asset("open-triangle.glb", &minimal_triangle_glb())
+            .unwrap();
+        let scheduler = Arc::new(Semaphore::new(1));
+        assert!(!core.quadriflow_backend_status().available);
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: scheduler.clone(),
+            },
+            "private-test-token".into(),
+        );
+        let endpoint = format!("/api/v1/assets/{}/retopology-preflight", asset.id);
+        let request = |uri: &str, body: &'static str, authorized: bool| {
+            let mut builder = axum::http::Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(header::HOST, "localhost:7432")
+                .header(header::CONTENT_TYPE, "application/json");
+            if authorized {
+                builder = builder
+                    .header(header::ORIGIN, "http://localhost:7432")
+                    .header("x-meshharbor-dashboard", "local-ui-v1");
+            }
+            builder.body(Body::from(body)).unwrap()
+        };
+        let denied = app
+            .clone()
+            .oneshot(request(&endpoint, "{}", false))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let invalid = app
+            .clone()
+            .oneshot(request(&endpoint, r#"{"target_quads":3}"#, true))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let wrong_geometry = app
+            .clone()
+            .oneshot(request(&endpoint, r#"{"target_quads":12}"#, true))
+            .await
+            .unwrap();
+        assert_eq!(wrong_geometry.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = wrong_geometry
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        let expected = core
+            .preflight_retopology_asset(&asset.id, retopology_options(Some(12)))
+            .unwrap_err();
+        assert_eq!(error["error"], expected.to_string());
+        assert!(!expected.to_string().contains("sidecar"));
+
+        let server = McpServer::new(core.clone(), scheduler.clone());
+        let mcp = server
+            .preflight_retopology(Parameters(RetopologyPreflightArgs {
+                asset_id: asset.id.clone(),
+                target_quads: Some(12),
+            }))
+            .await;
+        assert_eq!(serde_json::from_str::<Value>(&mcp).unwrap(), error);
+        let permit = scheduler.try_acquire_owned().unwrap();
+        let busy = app.oneshot(request(&endpoint, "{}", true)).await.unwrap();
+        assert_eq!(busy.status(), StatusCode::CONFLICT);
+        drop(permit);
+        assert!(core.store().list_jobs(10).unwrap().is_empty());
+        let existing = core.store().list_assets(10).unwrap();
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[0].sha256, asset.sha256);
+        drop(server);
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
