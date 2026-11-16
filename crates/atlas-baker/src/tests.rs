@@ -421,3 +421,57 @@ fn atlas_options_deserialize_to_safe_defaults_and_reject_unknown_fields() {
     assert_eq!(options, AtlasBakeOptions::default());
     assert!(serde_json::from_value::<AtlasBakeOptions>(json!({"quality": 2})).is_err());
 }
+
+#[test]
+fn projection_reads_same_source_through_transform_free_parents() {
+    let flat = fixture(false, false, false);
+    let mut wrapped = super::Glb::parse(&flat).unwrap();
+    wrapped.document["nodes"] = json!([
+        {"mesh": 0},
+        {"children": [0], "name": "geometry container"},
+        {"children": [1], "name": "world"}
+    ]);
+    wrapped.document["scenes"][0]["nodes"] = json!([2]);
+    let wrapped = wrapped.write().unwrap();
+    let flat_source = extract_projection_source_mesh(&flat).unwrap();
+    let wrapped_source = extract_projection_source_mesh(&wrapped).unwrap();
+    assert_eq!(flat_source.positions, wrapped_source.positions);
+    assert_eq!(flat_source.uv, wrapped_source.uv);
+    assert_eq!(flat_source.indices, wrapped_source.indices);
+}
+
+#[test]
+fn projection_rejects_unreachable_branched_transformed_and_cyclic_scenes() {
+    let unsafe_scenes = [
+        (
+            json!([{"translation": [1, 0, 0], "children": [1]}, {"mesh": 0}]),
+            json!([0]),
+        ),
+        (
+            json!([{"extensions": {"KHR_lights_punctual": {"light": 0}}, "children": [1]}, {"mesh": 0}]),
+            json!([0]),
+        ),
+        (json!([{"children": [1, 2]}, {"mesh": 0}, {}]), json!([0])),
+        (json!([{"children": [1]}, {"mesh": 0}, {}]), json!([0])),
+        (
+            json!([{"children": [1]}, {"children": [0]}, {"mesh": 0}]),
+            json!([0]),
+        ),
+        (json!([{"children": [9]}, {"mesh": 0}]), json!([0])),
+        (
+            json!([{"mesh": 0, "children": [1]}, {"children": [0]}]),
+            json!([0]),
+        ),
+        (json!([{"mesh": 0, "children": null}]), json!([0])),
+        (json!([{"mesh": 0}, {}]), json!([0, 1])),
+    ];
+    for (nodes, roots) in unsafe_scenes {
+        let mut glb = super::Glb::parse(&fixture(false, false, false)).unwrap();
+        glb.document["nodes"] = nodes.clone();
+        glb.document["scenes"][0]["nodes"] = roots.clone();
+        assert!(
+            extract_projection_source_mesh(&glb.write().unwrap()).is_err(),
+            "unsupported hierarchy was accepted: {nodes} and roots {roots}"
+        );
+    }
+}
