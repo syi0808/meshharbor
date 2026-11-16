@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/quadriflow-linux-reproduction.yml
       - scripts/quadriflow-linux-reproduction.sh
+      - scripts/quadriflow-platform-smoke.py
       - scripts/quadriflow_compile_inputs.py
   workflow_dispatch:
 
