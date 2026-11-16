@@ -154,6 +154,26 @@ unverified. The existing candidate workflows and signature/installer policy
 do not consume these receipts. Published historical signatures do not bind
 these new observations.
 
+## Unsigned Ubuntu runner-to-runner experiment
+
+The `QuadriFlow unsigned Linux reproduction` workflow runs on relevant
+same-repository pull requests or by manual dispatch on `main`. It schedules
+two separate standard Ubuntu 24.04 jobs with fresh directories, no shared
+cache and no package installation. Each checks the exact upstream Git
+checkout, and separately downloads and verifies the size and SHA-256 of two
+Ubuntu snapshot packages before extracting their headers. Each maps its
+private build root to the same compiler path prefix and builds an unsigned
+ELF without running it.
+
+Only four SHA-256 values pass to the comparison job: the ELF, the QuadriFlow
+and LEMON compiler-input reports, and a fixed-order sample of host tools.
+Missing or unequal digests fail the comparison. The runner image identifier
+is logged separately; it is not treated as a build material. This checks
+only the inputs actually observed during this run. It does not pin the
+whole runner image, collect resolved link/runtime files, prove dependency
+closure, or replace either existing candidate build. The workflow does not
+upload binaries, attest, sign, publish, or enable auto-installation.
+
 ## Reproducibility and release gates
 
 The older smoke workflow installs native dependencies from moving apt, Homebrew, and vcpkg state and uses version-tag action references. The manual candidate workflow pins its actions and Python version, but native compiler/dependency state and hosted runner images remain mutable. Recorded tool/package versions are diagnostic, not lockfiles. A release pipeline therefore still needs pinned compiler/CMake versions, a pinned vcpkg baseline or exact formula/package snapshots, a pinned Linux image and packages, deterministic archive creation, and repeat builds with matching hashes before it can claim reproducibility.

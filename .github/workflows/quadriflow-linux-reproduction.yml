@@ -1,0 +1,67 @@
+name: QuadriFlow unsigned Linux reproduction
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/quadriflow-linux-reproduction.yml
+      - scripts/quadriflow-linux-reproduction.sh
+      - scripts/quadriflow_compile_inputs.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  primary:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      digests: ${{ steps.build.outputs.digests }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - id: build
+        run: bash scripts/quadriflow-linux-reproduction.sh primary
+
+  independent:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      digests: ${{ steps.build.outputs.digests }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - id: build
+        run: bash scripts/quadriflow-linux-reproduction.sh independent
+
+  compare:
+    needs: [primary, independent]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require identical executable, compiler observations and sampled tools
+        env:
+          PRIMARY: ${{ needs.primary.outputs.digests }}
+          INDEPENDENT: ${{ needs.independent.outputs.digests }}
+        run: |
+          set -euo pipefail
+          format='^elf=[a-f0-9]{64}:quadriflow=[a-f0-9]{64}:lemon=[a-f0-9]{64}:tools=[a-f0-9]{64}$'
+          if [[ ! $PRIMARY =~ $format || ! $INDEPENDENT =~ $format ]]; then
+            echo 'Missing or malformed replica digest output.' >&2
+            exit 1
+          fi
+          if [[ $PRIMARY != "$INDEPENDENT" ]]; then
+            printf 'Replica mismatch.\nprimary: %s\nindependent: %s\n' "$PRIMARY" "$INDEPENDENT" >&2
+            exit 1
+          fi
+          echo "Matched unsigned diagnostic inputs and executable: $PRIMARY"
