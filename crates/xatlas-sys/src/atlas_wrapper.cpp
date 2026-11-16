@@ -501,14 +501,20 @@ BakedTextures bake_projected_textures(
         }
     }
     if (result.projection_attempted == 0) throw std::runtime_error("target atlas contains no rasterized texels");
-    if (result.projection_ambiguous > 0) throw std::runtime_error("texture projection encountered ambiguous opposing surfaces; refusing to bake thin shells");
     const double coverage = static_cast<double>(result.projection_projected) / static_cast<double>(result.projection_attempted);
-    if (coverage < min_coverage) throw std::runtime_error(
-        "texture projection coverage " + std::to_string(coverage) + " (" +
-        std::to_string(result.projection_projected) + "/" + std::to_string(result.projection_attempted) +
-        " texels) is below the configured safety threshold [no-normal=" + std::to_string(no_normal) +
-        ", no-hit=" + std::to_string(no_hit) + ", backface=" + std::to_string(backface) +
-        "]");
+    if (result.projection_ambiguous > 0 || coverage < min_coverage) {
+        const bool ambiguous = result.projection_ambiguous > 0;
+        const std::string reason = ambiguous
+            ? "texture projection encountered ambiguous opposing surfaces; refusing to bake thin shells"
+            : "texture projection coverage is below the configured safety threshold";
+        throw std::runtime_error(
+            reason + " [projected=" + std::to_string(result.projection_projected) +
+            "/" + std::to_string(result.projection_attempted) +
+            ", minimum-coverage=" + std::to_string(min_coverage) +
+            ", ambiguous=" + std::to_string(result.projection_ambiguous) +
+            ", no-normal=" + std::to_string(no_normal) + ", no-hit=" + std::to_string(no_hit) +
+            ", backface=" + std::to_string(backface) + "]");
+    }
     std::vector<int32_t> owner(size_t(width) * height, -1);
     for (size_t i = 0; i < owner.size(); ++i)
         if (atlas_image[i] & xatlas::kImageHasChartIndexBit)
