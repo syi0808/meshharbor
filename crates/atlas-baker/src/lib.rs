@@ -597,8 +597,9 @@ pub fn bake_glb(
 }
 
 /// Read the narrow source subset accepted for retopology appearance projection.
-/// This intentionally rejects extra vertex streams and scene transforms so
-/// ignored attributes cannot silently disappear from a retopologized asset.
+/// Extra vertex streams and scene transforms are rejected. A bounded chain
+/// of transform-free parents may wrap the sole mesh without changing its
+/// local coordinates or the attributes used for projection.
 pub fn extract_projection_source_mesh(
     bytes: &[u8],
 ) -> Result<ProjectionSourceMesh, AtlasBakeError> {
@@ -975,32 +976,57 @@ pub fn encode_projected_mesh_glb(bake: &ProjectedMeshBake) -> Result<Vec<u8>, At
 }
 
 fn validate_projection_scene(document: &Value) -> Result<(), AtlasBakeError> {
+    const MAX_SCENE_NODES: usize = 32;
+
+    let reject = || {
+        unsupported(
+            "projection requires one static mesh leaf in one scene; any parent nodes must form a single untransformed chain",
+        )
+    };
     let nodes = array(document, "nodes")?;
     let scenes = array(document, "scenes")?;
-    if nodes.len() != 1
-        || nodes[0].get("mesh").and_then(Value::as_u64) != Some(0)
-        || nodes[0].get("skin").is_some()
-        || nodes[0]
-            .get("children")
-            .and_then(Value::as_array)
-            .is_some_and(|children| !children.is_empty())
-        || ["matrix", "translation", "rotation", "scale"]
-            .iter()
-            .any(|key| nodes[0].get(*key).is_some())
+    if !(1..=MAX_SCENE_NODES).contains(&nodes.len())
         || scenes.len() != 1
-        || array(&scenes[0], "nodes")?.len() != 1
-        || array(&scenes[0], "nodes")?[0].as_u64() != Some(0)
-        || document.get("scene").and_then(Value::as_u64).unwrap_or(0) != 0
+        || document
+            .get("scene")
+            .is_some_and(|scene| scene.as_u64() != Some(0))
         || document
             .get("cameras")
-            .and_then(Value::as_array)
-            .is_some_and(|cameras| !cameras.is_empty())
+            .is_some_and(|cameras| cameras.as_array().is_none_or(|cameras| !cameras.is_empty()))
     {
-        return Err(unsupported(
-            "projection requires one untransformed static mesh node in one scene",
-        ));
+        return Err(reject());
     }
-    Ok(())
+    let [root] = array(&scenes[0], "nodes")? else {
+        return Err(reject());
+    };
+    let mut index = as_index(root, "projection scene root")?;
+    let mut visited = [false; MAX_SCENE_NODES];
+    for depth in 1..=nodes.len() {
+        let node = nodes
+            .get(index)
+            .and_then(Value::as_object)
+            .ok_or_else(reject)?;
+        if visited[index]
+            || node
+                .keys()
+                .any(|key| !matches!(key.as_str(), "name" | "extras" | "mesh" | "children"))
+        {
+            return Err(reject());
+        }
+        visited[index] = true;
+        let children = match node.get("children") {
+            None => &[][..],
+            Some(value) => value.as_array().ok_or_else(reject)?.as_slice(),
+        };
+        match (node.get("mesh"), children) {
+            (Some(mesh), []) if mesh.as_u64() == Some(0) && depth == nodes.len() => {
+                return Ok(());
+            }
+            (None, [child]) => index = as_index(child, "projection child")?,
+            _ => return Err(reject()),
+        }
+    }
+    Err(reject())
 }
 
 fn validate_projection_material(
