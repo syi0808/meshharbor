@@ -115,10 +115,24 @@ jobs:
           run-id: 43721747855
           github-token: ${{ github.token }}
 
+      - name: Stage exact payload for a fresh verification report
+        env:
+          DOWNLOADED_DIR: ${{ runner.temp }}/quadriflow-fixed-linux-candidate
+          CANDIDATE_DIR: ${{ runner.temp }}/quadriflow-fixed-linux-reverified
+        run: |
+          set -euo pipefail
+          mkdir -- "$CANDIDATE_DIR"
+          for payload in quadriflow provenance.sigstore.json CANDIDATE-STATUS.json; do
+            test -f "$DOWNLOADED_DIR/$payload"
+            test ! -L "$DOWNLOADED_DIR/$payload"
+            cp -- "$DOWNLOADED_DIR/$payload" "$CANDIDATE_DIR/$payload"
+          done
+          test ! -e "$CANDIDATE_DIR/verification.json"
+
       - name: Verify the original signature, workflow, source, materials, and executable digest before smoke
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_DIR: ${{ runner.temp }}/quadriflow-fixed-linux-candidate
+          CANDIDATE_DIR: ${{ runner.temp }}/quadriflow-fixed-linux-reverified
         run: >-
           python scripts/quadriflow_attestation_verify.py verify
           --artifact "$CANDIDATE_DIR/quadriflow"
@@ -128,11 +142,11 @@ jobs:
           --workflow-run-id "$MESHHARBOR_ORIGINAL_RUN_ID"
           --workflow-run-attempt "$MESHHARBOR_ORIGINAL_RUN_ATTEMPT"
           --platform linux-x86_64
-          --output "$RUNNER_TEMP/quadriflow-linux-reverification.json"
+          --output "$CANDIDATE_DIR/verification.json"
 
       - name: Run the verified candidate in an unmodified Ubuntu 24.04 container
         env:
-          CANDIDATE_DIR: ${{ runner.temp }}/quadriflow-fixed-linux-candidate
+          CANDIDATE_DIR: ${{ runner.temp }}/quadriflow-fixed-linux-reverified
           UBUNTU_IMAGE: docker.io/library/ubuntu@sha256:a2d43bffc46670d7108bb3c0468c67c5557c4c92e83e1e34cbff1322ad1b94dc
         run: |
           set -euo pipefail
