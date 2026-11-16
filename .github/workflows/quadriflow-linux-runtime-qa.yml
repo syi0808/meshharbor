@@ -163,23 +163,32 @@ jobs:
             --env HOME=/nonexistent --env LANG=C --env LC_ALL=C --env TZ=UTC \
             --mount "type=bind,src=$exe,dst=/candidate/quadriflow,readonly" \
             --mount "type=bind,src=$fixture,dst=/candidate/cube-triangles.obj,readonly" \
-            --mount "type=bind,src=$scratch,dst=/output" \
+            --tmpfs /output:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
             --workdir /output "$UBUNTU_IMAGE" /bin/sh -eu -c '
               . /etc/os-release
               test "$ID" = ubuntu && test "$VERSION_ID" = 24.04
               for package in build-essential gcc g++ make libeigen3-dev libboost-dev libboost1.83-dev; do
-                status="$(dpkg-query -W -f="${db:Status-Status}" "$package" 2>/dev/null || :)"
+                status="$(dpkg-query -W -f="\${db:Status-Status}" "$package" 2>/dev/null || :)"
                 if [ "$status" = installed ]; then
                   echo "Unexpected development package: $package" >&2
                   exit 1
                 fi
               done
+              printf "Installed package count: " >&2
+              dpkg-query -W -f="\${db:Status-Status}\n" | grep -c -x installed >&2
               for package in libc6 libstdc++6 libgcc-s1; do
-                dpkg-query -W "$package" 2>/dev/null || :
+                dpkg-query -W "$package" >&2 2>/dev/null || :
               done
-              exec /candidate/quadriflow -i /candidate/cube-triangles.obj -o /output/cube-quad.obj -f 12 -seed 0
+              if ! /candidate/quadriflow -i /candidate/cube-triangles.obj -o /output/cube-quad.obj -f 12 -seed 0 > /output/worker.log 2>&1; then
+                head -c 4096 /output/worker.log | sed "s/^/[quadri] /" >&2
+                exit 1
+              fi
+              test -f /output/cube-quad.obj
+              test ! -L /output/cube-quad.obj
+              test -s /output/cube-quad.obj
+              head -c 1048577 /output/cube-quad.obj
             '
-          if ! timeout 90s docker start --attach "$container_name"; then
+          if ! timeout 90s docker start --attach "$container_name" > "$scratch/cube-quad.obj"; then
             echo "QuadriFlow did not execute successfully in the unmodified runtime image; see loader or worker error above." >&2
             exit 1
           fi
@@ -187,6 +196,7 @@ jobs:
           test -f "$scratch/cube-quad.obj"
           test ! -L "$scratch/cube-quad.obj"
           test -s "$scratch/cube-quad.obj"
+          test "$(wc -c < "$scratch/cube-quad.obj")" -le 1048576
           printf '%s  %s\n' 021f46b872796ea5b3b36ae0b755f64d7831131eab066a2b069fdfd523becbc8 "$scratch/cube-quad.obj" | sha256sum --check
           printf '%s  %s\n' a925c519b1339d8152705376622bde4817f66e307800c12f1a3ce61d7e25a1e9 "$exe" | sha256sum --check
           echo "Runtime-only smoke passed; this is not a MeshHarbor installation or textured-asset test."
