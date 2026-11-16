@@ -96,7 +96,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $archive = Join-Path $env:RUNNER_TEMP 'nasm-3.02-win64.zip'
-          Invoke-WebRequest -Uri 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' -OutFile $archive -TimeoutSec 60
+          curl.exe --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --max-time 60 --max-filesize 16777216 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' --output $archive
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the bounded NASM archive' }
           $expected = '161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7'
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw 'NASM archive checksum mismatch' }
