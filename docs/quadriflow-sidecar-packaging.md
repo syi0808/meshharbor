@@ -46,6 +46,23 @@ python3 -m unittest scripts.test_quadriflow_ustar_package
 
 The checked-in fixture files explicitly say they are synthetic and are not an executable, third-party notices, or valid signature. A production archive still requires reviewed, exact payloads and release approvals; this test is only an assembly/parser contract check while the bundled manifest remains empty.
 
+## Native local-archive rehearsal (ignored test, not a product install)
+
+On a disposable native QA host, the explicit ignored Rust test can take a previously reviewed local USTAR and local single-platform rehearsal manifest, then verify the normal in-process attestation policy, exercise the real installer using only a local-file fetcher, and run the resolved binary on the checked-in LF-pinned cube. It checks the core quad output and GLB preview contract, not a byte-identical OBJ across different platforms. The archive digest must also be supplied independently of the manifest. The candidate bundle attests the executable, not the assembled archive or its notice/SBOM payloads.
+
+For Bash, set the paths and the independently reviewed digest locally:
+
+```sh
+export MESHHARBOR_TEST_SIGNED_ARCHIVE_MANIFEST=/absolute/local/rehearsal-manifest.json
+export MESHHARBOR_TEST_SIGNED_ARCHIVE=/absolute/local/quadriflow-rehearsal.tar
+export MESHHARBOR_TEST_SIGNED_ARCHIVE_SHA256='<reviewed lowercase SHA-256>'
+cargo test --locked -p meshharbor-core --lib \
+  quadriflow_installer::tests::rehearse_signed_native_archive_and_run_fixed_cube -- \
+  --ignored --exact --nocapture
+```
+
+On Windows set the same variables with PowerShell's `$env:NAME = 'value'` and use a local temporary directory with a short path. Keep the supplied files quiescent. This test executes the verified native binary; run it only for an explicitly approved candidate, in an isolated QA environment. It creates and removes its own temporary data root, never uses the manifest's URL for downloads, and cannot change the bundled manifest, install into the live app, or approve a release. Build the Rust test before disconnecting from the network if its Cargo dependencies are not cached; optionally run the compiled test executable in a network-isolated environment. There is no automatic workflow trigger for this test.
+
 ## Notice/SBOM evidence helper
 
 `scripts/quadriflow_notices.py` is an offline, Python standard-library-only tool. It accepts a caller-supplied inventory and writes to a new output directory:

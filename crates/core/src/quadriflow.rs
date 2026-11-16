@@ -918,6 +918,16 @@ where
     Ok((preview_glb, quad_obj, report))
 }
 
+#[cfg(test)]
+pub(crate) fn execute_archive_rehearsal_cube(
+    worker: &Path,
+    input_path: &Path,
+    output_path: &Path,
+) -> CoreResult<()> {
+    // Reuse production subprocess arguments, environment filtering and timeout.
+    execute_quadriflow_worker(worker, input_path, output_path, 12)
+}
+
 fn execute_quadriflow_worker(
     worker: &Path,
     input_path: &Path,

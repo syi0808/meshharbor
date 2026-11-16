@@ -1528,6 +1528,153 @@ mod tests {
         assert_eq!(fs::read(rolled_back_again).unwrap(), b"binary-one");
     }
 
+    fn open_local_rehearsal_input(path: &Path, max_size: u64) -> io::Result<File> {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a bounded, regular, local rehearsal input",
+            ));
+        }
+        // The explicit test inputs must be quiescent. The copied archive is
+        // then checked again by the real installer against size and SHA-256.
+        File::open(path)
+    }
+
+    #[test]
+    fn rehearsal_input_rejects_nonfiles_empty_and_oversized() {
+        let root = TestRoot::new();
+        assert!(open_local_rehearsal_input(&root.0, 1).is_err());
+        let file = root.0.join("input");
+        fs::write(&file, []).unwrap();
+        assert!(open_local_rehearsal_input(&file, 1).is_err());
+        fs::write(&file, "12").unwrap();
+        assert!(open_local_rehearsal_input(&file, 1).is_err());
+        assert!(open_local_rehearsal_input(&file, 2).is_ok());
+        #[cfg(unix)]
+        {
+            let alias = root.0.join("alias");
+            std::os::unix::fs::symlink(&file, &alias).unwrap();
+            assert!(open_local_rehearsal_input(&alias, 2).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires explicitly reviewed local files; executes the signed native QA candidate"]
+    fn rehearse_signed_native_archive_and_run_fixed_cube() {
+        const MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+        const MAX_CUBE_OUTPUT_BYTES: u64 = 1024 * 1024;
+        const CUBE: &[u8] = include_bytes!("../tests/fixtures/quadriflow_cube_triangles.obj");
+        const EXPECTED_CUBE_SHA256: &str =
+            "b8dc26f8c3ac17b60d29c8145531c52254a3da511fdb9271185c781dc2e4d956";
+        let platform = host_platform().expect("a supported native host is required");
+        let manifest_path = std::env::var_os("MESHHARBOR_TEST_SIGNED_ARCHIVE_MANIFEST")
+            .expect("provide a reviewed single-platform manifest for this test only");
+        let archive_path = std::env::var_os("MESHHARBOR_TEST_SIGNED_ARCHIVE")
+            .expect("provide the exact reviewed local archive for this test only");
+        let expected_archive_sha256 = std::env::var("MESHHARBOR_TEST_SIGNED_ARCHIVE_SHA256")
+            .expect("provide the reviewed archive SHA-256 independently of its test manifest");
+
+        let mut manifest_bytes = Vec::new();
+        open_local_rehearsal_input(Path::new(&manifest_path), MANIFEST_BYTES)
+            .expect("could not open the local manifest")
+            .take(MANIFEST_BYTES + 1)
+            .read_to_end(&mut manifest_bytes)
+            .expect("could not read the local manifest");
+        let manifest = crate::parse_quadriflow_release_manifest(&manifest_bytes)
+            .expect("local manifest did not match the product's structural policy");
+        let [artifact] = manifest.artifacts.as_slice() else {
+            panic!("this test accepts one local artifact only");
+        };
+        assert_eq!(
+            artifact.platform, platform,
+            "the artifact must match the host"
+        );
+        assert_eq!(artifact.archive.sha256, expected_archive_sha256);
+        let verified = verified_release_manifest(&manifest)
+            .expect("the original candidate did not pass the product's signature policy");
+        assert_eq!(format!("{:x}", Sha256::digest(CUBE)), EXPECTED_CUBE_SHA256);
+
+        let temp = std::env::temp_dir()
+            .canonicalize()
+            .expect("a local temporary directory");
+        let root = PrivateTempDir::create(&temp, "quadriflow-native-rehearsal").unwrap();
+        let installed = install_manifest_with_fetcher(
+            &root.path,
+            &verified,
+            platform,
+            |_, expected_size, destination| {
+                // Do not call the network downloader, even though the regular
+                // manifest schema requires a well-formed release URL.
+                let source = open_local_rehearsal_input(Path::new(&archive_path), expected_size)?;
+                let mut local_copy = create_private_file(destination)?;
+                let copied = io::copy(&mut source.take(expected_size + 1), &mut local_copy)?;
+                if copied != expected_size {
+                    return Err(archive_error("local archive length did not match"));
+                }
+                local_copy.sync_all()?;
+                Ok(())
+            },
+        )
+        .expect("verified local archive failed the product installer path");
+        assert!(
+            !installed.already_installed,
+            "rehearsal must use an empty data root"
+        );
+        let resolved = resolve_installed(&root.path, platform, &verified)
+            .expect("local test installation could not be verified")
+            .expect("local test installation was not resolved");
+        assert_eq!(resolved, installed.executable);
+        assert!(fs::symlink_metadata(&resolved).unwrap().is_file());
+        assert!(resolved.canonicalize().unwrap().starts_with(&root.path));
+
+        let input = root.path.join("cube-triangles.obj");
+        let output = root.path.join("cube-quad.obj");
+        create_private_file(&input)
+            .unwrap()
+            .write_all(CUBE)
+            .unwrap();
+        crate::quadriflow::execute_archive_rehearsal_cube(&resolved, &input, &output)
+            .expect("installed signed executable failed the fixed native cube test");
+        let mut obj = Vec::new();
+        open_local_rehearsal_input(&output, MAX_CUBE_OUTPUT_BYTES)
+            .expect("worker output was missing or larger than the QA bound")
+            .take(MAX_CUBE_OUTPUT_BYTES + 1)
+            .read_to_end(&mut obj)
+            .expect("could not read the worker output");
+        assert!(obj.len() as u64 <= MAX_CUBE_OUTPUT_BYTES);
+        let source_positions = [
+            [-1., -1., -1.],
+            [1., -1., -1.],
+            [1., 1., -1.],
+            [-1., 1., -1.],
+            [-1., -1., 1.],
+            [1., -1., 1.],
+            [1., 1., 1.],
+            [-1., 1., 1.],
+        ];
+        let (mesh, report) = crate::parse_quad_obj_output(&obj, &source_positions)
+            .expect("output violated the core quad mesh contract");
+        assert!(report.output_quads > 0);
+        assert_eq!(report.preview_triangles, report.output_quads * 2);
+        let preview = crate::quad_mesh_preview_glb(&mesh).unwrap();
+        let inspected = crate::inspect_asset("preview.glb", &preview).unwrap();
+        assert_eq!(inspected.kind, crate::AssetKind::Mesh);
+        assert_eq!(inspected.metadata["triangles"], report.preview_triangles);
+        assert_eq!(
+            resolve_installed(&root.path, platform, &verified).unwrap(),
+            Some(resolved),
+            "the test executable must still match its pin after running",
+        );
+        println!(
+            "local signed archive rehearsal for {:?}: {} quads, {} preview triangles, OBJ SHA-256 {:x}; no production install",
+            platform,
+            report.output_quads,
+            report.preview_triangles,
+            Sha256::digest(obj),
+        );
+    }
+
     #[test]
     #[ignore = "run by scripts/test_quadriflow_ustar_package.py against its generated archive"]
     fn package_recipe_round_trips_through_installer_parser() {
