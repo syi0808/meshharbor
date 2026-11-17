@@ -1,0 +1,43 @@
+export type SidebarPanel = 'assets' | 'jobs';
+export type Inspector = 'generation' | 'optimize' | 'tools';
+
+export const DESKTOP_SIDEBAR_KEY = 'meshharbor.studio.sidebar.v1';
+export const WORKBENCH_INSPECTOR_SHEET_QUERY = '(max-width: 880px)';
+export const WORKBENCH_NARROW_QUERY = '(max-width: 760px)';
+
+export function decodeSidebarPanel(value: string | null): SidebarPanel | null {
+  return value === 'assets' || value === 'jobs' ? value : null;
+}
+
+export function toggleSidebarPanel(current: SidebarPanel | null, requested: SidebarPanel): SidebarPanel | null {
+  return current === requested ? null : requested;
+}
+
+export function inspectorForAsset(inspector: Inspector | null, kind: 'mesh' | 'image' | undefined): Inspector | null {
+  if (kind === 'image') return inspector === 'generation' ? inspector : null;
+  if (kind === 'mesh') return inspector === 'optimize' || inspector === 'tools' ? inspector : null;
+  return null;
+}
+
+export function shouldHighlightExport(
+  activeVersion: 'source' | 'result',
+  inspector: Inspector | null,
+  isRunning: boolean,
+  connected: boolean,
+): boolean {
+  return activeVersion === 'result' && inspector === null && !isRunning && connected;
+}
+
+export function formatVersionSizes(original: number, result: number): string | null {
+  if (![original, result].every(value => Number.isSafeInteger(value) && value >= 0)) return null;
+  // Both versions use the same unit. Give a precise byte delta when rounding hides a change.
+  const max = Math.max(original, result);
+  const [scale, unit] = max >= 1024 ** 2 ? [1024 ** 2, 'MiB'] : max >= 1024 ? [1024, 'KiB'] : [1, 'B'];
+  const decimals = scale === 1 ? 0 : 2;
+  const first = (original / scale).toFixed(decimals);
+  const second = (result / scale).toFixed(decimals);
+  const delta = result - original;
+  const roundedChange = first === second && delta !== 0
+    ? ` (${delta > 0 ? '+' : '−'}${Math.abs(delta).toLocaleString('en-US')} B)` : '';
+  return `${first} → ${second} ${unit}${roundedChange}`;
+}

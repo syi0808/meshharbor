@@ -1,0 +1,587 @@
+/* MeshHarbor's application chrome is a full-bleed work surface, not a card. */
+.studio-app {
+  /* Bridge legacy shell names to shadcn's canonical palette. */
+  --muted-surface: var(--muted, #25272b);
+  /* Muted is a surface role; subdued text always uses muted-foreground. */
+  --studio-bg: var(--background, #16171a);
+  --studio-fg: var(--foreground, #e9ebed);
+  --studio-muted: var(--muted, #25272b);
+  --studio-muted-fg: var(--muted-foreground, #adb3ba);
+  --studio-border: var(--border, #35383d);
+  --studio-input: var(--input, #3b3f45);
+  --studio-card: var(--card, #1b1d20);
+  --studio-accent: var(--accent, #2a3d35);
+  --studio-accent-fg: var(--accent-foreground, #afe5d0);
+  --studio-canvas: #202225;
+  --studio-selected: color-mix(in srgb, var(--accent) 22%, var(--card));
+  --studio-selected-border: color-mix(in srgb, var(--accent-foreground) 28%, var(--border));
+
+  color: var(--studio-fg);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  min-width: 0;
+}
+
+.studio-app .workbench {
+  --wb-background: var(--studio-bg);
+  --wb-foreground: var(--studio-fg);
+  --wb-card: var(--studio-card);
+  --wb-muted-bg: var(--studio-muted);
+  --wb-muted-foreground: var(--studio-muted-fg);
+  --wb-border: var(--studio-border);
+  --wb-primary: var(--primary, #216c57);
+  --wb-primary-foreground: var(--primary-foreground, #fff);
+  --wb-ring: var(--ring, #8ac9b3);
+  --wb-ink: var(--studio-fg);
+  --wb-ink-soft: var(--studio-fg);
+  --wb-muted: var(--studio-muted-fg);
+  --wb-subtle: var(--studio-muted-fg);
+  --wb-line: var(--studio-border);
+  --wb-line-soft: var(--studio-border);
+  --wb-surface: var(--studio-card);
+  --wb-surface-soft: var(--studio-muted);
+  --wb-canvas: var(--studio-canvas);
+  --wb-accent: var(--studio-accent-fg);
+  --wb-accent-soft: var(--studio-selected);
+}
+
+/* Quiet separators keep the canvas open while retaining useful boundaries. */
+.studio-app .studio-topbar {
+  border-bottom-color: var(--studio-border);
+}
+
+.studio-app .product-label,
+.studio-app .engine-status {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.studio-app .fullscreen-workbench {
+  background: var(--studio-bg);
+}
+
+.studio-app .workbench-grid {
+  background: var(--studio-bg);
+}
+
+@media (min-width: 1121px) {
+  .studio-app .workbench-grid[data-sidebar="expanded"][data-inspector="closed"] {
+    grid-template-columns: 250px minmax(0, 1fr);
+  }
+
+  .studio-app .workbench-grid[data-sidebar="expanded"][data-inspector="open"] {
+    grid-template-columns: 250px minmax(0, 1fr) minmax(248px, 284px);
+  }
+
+  .studio-app .workbench-grid[data-sidebar="collapsed"][data-inspector="open"] {
+    grid-template-columns: 48px minmax(0, 1fr) minmax(248px, 284px);
+  }
+}
+
+.studio-app .workbench-sidebar,
+.studio-app .workbench-inspector,
+.studio-app .workbench-dock,
+.studio-app .workbench-rail {
+  background-color: var(--studio-card);
+}
+
+.studio-app .workbench-rail {
+  background-color: var(--studio-bg);
+  border-right-color: var(--studio-border);
+}
+
+.studio-app .workbench-dock {
+  padding: 14px 12px 18px;
+  color: var(--studio-fg);
+}
+
+.studio-app .workbench-dock-heading,
+.studio-app .workbench-inspector-heading {
+  color: var(--studio-fg);
+}
+
+.studio-app .workbench-dock-heading h2,
+.studio-app .workbench-inspector-heading h2 {
+  color: var(--studio-fg);
+  font-size: 14px;
+  font-weight: 550;
+  letter-spacing: 0;
+}
+
+.studio-app .workbench-dock .section-heading {
+  margin-bottom: 10px;
+}
+
+.studio-app .workbench-dock .section-heading span,
+.studio-app .workbench-dock .job-history .section-heading span {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.studio-app .workbench-dock .asset-search-input > span,
+.studio-app .workbench-dock .asset-filters label > span {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.studio-app .workbench-dock .asset-library-note,
+.studio-app .workbench-dock .library-empty,
+.studio-app .workbench-dock .job-history-empty {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Assets and jobs read as one navigable list, with a restrained mint selection. */
+.studio-app .workbench-dock .asset-list {
+  max-height: min(47vh, 520px);
+  border: 1px solid var(--studio-border);
+  border-radius: 7px;
+  background: var(--studio-card);
+}
+
+.studio-app .workbench-dock .asset-pinned {
+  margin-top: 12px;
+}
+
+.studio-app .workbench-dock .asset-pinned > .asset-library-note {
+  margin: 12px 0 7px;
+  color: var(--studio-fg);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.studio-app .workbench-dock .asset-pinned .asset-list {
+  max-height: none;
+}
+
+.studio-app .workbench-dock .asset-row {
+  display: flex;
+  width: 100%;
+  justify-content: flex-start;
+  min-height: 56px;
+  height: auto;
+  gap: 9px;
+  padding: 8px 22px 8px 9px;
+  border: 0;
+  border-bottom: 1px solid var(--studio-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--studio-fg);
+  text-align: left;
+  white-space: normal;
+  box-shadow: none;
+}
+
+.studio-app .workbench-dock .asset-row:hover {
+  background: color-mix(in srgb, var(--studio-muted) 66%, var(--studio-card));
+}
+
+.studio-app .workbench-dock .asset-row.selected {
+  background: var(--studio-selected);
+  box-shadow: inset 2px 0 var(--studio-accent-fg);
+}
+
+.studio-app .workbench-dock .asset-row-name strong {
+  color: var(--studio-fg);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.studio-app .workbench-dock .asset-row-name small,
+.studio-app .workbench-dock .asset-row-tris,
+.studio-app .workbench-dock .asset-row-tris small {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.studio-app .workbench-dock .asset-row-icon {
+  border-color: var(--studio-border);
+  background: var(--studio-muted);
+  color: var(--studio-muted-fg);
+}
+
+.studio-app .workbench-dock .asset-current-dot {
+  background: var(--studio-accent-fg);
+}
+
+.studio-app .workbench-dock .job-history {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top-color: var(--studio-border);
+}
+
+.studio-app .workbench-dock .job-history summary {
+  color: var(--studio-fg);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.studio-app .workbench-dock .job-history-note {
+  margin: 9px 0 10px;
+  padding: 10px;
+  border: 1px solid var(--studio-border);
+  border-radius: 6px;
+  background: var(--studio-muted);
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.studio-app .workbench-dock .job-history-note > summary {
+  color: var(--studio-fg);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.studio-app .workbench-dock .job-history-note p {
+  margin: 8px 0 0;
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.studio-app .workbench-dock .job-history-note code {
+  color: var(--studio-fg);
+  overflow-wrap: anywhere;
+}
+
+.studio-app .workbench-dock .job-history-list {
+  gap: 6px;
+}
+
+.studio-app .workbench-dock .job-history-row {
+  gap: 8px;
+  padding: 9px;
+  border-color: var(--studio-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--studio-fg);
+}
+
+.studio-app .workbench-dock .job-history-row.selected {
+  border-color: var(--studio-selected-border);
+  background: var(--studio-selected);
+}
+
+.studio-app .workbench-dock .job-history-copy strong {
+  color: var(--studio-fg);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.studio-app .workbench-dock .job-history-copy small,
+.studio-app .workbench-dock .job-history-status,
+.studio-app .workbench-dock .job-history-status span {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.studio-app .workbench-dock .job-history-status[data-state="succeeded"] {
+  color: var(--studio-accent-fg);
+}
+
+.studio-app .workbench-dock .job-history-status[data-state="failed"] {
+  color: var(--destructive, #f1a49a);
+}
+
+/* The viewer stays graphite and edge-to-edge; metadata forms a quiet footer. */
+.studio-app .workbench-commandbar {
+  min-height: 48px;
+  padding-inline: 14px;
+  border-bottom-color: var(--studio-border);
+  background: var(--studio-card);
+}
+
+.studio-app .workbench-commandbar .viewer-title {
+  color: var(--studio-fg);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.studio-app .workbench-commandbar .viewer-filename {
+  color: var(--studio-fg);
+  font-size: 13px;
+}
+
+.studio-app .workbench-commandbar .workbench-view-actions {
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.studio-app .workbench-viewer,
+.studio-app .workbench-viewer .viewer-card,
+.studio-app .workbench-viewer .preview-stage,
+.studio-app .workbench .studio-start {
+  background: var(--studio-canvas);
+}
+
+.studio-app .workbench-comparison-meta,
+.studio-app .workbench-viewer .asset-meta-strip {
+  min-height: 56px;
+  gap: 14px;
+  padding: 10px 16px;
+  border-top-color: var(--studio-border);
+  background: var(--studio-card);
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.studio-app .workbench-comparison-meta strong,
+.studio-app .workbench-viewer .asset-meta-main strong,
+.studio-app .workbench-viewer .meta-stat strong {
+  color: var(--studio-fg);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.studio-app .workbench-viewer .asset-meta-main > div > span,
+.studio-app .workbench-viewer .meta-stat > span {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+}
+
+.studio-app .workbench-viewer .meta-divider {
+  border-left-color: var(--studio-border);
+}
+
+.studio-app .workbench-viewer .file-badge {
+  border-color: var(--studio-border);
+  background: var(--studio-muted);
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+}
+
+.studio-app .workbench-viewer .status-ready {
+  color: var(--studio-accent-fg);
+  font-size: 12px;
+}
+
+/* Inspector content is spaced as a settings column, without extra cards. */
+@media (min-width: 881px) {
+  .studio-app .workbench-inspector {
+    gap: 0;
+    padding: 0;
+    overflow: auto;
+    background: var(--studio-card);
+  }
+
+  .studio-app .workbench-inspector-heading {
+    top: 0;
+    min-height: 48px;
+    margin: 0;
+    padding: 8px 14px;
+    border-bottom-color: var(--studio-border);
+    background: var(--studio-card);
+  }
+
+  .studio-app .workbench-inspector > .operation-card,
+  .studio-app .workbench-inspector > .capability-card {
+    padding: 16px 14px;
+  }
+}
+
+.studio-app .workbench-inspector .operation-header h2,
+.studio-app .workbench-inspector .capability-heading {
+  color: var(--studio-fg);
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.studio-app .workbench-inspector .operation-kicker {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.studio-app .workbench-inspector .operation-description,
+.studio-app .workbench-inspector .capability-card p {
+  color: var(--studio-muted-fg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.studio-app .workbench-inspector .field-label-row label,
+.studio-app .workbench-inspector .settings-disclosure summary {
+  color: var(--studio-fg);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.studio-app .workbench-inspector .field-hint,
+.studio-app .workbench-inspector .control-footnote,
+.studio-app .workbench-inspector .preserve-note,
+.studio-app .workbench-inspector .generation-card > p,
+.studio-app .workbench-inspector .mesh-tool-item > p,
+.studio-app .workbench-inspector .job-progress-top,
+.studio-app .workbench-inspector .job-progress > small,
+.studio-app .workbench-inspector .engine-nudge,
+.studio-app .workbench-inspector .capability-foot {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.studio-app .workbench-inspector .preserve-note,
+.studio-app .workbench-inspector .runtime-setup-panel {
+  border-color: var(--studio-border);
+  background: var(--studio-muted);
+}
+
+.studio-app .workbench-inspector .generation-card,
+.studio-app .workbench-inspector .mesh-tool-item,
+.studio-app .workbench-inspector .job-progress {
+  border-color: var(--studio-border);
+}
+
+/* Reports are readable at a glance and retain room for long IDs and warnings. */
+.studio-app .workbench-result > summary {
+  color: var(--studio-muted-fg);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.studio-app .workbench-result .result-heading {
+  align-items: center;
+  gap: 12px;
+  color: var(--studio-fg);
+}
+
+.studio-app .workbench-result .result-heading strong {
+  color: var(--studio-fg);
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.studio-app .workbench-result .report-job-id {
+  max-width: 48%;
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.studio-app .workbench-result .report-lineage {
+  gap: 8px 18px;
+  padding: 12px 0 4px;
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.studio-app .workbench-result .report-technical {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--studio-border);
+}
+
+.studio-app .workbench-result .report-technical > summary {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.studio-app .workbench-result .report-lineage {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  gap: 8px 14px;
+}
+
+.studio-app .workbench-result .report-lineage > div {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.studio-app .workbench-result .report-lineage dt {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+}
+
+.studio-app .workbench-result .report-lineage dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.studio-app .workbench-result .report-lineage code {
+  max-width: 100%;
+  border: 1px solid var(--studio-border);
+  background: var(--studio-muted);
+  color: var(--studio-fg);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.studio-app .workbench-result .report-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(144px, 1fr));
+  gap: 8px;
+  padding: 12px 0 2px;
+}
+
+.studio-app .workbench-result .report-metric {
+  gap: 5px;
+  padding: 9px 11px;
+  border: 1px solid var(--studio-border);
+  border-radius: 6px;
+  background: var(--studio-muted);
+  color: var(--studio-fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.studio-app .workbench-result .report-metric span {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.studio-app .workbench-result .report-metric strong {
+  color: var(--studio-fg);
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.studio-app .workbench-result .report-list,
+.studio-app .workbench-result .report-warnings {
+  border-top-color: var(--studio-border);
+}
+
+.studio-app .workbench-result .report-list > strong,
+.studio-app .workbench-result .report-warnings > strong {
+  color: var(--studio-fg);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.studio-app .workbench-result .report-list p,
+.studio-app .workbench-result .report-warnings p,
+.studio-app .workbench-result .report-list ul,
+.studio-app .workbench-result .report-warnings ul,
+.studio-app .workbench-result .report-unavailable {
+  color: var(--studio-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 760px) {
+  .studio-app .workbench-dock {
+    padding: 14px 12px 18px;
+  }
+
+  .studio-app .workbench-viewer .asset-meta-strip {
+    padding: 10px 12px;
+  }
+}

@@ -4,9 +4,15 @@ This is the single-screen Studio client for the local MeshHarbor engine. It impo
 
 ## Workspace flow
 
-Start with **Create from image** or **Open GLB** (or drop either file type). Studio shows actions for the selected asset: generation/setup for an image, and optimization or more tools for a GLB. A missing generation runtime does not block opening and optimizing local GLBs.
+Studio is one edge-to-edge workbench: the app bar, canvas, and docks share the window without a separate page frame. Start with **Create from image** or **Open GLB** (or drop either file type). Studio shows actions for the selected asset: generation/setup for an image, and optimization or more tools for a GLB. A missing generation runtime does not block opening and optimizing local GLBs.
 
-Optimization stores a separate result. Select the known **Original** and **Result** pair in the viewer to compare at the same angle, and use **Export GLB** to download the selected version. Assets and recent jobs remain available beside the viewer; opening a record does not restart it.
+Use the collapsible **Assets** and **Jobs** sidebar when you need it. Desktop remembers the last sidebar choice; on narrow screens it opens as a modal drawer without changing the saved desktop layout. Mesh controls are next to the preview and open only the selected tool. Optimization stores a separate result. Select the known **Original** and **Result** pair in the viewer to compare at the same angle, and use **Export GLB** to download the selected version. Assets and recent jobs remain available beside the viewer; opening a record does not restart it.
+
+## UI primitives
+
+Studio keeps its [shadcn/ui](https://ui.shadcn.com/docs/components) component styles in local `src/ui` files rather than importing an application-wide utility framework. The shared graphite/mint theme uses semantic roles for surfaces, text, neutral actions, and the current primary action. Use these components for new buttons, fields, dialogs, feedback, and selection controls; use shell CSS only for the workbench geometry and the 3D canvas. The engine dialog and narrow drawers share Radix Dialog behavior. The desktop dock retains its Radix Collapsible and the comparison selector retains Radix Toggle Group semantics.
+
+The right-hand inspector docks on desktop and opens as a modal at widths up to 880px; the Assets and Jobs dock continues to collapse independently. There is one live progress and cancellation surface, inside an open tool drawer or on the workbench, never both. On a completed associated operation, Studio returns to the result for review; Export is emphasized while that result is selected and no editor is open.
 
 ## Local development
 
@@ -51,4 +57,4 @@ Studio loads up to 20 recent job records from the local engine on connection. Op
 - `mesh.retopology` is currently unavailable. Adjacent executables are ignored; only a managed sidecar accepted by an in-process signature/provenance verifier and matched to the trusted manifest may be made ready in a future build. It accepts a closed, static triangle GLB; supported textured inputs require existing float UVs, optional normals, and embedded PNG base-color and metallic/roughness maps. A nearest-surface projection is bounded by source-relative distance, normal orientation, coverage, and opposing-shell ambiguity checks. Only those maps are rebaked into the triangulated GLB preview. The separate OBJ artifact retains editable quad faces but has no UVs or appearance. Unsupported attributes/maps fail closed, and the operation does not certify texture quality, self-intersection freedom, or a measured surface-error tolerance.
 - The remaining mesh operations create derived assets and leave source files unchanged. Their accepted GLB layouts and size/count limits are enforced by the Rust engine, not by the UI.
 
-The React/npm bundle and browser workflow have not been verified in this environment; the Studio sources are not evidence of a complete desktop installer or production client build.
+The Studio bundle and local browser workflow can be tested without a model runtime; actual 3D rendering and image-to-3D generation require a suitable WebGL and MLX/CUDA environment, respectively. The Studio sources and local bundle are not a desktop installer.

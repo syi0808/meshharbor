@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button';
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -98,7 +99,7 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     if (!host) return;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#eef0ec');
+    scene.background = new THREE.Color('#202225');
     const camera = new THREE.PerspectiveCamera(36, 1, 0.01, 1000);
     camera.position.set(3.6, 2.5, 4.2);
     let renderer: THREE.WebGLRenderer;
@@ -273,7 +274,7 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
         const nextPreview = {
           meshes,
           originalMaterials: new Map<THREE.Mesh, THREE.Material | THREE.Material[]>(),
-          material: new THREE.MeshBasicMaterial({ color: '#263a32', wireframe: true, toneMapped: false }),
+          material: new THREE.MeshBasicMaterial({ color: '#a7c7ba', wireframe: true, toneMapped: false }),
         };
         wireframePreviewRef.current = nextPreview;
         currentModelRef.current = model;
@@ -320,8 +321,8 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
       <div className="preview-canvas" ref={hostRef} aria-label="Interactive 3D model preview" />
       {modelReady && (
         <div className="preview-display-toggle" role="group" aria-label="3D preview display">
-          <button type="button" aria-pressed={!wireframe} onClick={() => setWireframe(false)}>Material view</button>
-          <button type="button" aria-pressed={wireframe} onClick={() => setWireframe(true)}>Triangle wireframe</button>
+          <Button type="button" variant="ghost" size="sm" aria-pressed={!wireframe} onClick={() => setWireframe(false)}>Material view</Button>
+          <Button type="button" variant="ghost" size="sm" aria-pressed={wireframe} onClick={() => setWireframe(true)}>Triangle wireframe</Button>
         </div>
       )}
       {rendererUnavailable && asset && (
