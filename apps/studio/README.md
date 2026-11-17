@@ -2,6 +2,12 @@
 
 This is the single-screen Studio client for the local MeshHarbor engine. It imports PNG/JPEG/GLB assets and exposes meshoptimizer simplification, conservative cleanup, connected-part splitting, render-order optimization, KHR_meshopt compression, and experimental, currently unavailable QuadriFlow retopology. Retopology is unavailable in the current product build. Studio displays backend status and the next step, and exposes a disabled install request button. The runtime ignores adjacent executables; a managed sidecar can be resolved only after an in-process verifier accepts its release attestation and the executable hash matches the trusted manifest. The in-process verifier is integrated, but the bundled manifest is empty and no approved sidecar is listed, so install/rollback requests fail closed before downloads or backend-directory writes. No MeshHarbor-issued candidate bundle has been verified yet. For the supported textured subset, base-color and metallic/roughness maps are projected only into the triangulated GLB preview; the separate quad OBJ is geometry-only. Image-to-3D jobs depend on the separately configured local MLX/CUDA backends.
 
+## Workspace flow
+
+Start with **Create from image** or **Open GLB** (or drop either file type). Studio shows actions for the selected asset: generation/setup for an image, and optimization or more tools for a GLB. A missing generation runtime does not block opening and optimizing local GLBs.
+
+Optimization stores a separate result. Select the known **Original** and **Result** pair in the viewer to compare at the same angle, and use **Export GLB** to download the selected version. Assets and recent jobs remain available beside the viewer; opening a record does not restart it.
+
 ## Local development
 
 1. Start the Rust API in one terminal:

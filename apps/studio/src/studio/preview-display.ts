@@ -31,3 +31,10 @@ export function restorePreviewMaterials<
   }
   originalMaterials.clear();
 }
+
+
+// Model JSON rejects explicit external buffer/image URLs before this check.
+// Three.js exposes image bufferViews through same-origin browser object URLs.
+export function isLocalPreviewResource(url: string, origin: string): boolean {
+  return url.startsWith('data:') || url.startsWith(`blob:${origin}/`);
+}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyTriangleWireframe, restorePreviewMaterials } from './preview-display.ts';
+import { applyTriangleWireframe, isLocalPreviewResource, restorePreviewMaterials } from './preview-display.ts';
 
 test('triangle wireframe swaps preview materials and restores original references without changing geometry', () => {
   const sharedMaterial = { name: 'shared material', wireframe: false };
@@ -46,4 +46,15 @@ test('triangle wireframe swaps preview materials and restores original reference
   applyTriangleWireframe(meshes, wireframeMaterial, originals);
   restorePreviewMaterials(originals);
   assert.strictEqual(groupedMesh.material, multiMaterials, 'a later toggle cycle still restores the same original array');
+});
+
+
+test('preview can resolve embedded image bytes without allowing remote resources', () => {
+  const origin = 'http://127.0.0.1:7432';
+  assert.equal(isLocalPreviewResource('data:image/png;base64,AA==', origin), true);
+  assert.equal(isLocalPreviewResource(`blob:${origin}/72bad282-a191-447f-9e56-05d26a461671`, origin), true);
+  for (const url of ['/image.png', `${origin}/image.png`, 'https://example.com/image.png',
+    'blob:https://example.com/id', `blob:${origin}0/wrong-port`]) {
+    assert.equal(isLocalPreviewResource(url, origin), false);
+  }
 });

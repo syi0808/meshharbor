@@ -1786,7 +1786,7 @@ pub fn simplify_glb(
         }
         let adapter = VertexDataAdapter::new(&position_bytes, 12, 0)
             .map_err(|e| CoreError::InvalidInput(format!("Invalid POSITION data: {e}")))?;
-        let (attributes, weights, attribute_stride) =
+        let (attributes, weights) =
             decode_simplification_attributes(&glb.document, binary, primitive, positions.len())?;
         let mut error = 0.0f32;
         let locks = vec![SimplifyVertex::None; positions.len()];
@@ -1805,7 +1805,8 @@ pub fn simplify_glb(
                 &adapter,
                 &attributes,
                 &weights,
-                attribute_stride,
+                // meshoptimizer needs a byte stride, not a count of f32s.
+                weights.len() * size_of::<f32>(),
                 &locks,
                 target_for_primitive as usize * 3,
                 max_error,
@@ -2628,7 +2629,7 @@ fn decode_simplification_attributes(
     binary: &[u8],
     primitive: &Value,
     vertex_count: usize,
-) -> Result<(Vec<f32>, Vec<f32>, usize), CoreError> {
+) -> Result<(Vec<f32>, Vec<f32>), CoreError> {
     let attributes = primitive
         .get("attributes")
         .and_then(Value::as_object)
@@ -2651,7 +2652,7 @@ fn decode_simplification_attributes(
         .map(|(_, values, _)| values.first().map(Vec::len).unwrap_or(0))
         .sum::<usize>();
     if stride == 0 {
-        return Ok((Vec::new(), Vec::new(), 0));
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut flat = Vec::with_capacity(vertex_count * stride);
     let mut weights = Vec::with_capacity(stride);
@@ -2664,7 +2665,7 @@ fn decode_simplification_attributes(
             flat.extend(values[vertex].iter().copied());
         }
     }
-    Ok((flat, weights, stride))
+    Ok((flat, weights))
 }
 
 fn decode_component(bytes: &[u8], component_type: u64, normalized: bool) -> Result<f32, CoreError> {
@@ -3111,6 +3112,53 @@ mod tests {
         assert_eq!(
             parsed.document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"][0],
             0.8
+        );
+    }
+
+    #[test]
+    fn meshoptimizer_simplifies_normals_and_uvs_without_changing_the_streams() {
+        let side = 12usize;
+        let mut glb = GlbFile::parse(&grid_glb(side)).unwrap();
+        let binary = glb.binary.as_mut().unwrap();
+        for (semantic, shape, size) in [("NORMAL", "VEC3", 12), ("TEXCOORD_0", "VEC2", 8)] {
+            let offset = binary.len();
+            for y in 0..side {
+                for x in 0..side {
+                    if semantic == "NORMAL" {
+                        for value in [0.0f32, 1.0, 0.0] {
+                            binary.extend_from_slice(&value.to_le_bytes());
+                        }
+                    } else {
+                        for value in [x as f32 / (side - 1) as f32, y as f32 / (side - 1) as f32] {
+                            binary.extend_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let views = glb.document["bufferViews"].as_array_mut().unwrap();
+            let view = views.len();
+            views.push(json!({
+                "buffer": 0, "byteOffset": offset, "byteLength": side * side * size,
+                "byteStride": size, "target": 34962
+            }));
+            let accessors = glb.document["accessors"].as_array_mut().unwrap();
+            let accessor = accessors.len();
+            accessors.push(json!({
+                "bufferView": view, "componentType": 5126, "count": side * side, "type": shape
+            }));
+            glb.document["meshes"][0]["primitives"][0]["attributes"][semantic] = json!(accessor);
+        }
+        let original = pack_glb(glb.document.clone(), binary.clone());
+        let (reduced, report) = simplify_glb(&original, 80, 1.0).unwrap();
+        let parsed = GlbFile::parse(&reduced).unwrap();
+        assert!(report.triangles_after < report.triangles_before);
+        assert_eq!(
+            parsed.document["meshes"][0]["primitives"][0]["attributes"],
+            glb.document["meshes"][0]["primitives"][0]["attributes"]
+        );
+        assert_eq!(
+            &parsed.binary.as_ref().unwrap()[..binary.len()],
+            binary.as_slice()
         );
     }
 

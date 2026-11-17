@@ -138,9 +138,11 @@ export function App() {
     setJobState(next);
   }, []);
   const [reportJob, setReportJob] = useState<Job | null>(null);
+  const [resolvedPreviewSource, setResolvedPreviewSource] = useState<Asset | null>(null);
   const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const downloadInFlight = useRef(false);
+  const [meshPanel, setMeshPanel] = useState<'optimize' | 'tools'>('optimize');
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -174,7 +176,6 @@ export function App() {
     || assetFilters.kind !== 'all'
     || assetFilters.origin !== 'all';
   const quadArtifact = quadTopologyArtifact(selectedAsset);
-  const retopologyAvailable = operations.find((operation) => operation.id === 'mesh.retopology')?.implemented === true;
   const quadriflowBackend = runtime?.quadriflow_backend;
   const [checkingRetopology, setCheckingRetopology] = useState(false);
   const [retopologyCheck, setRetopologyCheck] = useState<{ assetId: string; message: string } | null>(null);
@@ -421,7 +422,6 @@ export function App() {
       setAssetPageLoading(false);
       setConnection('connected');
       setShowConnect(false);
-      setNotice('Connected to your local MeshHarbor engine.');
     } catch (cause) {
       setAssetPageLoading(false);
       setConnection('disconnected');
@@ -620,6 +620,38 @@ export function App() {
   }, [showConnect]);
 
   const previewAsset = selectedAsset;
+  // Keep the viewing frame while the active job temporarily hides comparison controls.
+  const previewPair = assetComparisonPairForSelection(assets, selectedId, comparisonPair);
+  const comparisonSourceId = selectedAsset?.kind === 'mesh'
+    ? previewPair?.inputAssetId ?? null
+    : null;
+  const comparisonSourceInLibrary = comparisonSourceId
+    ? assets.find((asset) => asset.id === comparisonSourceId) ?? null
+    : null;
+  useEffect(() => {
+    if (!comparisonSourceId || comparisonSourceInLibrary || connection !== 'connected') return;
+    let current = true;
+    void api.derivedAsset(comparisonSourceId).then((source) => {
+      if (current && source.id === comparisonSourceId) setResolvedPreviewSource(source);
+    }).catch(() => {
+      // The preview remains usable without shared framing. Selecting Original will surface a load error if necessary.
+    });
+    return () => { current = false; };
+  }, [api, comparisonSourceId, comparisonSourceInLibrary, connection]);
+  const previewSource = comparisonSourceInLibrary
+    ?? (resolvedPreviewSource?.id === comparisonSourceId ? resolvedPreviewSource : null);
+  const comparisonResultId = previewPair?.resultAssetId;
+  const previewComparison = previewSource?.kind === 'mesh' && comparisonResultId
+    && (selectedId === previewSource.id || selectedId === comparisonResultId)
+    && assets.some((asset) => asset.id === comparisonResultId
+      && asset.kind === 'mesh' && asset.source_asset_id === previewSource.id)
+    ? {
+      groupId: `${previewSource.id}:${comparisonResultId}`,
+      sourceAsset: previewSource,
+      resultAssetId: comparisonResultId,
+      side: selectedId === previewSource.id ? 'source' as const : 'result' as const,
+    }
+    : null;
 
   const loadPreview = useCallback((asset: Asset) => {
     if (connection !== 'connected') return Promise.reject(new Error('The local MeshHarbor engine is offline.'));
@@ -628,6 +660,7 @@ export function App() {
   const reportPreviewError = useCallback((message: string) => setError(`Preview: ${message}`), []);
 
   function selectAsset(asset: Asset) {
+    if (asset.kind === 'mesh' && asset.id !== selectedId) setMeshPanel('optimize');
     invalidateHistoryRequests();
     const pair = assetComparisonPairForSelection(assets, asset.id, comparisonPair);
     setComparisonPair(pair);
@@ -711,6 +744,7 @@ export function App() {
           invalidateHistoryRequests();
           comparisonPairRef.current = null;
           setComparisonPair(null);
+          setMeshPanel('optimize');
           selectAssetId(result.assets[0].id);
           setActiveView('source');
           setReportJob(null);
@@ -960,7 +994,18 @@ export function App() {
     && selectedGenerationBackend?.ready === true;
 
   return (
-    <div className="app-shell" onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); void importFiles(event.dataTransfer.files); }}>
+    <div className="app-shell" onDragOver={(event) => {
+      if (!event.dataTransfer.types.includes('Files')) return;
+      event.preventDefault();
+      setDragging(true);
+    }} onDragLeave={(event) => {
+      if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragging(false);
+    }} onDrop={(event) => {
+      if (!event.dataTransfer.types.includes('Files')) return;
+      event.preventDefault();
+      setDragging(false);
+      void importFiles(event.dataTransfer.files);
+    }}>
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark"><span /><span /><span /></div>
@@ -968,134 +1013,37 @@ export function App() {
           <span className="brand-divider" />
           <span className="product-label">STUDIO</span>
         </div>
-        <div className="topbar-center"><span className="crumb-muted">Workspace</span><span className="crumb-chevron">/</span><span>Mesh processing</span></div>
+        <div className="topbar-center"><span className="crumb-muted">Workspace</span><span className="crumb-chevron">/</span><span>Model studio</span></div>
         <div className="topbar-actions">
           <div className={`engine-status ${connection}`} title={runtime ? `${runtime.platform} · ${runtime.status.replaceAll('_', ' ')}` : undefined}><i />{connection === 'connected' ? 'Local engine ready' : connection === 'connecting' ? 'Connecting…' : 'Engine offline'}</div>
           <button className="avatar-button" aria-label="Connect engine" title="Connect local engine" onClick={() => setShowConnect((value) => !value)}><span className="plug-icon">⌁</span></button>
         </div>
       </header>
 
-      <div className="workspace">
-        <aside className="sidebar">
-          <div className="sidebar-section-label">WORKSPACE</div>
-          <button className="nav-item active"><span className="nav-icon grid-icon" /> Studio</button>
-          <button className="nav-item" onClick={() => document.getElementById('asset-library')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon cube-icon" /> Asset library <span className="nav-count">{assets.length}</span></button>
-          <div className="sidebar-section-label operations-label">OPERATIONS</div>
-          <div className="nav-item selected"><span className="nav-icon simplify-icon">◒</span> Simplify mesh <span className="selected-dot" /></div>
-          <button className="nav-item" onClick={() => document.getElementById('mesh-tools')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon">⌘</span> Cleanup &amp; export</button>
-          <button className="nav-item" title="Image-to-3D generation" onClick={() => document.getElementById('image-generation')?.scrollIntoView({ behavior: 'smooth' })}><span className="nav-icon sparkle-icon">✳</span> Generate</button>
-          <button
-            className="nav-item"
-            title={retopologyAvailable
-              ? 'Experimental QuadriFlow; a verified, manifest-matched managed sidecar is available.'
-              : 'Retopology is unavailable until a trusted managed QuadriFlow release is verified; adjacent binaries are ignored.'}
-            onClick={() => document.getElementById('mesh-tools')?.scrollIntoView({ behavior: 'smooth' })}
-          >
-            <span className="nav-icon">⌘</span> Retopology <span className="soon-label">{retopologyAvailable ? 'READY' : 'UNAVAILABLE'}</span>
-          </button>
-          <div className="sidebar-bottom">
-            <div className="local-card">
-              <div className="local-card-top"><span className="local-lock">⌑</span><span>PRIVATE BY DESIGN</span></div>
-              <p>Your files stay on this computer. Nothing is uploaded to a cloud service.</p>
-            </div>
-            <div className="version-row"><span>MeshHarbor</span><span>v0.1 · preview</span></div>
-          </div>
-        </aside>
-
-        <main className="main-content">
-          <div className="page-heading">
-            <div><div className="eyebrow">YOUR WORKSPACE</div><h1>Studio <span className="heading-dot">.</span></h1><p>Generate from an image or refine a mesh, all locally. Import up to 10 files per batch.</p></div>
-            <div className="import-actions">
-              <button className="button button-secondary import-button" onClick={() => fileInputRef.current?.click()} disabled={busy}><span className="button-plus">＋</span> Import GLBs</button>
-              <button className="button button-secondary import-button" onClick={() => imageInputRef.current?.click()} disabled={busy}><span className="button-plus">＋</span> Import images</button>
-            </div>
-            <input ref={fileInputRef} className="sr-only" type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-            <input ref={imageInputRef} className="sr-only" type="file" multiple accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-          </div>
+      <main className="main-content model-workspace">
+        <div className="page-heading studio-heading">
+          <div><div className="eyebrow">LOCAL WORKSPACE</div><h1>Studio<span className="heading-dot">.</span></h1></div>
+          {selectedAsset && <div className="import-actions">
+            <button className="button button-secondary import-button" onClick={() => imageInputRef.current?.click()} disabled={busy}>New from image</button>
+            <button className="button button-secondary import-button" onClick={() => fileInputRef.current?.click()} disabled={busy}>Open GLB</button>
+          </div>}
+          <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
+          <input ref={imageInputRef} className="sr-only" aria-label="Choose images" type="file" multiple accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
+        </div>
 
           {(error || notice) && <div className={`toast ${error ? 'toast-error' : 'toast-success'}`} role={error ? 'alert' : 'status'}><span className="toast-icon">{error ? '!' : '✓'}</span><span>{error ?? notice}</span><button onClick={() => { setError(null); closeNotice(); }} aria-label="Dismiss">×</button></div>}
 
-          <div className="studio-grid">
-            <section className="viewer-column">
-              <div className="viewer-card">
-                <div className="viewer-toolbar">
-                  <div className="viewer-title"><span className="tiny-cube" /> {selectedAsset?.kind === 'image' ? 'Image preview' : '3D Preview'} {selectedAsset && <span className="viewer-filename">/ {selectedAsset.name}</span>}</div>
-                  <div className="view-toggle" role="tablist" aria-label="Preview version" aria-busy={comparisonLoadingSide !== null}>
-                    <button
-                      className={activeView === 'source' ? 'active' : ''}
-                      role="tab"
-                      aria-selected={activeView === 'source'}
-                      disabled={!selectedComparisonPair || comparisonLoadingSide !== null || busy || connection !== 'connected'}
-                      onClick={() => void selectComparisonSide('source')}
-                    >
-                      {comparisonLoadingSide === 'source' ? <><span className="spinner small" /> Loading…</> : 'Original'}
-                    </button>
-                    <button
-                      className={activeView === 'result' ? 'active' : ''}
-                      role="tab"
-                      aria-selected={activeView === 'result'}
-                      disabled={!selectedComparisonPair || comparisonLoadingSide !== null || busy || connection !== 'connected'}
-                      onClick={() => void selectComparisonSide('result')}
-                    >
-                      {comparisonLoadingSide === 'result' ? <><span className="spinner small" /> Loading…</> : 'Result'}
-                    </button>
-                  </div>
-                  {quadArtifact && <button className="button button-secondary" title="Original editable quad topology, without textures or UVs" disabled={downloading || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Download quad OBJ</button>}
-                  <button className="icon-button" title="Download selected GLB" aria-label="Download selected GLB" disabled={!selectedAsset || downloading || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadIcon /></button>
-                </div>
-                <ModelPreview asset={previewAsset} loadModel={loadPreview} onError={reportPreviewError} />
-                {selectedAsset && (
-                  <div className="asset-meta-strip">
-                    <div className="asset-meta-main"><span className="file-badge">{selectedAsset.kind === 'mesh' ? 'GLB' : selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPG'}</span><div><strong>{selectedAsset.name}</strong><span>{formatSize(selectedAsset.byte_size)} · {selectedAsset.kind === 'mesh' ? `${Number(selectedAsset.metadata.mesh_count ?? 0)} mesh${Number(selectedAsset.metadata.mesh_count ?? 0) === 1 ? '' : 'es'}` : 'Image asset'}</span></div></div>
-                    <div className="meta-divider" />
-                    {selectedAsset.kind === 'mesh' ? <><div className="meta-stat"><span>TRIANGLES</span><strong>{triangleCount.toLocaleString()}</strong></div><div className="meta-stat"><span>MATERIALS</span><strong>{Number(selectedAsset.metadata.material_count ?? 0)}</strong></div></> : <div className="meta-stat"><span>INPUT</span><strong>{selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPEG'}</strong></div>}
-                    <div className="meta-stat"><span>STATUS</span><strong className="status-ready"><i /> Ready</strong></div>
-                  </div>
-                )}
-              </div>
+          {isRunning && <div className="workspace-job" role="status">
+            <span className="spinner small" /> <strong>{job.state === 'queued' ? 'Queued' : 'Working'}</strong>
+            <span>{job.operation === 'image.generate' ? 'Generating 3D' : job.operation.startsWith('runtime.') ? 'Preparing local runtime' : 'Processing mesh'} · {job.progress}%</span>
+            {isQueuedJobCancellable(job) && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}
+          </div>}
 
-              {reportCard && (
-                <section className="result-card" aria-label={`${reportCard.title} result`}>
-                  <div className="result-heading">
-                    <div><span className="result-icon">✓</span><strong>{reportCard.title} complete</strong></div>
-                    <span className="report-job-id" title={reportCard.jobId}>Job {reportCard.jobId}</span>
-                  </div>
-                  <div className="report-lineage">
-                    <span>Input <code title={reportCard.inputAssetId ?? 'Not reported'}>{reportCard.inputAssetId ?? 'Not reported'}</code></span>
-                    <span>Result <code title={reportCard.resultAssetId ?? 'Not reported'}>{reportCard.resultAssetId ?? 'Not reported'}</code></span>
-                  </div>
-                  {!reportCard.reportAvailable && <p className="report-unavailable">The operation completed, but its report payload is missing or unreadable.</p>}
-                  <div className="report-metrics">
-                    {reportCard.metrics.map((metric) => (
-                      <div className="report-metric" key={metric.label}>
-                        <span>{metric.label}</span>
-                        <strong>{metric.value}</strong>
-                      </div>
-                    ))}
-                  </div>
-                  {reportCard.lists.map((list) => (
-                    <div className="report-list" key={list.label}>
-                      <strong>{list.label}</strong>
-                      {list.state === 'unavailable' && <p>Not reported.</p>}
-                      {list.state === 'empty' && <p>None reported.</p>}
-                      {list.state === 'partial' && <p>Some entries were invalid or omitted.</p>}
-                      {list.values.length > 0 && <ul>{list.values.map((value, index) => <li key={`${index}-${value}`}>{value}</li>)}</ul>}
-                      {list.omittedCount > 0 && <p>{list.omittedCount.toLocaleString()} additional entries are not shown.</p>}
-                    </div>
-                  ))}
-                  <section className="report-warnings" aria-label="Warnings">
-                    <strong>Warnings</strong>
-                    {reportCard.warningsState === 'unavailable' && <p>{reportCard.warningsMessage}</p>}
-                    {reportCard.warningsState === 'empty' && <p>No warnings reported.</p>}
-                    {reportCard.warningFormatIssue && <p>Some warning data was missing or invalid; all readable warning text is listed below.</p>}
-                    {reportCard.warnings.length > 0 && <ul>{reportCard.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>}
-                  </section>
-                </section>
-              )}
-
+          <div className={`studio-grid model-grid${selectedAsset ? ' has-selection' : ''}`}>
+            <aside className="asset-rail" aria-label="Workspace assets">
               <div className="library-section" id="asset-library">
                 <div className="section-heading">
-                  <div><h2>Asset library</h2><span>Search and browse assets stored locally in your workspace</span></div>
+                  <div><h2>Your assets</h2><span>Originals and results</span></div>
                   <button className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <span>↻</span></button>
                 </div>
                 <form className="asset-search" onSubmit={(event) => {
@@ -1162,14 +1110,14 @@ export function App() {
                 </div>
                 <p className="asset-library-note">
                   {assetPageLoading ? 'Loading assets…' : `Showing ${visibleAssets.length} loaded asset${visibleAssets.length === 1 ? '' : 's'}`}
-                  {pinnedAssetIds.size > 0 && ' · Your selected asset and comparison pair stay visible while filtering.'}
+                  {hasActiveAssetFilters && pinnedAssetIds.size > 0 && ' · Your current selection stays visible.'}
                 </p>
                 {visibleAssets.length === 0
                   ? <div className="library-empty">
                     {assetPageLoading
                       ? 'Loading assets…'
                       : assets.length === 0
-                        ? 'Your imported models will appear here.'
+                        ? 'Imported files and results will appear here.'
                         : 'No assets match these filters. Try a different search or clear the filters.'}
                   </div>
                   : <div className="asset-list">{visibleAssets.map((asset) => {
@@ -1186,7 +1134,7 @@ export function App() {
                           <strong>{asset.name}</strong>
                           <small>{asset.source_asset_id ? 'Derived result' : 'Original'} · {formatSize(asset.byte_size)}{pinnedOutsideFilter ? ' · Pinned selection' : ''}</small>
                         </span>
-                        <span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>
+                        {asset.kind === 'mesh' && <span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>}
                         {asset.id === selectedId && <span className="asset-current-dot" />}
                       </button>
                     );
@@ -1200,9 +1148,10 @@ export function App() {
                 )}
               </div>
 
-              <section className="job-history" aria-labelledby="job-history-title">
+              <details className="job-history" aria-labelledby="job-history-title">
+                <summary id="job-history-title">Recent jobs</summary>
                 <div className="section-heading">
-                  <div><h2 id="job-history-title">Recent jobs</h2><span>Saved locally by the engine</span></div>
+                  <div><span>Saved locally by the engine</span></div>
                   <button className="text-button" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <span>↻</span></button>
                 </div>
                 <p className="job-history-note">Opening a record only checks its saved state; Studio never resumes or restarts work. After an unexpected engine exit, a saved queued/running state may be stale. Stop all REST/MCP processes for this data directory and run meshharbor jobs recover-interrupted --confirm-no-running-meshharbor before retrying.</p>
@@ -1215,24 +1164,122 @@ export function App() {
                       <button className="job-history-open" onClick={() => void openRecentJob(savedJob.id)} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</button>
                     </div>
                   ))}</div>}
-              </section>
+              </details>
+            </aside>
+
+            <section className="viewer-column" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
+              {!selectedAsset ? <div className="studio-start">
+                <div className="studio-start-mark" aria-hidden="true"><MiniCube /></div>
+                <div className="eyebrow">MAKE IT 3D</div>
+                <h2>What are you making?</h2>
+                <p>Start with a reference image or open an existing model. Your files stay on this device.</p>
+                <div className="studio-start-actions">
+                  <button className="button button-primary" onClick={() => imageInputRef.current?.click()} disabled={busy}>Create from image <span aria-hidden="true">→</span></button>
+                  <button className="button button-secondary" onClick={() => fileInputRef.current?.click()} disabled={busy}>Open GLB</button>
+                </div>
+                <span className="studio-start-hint">Or drop PNG, JPEG or GLB files anywhere</span>
+              </div> : <div className="viewer-card">
+                <div className="viewer-toolbar">
+                  <div className="viewer-title"><span className="tiny-cube" /> {selectedAsset?.kind === 'image' ? 'Image preview' : '3D Preview'} {selectedAsset && <span className="viewer-filename">/ {selectedAsset.name}</span>}</div>
+                  {selectedComparisonPair && <div className="view-toggle" role="tablist" aria-label="Preview version" aria-busy={comparisonLoadingSide !== null}>
+                    <button
+                      className={activeView === 'source' ? 'active' : ''}
+                      role="tab"
+                      aria-selected={activeView === 'source'}
+                      disabled={!selectedComparisonPair || comparisonLoadingSide !== null || busy || connection !== 'connected'}
+                      onClick={() => void selectComparisonSide('source')}
+                    >
+                      {comparisonLoadingSide === 'source' ? <><span className="spinner small" /> Loading…</> : 'Original'}
+                    </button>
+                    <button
+                      className={activeView === 'result' ? 'active' : ''}
+                      role="tab"
+                      aria-selected={activeView === 'result'}
+                      disabled={!selectedComparisonPair || comparisonLoadingSide !== null || busy || connection !== 'connected'}
+                      onClick={() => void selectComparisonSide('result')}
+                    >
+                      {comparisonLoadingSide === 'result' ? <><span className="spinner small" /> Loading…</> : 'Result'}
+                    </button>
+                  </div>}
+                  {quadArtifact && <button className="button button-secondary" title="Original editable quad topology, without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Download quad OBJ</button>}
+                  {selectedAsset.kind === 'mesh' && <button className="button button-secondary export-glb" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadIcon /> Export GLB</button>}
+                </div>
+                <ModelPreview asset={previewAsset} comparison={previewComparison} loadModel={loadPreview} onError={reportPreviewError} />
+                {selectedAsset && (
+                  <div className="asset-meta-strip">
+                    <div className="asset-meta-main"><span className="file-badge">{selectedAsset.kind === 'mesh' ? 'GLB' : selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPG'}</span><div><strong>{selectedAsset.name}</strong><span>{formatSize(selectedAsset.byte_size)} · {selectedAsset.kind === 'mesh' ? `${Number(selectedAsset.metadata.mesh_count ?? 0)} mesh${Number(selectedAsset.metadata.mesh_count ?? 0) === 1 ? '' : 'es'}` : 'Image asset'}</span></div></div>
+                    <div className="meta-divider" />
+                    {selectedAsset.kind === 'mesh' ? <><div className="meta-stat"><span>TRIANGLES</span><strong>{triangleCount.toLocaleString()}</strong></div><div className="meta-stat"><span>MATERIALS</span><strong>{Number(selectedAsset.metadata.material_count ?? 0)}</strong></div></> : <div className="meta-stat"><span>INPUT</span><strong>{selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPEG'}</strong></div>}
+                    <div className="meta-stat"><span>STATUS</span><strong className="status-ready"><i /> Ready</strong></div>
+                  </div>
+                )}
+              </div>}
+
+              {reportCard && (
+                <section className="result-card" aria-label={`${reportCard.title} result`}>
+                  <div className="result-heading">
+                    <div><span className="result-icon">✓</span><strong>{reportCard.title} complete</strong></div>
+                    <span className="report-job-id" title={reportCard.jobId}>Job {reportCard.jobId}</span>
+                  </div>
+                  <div className="report-lineage">
+                    <span>Input <code title={reportCard.inputAssetId ?? 'Not reported'}>{reportCard.inputAssetId ?? 'Not reported'}</code></span>
+                    <span>Result <code title={reportCard.resultAssetId ?? 'Not reported'}>{reportCard.resultAssetId ?? 'Not reported'}</code></span>
+                  </div>
+                  {!reportCard.reportAvailable && <p className="report-unavailable">The operation completed, but its report payload is missing or unreadable.</p>}
+                  <div className="report-metrics">
+                    {reportCard.metrics.map((metric) => (
+                      <div className="report-metric" key={metric.label}>
+                        <span>{metric.label}</span>
+                        <strong>{metric.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                  {reportCard.lists.map((list) => (
+                    <div className="report-list" key={list.label}>
+                      <strong>{list.label}</strong>
+                      {list.state === 'unavailable' && <p>Not reported.</p>}
+                      {list.state === 'empty' && <p>None reported.</p>}
+                      {list.state === 'partial' && <p>Some entries were invalid or omitted.</p>}
+                      {list.values.length > 0 && <ul>{list.values.map((value, index) => <li key={`${index}-${value}`}>{value}</li>)}</ul>}
+                      {list.omittedCount > 0 && <p>{list.omittedCount.toLocaleString()} additional entries are not shown.</p>}
+                    </div>
+                  ))}
+                  <section className="report-warnings" aria-label="Warnings">
+                    <strong>Warnings</strong>
+                    {reportCard.warningsState === 'unavailable' && <p>{reportCard.warningsMessage}</p>}
+                    {reportCard.warningsState === 'empty' && <p>No warnings reported.</p>}
+                    {reportCard.warningFormatIssue && <p>Some warning data was missing or invalid; all readable warning text is listed below.</p>}
+                    {reportCard.warnings.length > 0 && <ul>{reportCard.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>}
+                  </section>
+                </section>
+              )}
+
             </section>
 
-            <aside className="settings-column">
-              <div className="operation-card">
-                <div className="operation-header"><div className="operation-symbol"><SimplifyIcon /></div><div><div className="operation-kicker">MESH OPERATION</div><h2>Simplify mesh</h2></div><span className="operation-check">✓</span></div>
+            {selectedAsset && <aside className="settings-column active-inspector" aria-label="Model actions">
+              {selectedAsset.kind === 'mesh' && <div className="inspector-nav" role="group" aria-label="Mesh tools">
+                <button className="button" aria-pressed={meshPanel === 'optimize'} onClick={() => setMeshPanel('optimize')}>Optimize</button>
+                <button className="button" aria-pressed={meshPanel === 'tools'} onClick={() => setMeshPanel('tools')}>More tools</button>
+              </div>}
+              {selectedAsset.kind === 'mesh' && meshPanel === 'optimize' && <div className="operation-card">
+                <div className="operation-header"><div className="operation-symbol"><SimplifyIcon /></div><div><div className="operation-kicker">MESH OPERATION</div><h2>Optimize mesh</h2></div><span className="operation-check">✓</span></div>
                 <p className="operation-description">Reduce polygon count while keeping the original file intact and preserving material references.</p>
                 <div className="field-label-row"><label htmlFor="triangle-target">Triangle target</label><span className="field-hint">Goal, not a guarantee</span></div>
                 <div className="number-input-wrap"><input id="triangle-target" type="number" min="1" max="10000000" step="100" value={targetTriangles} onChange={(event) => setTargetTriangles(Number(event.target.value))} disabled={!selectedAsset || isRunning || busy} /><span>tris</span></div>
                 <div className="range-row"><span>More detail</span><input aria-label="Triangle target" type="range" min="100" max={Math.max(1000, triangleCount || 20000)} step="100" value={Math.min(targetTriangles, Math.max(1000, triangleCount || 20000))} onChange={(event) => setTargetTriangles(Number(event.target.value))} disabled={!selectedAsset || isRunning || busy} /><span>Smaller</span></div>
+                <details className="settings-disclosure"><summary>Shape protection</summary>
                 <div className="field-label-row tolerance-label"><label htmlFor="error-budget">Error tolerance</label><span className="mono-value">{maxError.toFixed(3)}</span></div>
                 <input id="error-budget" className="tolerance-range" aria-label="Maximum geometric error" type="range" min="0.001" max="0.08" step="0.001" value={maxError} onChange={(event) => setMaxError(Number(event.target.value))} disabled={!selectedAsset || isRunning || busy} />
                 <div className="control-footnote">A lower tolerance may stop above your target to protect shape.</div>
+                </details>
                 <div className="preserve-note"><span className="preserve-check">✓</span><span>Original kept unchanged</span><span className="preserve-check">✓</span><span>UVs &amp; materials preserved</span></div>
-                {isRunning && job.operation === 'mesh.simplify' ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating output' : 'Simplifying mesh'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{isQueuedJobCancellable(job) && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Native simplification can’t be interrupted once it starts.</small></div> : <button className="button button-primary simplify-button" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><span className="spinner small" /> Working…</> : <><SimplifyIcon /> Simplify mesh <span className="button-arrow">→</span></>}</button>}
-                <section className="generation-card" id="image-generation">
-                  <div className="generation-heading"><span className="capability-spark">✳</span><strong>Generate from image</strong></div>
-                  <p>Generate a GLB from a local image with the 512 Pixal3D profile. Choose a ready backend; setup and model downloads stay separate opt-in steps.</p>
+                {isRunning && job.operation === 'mesh.simplify' ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating output' : 'Simplifying mesh'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{isQueuedJobCancellable(job) && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Native simplification can’t be interrupted once it starts.</small></div> : <button className="button button-primary simplify-button" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><span className="spinner small" /> Working…</> : <><SimplifyIcon /> Optimize mesh <span className="button-arrow">→</span></>}</button>}
+              </div>}
+
+              {selectedAsset.kind === 'image' && <section className="operation-card generation-card" id="image-generation">
+                  <div className="operation-header"><div className="operation-symbol" aria-hidden="true">✳</div><div><div className="operation-kicker">IMAGE TO 3D</div><h2>Generate model</h2></div></div>
+                  <p>Use this image to create a local GLB model.</p>
+                  <details className="settings-disclosure"><summary>Generation settings</summary>
                   <div className="field-label-row"><label htmlFor="generation-backend">Backend</label><span className="field-hint">Auto selects this host’s backend</span></div>
                   <select id="generation-backend" value={generationBackend} onChange={(event) => setGenerationBackend(event.target.value)} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning}>
                     <option value="auto">Auto ({automaticBackend?.id === 'pixal3d-cuda' ? 'CUDA' : 'MLX'})</option>
@@ -1245,8 +1292,12 @@ export function App() {
                   </select>
                   <div className="field-label-row generation-face-label"><label htmlFor="target-faces">Soft face target</label><span className="field-hint">Not a hard cap</span></div>
                   <div className="number-input-wrap"><input id="target-faces" type="number" min="4" max="1000000" step="1000" value={targetFaces} onChange={(event) => setTargetFaces(Number(event.target.value))} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning} /><span>faces</span></div>
-                  {isRunning && job.operation === 'image.generate' ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating GLB' : 'Generating 3D'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{isQueuedJobCancellable(job) && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Running inference cannot be interrupted safely.</small></div> : <button className="button button-primary simplify-button" disabled={!canGenerate || busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><span className="spinner small" /> Working…</> : <>Generate 3D <span className="button-arrow">→</span></>}</button>}
+                  </details>
+                  {isRunning && job.operation === 'image.generate' ? <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating GLB' : 'Generating 3D'}</span><span>{job.progress}%</span></div><div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>{isQueuedJobCancellable(job) && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Running inference cannot be interrupted safely.</small></div> : canGenerate && <button className="button button-primary simplify-button" disabled={busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><span className="spinner small" /> Working…</> : <>Generate 3D <span className="button-arrow">→</span></>}</button>}
+                  <details className="settings-disclosure runtime-disclosure" open={!canGenerate || undefined}>
+                    <summary>{canGenerate ? 'Local runtime' : 'Prepare local generation'}</summary>
                   <div className="runtime-setup-panel">
+                    {(selectedGenerationBackend?.id === 'pixal3d-mlx' || (isRunning && (job.operation === 'runtime.pixal3d.setup' || job.operation === 'runtime.pixal3d.install_models' || job.operation === 'runtime.pixal3d.convert_naf'))) && <>
                     <div className="runtime-panel-heading">Pixal3D MLX setup <span>{mlxBackend?.status.replaceAll('_', ' ') ?? 'engine disconnected'}</span></div>
                     {isRunning && job.operation === 'runtime.pixal3d.setup' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Preparing isolated Python environment'}</span></div><div className="progress-track"><span /></div>{isQueuedJobCancellable(job) && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Package downloads may take several minutes. Detailed output appears in the engine terminal.</small></div>}
                     {isRunning && job.operation === 'runtime.pixal3d.install_models' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Downloading pinned model files'}</span></div><div className="progress-track"><span /></div>{isQueuedJobCancellable(job) && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>This is a large download (about 24 GB) and may take a while. Per-file transfer output appears in the engine terminal.</small></div>}
@@ -1255,6 +1306,8 @@ export function App() {
                     {!isRunning && mlxBackend?.environment_ready && !mlxBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime hf-login</code>. The token is entered through Hugging Face's masked prompt and stored only in MeshHarbor's isolated cache.</p><p className="runtime-terms">MeshHarbor’s project license has not been selected in this repository, and model-checkpoint terms remain separate. Review the DINOv3 and NAF checkpoint terms and obtain gated access before continuing. This download uses about 24 GB of disk space, then installs an isolated CPU-only NAF conversion environment.</p><label className="runtime-consent"><input type="checkbox" checked={modelDownloadAcknowledged} onChange={(event) => setModelDownloadAcknowledged(event.target.checked)} disabled={busy || isRunning || connection !== 'connected'} /><span>I have reviewed the model terms, have access to gated DINOv3, and am ready to download the files to this computer.</span></label><button className="button button-secondary runtime-action" disabled={!mlxBackend.downloads_enabled || !modelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dModels()}>{busy ? 'Starting…' : 'Download model files'} <span className="button-arrow">↓</span></button></>}
                     {!isRunning && mlxBackend?.models_downloaded && mlxBackend.naf_conversion_required && <div className="runtime-conversion"><strong>One setup step remains</strong><span>The verified NAF checkpoint needs one-time conversion. MeshHarbor installs the pinned CPU-only converter into a separate environment.</span><button className="button button-secondary runtime-action" disabled={!mlxBackend.conversion_enabled || busy || isRunning || connection !== 'connected'} onClick={() => void convertPixal3dNaf()}>{busy ? 'Starting…' : 'Finish NAF conversion'} <span className="button-arrow">→</span></button></div>}
                     {!isRunning && mlxBackend?.installable === false && <p>Pixal3D MLX setup is supported on Apple Silicon macOS only. CUDA setup is a separate Linux/NVIDIA runtime.</p>}
+                    </>}
+                    {(selectedGenerationBackend?.id === 'pixal3d-cuda' || (isRunning && (job.operation === 'runtime.pixal3d.cuda_setup' || job.operation === 'runtime.pixal3d.cuda_install_models'))) && <>
                     <div className="runtime-panel-heading">Pixal3D CUDA setup <span>{cudaBackend?.status.replaceAll('_', ' ') ?? 'engine disconnected'}</span></div>
                     {isRunning && job.operation === 'runtime.pixal3d.cuda_setup' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Installing CUDA Python environment and running GPU checks'}</span></div><div className="progress-track"><span /></div>{isQueuedJobCancellable(job) && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>Uses Python 3.12, PyTorch 2.6.0 with CUDA 12.4, and an app-private per-install lock. Detailed output appears in the engine terminal.</small></div>}
                     {isRunning && job.operation === 'runtime.pixal3d.cuda_install_models' && <div className="job-progress"><div className="job-progress-top"><span><i className="spinner small" /> {job.state === 'queued' ? 'Waiting for local worker' : 'Downloading pinned CUDA model files'}</span></div><div className="progress-track"><span /></div>{isQueuedJobCancellable(job) && <button className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</button>}<small>About 25–30 GB; the DINOv3 access check happens before the checkpoint download.</small></div>}
@@ -1262,16 +1315,15 @@ export function App() {
                     {!isRunning && cudaBackend?.environment_ready && !cudaBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime cuda-hf-login</code>. Hugging Face's prompt stores credentials only in the isolated CUDA cache.</p><p className="runtime-terms">MeshHarbor’s project license has not been selected in this repository; model/checkpoint terms are separate. Review DINOv3, Pixal3D, and NAF terms and obtain gated DINOv3 access first. The download is about 25–30 GB and needs roughly 40 GiB of free disk space.</p><label className="runtime-consent"><input type="checkbox" checked={cudaModelDownloadAcknowledged} onChange={(event) => setCudaModelDownloadAcknowledged(event.target.checked)} disabled={busy || isRunning || connection !== 'connected'} /><span>I reviewed the model terms, have gated DINOv3 access, and approve downloading the CUDA model files to this computer.</span></label><button className="button button-secondary runtime-action" disabled={!cudaBackend.downloads_enabled || !cudaModelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dCudaModels()}>{busy ? 'Starting…' : 'Download CUDA model files'} <span className="button-arrow">↓</span></button></>}
                     {!isRunning && cudaBackend?.installable === false && <p>Pixal3D CUDA setup is Linux x86_64/NVIDIA only. Use the Apple MLX backend on supported Macs; the CUDA backend is not available on this host.</p>}
                     {cudaBackend?.license_notice && <p className="runtime-terms">{cudaBackend.license_notice}</p>}
+                    </>}
+                    {!selectedGenerationBackend && <p>No compatible image-to-3D backend was detected. You can still work with existing GLBs.</p>}
                     {isRunning && job.operation.startsWith('runtime.') && <small className="runtime-serial-note">Runtime installation and generation share one local worker.</small>}
                   </div>
-                  {selectedAsset?.kind !== 'image' && <div className="engine-nudge">Import or select a PNG/JPEG image to generate a mesh.</div>}
-                  {selectedAsset?.kind === 'image' && !canGenerate && <div className="engine-nudge">{selectedGenerationBackend?.status.replaceAll('_', ' ') ?? 'No supported backend detected'}. Complete that backend’s runtime and model steps before starting inference.</div>}
-                  {connection !== 'connected' && <div className="engine-nudge">Start the local engine to generate.</div>}
-                </section>
-                {connection !== 'connected' && <div className="engine-nudge"><span>●</span> Start the local engine to process models.</div>}
-                {selectedAsset && selectedAsset.kind !== 'mesh' && <div className="engine-nudge">Mesh processing requires a GLB mesh file.</div>}
-              </div>
+                  </details>
+                  {!canGenerate && <p className="generation-unavailable">Generation needs a compatible local runtime and model files. Opening and optimizing GLBs does not require them.</p>}
+                </section>}
 
+              {selectedAsset.kind === 'mesh' && meshPanel === 'tools' && <>
               <div className="operation-card mesh-tools-card" id="mesh-tools">
                 <div className="operation-header">
                   <div className="operation-symbol"><span className="capability-spark">⌘</span></div>
@@ -1326,11 +1378,11 @@ export function App() {
                 <div className="control-footnote">Compression exports a GLB that requires KHR_meshopt_compression support. The Studio preview includes its decoder. Part separation creates connected-component primitives inside the same mesh; it does not split scene nodes.</div>
               </div>
 
-              <div className="capability-card"><div className="capability-heading"><span className="capability-spark">✳</span><strong>Still in progress</strong></div><p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is unavailable until a signature-verified, manifest-matched managed sidecar is supported; adjacent binaries are intentionally ignored. Editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p><div className="capability-foot"><span>QuadriFlow backend</span><span className="capability-status">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>{quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}<button className="button button-primary" onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</button><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></div>
-            </aside>
+              <details className="capability-card settings-disclosure"><summary>Retopology availability</summary><p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is unavailable until a signature-verified, manifest-matched managed sidecar is supported; adjacent binaries are intentionally ignored. Editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p><div className="capability-foot"><span>QuadriFlow backend</span><span className="capability-status">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>{quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}<button className="button button-primary" onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</button><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></details>
+              </>}
+            </aside>}
           </div>
-        </main>
-      </div>
+      </main>
 
       {dragging && <div className="drop-overlay"><div className="drop-overlay-card"><span className="drop-icon">↓</span><strong>Drop a GLB or source image here</strong><span>Import starts locally on your computer</span></div></div>}
 
