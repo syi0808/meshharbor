@@ -17,6 +17,7 @@ const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const MAX_VERTICES: usize = 5_000_000;
 const MAX_INDICES: usize = 15_000_000;
 const MAX_PNG_BYTES: usize = 128 * 1024 * 1024;
+const CHART_COORDINATE_EXTENT: f64 = 1024.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtlasBakeError {
@@ -45,7 +46,7 @@ impl Error for AtlasBakeError {}
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AtlasBakeOptions {
-    /// xatlas packing resolution hint. Output width/height may be smaller.
+    /// xatlas packing resolution hint. Actual atlas dimensions may differ.
     pub resolution: u32,
     /// Number of atlas texels reserved for each chart's filtering gutter.
     pub padding: u32,
@@ -64,6 +65,8 @@ impl Default for AtlasBakeOptions {
 pub struct AtlasBakeReport {
     pub source_triangles: u64,
     pub output_triangles: u64,
+    #[serde(default)]
+    pub zero_area_triangles_removed: u64,
     pub source_vertices: u64,
     pub output_vertices: u64,
     pub atlas_width: u32,
@@ -328,9 +331,8 @@ fn add_scaled(a: [f32; 3], b: [f32; 3], s: f32) -> [f32; 3] {
 /// Generate atlas UVs and rebake the supported embedded PBR textures.
 ///
 /// Static attributes other than `TEXCOORD_0` are duplicated byte-for-byte via
-/// xatlas' xref map. The only geometry change is vertex splitting for atlas
-/// seams plus the corresponding new triangle index buffer. Meshoptimizer
-/// simplification is intentionally a separate operation.
+/// xatlas' xref map. Zero-area triangles are omitted, but atlas charting does
+/// not otherwise change the surface. Meshoptimizer simplification is separate.
 pub fn bake_glb(
     bytes: &[u8],
     options: AtlasBakeOptions,
@@ -373,7 +375,7 @@ pub fn bake_glb(
         None
     };
 
-    let indices = if let Some(index_accessor) = snapshot.index_accessor {
+    let mut indices = if let Some(index_accessor) = snapshot.index_accessor {
         read_indices(&glb.document, &glb.binary, index_accessor)?
     } else {
         (0..u32::try_from(snapshot.source_vertices).map_err(|_| invalid("too many vertices"))?)
@@ -391,11 +393,14 @@ pub fn bake_glb(
         return Err(invalid("an index points outside the POSITION accessor"));
     }
 
+    let source_triangles = indices.len() / 3;
+    let chart_positions = prepare_chart_mesh(&positions, &mut indices)?;
+    let zero_area_triangles_removed = source_triangles - indices.len() / 3;
     let base_png = read_png_image(&glb.document, &glb.binary, snapshot.base_image)?;
     let mr_png = read_png_image(&glb.document, &glb.binary, snapshot.mr_image)?;
     let native = meshharbor_xatlas_sys::unwrap_and_bake(
         meshharbor_xatlas_sys::AtlasInput {
-            positions: &positions,
+            positions: &chart_positions,
             normals: normals.as_deref(),
             original_uv: &source_uv,
             indices: &indices,
@@ -576,9 +581,19 @@ pub fn bake_glb(
         return Err(invalid("the GLB embedded buffer entry is missing"));
     }
 
+    let mut warnings = vec![
+        "Texture transfer samples the original UV-mapped surface; this operation does not simplify or transfer onto different geometry.".into(),
+        "Normal, occlusion, and emissive texture baking is not implemented; assets using those maps are rejected.".into(),
+    ];
+    if zero_area_triangles_removed > 0 {
+        warnings.push(format!(
+            "Omitted {zero_area_triangles_removed} zero-area triangles that cannot be unwrapped. The source asset is unchanged."
+        ));
+    }
     let report = AtlasBakeReport {
-        source_triangles: (indices.len() / 3) as u64,
+        source_triangles: source_triangles as u64,
         output_triangles: (native.indices.len() / 3) as u64,
+        zero_area_triangles_removed: zero_area_triangles_removed as u64,
         source_vertices: snapshot.source_vertices as u64,
         output_vertices: native.xref.len() as u64,
         atlas_width: native.width,
@@ -588,12 +603,58 @@ pub fn bake_glb(
         gutter_texels: native.gutter_texels,
         preserved_attributes,
         rebaked_maps: vec!["baseColorTexture".into(), "metallicRoughnessTexture".into()],
-        warnings: vec![
-            "Texture transfer samples the original UV-mapped surface; this operation does not simplify or transfer onto different geometry.".into(),
-            "Normal, occlusion, and emissive texture baking is not implemented; assets using those maps are rejected.".into(),
-        ],
+        warnings,
     };
     Ok((glb.write()?, report))
+}
+
+fn prepare_chart_mesh(
+    positions: &[[f32; 3]],
+    indices: &mut Vec<u32>,
+) -> Result<Vec<[f32; 3]>, AtlasBakeError> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    let mut retained = 0;
+    for offset in (0..indices.len()).step_by(3) {
+        let triangle = [indices[offset], indices[offset + 1], indices[offset + 2]];
+        let [first, second, third] = triangle.map(|index| positions[index as usize].map(f64::from));
+        let edge = std::array::from_fn::<_, 3, _>(|axis| second[axis] - first[axis]);
+        let other = std::array::from_fn::<_, 3, _>(|axis| third[axis] - first[axis]);
+        if (0..3).all(|axis| {
+            edge[(axis + 1) % 3] * other[(axis + 2) % 3]
+                == edge[(axis + 2) % 3] * other[(axis + 1) % 3]
+        }) {
+            continue;
+        }
+        indices[retained..retained + 3].copy_from_slice(&triangle);
+        retained += 3;
+        for position in [first, second, third] {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(position[axis]);
+                max[axis] = max[axis].max(position[axis]);
+            }
+        }
+    }
+    if retained == 0 {
+        return Err(invalid(
+            "UV unwrap requires at least one non-zero-area triangle",
+        ));
+    }
+    indices.truncate(retained);
+    let span = (0..3).map(|axis| max[axis] - min[axis]).fold(0.0, f64::max);
+    let scale = (CHART_COORDINATE_EXTENT / span).log2().floor().exp2();
+    let mut normalized = vec![[0.0; 3]; positions.len()];
+    for &index in indices.iter() {
+        let vertex = index as usize;
+        normalized[vertex] = std::array::from_fn(|axis| {
+            if min[axis] == max[axis] {
+                0.0
+            } else {
+                (f64::from(positions[vertex][axis]) * scale) as f32
+            }
+        });
+    }
+    Ok(normalized)
 }
 
 /// Read the narrow source subset accepted for retopology appearance projection.

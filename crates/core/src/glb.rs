@@ -1596,7 +1596,7 @@ fn read_cleanup_positions(
         .collect()
 }
 
-fn triangle_has_zero_area(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> bool {
+pub(crate) fn triangle_has_zero_area(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> bool {
     let ab = [
         f64::from(b[0]) - f64::from(a[0]),
         f64::from(b[1]) - f64::from(a[1]),

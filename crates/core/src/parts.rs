@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::{cmp::Reverse, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -18,6 +18,10 @@ const MAX_PART_INDICES: u64 = 3_000_000;
 pub struct PartSeparationReport {
     pub triangles_before: u64,
     pub connected_parts: u64,
+    #[serde(default)]
+    pub output_primitives: u64,
+    #[serde(default)]
+    pub grouped_components: u64,
     pub triangles_per_part: Vec<u64>,
     pub method: String,
     pub warnings: Vec<String>,
@@ -128,9 +132,9 @@ impl Glb {
 }
 
 /// Split a static, indexed triangle GLB primitive into separate primitives by
-/// connected components that share indexed vertices. This keeps the GLB asset
-/// and material/attribute data intact while making each part independently
-/// addressable as a mesh primitive.
+/// connected components, matching duplicated vertices across unambiguous
+/// seams. Keep the source streams intact and group excess fragments rather than
+/// dropping geometry or exceeding the primitive limit.
 pub fn separate_components(bytes: &[u8]) -> Result<(Vec<u8>, PartSeparationReport), CoreError> {
     validate_part_glb_size(bytes.len() as u64)?;
     let mut glb = Glb::parse(bytes)?;
@@ -222,7 +226,7 @@ pub fn separate_components(bytes: &[u8]) -> Result<(Vec<u8>, PartSeparationRepor
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid("Primitive POSITION attribute is missing."))?
         as usize;
-    let positions_count = read_positions(doc, &bin[..declared_bin_length], positions_index)?;
+    let positions = read_positions(doc, &bin[..declared_bin_length], positions_index)?;
     let indices_index = primitive
         .get("indices")
         .and_then(Value::as_u64)
@@ -235,7 +239,7 @@ pub fn separate_components(bytes: &[u8]) -> Result<(Vec<u8>, PartSeparationRepor
         ));
     }
     for index in &indices {
-        if *index as usize >= positions_count {
+        if *index as usize >= positions.len() {
             return Err(invalid(
                 "Primitive index references a vertex outside POSITION.",
             ));
@@ -244,9 +248,9 @@ pub fn separate_components(bytes: &[u8]) -> Result<(Vec<u8>, PartSeparationRepor
     let triangle_count = indices.len() / 3;
     let mut parent: Vec<usize> = (0..triangle_count).collect();
     let mut rank = vec![0u8; triangle_count];
-    let mut first_for_vertex = vec![usize::MAX; positions_count];
-    for triangle in 0..triangle_count {
-        for vertex in &indices[triangle * 3..triangle * 3 + 3] {
+    let mut first_for_vertex = vec![usize::MAX; positions.len()];
+    for (triangle, vertices) in indices.chunks_exact(3).enumerate() {
+        for vertex in vertices {
             let vertex_index = *vertex as usize;
             let first = first_for_vertex[vertex_index];
             if first == usize::MAX {
@@ -256,30 +260,14 @@ pub fn separate_components(bytes: &[u8]) -> Result<(Vec<u8>, PartSeparationRepor
             }
         }
     }
-    let mut groups: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
-    let mut component_count = 0;
-    for (triangle, tri) in indices.chunks_exact(3).enumerate() {
-        let root = find(&mut parent, triangle);
-        match groups.entry(root) {
-            Entry::Occupied(mut entry) => entry.get_mut().extend_from_slice(tri),
-            Entry::Vacant(entry) => {
-                if component_count >= MAX_PARTS {
-                    return Err(unsupported(format!(
-                        "Part separation would exceed the limit of {MAX_PARTS} connected parts."
-                    )));
-                }
-                component_count += 1;
-                entry.insert(tri.to_vec());
-            }
-        }
-    }
-    let mut grouped: Vec<Vec<u32>> = groups.into_values().collect();
-    grouped.sort_by_key(|part| part.iter().copied().min().unwrap_or(u32::MAX));
+    drop(first_for_vertex);
+    merge_surface_seams(&positions, &indices, &mut parent, &mut rank);
+    drop(positions);
+    drop(rank);
+    let (grouped, component_count) = group_components(&indices, &mut parent);
     let triangles_per_part: Vec<u64> = grouped.iter().map(|part| (part.len() / 3) as u64).collect();
     drop(indices);
     drop(parent);
-    drop(rank);
-    drop(first_for_vertex);
     let mut output_bin = bin;
     let mut output_primitives = Vec::with_capacity(grouped.len());
     let mut buffer_views = doc
@@ -327,20 +315,158 @@ pub fn separate_components(bytes: &[u8]) -> Result<(Vec<u8>, PartSeparationRepor
     if let Some((_, data)) = glb.chunks.iter_mut().find(|(kind, _)| *kind == BIN_CHUNK) {
         *data = output_bin;
     }
+    let grouped_components = if component_count > MAX_PARTS {
+        component_count - (MAX_PARTS - 1)
+    } else {
+        0
+    };
+    let mut warnings = vec![
+        "Shared indices and unambiguous oppositely oriented edges with exactly matching positions define connectivity. Point contacts and ambiguous positional edges do not join separate index components.".into(),
+        "Output parts are TRIANGLES primitives in one GLB mesh. Original vertex streams and materials are retained; source buffer data remains in the binary chunk.".into(),
+    ];
+    if grouped_components > 0 {
+        warnings.push(format!(
+            "The largest {} connected components are separate primitives; {grouped_components} smaller components share the last primitive to stay within the {MAX_PARTS}-primitive limit. No triangles were discarded.",
+            MAX_PARTS - 1
+        ));
+    }
     let report = PartSeparationReport {
         triangles_before: triangle_count as u64,
-        connected_parts: grouped.len() as u64,
+        connected_parts: component_count as u64,
+        output_primitives: grouped.len() as u64,
+        grouped_components: grouped_components as u64,
         triangles_per_part,
-        method: "shared_indexed_vertex_components".into(),
-        warnings: vec![
-            "Connectivity is determined by shared vertex indices; touching surfaces with duplicated vertices are separate parts.".into(),
-            "Parts are emitted as separate TRIANGLES primitives in one GLB mesh. Original vertex streams and materials are retained; source buffer data remains in the binary chunk.".into(),
-        ],
+        method: "indexed_components_with_exact_seams".into(),
+        warnings,
     };
     Ok((glb.write()?, report))
 }
 
-fn read_positions(doc: &Value, bin: &[u8], accessor_index: usize) -> Result<usize, CoreError> {
+enum Seam {
+    Single {
+        triangle: u32,
+        opposite: u32,
+        forward: bool,
+    },
+    Pair(u32, u32),
+    Ambiguous,
+}
+
+fn merge_surface_seams(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    parent: &mut [usize],
+    rank: &mut [u8],
+) {
+    let mut canonical = HashMap::new();
+    let mut duplicated = vec![false; positions.len()];
+    let vertices: Vec<u32> = positions
+        .iter()
+        .enumerate()
+        .map(|(index, position)| {
+            let key = position.map(|value| if value == 0.0 { 0 } else { value.to_bits() });
+            let representative = *canonical.entry(key).or_insert(index);
+            if representative != index {
+                duplicated[representative] = true;
+            }
+            representative as u32
+        })
+        .collect();
+    drop(canonical);
+    let mut seams: HashMap<(u32, u32), Seam> = HashMap::new();
+    for (triangle, vertices_of_face) in indices.chunks_exact(3).enumerate() {
+        let [first, second, third] = [
+            vertices_of_face[0],
+            vertices_of_face[1],
+            vertices_of_face[2],
+        ];
+        let [a, b, c] = [first, second, third].map(|index| vertices[index as usize]);
+        let is_candidate =
+            |start: u32, end: u32| duplicated[start as usize] && duplicated[end as usize];
+        if !(is_candidate(a, b) || is_candidate(b, c) || is_candidate(c, a))
+            || crate::glb::triangle_has_zero_area(
+                positions[first as usize],
+                positions[second as usize],
+                positions[third as usize],
+            )
+        {
+            continue;
+        }
+        let triangle = triangle as u32;
+        for (start, end, opposite) in [(a, b, c), (b, c, a), (c, a, b)] {
+            if is_candidate(start, end) {
+                let forward = start < end;
+                let edge = (start.min(end), start.max(end));
+                seams
+                    .entry(edge)
+                    .and_modify(|seam| {
+                        *seam = match *seam {
+                            Seam::Single {
+                                triangle: other,
+                                opposite: other_opposite,
+                                forward: other_forward,
+                            } if forward != other_forward && opposite != other_opposite => {
+                                Seam::Pair(other, triangle)
+                            }
+                            _ => Seam::Ambiguous,
+                        };
+                    })
+                    .or_insert(Seam::Single {
+                        triangle,
+                        opposite,
+                        forward,
+                    });
+            }
+        }
+    }
+    for seam in seams.into_values() {
+        if let Seam::Pair(first, second) = seam {
+            union(parent, rank, first as usize, second as usize);
+        }
+    }
+}
+
+fn group_components(indices: &[u32], parent: &mut [usize]) -> (Vec<Vec<u32>>, usize) {
+    let mut sizes = vec![0; parent.len()];
+    let mut minimum_vertices = vec![u32::MAX; parent.len()];
+    for (triangle, vertices) in indices.chunks_exact(3).enumerate() {
+        let root = find(parent, triangle);
+        sizes[root] += 1;
+        minimum_vertices[root] =
+            minimum_vertices[root].min(*vertices.iter().min().expect("triangle"));
+    }
+    let mut roots: Vec<_> = (0..parent.len()).filter(|&root| sizes[root] > 0).collect();
+    let component_count = roots.len();
+    if component_count > MAX_PARTS {
+        roots.sort_unstable_by_key(|&root| (Reverse(sizes[root]), minimum_vertices[root], root));
+        roots.truncate(MAX_PARTS - 1);
+    } else {
+        roots.sort_unstable_by_key(|&root| (minimum_vertices[root], root));
+    }
+    let mut output_by_root = vec![roots.len(); parent.len()];
+    let mut grouped: Vec<_> = roots
+        .iter()
+        .enumerate()
+        .map(|(index, &root)| {
+            output_by_root[root] = index;
+            Vec::with_capacity(sizes[root] * 3)
+        })
+        .collect();
+    if component_count > MAX_PARTS {
+        grouped.push(Vec::new());
+    }
+    for (triangle, vertices) in indices.chunks_exact(3).enumerate() {
+        let root = find(parent, triangle);
+        grouped[output_by_root[root]].extend_from_slice(vertices);
+    }
+    (grouped, component_count)
+}
+
+fn read_positions(
+    doc: &Value,
+    bin: &[u8],
+    accessor_index: usize,
+) -> Result<Vec<[f32; 3]>, CoreError> {
     let accessor = array(doc, "accessors")
         .get(accessor_index)
         .ok_or_else(|| invalid("POSITION accessor does not exist."))?;
@@ -400,6 +526,7 @@ fn read_positions(doc: &Value, bin: &[u8], accessor_index: usize) -> Result<usiz
     if count == 0 || count - 1 > available.saturating_sub(12) / stride {
         return Err(invalid("POSITION accessor exceeds its bufferView."));
     }
+    let mut positions = Vec::with_capacity(count);
     for i in 0..count {
         let offset = start
             .checked_add(
@@ -411,16 +538,20 @@ fn read_positions(doc: &Value, bin: &[u8], accessor_index: usize) -> Result<usiz
             .checked_add(12)
             .filter(|end| *end <= view_end)
             .ok_or_else(|| invalid("POSITION accessor exceeds BIN chunk."))?;
-        for component in 0..3 {
-            let pos = offset + component * 4;
-            let value = f32::from_le_bytes(bin[pos..pos + 4].try_into().expect("four bytes"));
-            if !value.is_finite() {
-                return Err(invalid("POSITION contains a non-finite value."));
-            }
+        let position = std::array::from_fn(|component| {
+            let start = component * 4;
+            f32::from_le_bytes(
+                bin[offset..end][start..start + 4]
+                    .try_into()
+                    .expect("four bytes"),
+            )
+        });
+        if position.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("POSITION contains a non-finite value."));
         }
-        debug_assert_eq!(end - offset, 12);
+        positions.push(position);
     }
-    Ok(count)
+    Ok(positions)
 }
 
 fn read_indices(doc: &Value, bin: &[u8], accessor_index: usize) -> Result<Vec<u32>, CoreError> {
@@ -726,9 +857,60 @@ mod tests {
     }
 
     #[test]
-    fn rejects_more_connected_parts_than_the_bounded_output_allows() {
-        let error = separate_components(&disconnected_triangles(MAX_PARTS + 1)).unwrap_err();
-        assert!(error.to_string().contains("connected parts"));
+    fn groups_excess_components_without_discarding_triangles() {
+        let count = MAX_PARTS as u64 + 1;
+        let (output, report) =
+            separate_components(&disconnected_triangles(count as usize)).unwrap();
+        assert_eq!(report.connected_parts, count);
+        assert_eq!(report.triangles_before, count);
+        assert_eq!(report.grouped_components, 2);
+        assert_eq!(report.output_primitives, MAX_PARTS as u64);
+        assert_eq!(report.triangles_per_part.last(), Some(&2));
+        assert_eq!(report.triangles_per_part.iter().sum::<u64>(), count);
+
+        let parsed = Glb::parse(&output).unwrap();
+        let primitives = array(&parsed.document["meshes"][0], "primitives");
+        let mut output_indices = Vec::new();
+        for primitive in primitives {
+            let accessor = primitive["indices"].as_u64().unwrap() as usize;
+            output_indices
+                .extend(read_indices(&parsed.document, parsed.binary(), accessor).unwrap());
+        }
+        assert_eq!(output_indices, (0..count as u32 * 3).collect::<Vec<_>>());
+
+        let (_, at_limit) = separate_components(&disconnected_triangles(MAX_PARTS)).unwrap();
+        assert_eq!(at_limit.grouped_components, 0);
+    }
+
+    #[test]
+    fn joins_only_unambiguous_opposite_seams() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 2.0, 0.0],
+        ];
+        for (indices, expected_components) in [
+            (&[0, 1, 2, 4, 3, 5][..], 1),
+            (&[0, 1, 2, 3, 4, 5][..], 2),
+            (&[0, 1, 2, 4, 3, 5, 6, 7, 8][..], 3),
+            (&[0, 1, 2, 3, 8, 9][..], 2),
+            (&[0, 1, 2, 4, 3, 2][..], 2),
+        ] {
+            let mut parent: Vec<_> = (0..indices.len() / 3).collect();
+            let mut rank = vec![0; parent.len()];
+            merge_surface_seams(&positions, indices, &mut parent, &mut rank);
+            assert_eq!(
+                group_components(indices, &mut parent).1,
+                expected_components
+            );
+        }
     }
 
     #[test]

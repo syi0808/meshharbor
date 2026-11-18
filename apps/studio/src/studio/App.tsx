@@ -49,7 +49,6 @@ import { formatVersionSizes, inspectorForAsset, shouldHighlightExport, WORKBENCH
 import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
-type StudioMeshOperationId = Exclude<MeshOperationId, 'uv.unwrap'>;
 type AssetKindFilter = AssetKind | 'all';
 type AssetOriginFilter = 'all' | 'original' | 'derived';
 interface AssetBrowserFilters {
@@ -92,7 +91,7 @@ function formatSize(size: number) {
   return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(0)} KiB` : `${(size / (1024 * 1024)).toFixed(2)} MiB`;
 }
 
-const meshOperationOptions: Array<{ id: StudioMeshOperationId; title: string; description: string }> = [
+const meshOperationOptions: Array<{ id: MeshOperationId; title: string; description: string }> = [
   {
     id: 'mesh.retopology',
     title: 'Quad retopology (experimental)',
@@ -106,7 +105,12 @@ const meshOperationOptions: Array<{ id: StudioMeshOperationId; title: string; de
   {
     id: 'mesh.separate_parts',
     title: 'Separate connected parts',
-    description: 'Split disconnected indexed components into primitives within the same mesh; no node separation or welding.',
+    description: 'Find connected surfaces across exact seams without welding. On fragmented meshes, small components share one primitive to stay within the output limit.',
+  },
+  {
+    id: 'uv.unwrap',
+    title: 'UV atlas rebake',
+    description: 'Repack one textured mesh primitive with one material and rebake its embedded base-color and metallic/roughness PNGs. Zero-area faces are omitted from the result. This is not a high-to-low bake.',
   },
   {
     id: 'render.optimize',
@@ -577,7 +581,11 @@ export function App() {
             setNotice(`Compression complete. Saved ${formatSize(saved)}. This GLB requires KHR_meshopt_compression support; the original remains unchanged.`);
           } else if (latest.operation === 'mesh.separate_parts') {
             const parts = Number(resultReport.connected_parts ?? 0);
-            setNotice(`Part separation complete. Found ${parts.toLocaleString()} connected component${parts === 1 ? '' : 's'}, emitted as primitives in the same mesh.`);
+            const grouped = Number(resultReport.grouped_components ?? 0);
+            const primitives = Number(resultReport.output_primitives ?? parts);
+            setNotice(grouped > 0
+              ? `Part separation complete. Found ${parts.toLocaleString()} connected components. ${grouped.toLocaleString()} small components share the last of ${primitives.toLocaleString()} output primitives; no triangles were discarded.`
+              : `Part separation complete. Found ${parts.toLocaleString()} connected component${parts === 1 ? '' : 's'}, emitted as primitives in the same mesh.`);
           } else if (latest.operation === 'mesh.retopology') {
             const projection = resultReport.appearance_projection;
             const coverage = projection && typeof projection === 'object'
@@ -863,7 +871,7 @@ export function App() {
     }
   }
 
-  async function runMeshOperation(operation: StudioMeshOperationId) {
+  async function runMeshOperation(operation: MeshOperationId) {
     if (!selectedAsset || selectedAsset.kind !== 'mesh') return;
     invalidateHistoryRequests();
     setError(null);
@@ -1044,6 +1052,7 @@ export function App() {
   const showInspectorSheet = inspectorIsSheet && !!openInspector;
   const exportIsPrimary = shouldHighlightExport(activeView, openInspector, isRunning, connection === 'connected');
   const runtimeJobRunning = isRunning && job.operation.startsWith('runtime.');
+  const jobShowsProgress = isRunning && displaysJobProgress(job.operation);
   function restoreInspectorFocus() {
     const trigger = inspectorTrigger.current;
     if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus();
@@ -1056,13 +1065,14 @@ export function App() {
   const jobFeedback = isRunning ? (
     <div className="grid gap-2 rounded-lg border bg-card p-3 text-xs text-card-foreground">
       <div className="flex flex-wrap items-center gap-2" role="status">
-        {runtimeJobRunning
-          ? <Spinner role="progressbar" aria-label="Job progress" />
-          : <Spinner aria-hidden="true" />}
+        {jobShowsProgress
+          ? <Spinner aria-hidden="true" />
+          : <Spinner role="progressbar" aria-label="Job progress" />}
         <strong>{job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating' : job.state === 'cancelling' ? 'Cancelling' : 'Working'}</strong>
-        <span>{studioOperationLabel(job.operation)}{!runtimeJobRunning && ` · ${job.progress}%`}</span>
+        <span>{studioOperationLabel(job.operation)}{jobShowsProgress && ` · ${job.progress}%`}</span>
       </div>
-      {!runtimeJobRunning && <Progress value={job.progress} aria-label="Job progress" />}
+      {jobShowsProgress && <Progress value={job.progress} aria-label="Job progress" />}
+      {job.operation === 'image.generate' && job.state === 'running' && <p className="text-muted-foreground">Running locally. Generation can take several minutes.</p>}
       {isQueuedJobCancellable(job) && <Button variant="outline" size="sm" className="justify-self-start" onClick={() => void cancelJob()}>Cancel queued job</Button>}
     </div>
   ) : null;
@@ -1071,7 +1081,7 @@ export function App() {
   ) : (error || notice) ? (
     <Alert variant={error ? 'destructive' : 'default'} role={error ? 'alert' : 'status'}>
       {error && <WarningCircleIcon aria-hidden="true" />}
-      <AlertDescription>{error ?? notice}</AlertDescription>
+      <AlertDescription className="min-w-0 wrap-anywhere">{error ?? notice}</AlertDescription>
       <AlertAction><Button variant="ghost" size="icon-sm" onClick={() => { setError(null); closeNotice(); }} aria-label="Dismiss"><XIcon /></Button></AlertAction>
     </Alert>
   ) : null;
@@ -1083,10 +1093,10 @@ export function App() {
           onClick={() => { selectAsset(asset); if (sidebar.narrow) sidebar.setPanel(null); }}>
           <ItemMedia variant="icon" className="text-muted-foreground">{asset.kind === 'mesh' ? <CubeIcon aria-hidden="true" /> : <FileImageIcon aria-hidden="true" />}</ItemMedia>
           <ItemContent className="min-w-0">
-            <ItemTitle className="min-w-0"><span className="truncate" title={asset.name}>{asset.name}</span></ItemTitle>
+            <ItemTitle className="min-w-0 w-full"><span className="block min-w-0 truncate" title={asset.name}>{asset.name}</span></ItemTitle>
             <ItemDescription>{asset.source_asset_id ? 'Result' : 'Original'} · {formatSize(asset.byte_size)}</ItemDescription>
           </ItemContent>
-          {asset.kind === 'mesh' && <ItemActions><span className="text-right tabular-nums text-muted-foreground">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small className="block">tris</small></span></ItemActions>}
+          {asset.kind === 'mesh' && <ItemActions className="shrink-0"><span className="text-right tabular-nums text-muted-foreground">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small className="block">tris</small></span></ItemActions>}
         </button>
       </Item>
     );
@@ -1360,7 +1370,7 @@ export function App() {
                   <Button variant="ghost" size="sm" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
                 </div>
                 {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
-                  <details className="rounded-lg border p-2 text-muted-foreground [&>summary]:cursor-pointer"><summary>Recover an interrupted job</summary>
+                  <details className="rounded-lg border p-2 wrap-anywhere text-muted-foreground [&>summary]:cursor-pointer"><summary>Recover an interrupted job</summary>
                     <p>Checking a record does not resume it. If the engine exited unexpectedly, stop all REST/MCP processes for this data directory before running <code>meshharbor jobs recover-interrupted --confirm-no-running-meshharbor</code>.</p>
                   </details>}
                 {recentJobs.length === 0
@@ -1368,7 +1378,7 @@ export function App() {
                   : <div className="grid gap-2">{recentJobs.slice(0, 8).map((savedJob) => (
                     <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-2 data-[selected=true]:bg-muted" data-selected={savedJob.id === job?.id} key={savedJob.id}>
                       <div className="grid min-w-0 flex-1 gap-1 wrap-anywhere [&>strong]:font-medium [&>small]:text-muted-foreground"><strong>{studioOperationLabel(savedJob.operation)}</strong><small>Updated {formatJobTime(savedJob.updated_at)}</small></div>
-                      <div className="shrink-0 text-right text-xs tabular-nums text-muted-foreground data-[state=failed]:text-destructive [&>strong]:block" data-state={savedJob.state}><strong>{savedJob.state === 'succeeded' ? 'Complete' : savedJob.state[0].toUpperCase() + savedJob.state.slice(1)}</strong>{isActiveJob(savedJob) && <span>{savedJob.progress}%</span>}</div>
+                      <div className="shrink-0 text-right text-xs tabular-nums text-muted-foreground data-[state=failed]:text-destructive [&>strong]:block" data-state={savedJob.state}><strong>{savedJob.state === 'succeeded' ? 'Complete' : savedJob.state[0].toUpperCase() + savedJob.state.slice(1)}</strong>{isActiveJob(savedJob) && displaysJobProgress(savedJob.operation) && <span>{savedJob.progress}%</span>}</div>
                       <Button variant="ghost" size="sm" onClick={() => { void openRecentJob(savedJob.id); if (sidebar.narrow) sidebar.setPanel(null); }} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</Button>
                     </div>
                   ))}</div>}
@@ -1532,6 +1542,10 @@ export function App() {
 function formatJobTime(timestamp: string): string {
   const date = new Date(Number(timestamp));
   return Number.isNaN(date.getTime()) ? 'time unavailable' : date.toLocaleString();
+}
+
+function displaysJobProgress(operation: string): boolean {
+  return operation !== 'image.generate' && !operation.startsWith('runtime.');
 }
 
 function studioOperationLabel(operation: string): string {

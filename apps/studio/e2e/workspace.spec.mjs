@@ -1,5 +1,6 @@
 import { expect } from '@playwright/test';
 import { test } from './studio-fixture.mjs';
+import { texturedGlb } from './textured-glb.mjs';
 
 test('the desktop library opens on first visit and remembers a collapsed dock', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
@@ -37,6 +38,55 @@ test('the icon rail overlays a label and the desktop library remembers its resiz
   const resizedWidth = await panelWidth();
   await page.reload();
   await expect.poll(panelWidth).toBe(resizedWidth);
+});
+
+test('long model names do not overlap row metadata at narrow panel and mobile widths', async ({ page, studioOrigin }) => {
+  const name = 'MeshHarbor-reference-asset-with-an-extraordinarily-long-name-generated-simplified.glb';
+  await page.goto(studioOrigin);
+  await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.getByRole('button', { name: 'Open GLB', exact: true }).click(),
+  ]);
+  await chooser.setFiles({ name, mimeType: 'model/gltf-binary', buffer: texturedGlb() });
+
+  const assertNoOverflow = async (library) => {
+    const item = library.getByRole('button', { name: new RegExp(name.replace('.', '\\.')) });
+    await expect(item).toBeVisible();
+    await expect(item.getByText('tris', { exact: true })).toBeVisible();
+    await expect(item.getByTitle(name, { exact: true })).toHaveCSS('text-overflow', 'ellipsis');
+    const bounds = await item.evaluate((row) => {
+      const filename = row.querySelector('[data-slot="item-title"] span');
+      const metadata = row.querySelector('[data-slot="item-actions"]');
+      return {
+        truncated: filename.scrollWidth > filename.clientWidth,
+        titleRight: filename.getBoundingClientRect().right,
+        metadataLeft: metadata.getBoundingClientRect().left,
+        metadataRight: metadata.getBoundingClientRect().right,
+        rowRight: row.getBoundingClientRect().right,
+        overflow: row.scrollWidth - row.clientWidth,
+      };
+    });
+    expect(bounds.truncated).toBe(true);
+    expect(bounds.titleRight).toBeLessThan(bounds.metadataLeft);
+    expect(bounds.metadataRight).toBeLessThan(bounds.rowRight);
+    expect(bounds.overflow).toBe(0);
+  };
+
+  const dock = page.locator('#workbench-sidebar-dock');
+  await assertNoOverflow(dock);
+  const handle = page.getByRole('separator', { name: 'Resize library panel' });
+  const defaultWidth = await dock.evaluate(element => element.clientWidth);
+  await handle.press('ArrowLeft');
+  await expect.poll(() => dock.evaluate(element => element.clientWidth)).toBeLessThan(defaultWidth);
+  await assertNoOverflow(dock);
+
+  await page.setViewportSize({ width: 320, height: 720 });
+  const assets = page.getByRole('button', { name: 'Assets', exact: true });
+  await expect(assets).toHaveAttribute('aria-expanded', 'false');
+  await assets.click();
+  await assertNoOverflow(page.getByRole('dialog', { name: 'Assets' }));
+  expect(await page.locator('html').evaluate(element => element.scrollWidth)).toBe(320);
 });
 
 test('buttons, native selects and dialogs keep the official Mira dimensions', async ({ page, studioOrigin }) => {

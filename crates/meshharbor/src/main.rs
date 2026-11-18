@@ -82,7 +82,7 @@ enum Command {
         target_quads: Option<u32>,
     },
     /// Run a supported local mesh operation. For retopology, --output writes the triangle GLB preview and --quad-output preserves the editable OBJ quads.
-    /// Part separation limits: 64 MiB GLB, 4 MiB JSON, 1,000,000 vertices, 3,000,000 indices, and 256 output parts.
+    /// Part separation limits: 64 MiB GLB, 4 MiB JSON, 1,000,000 vertices, 3,000,000 indices, and 256 output primitives (excess fragments grouped).
     ProcessMesh {
         asset_id: String,
         #[arg(long, value_parser = ["mesh.cleanup", "mesh.separate_parts", "uv.unwrap", "render.optimize", "mesh.compress", "mesh.retopology"])]
@@ -463,7 +463,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits connected-component primitives in one mesh. uv.unwrap is same-mesh rebaking, not high-to-low projection. Quad retopology requires a compatible managed or adjacent QuadriFlow sidecar and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
+        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits up to 256 primitives in one mesh, grouping excess fragments without discarding triangles. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires a verified, manifest-matched managed QuadriFlow sidecar and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
     )]
     async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
         let args = params.0;

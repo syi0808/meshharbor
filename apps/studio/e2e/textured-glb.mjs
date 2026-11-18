@@ -57,7 +57,7 @@ function chunk(type, bytes, padding) {
   return Buffer.concat([header, aligned]);
 }
 
-export function texturedGlb() {
+export function texturedGlb({ singleMaterial = false } = {}) {
   const payload = [];
   const bufferViews = [];
   const accessors = [];
@@ -88,7 +88,8 @@ export function texturedGlb() {
     }) - 1;
   }
 
-  const primitives = [panel(-1, -0.125, 0, addAccessor), panel(0, 0.125, 1, addAccessor)];
+  const primitives = [panel(-1, -0.125, 0, addAccessor)];
+  if (!singleMaterial) primitives.push(panel(0, 0.125, 1, addAccessor));
   const images = [
     encodePng([225, 25, 16, 255], [16, 190, 25, 255]),
     encodePng([25, 47, 230, 255], [230, 194, 19, 255]),
@@ -110,8 +111,8 @@ export function texturedGlb() {
         baseColorTexture: { index: 1 }, metallicRoughnessTexture: { index: 2 },
         metallicFactor: 0.7, roughnessFactor: 0.55,
       } },
-    ],
-    textures: images.map((_, source) => ({ source, sampler: 0 })),
+    ].slice(0, singleMaterial ? 1 : 2),
+    textures: images.map((_, source) => singleMaterial ? { source } : { source, sampler: 0 }),
     samplers: [{ magFilter: 9728, minFilter: 9728, wrapS: 33071, wrapT: 33071 }],
     images,
     buffers: [{ byteLength: binary.length }],

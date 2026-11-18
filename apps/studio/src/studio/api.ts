@@ -387,15 +387,18 @@ const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
     metrics: [
       { key: 'triangles_before', label: 'Triangles before', formatter: 'count' },
       { key: 'connected_parts', label: 'Connected parts', formatter: 'count' },
+      { key: 'output_primitives', label: 'Output primitives', formatter: 'count' },
+      { key: 'grouped_components', label: 'Grouped components', formatter: 'count' },
       { key: 'method', label: 'Method', formatter: 'text' },
     ],
-    lists: [{ key: 'triangles_per_part', label: 'Triangles per part', formatter: 'count-list' }],
+    lists: [{ key: 'triangles_per_part', label: 'Triangles per output primitive', formatter: 'count-list' }],
   },
   'uv.unwrap': {
     title: 'UV unwrap',
     metrics: [
       { key: 'source_triangles', label: 'Source triangles', formatter: 'count' },
       { key: 'output_triangles', label: 'Output triangles', formatter: 'count' },
+      { key: 'zero_area_triangles_removed', label: 'Zero-area triangles omitted', formatter: 'count' },
       { key: 'source_vertices', label: 'Source vertices', formatter: 'count' },
       { key: 'output_vertices', label: 'Output vertices', formatter: 'count' },
       { key: 'atlas_width', label: 'Atlas width', formatter: 'count' },

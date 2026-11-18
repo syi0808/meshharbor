@@ -71,6 +71,38 @@ async function exportSelectedGlb(page, filename) {
   return readFile(await download.path());
 }
 
+test('Studio rebakes a supported GLB UV atlas and exports both PBR maps', async ({ page, studioOrigin }) => {
+  const sourceName = 'atlas-source.glb';
+  const resultName = 'atlas-source-atlas-unwrapped.glb';
+  const source = texturedGlb({ singleMaterial: true });
+  await page.goto(studioOrigin);
+  await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.getByRole('button', { name: 'Open GLB', exact: true }).click(),
+  ]);
+  await chooser.setFiles({ name: sourceName, mimeType: 'model/gltf-binary', buffer: source });
+  const selected = page.getByRole('region', { name: 'Selected asset' });
+  await expect(selected.getByTitle(sourceName, { exact: true })).toBeVisible();
+  await selected.getByRole('button', { name: 'More tools' }).click();
+  await page.getByRole('button', { name: 'UV atlas rebake', exact: true }).click();
+  await page.getByRole('button', { name: 'Run UV atlas rebake' }).click();
+  await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
+
+  const before = inspectTexturedGlb(source);
+  const after = inspectTexturedGlb(await exportSelectedGlb(page, resultName));
+  expect(after.triangles).toBe(before.triangles);
+  const material = after.appearance.materials[0].pbrMetallicRoughness;
+  for (const role of ['baseColorTexture', 'metallicRoughnessTexture']) {
+    const texture = after.appearance.textures[material[role].index];
+    expect(texture.source).toBeGreaterThanOrEqual(before.appearance.images.length);
+    const image = after.appearance.images[texture.source];
+    expect(image.mimeType).toBe('image/png');
+    const { width, height } = PNG.sync.read(image.bytes);
+    expect(Math.min(width, height)).toBeGreaterThan(8);
+  }
+});
+
 test('Studio optimizes a textured GLB without changing its materials or textures', async ({ page, studioOrigin }, testInfo) => {
   const sourceName = 'textured-panels.glb';
   const resultName = 'textured-panels-simplified.glb';

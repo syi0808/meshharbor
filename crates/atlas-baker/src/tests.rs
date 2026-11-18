@@ -224,6 +224,79 @@ fn fixture(with_tangent: bool, with_normal_map: bool, with_color: bool) -> Vec<u
 }
 
 #[test]
+fn rebake_preserves_small_surfaces_and_reports_only_zero_area_triangles_removed() {
+    let mut glb = super::Glb::parse(&fixture(false, false, false)).unwrap();
+    let positions = [
+        0.0,
+        0.0,
+        f32::MAX,
+        0.00001,
+        0.0,
+        f32::MAX,
+        0.00001,
+        0.00001,
+        f32::MAX,
+        0.0,
+        0.00001,
+        f32::MAX,
+    ];
+    glb.binary[..48].copy_from_slice(&floats(&positions));
+    let index_bytes: Vec<_> = [0u16, 1, 2, 0, 2, 3, 0, 0, 1]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let view = super::append_view(
+        &mut glb.document,
+        &mut glb.binary,
+        &index_bytes,
+        Some(34963),
+    )
+    .unwrap();
+    glb.document["accessors"][3]["bufferView"] = json!(view);
+    glb.document["accessors"][3]["count"] = json!(9);
+    glb.document["buffers"][0]["byteLength"] = json!(glb.binary.len());
+    let (output, report) = bake_glb(
+        &glb.write().unwrap(),
+        AtlasBakeOptions {
+            resolution: 128,
+            padding: 4,
+        },
+    )
+    .unwrap();
+    assert_eq!(report.source_triangles, 3);
+    assert_eq!(report.output_triangles, 2);
+    assert_eq!(report.zero_area_triangles_removed, 1);
+    assert!(report.covered_texels > 0);
+    let result = super::Glb::parse(&output).unwrap();
+    let position_accessor = result.document["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+        .as_u64()
+        .unwrap() as usize;
+    let output_positions = super::decode_vec3(
+        &super::read_accessor(&result.document, &result.binary, position_accessor)
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(output_positions.iter().all(|position| {
+        positions
+            .chunks_exact(3)
+            .any(|original| original == position)
+    }));
+
+    let mut only_degenerate = glb;
+    only_degenerate.binary[..48].fill(0);
+    assert!(
+        bake_glb(
+            &only_degenerate.write().unwrap(),
+            AtlasBakeOptions::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("non-zero-area")
+    );
+}
+
+#[test]
 fn projected_bake_reunwraps_target_and_reports_full_coverage() {
     let source = fixture(false, false, false);
     let source_mesh = extract_projection_source_mesh(&source).unwrap();
