@@ -1434,6 +1434,17 @@ mod tests {
 
     #[test]
     fn empty_bundled_manifest_stops_before_network_or_disk_writes() {
+        let mut empty = bundled_quadriflow_release_manifest().unwrap();
+        let bundle_empty = empty.artifacts.is_empty();
+        empty.artifacts.clear();
+        empty.release_tag = None;
+        assert!(matches!(
+            verified_release_manifest(&empty),
+            Err(QuadriFlowInstallError::NoReleaseArtifact)
+        ));
+        if !bundle_empty {
+            return;
+        }
         let root = std::env::temp_dir().join(format!("meshharbor-qf-empty-{}", Uuid::new_v4()));
         assert!(matches!(
             install_bundled_quadriflow_sidecar(&root),
@@ -1661,6 +1672,50 @@ mod tests {
         let inspected = crate::inspect_asset("preview.glb", &preview).unwrap();
         assert_eq!(inspected.kind, crate::AssetKind::Mesh);
         assert_eq!(inspected.metadata["triangles"], report.preview_triangles);
+        let (textured_preview, textured_obj, textured_report) =
+            crate::quadriflow::rehearse_textured_cube_with_worker(&resolved)
+                .expect("installed signed executable failed textured GLB retopology");
+        let appearance = textured_report.appearance_projection.unwrap();
+        assert_eq!(textured_report.input_vertices, 12);
+        assert_eq!(textured_report.input_triangles, 12);
+        assert_eq!(
+            textured_report.preview_triangles,
+            textured_report.output_quads * 2
+        );
+        assert!(textured_report.output_quads > 0);
+        assert!(appearance.projection_coverage >= 0.995);
+        assert_eq!(
+            appearance.rebaked_maps,
+            ["baseColorTexture", "metallicRoughnessTexture"]
+        );
+        let preview_metadata = crate::inspect_asset("textured-preview.glb", &textured_preview)
+            .unwrap()
+            .metadata;
+        assert_eq!(
+            preview_metadata["triangles"],
+            textured_report.preview_triangles
+        );
+        assert_eq!(preview_metadata["material_count"], 1);
+        let textured_source =
+            meshharbor_atlas_baker::extract_projection_source_mesh(&textured_preview)
+                .expect("textured GLB export must reference both supported embedded PNG maps");
+        assert_eq!(
+            textured_source.indices.len() as u64 / 3,
+            textured_report.preview_triangles
+        );
+        let (_, textured_obj_report) =
+            crate::parse_quad_obj_output(&textured_obj, &source_positions)
+                .expect("textured fixture's separate OBJ must remain geometry-only");
+        assert_eq!(
+            textured_obj_report.output_quads,
+            textured_report.output_quads
+        );
+        println!(
+            "signed native textured fixture: {} quad OBJ faces, {} GLB triangles, {:.2}% texture projection coverage",
+            textured_report.output_quads,
+            textured_report.preview_triangles,
+            appearance.projection_coverage * 100.0
+        );
         assert_eq!(
             resolve_installed(&root.path, platform, &verified).unwrap(),
             Some(resolved),

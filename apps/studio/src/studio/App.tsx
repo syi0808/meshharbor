@@ -148,6 +148,9 @@ export function App() {
   const comparisonPairRef = useRef(comparisonPair);
   const [comparisonLoadingSide, setComparisonLoadingSide] = useState<AssetComparisonSide | null>(null);
   const [targetTriangles, setTargetTriangles] = useState(4000);
+  const [targetQuads, setTargetQuads] = useState('10000');
+  const requestedQuads = Number(targetQuads);
+  const validQuadTarget = Number.isInteger(requestedQuads) && requestedQuads >= 4 && requestedQuads <= 50000;
   const [maxError, setMaxError] = useState(0.02);
   const [textureSize, setTextureSize] = useState(1024);
   const [targetFaces, setTargetFaces] = useState(100000);
@@ -855,12 +858,12 @@ export function App() {
   }
 
   async function checkRetopologyInput() {
-    if (!selectedAsset || selectedAsset.kind !== 'mesh' || checkingRetopology) return;
+    if (!selectedAsset || selectedAsset.kind !== 'mesh' || checkingRetopology || !validQuadTarget) return;
     const assetId = selectedAsset.id;
     setCheckingRetopology(true);
     setRetopologyCheck(null);
     try {
-      const report = await api.preflightRetopology(assetId);
+      const report = await api.preflightRetopology(assetId, requestedQuads);
       const input = report.appearance_projection_required ? 'Textured input' : 'Geometry-only input';
       const seams = report.coincident_boundary_vertices_joined ? ' Exact seams can be joined for the solver without changing the source.' : '';
       setRetopologyCheck({ assetId, message: `${input} passed the input checks (${report.input_triangles.toLocaleString()} triangles).${seams} The solver was not run.` });
@@ -872,7 +875,7 @@ export function App() {
   }
 
   async function runMeshOperation(operation: MeshOperationId) {
-    if (!selectedAsset || selectedAsset.kind !== 'mesh') return;
+    if (!selectedAsset || selectedAsset.kind !== 'mesh' || (operation === 'mesh.retopology' && !validQuadTarget)) return;
     invalidateHistoryRequests();
     setError(null);
     setNotice(null);
@@ -880,9 +883,9 @@ export function App() {
     setReportJob(null);
     setComparisonPair(null);
     try {
-      const parameters: Record<string, number> = operation === 'render.optimize'
-        ? { overdraw_threshold: 1.05 }
-        : {};
+      const parameters: Record<string, number> = {};
+      if (operation === 'render.optimize') parameters.overdraw_threshold = 1.05;
+      if (operation === 'mesh.retopology') parameters.target_quads = requestedQuads;
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
       setJob(nextJob);
     } catch (cause) {
@@ -1184,9 +1187,17 @@ export function App() {
                 <p className="text-muted-foreground">{tool.description}</p>
                 {tool.id === 'mesh.retopology' && (
                   <>
+                    <Field>
+                      <FieldLabel htmlFor="quad-target">Target quads</FieldLabel>
+                      <Input id="quad-target" type="number" min="4" max="50000" step="1"
+                        value={targetQuads} aria-invalid={!validQuadTarget}
+                        onChange={(event) => { setTargetQuads(event.currentTarget.value); setRetopologyCheck(null); }}
+                        disabled={busy || isRunning || checkingRetopology} />
+                      <FieldDescription>4–50,000. This is a target, not a guaranteed count.</FieldDescription>
+                    </Field>
                     <Button
                       variant="secondary" size="sm" className="w-full"
-                      disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || busy || checkingRetopology || connection !== 'connected' || isRunning}
+                      disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || !validQuadTarget || busy || checkingRetopology || connection !== 'connected' || isRunning}
                       onClick={() => void checkRetopologyInput()}
                     >
                       {checkingRetopology ? 'Checking input…' : 'Check retopology input'}
@@ -1199,7 +1210,7 @@ export function App() {
                 {!processing && (
                   <Button
                     className="w-full"
-                    disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || !available || busy || checkingRetopology || connection !== 'connected' || isRunning}
+                    disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || !available || busy || checkingRetopology || connection !== 'connected' || isRunning || (tool.id === 'mesh.retopology' && !validQuadTarget)}
                     onClick={() => void runMeshOperation(tool.id)}
                   >
                     Run {tool.title}

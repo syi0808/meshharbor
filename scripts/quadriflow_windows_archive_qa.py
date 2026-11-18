@@ -131,8 +131,12 @@ def build(args):
                   archive_evidence=True)
     for filename, raw in original.items():
         (payload / filename).write_bytes(raw)
-    for name in ("THIRD-PARTY-NOTICES.md", "sbom.spdx.json"):
-        (payload / name).write_bytes((evidence / "archive-evidence" / name).read_bytes())
+    archive_evidence = evidence / "archive-evidence"
+    (payload / "THIRD-PARTY-NOTICES.md").write_bytes((archive_evidence / "THIRD-PARTY-NOTICES.md").read_bytes())
+    historical_sbom = json.loads((archive_evidence / "sbom.spdx.json").read_bytes())
+    for record in historical_sbom["files"]:
+        record["checksums"] = [entry for entry in record["checksums"] if entry["algorithm"] == "SHA256"]
+    (payload / "sbom.spdx.json").write_bytes(notices.canonical(historical_sbom))
     archive = output / "windows-rehearsal.tar"
     report = ustar.build_ustar(payload, archive, PLATFORM)
     if report["size_bytes"] != EXPECTED_ARCHIVE_BYTES or report["sha256"] != EXPECTED_ARCHIVE_SHA256:

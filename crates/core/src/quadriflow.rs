@@ -982,6 +982,21 @@ pub(crate) fn execute_archive_rehearsal_cube(
     execute_quadriflow_worker(worker, input_path, output_path, 12)
 }
 
+#[cfg(test)]
+pub(crate) fn rehearse_textured_cube_with_worker(
+    worker: &Path,
+) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
+    quadriflow_retopology_glb_with_runner(
+        &tests::closed_textured_cube_glb(true),
+        QuadRetopologyOptions { target_quads: 384 },
+        || {
+            Some(|input: &Path, output: &Path, target| {
+                execute_quadriflow_worker(worker, input, output, target)
+            })
+        },
+    )
+}
+
 fn execute_quadriflow_worker(
     worker: &Path,
     input_path: &Path,
@@ -1220,7 +1235,7 @@ f 4 1 5 8\n";
         glb
     }
 
-    fn closed_textured_cube_glb(split_uv_seam: bool) -> Vec<u8> {
+    pub(super) fn closed_textured_cube_glb(split_uv_seam: bool) -> Vec<u8> {
         let positions = cube_positions();
         let mut position_values: Vec<f32> = positions.into_iter().flatten().collect();
         let mut normal_values: Vec<f32> = cube_positions()
@@ -1428,13 +1443,14 @@ f 4 1 5 8\n";
     fn unmanaged_sidecar_file_is_not_auto_discovered() {
         let root = std::env::temp_dir().join(format!("meshharbor-qf-unmanaged-{}", Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
+        let original_status = crate::quadriflow_installer::quadriflow_backend_status(&root);
         let sidecar = root.join(format!("quadriflow{}", std::env::consts::EXE_SUFFIX));
         fs::write(&sidecar, b"not a trusted executable").unwrap();
 
         assert!(!quadriflow_sidecar_available_at(&root));
         let status = crate::quadriflow_installer::quadriflow_backend_status(&root);
         assert!(!status.available);
-        assert!(!status.install_available);
+        assert_eq!(status, original_status);
         assert!(status.sidecar_source.is_none());
 
         fs::remove_dir_all(root).unwrap();

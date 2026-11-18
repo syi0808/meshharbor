@@ -420,10 +420,15 @@ mod tests {
     }
 
     #[test]
-    fn bundled_manifest_is_empty_and_valid() {
+    fn bundled_manifest_entries_pass_signature_policy() {
         let manifest = bundled_quadriflow_release_manifest().unwrap();
-        assert!(manifest.artifacts.is_empty());
-        assert!(manifest.release_tag.is_none());
+        for artifact in &manifest.artifacts {
+            crate::quadriflow_attestation::verify_release_artifact(
+                &manifest.source.commit,
+                artifact,
+            )
+            .expect("every bundled release artifact must satisfy the offline signature policy");
+        }
     }
 
     #[test]

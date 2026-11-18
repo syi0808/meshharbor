@@ -91,9 +91,10 @@ class NoticeTests(unittest.TestCase):
             [entry["fileName"] for entry in archive_sbom["files"]],
             ["./THIRD-PARTY-NOTICES.md"],
         )
-        self.assertEqual(archive_sbom["files"][0]["checksums"], [{
-            "algorithm": "SHA256", "checksumValue": hashlib.sha256(archive_notice).hexdigest()
-        }])
+        self.assertEqual(archive_sbom["files"][0]["checksums"], [
+            {"algorithm": "SHA1", "checksumValue": hashlib.sha1(archive_notice, usedforsecurity=False).hexdigest()},
+            {"algorithm": "SHA256", "checksumValue": hashlib.sha256(archive_notice).hexdigest()},
+        ])
         self.assertEqual(archive_sbom["files"][0]["licenseConcluded"], "NOASSERTION")
         self.assertEqual(
             {record["relatedSpdxElement"] for record in archive_sbom["relationships"]},

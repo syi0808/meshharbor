@@ -150,6 +150,13 @@ def safe_metadata_text(value, field):
     return value
 
 
+def _spdx_checksums(data, sha256):
+    return [
+        {"algorithm": "SHA1", "checksumValue": hashlib.sha1(data, usedforsecurity=False).hexdigest()},
+        {"algorithm": "SHA256", "checksumValue": sha256},
+    ]
+
+
 def _archive_evidence(report, spdx, raw_payloads):
     """Map the review tree to the two files that the USTAR contract can contain."""
     combined = bytearray()
@@ -205,7 +212,7 @@ def _archive_evidence(report, spdx, raw_payloads):
         "files": [{
             "SPDXID": file_id,
             "fileName": "./THIRD-PARTY-NOTICES.md",
-            "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
+            "checksums": _spdx_checksums(notice_bytes, digest),
             "licenseConcluded": "NOASSERTION",
             "licenseInfoInFiles": ["NOASSERTION"],
             "copyrightText": "NOASSERTION",
@@ -214,6 +221,7 @@ def _archive_evidence(report, spdx, raw_payloads):
             relationship for relationship in spdx["relationships"]
             if relationship["spdxElementId"] == "SPDXRef-DOCUMENT"
             and relationship["relationshipType"] == "DESCRIBES"
+            and relationship["relatedSpdxElement"].startswith("SPDXRef-Package-")
         ] + [{
             "spdxElementId": "SPDXRef-DOCUMENT",
             "relationshipType": "DESCRIBES",
@@ -318,14 +326,14 @@ def build(inventory, output, epoch, *, archive_evidence=False):
                 {
                     "SPDXID": file_id,
                     "fileName": "./" + destination,
-                    "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
+                    "checksums": _spdx_checksums(data, digest),
                     "licenseConcluded": "NOASSERTION",
                     "licenseInfoInFiles": ["NOASSERTION"],
                     "copyrightText": "NOASSERTION",
                 }
             )
             relationships.append(
-                {"spdxElementId": package_id, "relationshipType": "CONTAINS", "relatedSpdxElement": file_id}
+                {"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES", "relatedSpdxElement": file_id}
             )
         records.append(record)
         spdx_packages.append(

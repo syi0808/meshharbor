@@ -608,6 +608,8 @@ test('retopology preflight checks the mesh without creating a job', async () => 
     assert.equal(headers.get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
     assert.equal(headers.get('Authorization'), null);
     assert.deepEqual(JSON.parse(calls[0].init.body), {});
+    await api.preflightRetopology('source/id', 384);
+    assert.deepEqual(JSON.parse(calls[1].init.body), { target_quads: 384 });
     globalThis.fetch = async () => Response.json({ error: 'Water-tightness check failed.' }, { status: 422 });
     await assert.rejects(api.preflightRetopology('open'), /Water-tightness check failed/);
   } finally {

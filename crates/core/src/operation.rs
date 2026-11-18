@@ -516,8 +516,8 @@ mod tests {
             doctor.quadriflow_backend.available,
             crate::quadriflow::quadriflow_sidecar_available_at(core.store.data_root())
         );
-        assert!(!doctor.quadriflow_backend.install_available);
-        if !doctor.quadriflow_backend.available {
+        assert!(!doctor.quadriflow_backend.available);
+        if !doctor.quadriflow_backend.install_available {
             assert!(matches!(
                 core.install_quadriflow_backend(),
                 Err(CoreError::OperationUnavailable(_))

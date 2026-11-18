@@ -2820,7 +2820,7 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
-    async fn mcp_backend_tools_report_unavailable_without_side_effects() {
+    async fn mcp_backend_tools_report_clean_store_without_side_effects() {
         let root =
             std::env::temp_dir().join(format!("meshharbor-mcp-backend-{}", uuid::Uuid::new_v4()));
         let server = McpServer::new(
@@ -2830,10 +2830,12 @@ mod tests {
         let status: Value =
             serde_json::from_str(&server.quadriflow_backend_status().await).unwrap();
         assert_eq!(status["backend_id"], "quadriflow");
-        assert_eq!(status["install_available"], false);
-        let install: Value =
-            serde_json::from_str(&server.install_quadriflow_backend().await).unwrap();
-        assert!(install["error"].as_str().unwrap().contains("QuadriFlow"));
+        assert_eq!(status["available"], false);
+        if status["install_available"] == false {
+            let install: Value =
+                serde_json::from_str(&server.install_quadriflow_backend().await).unwrap();
+            assert!(install["error"].as_str().unwrap().contains("QuadriFlow"));
+        }
         assert!(!root.join("backends").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3572,9 +3574,8 @@ mod tests {
             .to_bytes();
         let backend_json: Value = serde_json::from_slice(&backend_body).unwrap();
         assert_eq!(backend_json["backend_id"], "quadriflow");
-        assert_eq!(backend_json["install_available"], false);
-
-        let backend_install = app
+        assert_eq!(backend_json["available"], false);
+        let unauthenticated_install = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
@@ -3582,21 +3583,37 @@ mod tests {
                     .uri("/api/v1/backends/quadriflow/install")
                     .header(header::HOST, "localhost:7432")
                     .header(header::ORIGIN, "http://localhost:7432")
-                    .header("x-meshharbor-dashboard", "local-ui-v1")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(backend_install.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let error_body = backend_install
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        let error_json: Value = serde_json::from_slice(&error_body).unwrap();
-        assert!(error_json["error"].as_str().unwrap().contains("QuadriFlow"));
+        assert_eq!(unauthenticated_install.status(), StatusCode::UNAUTHORIZED);
+        if backend_json["install_available"] == false {
+            let backend_install = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/backends/quadriflow/install")
+                        .header(header::HOST, "localhost:7432")
+                        .header(header::ORIGIN, "http://localhost:7432")
+                        .header("x-meshharbor-dashboard", "local-ui-v1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(backend_install.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let error_body = backend_install
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            let error_json: Value = serde_json::from_slice(&error_body).unwrap();
+            assert!(error_json["error"].as_str().unwrap().contains("QuadriFlow"));
+        }
         assert!(!root.join("backends").exists());
 
         let missing_marker = app
