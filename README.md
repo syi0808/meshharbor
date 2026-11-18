@@ -50,7 +50,7 @@ meshharbor jobs list --limit 20
 meshharbor jobs show job_<id>
 
 # Simplify an imported asset; the source stays intact
-meshharbor simplify asset_<id> --triangles 4000 --max-error 0.02 --output ./scene-simplified.glb
+meshharbor simplify asset_<id> --target-triangles 4000 --max-error 0.02 --output ./scene-simplified.glb
 
 # Conservative cleanup, connected-part primitives, atlas UV rebake, render optimization, or required KHR_meshopt compression
 meshharbor process-mesh asset_<id> --operation mesh.cleanup --output ./scene-cleaned.glb
