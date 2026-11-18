@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { decodeSidebarPanel, formatVersionSizes, inspectorForAsset, runtimeSetupStage, shouldHighlightExport } from './workbench-state.ts';
+import { decodeInventoryOpen, formatVersionSizes, inspectorForAsset, runtimeSetupStage, shouldHighlightExport } from './workbench-state.ts';
 
-test('sidebar storage restores only known panels', () => {
-  assert.equal(decodeSidebarPanel('assets'), 'assets');
-  assert.equal(decodeSidebarPanel('jobs'), 'jobs');
-  assert.equal(decodeSidebarPanel(null), 'assets');
-  for (const value of ['closed', '', 'true', 'unknown']) assert.equal(decodeSidebarPanel(value), null);
+test('inventory keeps existing open and closed preferences after Jobs moves left', () => {
+  for (const value of ['assets', 'jobs', null]) assert.equal(decodeInventoryOpen(value), true);
+  for (const value of ['closed', '', 'true', 'unknown']) assert.equal(decodeInventoryOpen(value), false);
 });
 
 test('runtime setup distinguishes the environment, model files, and inference readiness', () => {
@@ -24,6 +22,8 @@ test('mesh tools follow the selected input and generation is independent', () =>
   assert.equal(inspectorForAsset('generation', 'image'), 'generation');
   assert.equal(inspectorForAsset('generation', 'mesh'), 'generation');
   assert.equal(inspectorForAsset('generation', undefined), 'generation');
+  assert.equal(inspectorForAsset('jobs', undefined), 'jobs');
+  assert.equal(inspectorForAsset('jobs', 'image'), 'jobs');
   assert.equal(inspectorForAsset('optimize', 'image'), null);
   assert.equal(inspectorForAsset('tools', undefined), null);
 });
@@ -41,6 +41,7 @@ test('only a connected, idle result review emphasizes export', () => {
   assert.equal(shouldHighlightExport('result', null, false, true), true);
   assert.equal(shouldHighlightExport('source', null, false, true), false);
   assert.equal(shouldHighlightExport('result', 'optimize', false, true), false);
+  assert.equal(shouldHighlightExport('result', 'jobs', false, true), true);
   assert.equal(shouldHighlightExport('result', null, true, true), false);
   assert.equal(shouldHighlightExport('result', null, false, false), false);
 });

@@ -46,10 +46,18 @@ test('desktop docks flank the viewport, then become drawers without horizontal o
 
   await page.setViewportSize({ width: 390, height: 700 });
   await expect(rightDock).toHaveCount(0);
+  const jobs = tools.getByRole('button', { name: 'Jobs', exact: true });
+  await jobs.click();
+  const jobsSheet = page.getByRole('dialog', { name: 'Jobs' });
+  await expect(jobsSheet.getByText('No saved jobs yet.')).toBeVisible();
+  await expect(jobsSheet).toHaveAttribute('data-side', 'left');
+  await page.keyboard.press('Escape');
+  await expect(jobs).toBeFocused();
   expect((await inventory.boundingBox()).y).toBeLessThan((await selected.boundingBox()).y);
   await inventory.click();
   const sheet = page.getByRole('dialog', { name: 'Inventory' });
   await expect(sheet.getByRole('button', { name: 'Import assets' })).toBeVisible();
+  await expect(sheet.getByRole('button', { name: 'Jobs', exact: true })).toHaveCount(0);
   await expect.poll(async () => {
     const { x, width } = await sheet.boundingBox();
     return Math.round(x + width);

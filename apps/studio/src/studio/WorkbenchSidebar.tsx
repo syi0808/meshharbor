@@ -1,20 +1,14 @@
-import { ListChecksIcon, SidebarSimpleIcon, SquaresFourIcon } from '@phosphor-icons/react';
+import { SidebarSimpleIcon } from '@phosphor-icons/react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useDefaultLayout } from 'react-resizable-panels';
 import { Button } from '@/components/ui/button';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import {
-  decodeSidebarPanel,
+  decodeInventoryOpen,
   DESKTOP_SIDEBAR_KEY,
   WORKBENCH_NARROW_QUERY,
-  type SidebarPanel,
 } from './workbench-state';
-
-const sections = [
-  { key: 'assets', label: 'Assets', icon: SquaresFourIcon },
-  { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
-] as const;
 
 const panelStorage = {
   getItem(key: string) {
@@ -28,51 +22,48 @@ const panelStorage = {
 };
 
 export function useWorkbenchSidebar() {
-  const [desktopPanel, setDesktopPanel] = useState<SidebarPanel | null>(() => {
-    try { return decodeSidebarPanel(window.localStorage.getItem(DESKTOP_SIDEBAR_KEY)); }
-    catch { return decodeSidebarPanel(null); }
+  const [desktopOpen, setDesktopOpen] = useState(() => {
+    try { return decodeInventoryOpen(window.localStorage.getItem(DESKTOP_SIDEBAR_KEY)); }
+    catch { return true; }
   });
-  const [mobilePanel, setMobilePanel] = useState<SidebarPanel | null>(null);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const lastPanel = useRef<SidebarPanel>(desktopPanel ?? 'assets');
   const [narrow, setNarrow] = useState(() => window.matchMedia(WORKBENCH_NARROW_QUERY).matches);
   useEffect(() => {
     const media = window.matchMedia(WORKBENCH_NARROW_QUERY);
     const update = () => {
       setNarrow(media.matches);
-      if (!media.matches) setMobilePanel(null);
+      if (!media.matches) setMobileOpen(false);
     };
     update();
     media.addEventListener('change', update);
     return () => media.removeEventListener('change', update);
   }, []);
-  function setPanel(next: SidebarPanel | null) {
-    if (next) lastPanel.current = next;
-    if (narrow) return setMobilePanel(next);
-    setDesktopPanel(next);
+  function setOpen(next: boolean) {
+    if (narrow) return setMobileOpen(next);
+    setDesktopOpen(next);
     try {
-      window.localStorage.setItem(DESKTOP_SIDEBAR_KEY, next ?? 'closed');
+      window.localStorage.setItem(DESKTOP_SIDEBAR_KEY, next ? 'assets' : 'closed');
     } catch { /* Workbench remains usable if storage is disabled. */ }
   }
-  const panel = narrow ? mobilePanel : desktopPanel;
+  const open = narrow ? mobileOpen : desktopOpen;
   return {
-    narrow, panel, setPanel, triggerRef,
-    toggleInventory: () => setPanel(panel ? null : lastPanel.current),
+    narrow, open, setOpen, triggerRef,
+    toggleInventory: () => setOpen(!open),
   };
 }
 
 export function WorkbenchLayout({
-  state, assets, jobs, tools, inspector, children,
+  state, assets, tools, inspector, children,
 }: {
   state: ReturnType<typeof useWorkbenchSidebar>;
   assets: ReactNode;
-  jobs: ReactNode;
   tools: ReactNode;
   inspector: ReactNode;
   children: ReactNode;
 }) {
-  const { panel, narrow, setPanel, triggerRef } = state;
-  const desktopDockOpen = !narrow && panel !== null;
+  const { open, narrow, setOpen, triggerRef } = state;
+  const desktopDockOpen = !narrow && open;
   const inspectorOpen = Boolean(inspector);
   const panelIds = useMemo(() => [
     ...(inspectorOpen ? ['inspector'] : []),
@@ -89,18 +80,12 @@ export function WorkbenchLayout({
   const restoreFocus = () => triggerRef.current?.focus();
 
   function onCollapse() {
-    setPanel(null);
+    setOpen(false);
     if (!narrow) requestAnimationFrame(restoreFocus);
   }
 
-  const views = <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1" role="group" aria-label="Inventory views">
-    {sections.map(({ key, label, icon: Icon }) => (
-      <Button key={key} type="button" variant={panel === key ? 'outline' : 'ghost'} size="sm" aria-pressed={panel === key}
-        onClick={() => setPanel(key)}><Icon aria-hidden="true" />{label}</Button>
-    ))}
-  </div>;
   const body = <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
-    {panel === 'assets' ? assets : panel === 'jobs' ? jobs : null}
+    {assets}
   </div>;
 
   return (
@@ -130,24 +115,21 @@ export function WorkbenchLayout({
                     onCollapse();
                   }
                 }}>
-                <div className="grid shrink-0 gap-2 border-b px-3 pt-2 pb-3">
-                  <div className="flex min-h-6 items-center justify-between gap-2">
-                    <h2 id="workbench-inventory-title" className="font-heading text-sm font-medium">Inventory</h2>
-                    <Button variant="ghost" size="icon-sm" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={onCollapse}>
-                      <SidebarSimpleIcon aria-hidden="true" />
-                    </Button>
-                  </div>
-                  {views}
+                <div className="flex min-h-6 shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
+                  <h2 id="workbench-inventory-title" className="font-heading text-sm font-medium">Inventory</h2>
+                  <Button variant="ghost" size="icon-sm" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={onCollapse}>
+                    <SidebarSimpleIcon aria-hidden="true" />
+                  </Button>
                 </div>
                 {body}
               </aside>
             </ResizablePanel>
           </>}
         </ResizablePanelGroup>
-        {narrow && <Sheet open={panel !== null} onOpenChange={open => { if (!open) onCollapse(); }}>
+        {narrow && <Sheet open={open} onOpenChange={next => { if (!next) onCollapse(); }}>
           <SheetContent id="workbench-sidebar-drawer" side="right" aria-describedby={undefined} className="min-h-0 max-sm:w-full"
             onCloseAutoFocus={event => { event.preventDefault(); restoreFocus(); }}>
-            <SheetHeader className="shrink-0 gap-3 border-b px-3 pt-4 pb-3"><SheetTitle>Inventory</SheetTitle>{views}</SheetHeader>
+            <SheetHeader className="shrink-0 border-b px-3 py-4"><SheetTitle>Inventory</SheetTitle></SheetHeader>
             {body}
           </SheetContent>
         </Sheet>}

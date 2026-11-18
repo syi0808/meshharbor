@@ -1,4 +1,4 @@
-import { ArrowsClockwiseIcon, CpuIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, ImageSquareIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WarningCircleIcon, WrenchIcon, XIcon } from '@phosphor-icons/react';
+import { ArrowsClockwiseIcon, CpuIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WarningCircleIcon, WrenchIcon, XIcon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   assetComparisonPairForSelection,
@@ -719,7 +719,7 @@ export function App() {
   const reportPreviewError = useCallback((message: string) => setError(`Preview: ${message}`), []);
 
   function selectAsset(asset: Asset) {
-    if (asset.kind !== 'mesh') setInspector(current => current === 'generation' ? current : null);
+    if (asset.kind !== 'mesh') setInspector(current => inspectorForAsset(current, asset.kind));
     invalidateHistoryRequests();
     const pair = assetComparisonPairForSelection(assets, asset.id, comparisonPair);
     setComparisonPair(pair);
@@ -804,7 +804,7 @@ export function App() {
           invalidateHistoryRequests();
           comparisonPairRef.current = null;
           setComparisonPair(null);
-          if (result.assets[0].kind !== 'mesh') setInspector(current => current === 'generation' ? current : null);
+          if (result.assets[0].kind !== 'mesh') setInspector(current => inspectorForAsset(current, result.assets[0].kind));
           selectAssetId(result.assets[0].id);
           setReportJob(null);
         }
@@ -1063,7 +1063,8 @@ export function App() {
     inspectorTrigger.current = trigger;
     setInspector(current => current === next ? null : next);
   }
-  const inspectorTitle = openInspector === 'generation' ? 'Generate model' : openInspector === 'optimize' ? 'Optimize mesh' : 'Mesh tools';
+  const inspectorTitle = openInspector === 'generation' ? 'Generate model' : openInspector === 'optimize' ? 'Optimize mesh' : openInspector === 'jobs' ? 'Jobs' : 'Mesh tools';
+  const closeInspectorLabel = openInspector === 'jobs' ? 'Close jobs' : 'Close settings';
   const showInspectorSheet = inspectorIsSheet && !!openInspector;
   const exportIsPrimary = shouldHighlightExport(activeView, openInspector, isRunning, connection === 'connected');
   const runtimeJobRunning = isRunning && job.operation.startsWith('runtime.');
@@ -1103,12 +1104,33 @@ export function App() {
 
   function renderAssetCard(asset: Asset) {
     return <AssetGalleryCard key={asset.id} asset={asset} loadPreview={loadPreview} selected={asset.id === selectedId}
-      onSelect={() => { selectAsset(asset); if (sidebar.narrow) sidebar.setPanel(null); }} />;
+      onSelect={() => { selectAsset(asset); if (sidebar.narrow) sidebar.setOpen(false); }} />;
   }
 
   function inspectorBody() {
+    if (openInspector === 'jobs') return (
+        <section className="grid min-w-0 grid-cols-1 gap-3 p-3 text-xs" aria-label="Recent jobs">
+          <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
+            <span>Recent activity</span>
+            <Button variant="ghost" size="sm" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
+          </div>
+          {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
+            <details className="rounded-lg border p-2 wrap-anywhere text-muted-foreground [&>summary]:cursor-pointer"><summary>Recover an interrupted job</summary>
+              <p>Checking a record does not resume it. If the engine exited unexpectedly, stop all REST/MCP processes for this data directory before running <code>meshharbor jobs recover-interrupted --confirm-no-running-meshharbor</code>.</p>
+            </details>}
+          {recentJobs.length === 0
+            ? <Empty><EmptyHeader><EmptyDescription>No saved jobs yet.</EmptyDescription></EmptyHeader></Empty>
+            : <div className="grid gap-2">{recentJobs.slice(0, 8).map((savedJob) => (
+              <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-2 data-[selected=true]:bg-muted" data-selected={savedJob.id === job?.id} key={savedJob.id}>
+                <div className="grid min-w-0 flex-1 gap-1 wrap-anywhere [&>strong]:font-medium [&>small]:text-muted-foreground"><strong>{studioOperationLabel(savedJob.operation)}</strong><small>Updated {formatJobTime(savedJob.updated_at)}</small></div>
+                <div className="shrink-0 text-right text-xs tabular-nums text-muted-foreground data-[state=failed]:text-destructive [&>strong]:block" data-state={savedJob.state}><strong>{savedJob.state === 'succeeded' ? 'Complete' : savedJob.state[0].toUpperCase() + savedJob.state.slice(1)}</strong>{isActiveJob(savedJob) && displaysJobProgress(savedJob.operation) && <span>{savedJob.progress}%</span>}</div>
+                <Button variant="ghost" size="sm" onClick={() => { void openRecentJob(savedJob.id); if (inspectorIsSheet) setInspector(null); }} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</Button>
+              </div>
+            ))}</div>}
+        </section>
+    );
     return <>
-      {openInspector !== 'generation' && selectedAsset?.kind === 'mesh' && (
+      {(openInspector === 'optimize' || openInspector === 'tools') && selectedAsset?.kind === 'mesh' && (
         <div className="grid min-w-0 gap-1 border-b px-4 py-3 text-xs">
           <span className="text-muted-foreground">Selected model</span>
           <span className="truncate font-medium" title={selectedAsset.name}>{selectedAsset.name}</span>
@@ -1259,6 +1281,7 @@ export function App() {
         { key: 'generation', label: 'New model', icon: ImageSquareIcon },
         { key: 'optimize', label: 'Optimize', icon: SlidersHorizontalIcon },
         { key: 'tools', label: 'More tools', icon: WrenchIcon },
+        { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
       ] as const).map(({ key, label, icon: Icon }) => (
         <Tooltip key={key}>
           <TooltipTrigger asChild>
@@ -1266,7 +1289,7 @@ export function App() {
               aria-label={label} aria-expanded={openInspector === key}
               aria-controls={openInspector === key ? 'workbench-inspector' : undefined}
               aria-haspopup={inspectorIsSheet ? 'dialog' : undefined}
-              disabled={key !== 'generation' && selectedAsset?.kind !== 'mesh'}
+              disabled={(key === 'optimize' || key === 'tools') && selectedAsset?.kind !== 'mesh'}
               onClick={event => toggleInspector(key, event.currentTarget)}>
               <Icon aria-hidden="true" />
             </Button>
@@ -1283,7 +1306,7 @@ export function App() {
       }}>
       <div className="flex items-center justify-between gap-2 border-b px-4 py-2 font-heading text-sm font-medium">
         <h2 id="workbench-inspector-title">{inspectorTitle}</h2>
-        <Button variant="ghost" size="icon-sm" title="Close settings" aria-label="Close settings" onClick={closeInspector}><SidebarSimpleIcon aria-hidden="true" /></Button>
+        <Button variant="ghost" size="icon-sm" title={closeInspectorLabel} aria-label={closeInspectorLabel} onClick={closeInspector}><SidebarSimpleIcon aria-hidden="true" /></Button>
       </div>
       {inspectorBody()}
     </aside>
@@ -1311,9 +1334,9 @@ export function App() {
             {selectedAsset.kind === 'mesh' && <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> <span>Export GLB</span></Button>}
           </div>}
         <div className={selectedAsset ? 'ml-auto flex items-center gap-2 md:ml-0' : 'ml-auto flex items-center gap-2'}>
-          <Button variant={sidebar.panel ? 'secondary' : 'ghost'} size="sm" ref={sidebar.triggerRef}
-            aria-expanded={sidebar.panel !== null} aria-haspopup={sidebar.narrow ? 'dialog' : undefined}
-            aria-controls={sidebar.panel ? (sidebar.narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
+          <Button variant={sidebar.open ? 'secondary' : 'ghost'} size="sm" ref={sidebar.triggerRef}
+            aria-expanded={sidebar.open} aria-haspopup={sidebar.narrow ? 'dialog' : undefined}
+            aria-controls={sidebar.open ? (sidebar.narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
             onClick={sidebar.toggleInventory}><SquaresFourIcon aria-hidden="true" /> Inventory</Button>
           <DialogTrigger asChild><Button variant="ghost" size="sm" aria-label="Engine and runtimes"><CpuIcon data-icon="inline-start" aria-hidden="true" /><span>Runtime</span></Button></DialogTrigger>
         </div>
@@ -1432,27 +1455,6 @@ export function App() {
                 )}
                 </div>
               </div>
-              }
-              jobs={
-              <section className="grid min-w-0 grid-cols-1 gap-3 p-3 text-xs" aria-label="Recent jobs">
-                <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
-                  <div><span>Recent activity</span></div>
-                  <Button variant="ghost" size="sm" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
-                </div>
-                {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
-                  <details className="rounded-lg border p-2 wrap-anywhere text-muted-foreground [&>summary]:cursor-pointer"><summary>Recover an interrupted job</summary>
-                    <p>Checking a record does not resume it. If the engine exited unexpectedly, stop all REST/MCP processes for this data directory before running <code>meshharbor jobs recover-interrupted --confirm-no-running-meshharbor</code>.</p>
-                  </details>}
-                {recentJobs.length === 0
-                  ? <Empty><EmptyHeader><EmptyDescription>No saved jobs yet.</EmptyDescription></EmptyHeader></Empty>
-                  : <div className="grid gap-2">{recentJobs.slice(0, 8).map((savedJob) => (
-                    <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-2 data-[selected=true]:bg-muted" data-selected={savedJob.id === job?.id} key={savedJob.id}>
-                      <div className="grid min-w-0 flex-1 gap-1 wrap-anywhere [&>strong]:font-medium [&>small]:text-muted-foreground"><strong>{studioOperationLabel(savedJob.operation)}</strong><small>Updated {formatJobTime(savedJob.updated_at)}</small></div>
-                      <div className="shrink-0 text-right text-xs tabular-nums text-muted-foreground data-[state=failed]:text-destructive [&>strong]:block" data-state={savedJob.state}><strong>{savedJob.state === 'succeeded' ? 'Complete' : savedJob.state[0].toUpperCase() + savedJob.state.slice(1)}</strong>{isActiveJob(savedJob) && displaysJobProgress(savedJob.operation) && <span>{savedJob.progress}%</span>}</div>
-                      <Button variant="ghost" size="sm" onClick={() => { void openRecentJob(savedJob.id); if (sidebar.narrow) sidebar.setPanel(null); }} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</Button>
-                    </div>
-                  ))}</div>}
-              </section>
               }
             >
 

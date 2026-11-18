@@ -1,13 +1,11 @@
-export type SidebarPanel = 'assets' | 'jobs';
-export type Inspector = 'generation' | 'optimize' | 'tools';
+export type Inspector = 'generation' | 'optimize' | 'tools' | 'jobs';
 
 export const DESKTOP_SIDEBAR_KEY = 'meshharbor.studio.sidebar.v1';
 export const WORKBENCH_INSPECTOR_SHEET_QUERY = '(max-width: 1024px)';
 export const WORKBENCH_NARROW_QUERY = '(max-width: 760px)';
 
-export function decodeSidebarPanel(value: string | null): SidebarPanel | null {
-  if (value === null) return 'assets';
-  return value === 'assets' || value === 'jobs' ? value : null;
+export function decodeInventoryOpen(value: string | null): boolean {
+  return value === null || value === 'assets' || value === 'jobs';
 }
 
 export function runtimeSetupStage(backend: {
@@ -25,7 +23,7 @@ export function runtimeSetupStage(backend: {
 }
 
 export function inspectorForAsset(inspector: Inspector | null, kind: 'mesh' | 'image' | undefined): Inspector | null {
-  if (inspector === 'generation') return inspector;
+  if (inspector === 'generation' || inspector === 'jobs') return inspector;
   if (kind === 'mesh') return inspector === 'optimize' || inspector === 'tools' ? inspector : null;
   return null;
 }
@@ -36,7 +34,7 @@ export function shouldHighlightExport(
   isRunning: boolean,
   connected: boolean,
 ): boolean {
-  return activeVersion === 'result' && inspector === null && !isRunning && connected;
+  return activeVersion === 'result' && (inspector === null || inspector === 'jobs') && !isRunning && connected;
 }
 
 export function formatVersionSizes(original: number, result: number): string | null {

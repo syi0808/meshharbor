@@ -11,23 +11,27 @@ test('the desktop library opens on first visit and remembers a collapsed dock', 
   await expect(inventory).toBeFocused();
   await page.reload();
   await expect(inventory).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.getByRole('button', { name: 'Jobs', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs', exact: true })).toBeVisible();
   await inventory.click();
   await expect(inventory).toHaveAttribute('aria-expanded', 'true');
 });
 
-test('Inventory views stay inside the resizable right dock', async ({ page, studioOrigin }) => {
+test('Jobs opens on the left without replacing the resizable Inventory', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
   const library = page.getByRole('complementary', { name: 'Inventory' });
-  const views = library.getByRole('group', { name: 'Inventory views' });
-  const jobs = page.getByRole('button', { name: 'Jobs', exact: true });
-  await expect(views.getByRole('button', { name: 'Assets', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await views.getByRole('button', { name: 'Jobs', exact: true }).click();
-  await expect(jobs).toHaveAttribute('aria-pressed', 'true');
-  await expect(library.getByText('No saved jobs yet.')).toBeVisible();
-  const bounds = await library.boundingBox();
-  expect(Math.round(bounds.x + bounds.width)).toBe(1280);
+  const jobs = page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs', exact: true });
+  await jobs.click();
+  await expect(jobs).toHaveAttribute('aria-expanded', 'true');
+  const activity = page.getByRole('complementary', { name: 'Jobs' });
+  const viewport = page.getByRole('region', { name: 'Start a model' });
+  await expect(activity.getByText('No saved jobs yet.')).toBeVisible();
+  await expect(library.getByRole('button', { name: 'Import assets' })).toBeVisible();
+  const [left, center, right] = await Promise.all([activity.boundingBox(), viewport.boundingBox(), library.boundingBox()]);
+  expect(left.x + left.width).toBeLessThanOrEqual(center.x);
+  expect(Math.round(right.x + right.width)).toBe(1280);
+  await activity.getByRole('button', { name: 'Close jobs' }).click();
+  await expect(jobs).toBeFocused();
   const panelWidth = () => library.evaluate(element => Math.round(element.getBoundingClientRect().width));
   const initialWidth = await panelWidth();
   const handle = page.getByRole('separator', { name: 'Resize library panel' });
@@ -36,7 +40,7 @@ test('Inventory views stay inside the resizable right dock', async ({ page, stud
   const resizedWidth = await panelWidth();
   await page.reload();
   await expect.poll(panelWidth).toBe(resizedWidth);
-  await expect(jobs).toHaveAttribute('aria-pressed', 'true');
+  await expect(jobs).toHaveAttribute('aria-expanded', 'false');
 });
 
 test('long model names do not overflow gallery cards at narrow panel and mobile widths', async ({ page, studioOrigin }) => {
