@@ -17,7 +17,12 @@ use crate::{CoreError, CoreResult, uv_bootstrap::ensure_uv};
 
 const PYTHON_REQUEST: &str = "3.12";
 const NAF_SHA256: &str = "c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f";
-const CONVERTER_PACKAGES: &[&str] = &["torch==2.5.1", "safetensors==0.7.0", "numpy==1.26.4"];
+const CONVERTER_PACKAGES: &[&str] = &[
+    "torch==2.5.1",
+    "safetensors==0.7.0",
+    "numpy==1.26.4",
+    "packaging==26.2",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeSetupReport {

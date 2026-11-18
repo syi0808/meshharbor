@@ -59,11 +59,9 @@ does not accept credentials or transmit generated files over the network.
 
 ## Current verification boundary
 
-The orchestration and local export path are code-integrated, but neither Pixal3D
-inference chain has been demonstrated end to end. MLX requires Apple Silicon,
-downloaded model files, and the owner's gated DINOv3 access. CUDA requires Linux
-x86_64/NVIDIA, its CUDA preflight, model files, and gated DINOv3 access. In this
-executor, Rust compilation and GPU inference were not run because `cargo`,
-`rustc`, `rustfmt`, and a CUDA device were unavailable. Run
-`cargo test --workspace --locked` on a permitted Rust development environment
-before treating this patch as build-verified.
+The [local MLX validation run](pixal3d-mlx-manual-runtime.md#validation-status)
+verified the shared store and export path: a stdio MCP client used `get_job` for
+a real Pixal3D job started in Studio and `export_glb` returned the same GLB bytes
+as Studio. It did not separately start inference through MCP or test a fresh
+model installation. CUDA still requires a Linux x86_64/NVIDIA host, its CUDA
+preflight, model files, and gated DINOv3 access.
