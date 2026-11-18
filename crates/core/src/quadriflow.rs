@@ -1177,6 +1177,58 @@ f 4 1 5 8\n";
         ]
     }
 
+    #[test]
+    #[ignore = "requires an explicitly selected locally built QuadriFlow executable"]
+    fn validates_locally_built_worker_on_textured_cube() {
+        let worker = PathBuf::from(
+            std::env::var_os("MESHHARBOR_QUADRIFLOW_LOCAL_BINARY")
+                .expect("set the absolute path to the locally built executable"),
+        );
+        let output_dir = PathBuf::from(
+            std::env::var_os("MESHHARBOR_QUADRIFLOW_LOCAL_OUTPUT_DIR")
+                .expect("set the absolute path to a new scratch output directory"),
+        );
+        assert!(worker.is_absolute() && worker.is_file());
+        assert!(output_dir.is_absolute() && !output_dir.exists());
+
+        let (preview_glb, quad_obj, report) = rehearse_textured_cube_with_worker(&worker)
+            .expect("locally built worker must produce textured retopology for the fixture");
+        let (_, obj_report) = parse_quad_obj_output(&quad_obj, &cube_positions())
+            .expect("the separate OBJ must contain only quad geometry");
+        assert!(obj_report.output_quads > 0);
+        assert_eq!(obj_report.output_quads, report.output_quads);
+        assert_eq!(report.preview_triangles, report.output_quads * 2);
+        let preview = meshharbor_atlas_baker::extract_projection_source_mesh(&preview_glb)
+            .expect("the GLB preview must contain both supported embedded PNG bindings");
+        assert_eq!(preview.indices.len() as u64 / 3, report.preview_triangles);
+        let projection = report.appearance_projection.as_ref().unwrap();
+        assert!(projection.projection_coverage >= 0.995);
+        assert_eq!(
+            projection.rebaked_maps,
+            ["baseColorTexture", "metallicRoughnessTexture"]
+        );
+
+        fs::create_dir(&output_dir).expect("create a fresh fixture output directory");
+        fs::write(
+            output_dir.join("textured-cube-source.glb"),
+            closed_textured_cube_glb(true),
+        )
+        .unwrap();
+        fs::write(output_dir.join("textured-cube-preview.glb"), preview_glb).unwrap();
+        fs::write(output_dir.join("textured-cube-quads.obj"), quad_obj).unwrap();
+        fs::write(
+            output_dir.join("retopology-report.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "Local source build: {} quad OBJ faces, {} GLB triangles, {:.2}% texture projection coverage",
+            report.output_quads,
+            report.preview_triangles,
+            projection.projection_coverage * 100.0
+        );
+    }
+
     fn cube_triangle_glb(open: bool) -> Vec<u8> {
         let positions = cube_positions();
         let triangle_indices = [

@@ -46,6 +46,21 @@ python3 -m unittest scripts.test_quadriflow_ustar_package
 
 The checked-in fixture files explicitly say they are synthetic and are not an executable, third-party notices, or valid signature. A production archive still requires reviewed, exact payloads and release approvals; this test is only an assembly/parser contract check while the bundled manifest remains empty.
 
+## Local source build and textured fixture (not a product install)
+
+With CMake, a C++ compiler, Eigen, and Boost available, use the pinned source-build recipe in a fresh scratch directory. It builds QuadriFlow, validates native OBJ output from a synthetic cube, and records the executable's SHA-256 and build evidence. The separate ignored test uses the explicitly selected local binary on a fixed UV-seamed cube and writes the input, textured GLB preview, geometry-only quad OBJ, and projection report into a new directory:
+
+```sh
+scratch="$(mktemp -d)"
+RUNNER_TEMP="$scratch" python3 scripts/quadriflow-platform-smoke.py
+MESHHARBOR_QUADRIFLOW_LOCAL_BINARY="$scratch/quadriflow-platform-smoke/artifact/quadriflow" \
+MESHHARBOR_QUADRIFLOW_LOCAL_OUTPUT_DIR="$scratch/textured-fixture" \
+  cargo test --locked -p meshharbor-core --lib \
+    quadriflow::tests::validates_locally_built_worker_on_textured_cube -- --ignored --exact --nocapture
+```
+
+On Windows, use an explicit `quadriflow.exe` path and set the environment variables in PowerShell. Only run this with a local test binary you intended to execute. You can import the resulting GLBs into Studio for visual review. The binary selection and output paths exist only in this ignored Rust test; they do not configure the product or register a backend. An ad-hoc platform signature or a local checksum is not MeshHarbor release attestation.
+
 ## Native local-archive rehearsal (ignored test, not a product install)
 
 On a disposable native QA host, the explicit ignored Rust test can take a previously reviewed local USTAR and local single-platform rehearsal manifest, then verify the normal in-process attestation policy and exercise the real installer using only a local-file fetcher. It runs the installed executable on the checked-in LF-pinned geometry cube and a deterministic UV-seamed textured cube. It checks the geometry-only OBJ, triangulated GLB, and textured preview's two PNG bindings and projection coverage. It does not require byte-identical native solver output across platforms. The archive digest must also be supplied independently of the manifest. The candidate bundle attests the executable, not the assembled archive or its notice/SBOM payloads.
