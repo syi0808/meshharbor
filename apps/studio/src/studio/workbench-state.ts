@@ -2,7 +2,7 @@ export type SidebarPanel = 'assets' | 'jobs';
 export type Inspector = 'generation' | 'optimize' | 'tools';
 
 export const DESKTOP_SIDEBAR_KEY = 'meshharbor.studio.sidebar.v1';
-export const WORKBENCH_INSPECTOR_SHEET_QUERY = '(max-width: 880px)';
+export const WORKBENCH_INSPECTOR_SHEET_QUERY = '(max-width: 1024px)';
 export const WORKBENCH_NARROW_QUERY = '(max-width: 760px)';
 
 export function decodeSidebarPanel(value: string | null): SidebarPanel | null {
@@ -29,7 +29,7 @@ export function toggleSidebarPanel(current: SidebarPanel | null, requested: Side
 }
 
 export function inspectorForAsset(inspector: Inspector | null, kind: 'mesh' | 'image' | undefined): Inspector | null {
-  if (kind === 'image') return inspector === 'generation' ? inspector : null;
+  if (inspector === 'generation') return inspector;
   if (kind === 'mesh') return inspector === 'optimize' || inspector === 'tools' ? inspector : null;
   return null;
 }

@@ -41,6 +41,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sh
 import { Slider } from '@/components/ui/slider';
 import { Spinner } from '@/components/ui/spinner';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ModelPreview } from './ModelPreview';
 import { MeshStudy } from './MeshStudy';
 import { RuntimeSetup } from './RuntimeSetup';
@@ -155,6 +156,8 @@ export function App() {
   const [textureSize, setTextureSize] = useState(1024);
   const [targetFaces, setTargetFaces] = useState(100000);
   const [generationBackend, setGenerationBackend] = useState('auto');
+  const [generationSource, setGenerationSource] = useState<Asset | null>(null);
+  const [generationResult, setGenerationResult] = useState<Job | null>(null);
   const [modelDownloadAcknowledged, setModelDownloadAcknowledged] = useState(false);
   const [cudaModelDownloadAcknowledged, setCudaModelDownloadAcknowledged] = useState(false);
   const historySelectionGuard = useRef(new LatestRequestGuard());
@@ -188,6 +191,7 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const inventoryInputRef = useRef<HTMLInputElement>(null);
   const importBatchInFlight = useRef(false);
   const api = useMemo(() => new MeshHarborApi(), []);
   const selectedAsset = assets.find((asset) => asset.id === selectedId) ?? null;
@@ -549,13 +553,19 @@ export function App() {
           }
           if (stopped) return;
           setJob(latest);
-          setReportJob(latest);
           if (derived) {
             const completedAsset = derived;
             const pair = assetComparisonPairFromJob(latest, completedAsset);
-            setComparisonPair(pair);
+            const isGeneration = latest.operation === 'image.generate';
+            const advance = shouldAutoSelectComparisonResult(pair, selectedIdRef.current)
+              || (isGeneration && selectedIdRef.current === null);
+            if (!isGeneration || advance) {
+              setComparisonPair(pair);
+              setReportJob(latest);
+            }
+            if (isGeneration) setGenerationResult(latest);
             setAssets((current) => [completedAsset, ...current.filter((item) => item.id !== completedAsset.id)]);
-            if (shouldAutoSelectComparisonResult(pair, selectedIdRef.current)) {
+            if (advance) {
               selectAssetId(completedAsset.id);
               const completedInspector: Inspector = latest.operation === 'mesh.simplify' ? 'optimize' : latest.operation === 'image.generate' ? 'generation' : 'tools';
               const toolPane = document.getElementById('workbench-inspector');
@@ -708,7 +718,7 @@ export function App() {
   const reportPreviewError = useCallback((message: string) => setError(`Preview: ${message}`), []);
 
   function selectAsset(asset: Asset) {
-    if (asset.id !== selectedId) setInspector(asset.kind === 'image' && !inspectorIsSheet ? 'generation' : null);
+    if (asset.kind !== 'mesh') setInspector(current => current === 'generation' ? current : null);
     invalidateHistoryRequests();
     const pair = assetComparisonPairForSelection(assets, asset.id, comparisonPair);
     setComparisonPair(pair);
@@ -737,7 +747,7 @@ export function App() {
     }
   }
 
-  async function importFiles(files: FileList | File[]) {
+  async function importFiles(files: FileList | File[], purpose: 'library' | 'reference' = 'library') {
     if (files.length === 0) return;
     if (importBatchInFlight.current) {
       setNotice('An import batch is already running. These additional files were not queued.');
@@ -786,16 +796,19 @@ export function App() {
           selectionInteractionRevision: assetSelectionInteractionRevision.current,
         };
         const plan = planAssetImportUiCompletion(started, current);
-        if (plan.selectFirstImportedAsset) {
+        if (purpose === 'reference') {
+          const reference = result.assets.find(asset => asset.kind === 'image');
+          if (reference) setGenerationSource(reference);
+        } else if (plan.selectFirstImportedAsset) {
           invalidateHistoryRequests();
           comparisonPairRef.current = null;
           setComparisonPair(null);
-          setInspector(result.assets[0].kind === 'image' && !inspectorIsSheet ? 'generation' : null);
+          if (result.assets[0].kind !== 'mesh') setInspector(current => current === 'generation' ? current : null);
           selectAssetId(result.assets[0].id);
           setReportJob(null);
         }
 
-        if (plan.resetFilters) {
+        if (purpose === 'library' && plan.resetFilters) {
           filtersToRefresh = EMPTY_ASSET_BROWSER_FILTERS;
           assetSearchInputRef.current = '';
           setAssetSearchInput('');
@@ -896,15 +909,14 @@ export function App() {
   }
 
   async function generate() {
-    if (!selectedAsset || selectedAsset.kind !== 'image') return;
+    if (!generationSource || !canGenerate || busy || isRunning || connection !== 'connected') return;
     invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
-    setReportJob(null);
-    setComparisonPair(null);
     try {
-      const nextJob = await api.createImageGenerationJob(selectedAsset.id, generationBackend, textureSize, Math.max(4, Math.floor(targetFaces)));
+      const nextJob = await api.createImageGenerationJob(generationSource.id, generationBackend, textureSize, Math.max(4, Math.floor(targetFaces)));
+      setGenerationResult(null);
       setJob(nextJob);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not start image generation.');
@@ -1029,8 +1041,7 @@ export function App() {
 
   const triangleCount = Number(selectedAsset?.metadata.triangles ?? 0);
   const canSimplify = !!selectedAsset && selectedAsset.kind === 'mesh' && !!operations.find((operation) => operation.id === 'mesh.simplify')?.implemented;
-  const canGenerate = !!selectedAsset && selectedAsset.kind === 'image'
-    && !!operations.find((operation) => operation.id === 'image.generate')?.implemented
+  const canGenerate = !!operations.find((operation) => operation.id === 'image.generate')?.implemented
     && selectedGenerationBackend?.ready === true;
   const isComparingResult = selectedComparisonPair
     ? selectedComparisonPair.resultAssetId === selectedId
@@ -1107,6 +1118,12 @@ export function App() {
 
   function inspectorBody() {
     return <>
+      {openInspector !== 'generation' && selectedAsset?.kind === 'mesh' && (
+        <div className="grid min-w-0 gap-1 border-b px-4 py-3 text-xs">
+          <span className="text-muted-foreground">Selected model</span>
+          <span className="truncate font-medium" title={selectedAsset.name}>{selectedAsset.name}</span>
+        </div>
+      )}
       {openInspector === 'optimize' && <div className="grid gap-4 p-4 text-xs/relaxed">
         <p className="text-muted-foreground">Reduce polygon count while keeping the original file intact and preserving material references.</p>
         <Field>
@@ -1136,6 +1153,18 @@ export function App() {
       </div>}
 
       {openInspector === 'generation' && <section className="grid gap-4 p-4 text-xs/relaxed" id="image-generation">
+          <div className="grid min-w-0 gap-2 rounded-md border p-3">
+            <p className="font-medium">Reference image</p>
+            {generationSource
+              ? <p className="min-w-0 truncate text-muted-foreground" title={generationSource.name}>{generationSource.name}</p>
+              : <p className="text-muted-foreground">Choose a PNG or JPEG to create a new model. Your current selection stays in the viewport.</p>}
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => imageInputRef.current?.click()} disabled={busy || isRunning}>
+                <ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> {generationSource ? 'Replace reference' : 'Choose reference'}
+              </Button>
+              {generationSource && <Button variant="ghost" size="sm" onClick={() => setGenerationSource(null)} disabled={busy || isRunning}>Clear</Button>}
+            </div>
+          </div>
           <Accordion type="single" collapsible>
             <AccordionItem value="model-settings">
               <AccordionTrigger>Model settings</AccordionTrigger>
@@ -1165,11 +1194,15 @@ export function App() {
               </AccordionContent>
             </AccordionItem>
           </Accordion>
-          {canGenerate && !(isRunning && job.operation === 'image.generate') && <Button className="w-full" disabled={busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
+          {canGenerate && !(isRunning && job.operation === 'image.generate') && <Button className="w-full" disabled={!generationSource || busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
           {!canGenerate && <div className="grid gap-2 text-muted-foreground">
             <p>{selectedGenerationBackend?.installable ? 'Prepare a local runtime before generating.' : 'This backend is not available on this computer.'} Existing GLBs do not require a model runtime.</p>
             <Button variant={selectedGenerationBackend?.installable ? 'default' : 'secondary'} onClick={() => openRuntime(selectedGenerationBackend?.id)}>Runtime setup</Button>
           </div>}
+          {generationResult?.result?.asset_id && <Button variant="secondary" className="w-full" disabled={busy || isRunning} onClick={() => {
+            closeInspector();
+            void openRecentJob(generationResult.id);
+          }}>View generated model</Button>}
         </section>}
 
       {openInspector === 'tools' && <>
@@ -1229,6 +1262,30 @@ export function App() {
     </>;
   }
 
+  const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools"
+    className={sidebar.narrow ? 'flex gap-1 p-2' : 'flex flex-col gap-2 p-2'}>
+    <TooltipProvider delayDuration={180} disableHoverableContent>
+      {([
+        { key: 'generation', label: 'New model', icon: ImageSquareIcon },
+        { key: 'optimize', label: 'Optimize', icon: SlidersHorizontalIcon },
+        { key: 'tools', label: 'More tools', icon: WrenchIcon },
+      ] as const).map(({ key, label, icon: Icon }) => (
+        <Tooltip key={key}>
+          <TooltipTrigger asChild>
+            <Button type="button" size="icon" variant={openInspector === key ? 'secondary' : 'ghost'}
+              aria-label={label} aria-expanded={openInspector === key}
+              aria-controls={openInspector === key ? 'workbench-inspector' : undefined}
+              aria-haspopup={inspectorIsSheet ? 'dialog' : undefined}
+              disabled={key !== 'generation' && selectedAsset?.kind !== 'mesh'}
+              onClick={event => toggleInspector(key, event.currentTarget)}>
+              <Icon aria-hidden="true" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side={sidebar.narrow ? 'top' : 'right'} sideOffset={8}>{label}</TooltipContent>
+        </Tooltip>
+      ))}
+    </TooltipProvider>
+  </div>;
   const desktopInspector = openInspector && !inspectorIsSheet ? (
     <aside className="h-full min-w-0 overflow-auto overscroll-contain" id="workbench-inspector" data-tool={openInspector}
       aria-labelledby="workbench-inspector-title" onKeyDown={event => {
@@ -1259,7 +1316,6 @@ export function App() {
       <header className="z-10 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b bg-background px-4 py-2">
         <span className="font-heading text-sm font-medium">meshharbor</span>
           {selectedAsset && <div className="order-last flex w-full flex-wrap items-center gap-2 md:order-0 md:ml-auto md:w-auto" role="group" aria-label="File actions">
-            <Button variant="secondary" size="sm" aria-label="New from image" title="New from image" onClick={() => imageInputRef.current?.click()} disabled={busy}><ImageSquareIcon aria-hidden="true" /> <span>New from image</span></Button>
             <Button variant="secondary" size="sm" aria-label="Open GLB" title="Open GLB" onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon aria-hidden="true" /> <span>Open GLB</span></Button>
             {quadArtifact && <Button variant="secondary" size="sm" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
             {selectedAsset.kind === 'mesh' && <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> <span>Export GLB</span></Button>}
@@ -1272,19 +1328,22 @@ export function App() {
       <main className="relative flex min-h-0 min-w-0 flex-1 flex-col" ref={workbenchRef} data-connection={connection}>
           <h1 className="sr-only">MeshHarbor Studio</h1>
           <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" tabIndex={-1} type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-          <input ref={imageInputRef} className="sr-only" aria-label="Choose images" tabIndex={-1} type="file" multiple accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-          {!showInspectorSheet && !showEngineDialog && <div className="pointer-events-none fixed inset-x-3 bottom-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto">
+          <input ref={inventoryInputRef} className="sr-only" aria-label="Choose inventory files" tabIndex={-1} type="file" multiple accept=".glb,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
+          <input ref={imageInputRef} className="sr-only" aria-label="Choose reference file" tabIndex={-1} type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files, 'reference'); event.currentTarget.value = ''; }} />
+          {!showInspectorSheet && !showEngineDialog && <div className={`pointer-events-none fixed inset-x-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto ${sidebar.narrow ? 'bottom-16' : 'bottom-3'}`}>
             {feedback}
             {jobFeedback}
           </div>}
 
-            <WorkbenchLayout state={sidebar} inspector={desktopInspector}
+            <WorkbenchLayout state={sidebar} inspector={desktopInspector} tools={toolRail}
               assets={
               <div className="grid min-w-0 grid-cols-1 gap-3 text-xs" id="asset-library">
                 <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
                   <span>Local library</span>
                   <Button variant="ghost" size="sm" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
                 </div>
+                <Button variant="outline" size="sm" className="w-full" disabled={busy || connection !== 'connected'}
+                  onClick={() => inventoryInputRef.current?.click()}>Import assets</Button>
                 {showLibraryFilters && <><form className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2" onSubmit={(event) => {
                   event.preventDefault();
                   applyAssetBrowserFilters({ ...assetFilters, query: assetSearchInput.trim() });
@@ -1398,17 +1457,19 @@ export function App() {
             >
 
             <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-800" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
-              {!selectedAsset ? <div className="grid min-h-80 flex-1 content-center items-center justify-center gap-4 p-6 lg:grid-cols-[minmax(0,22rem)_minmax(0,24rem)] lg:gap-8">
+              {!selectedAsset ? <div className="flex min-h-0 flex-1 overflow-y-auto">
+                <div className="m-auto grid w-full max-w-4xl items-center justify-center gap-4 p-6 lg:grid-cols-[minmax(0,22rem)_minmax(0,24rem)] lg:gap-8">
                 <div className="order-2 grid min-w-0 gap-4 lg:order-first">
                   <h2 className="font-heading text-2xl font-medium lg:text-3xl">Start with a model or an image</h2>
                   <p className="text-sm text-muted-foreground">Inspect and refine a GLB, or turn a reference image into a 3D model on this computer.</p>
                   <div className="flex flex-wrap gap-2">
                     <Button onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon data-icon="inline-start" aria-hidden="true" /> Open GLB</Button>
-                    <Button variant="outline" onClick={() => imageInputRef.current?.click()} disabled={busy}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Create from image</Button>
+                    <Button variant="outline" onClick={event => toggleInspector('generation', event.currentTarget)}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Create from image</Button>
                   </div>
                   <p className="text-xs text-muted-foreground">Drop a GLB, PNG or JPEG here</p>
                 </div>
                 <MeshStudy />
+                </div>
               </div> : <div className="flex min-h-0 min-w-0 flex-1 flex-col">
                 <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-card p-2 text-card-foreground">
                 <div className="flex min-w-0 flex-1 items-center justify-between gap-2 max-sm:basis-full">
@@ -1425,16 +1486,11 @@ export function App() {
                     </ToggleGroup>
                   )}
                 </div>
-                <div className="flex shrink-0 flex-wrap items-center gap-2" data-slot="model-tools" role="group" aria-label="Model tools">
-                {selectedAsset.kind === 'image' ? (
-                  <Button variant="secondary" size="sm" aria-expanded={openInspector === 'generation'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'generation' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('generation', event.currentTarget)}><SlidersHorizontalIcon aria-hidden="true" /> Generation settings</Button>
-                ) : (
-                  <>
-                    <Button variant={!openInspector && !exportIsPrimary && canSimplify && !isRunning ? 'default' : 'secondary'} size="sm" aria-expanded={openInspector === 'optimize'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'optimize' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('optimize', event.currentTarget)}><SlidersHorizontalIcon aria-hidden="true" /> Optimize</Button>
-                    <Button variant="secondary" size="sm" aria-expanded={openInspector === 'tools'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'tools' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('tools', event.currentTarget)}><WrenchIcon aria-hidden="true" /> More tools</Button>
-                  </>
-                )}
-                </div>
+                {selectedAsset.kind === 'image' && <Button variant="secondary" size="sm" disabled={busy || isRunning} onClick={event => {
+                  inspectorTrigger.current = event.currentTarget;
+                  setGenerationSource(selectedAsset);
+                  setInspector('generation');
+                }}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Use as reference</Button>}
                 </div>
                 <ModelPreview asset={previewAsset} comparison={previewComparison} loadModel={loadPreview} onError={reportPreviewError} />
                 {showVersionStats && <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t bg-card px-3 py-2 text-xs tabular-nums text-muted-foreground [&_strong]:font-medium [&_strong]:text-foreground" role="group" aria-label="Original to result comparison">
@@ -1495,8 +1551,8 @@ export function App() {
 
             </WorkbenchLayout>
           {showInspectorSheet && <Sheet open={showInspectorSheet} onOpenChange={open => { if (!open) setInspector(null); }}>
-            <SheetContent side="right" id="workbench-inspector" data-tool={openInspector} aria-describedby={undefined}
-              className="overflow-auto overscroll-contain" onCloseAutoFocus={event => {
+            <SheetContent side="left" id="workbench-inspector" data-tool={openInspector} aria-describedby={undefined}
+              className="overflow-auto overscroll-contain max-sm:w-full" onCloseAutoFocus={event => {
               event.preventDefault();
               if (!showEngineDialog) restoreInspectorFocus();
             }}>

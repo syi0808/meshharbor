@@ -21,11 +21,12 @@ test('runtime setup distinguishes the environment, model files, and inference re
   assert.equal(runtimeSetupStage({ installable: true, ready: true }), 'ready');
 });
 
-test('only tools that match the selected input can open', () => {
+test('mesh tools follow the selected input and generation is independent', () => {
   assert.equal(inspectorForAsset('tools', 'mesh'), 'tools');
   assert.equal(inspectorForAsset('optimize', 'mesh'), 'optimize');
   assert.equal(inspectorForAsset('generation', 'image'), 'generation');
-  assert.equal(inspectorForAsset('generation', 'mesh'), null);
+  assert.equal(inspectorForAsset('generation', 'mesh'), 'generation');
+  assert.equal(inspectorForAsset('generation', undefined), 'generation');
   assert.equal(inspectorForAsset('optimize', 'image'), null);
   assert.equal(inspectorForAsset('tools', undefined), null);
 });

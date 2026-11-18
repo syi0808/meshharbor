@@ -12,7 +12,7 @@ async function openCube(page, name, bytes) {
   await chooser.setFiles({ name, mimeType: 'model/gltf-binary', buffer: bytes });
   const selected = page.getByRole('region', { name: 'Selected asset' });
   await expect(selected.getByTitle(name, { exact: true })).toBeVisible();
-  await selected.getByRole('button', { name: 'More tools' }).click();
+  await page.getByRole('button', { name: 'More tools' }).click();
   return selected;
 }
 

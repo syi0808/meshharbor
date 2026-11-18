@@ -58,11 +58,12 @@ export function useWorkbenchSidebar() {
 }
 
 export function WorkbenchLayout({
-  state, assets, jobs, inspector, children,
+  state, assets, jobs, tools, inspector, children,
 }: {
   state: ReturnType<typeof useWorkbenchSidebar>;
   assets: ReactNode;
   jobs: ReactNode;
+  tools: ReactNode;
   inspector: ReactNode;
   children: ReactNode;
 }) {
@@ -73,12 +74,12 @@ export function WorkbenchLayout({
   const desktopDockOpen = !narrow && panel !== null;
   const inspectorOpen = Boolean(inspector);
   const panelIds = useMemo(() => [
-    ...(desktopDockOpen ? ['library'] : []),
-    'viewport',
     ...(inspectorOpen ? ['inspector'] : []),
+    'viewport',
+    ...(desktopDockOpen ? ['library'] : []),
   ], [desktopDockOpen, inspectorOpen]);
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
-    id: 'meshharbor.studio.panels.v1',
+    id: 'meshharbor.studio.panels.v2',
     panelIds,
     storage: panelStorage,
     onlySaveAfterUserInteractions: true,
@@ -100,9 +101,47 @@ export function WorkbenchLayout({
     <Collapsible asChild open={desktopDockOpen} onOpenChange={open => {
       if (!open && !narrow) onCollapse();
     }}>
-      <div className="flex min-h-0 min-w-0 flex-1">
-        <div className="shrink-0 border-r bg-sidebar text-sidebar-foreground" data-slot="sidebar">
-          <div className="sticky top-0 flex flex-col gap-2 p-2" role="group" aria-label="Studio sidebar" ref={rail}>
+      <div className={narrow
+        ? 'grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)_auto]'
+        : 'grid min-h-0 min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)_auto]'}>
+        <div className={narrow ? 'col-start-1 row-start-2 border-t bg-sidebar' : 'border-r bg-sidebar'}>{tools}</div>
+        <ResizablePanelGroup id="studio-panels" orientation="horizontal"
+          className={narrow ? 'col-span-2 col-start-1 row-start-1 min-h-0 min-w-0' : 'min-h-0 min-w-0'}
+          defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
+          {inspectorOpen && <>
+            <ResizablePanel id="inspector" defaultSize={288} minSize={240} maxSize={416} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
+              {inspector}
+            </ResizablePanel>
+            <ResizableHandle withHandle aria-label="Resize settings panel" />
+          </>}
+          <ResizablePanel id="viewport" minSize="28%" className="flex min-h-0 min-w-0 flex-col">
+            {children}
+          </ResizablePanel>
+          {desktopDockOpen && <>
+            <ResizableHandle withHandle aria-label="Resize library panel" />
+            <ResizablePanel id="library" defaultSize={248} minSize={224} maxSize={416} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
+              <CollapsibleContent id="workbench-sidebar-dock" aria-label={title} className="h-full min-w-0 overflow-auto overscroll-contain p-4"
+                onKeyDown={event => {
+                  if (event.key === 'Escape') {
+                    event.stopPropagation();
+                    onCollapse();
+                  }
+                }}>
+                <div className="mb-4 flex items-center justify-between gap-2">
+                  <h2 className="font-heading text-sm font-medium">{title}</h2>
+                  <CollapsibleTrigger asChild>
+                    <Button variant="ghost" size="icon-sm" aria-label="Collapse sidebar" title="Collapse sidebar">
+                      <SidebarSimpleIcon aria-hidden="true" />
+                    </Button>
+                  </CollapsibleTrigger>
+                </div>
+                {body}
+              </CollapsibleContent>
+            </ResizablePanel>
+          </>}
+        </ResizablePanelGroup>
+        <div className={narrow ? 'col-start-2 row-start-2 border-t border-l bg-sidebar' : 'border-l bg-sidebar'}>
+          <div className={narrow ? 'flex gap-1 p-2' : 'flex flex-col gap-2 p-2'} role="group" aria-label="Asset inventory" ref={rail}>
             <TooltipProvider delayDuration={180} disableHoverableContent>
               {sections.map(({ key, label, icon: Icon }) => (
                 <Tooltip key={key}>
@@ -123,48 +162,14 @@ export function WorkbenchLayout({
                       }}
                     ><Icon aria-hidden="true" /></Button>
                   </TooltipTrigger>
-                  <TooltipContent side="right" sideOffset={8}>{label}</TooltipContent>
+                  <TooltipContent side={narrow ? 'top' : 'left'} sideOffset={8}>{label}</TooltipContent>
                 </Tooltip>
               ))}
             </TooltipProvider>
           </div>
         </div>
-        <ResizablePanelGroup id="studio-panels" orientation="horizontal" className="h-auto min-h-0 min-w-0 flex-1"
-          defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
-          {desktopDockOpen && <>
-            <ResizablePanel id="library" defaultSize={248} minSize={224} maxSize={416} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
-              <CollapsibleContent id="workbench-sidebar-dock" aria-label={title} className="h-full min-w-0 overflow-auto overscroll-contain p-4"
-                onKeyDown={event => {
-                  if (event.key === 'Escape') {
-                    event.stopPropagation();
-                    onCollapse();
-                  }
-                }}>
-                <div className="mb-4 flex items-center justify-between gap-2">
-                  <h2 className="font-heading text-sm font-medium">{title}</h2>
-                  <CollapsibleTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" aria-label="Collapse sidebar" title="Collapse sidebar">
-                      <SidebarSimpleIcon aria-hidden="true" />
-                    </Button>
-                  </CollapsibleTrigger>
-                </div>
-                {body}
-              </CollapsibleContent>
-            </ResizablePanel>
-            <ResizableHandle withHandle aria-label="Resize library panel" />
-          </>}
-          <ResizablePanel id="viewport" minSize="28%" className="flex min-h-0 min-w-0 flex-col">
-            {children}
-          </ResizablePanel>
-          {inspectorOpen && <>
-            <ResizableHandle withHandle aria-label="Resize settings panel" />
-            <ResizablePanel id="inspector" defaultSize={288} minSize={240} maxSize={416} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
-              {inspector}
-            </ResizablePanel>
-          </>}
-        </ResizablePanelGroup>
         {narrow && <Sheet open={panel !== null} onOpenChange={open => { if (!open) onCollapse(); }}>
-          <SheetContent id="workbench-sidebar-drawer" side="left" aria-describedby={undefined} className="overflow-auto overscroll-contain"
+          <SheetContent id="workbench-sidebar-drawer" side="right" aria-describedby={undefined} className="overflow-auto overscroll-contain max-sm:w-full"
             onCloseAutoFocus={event => { event.preventDefault(); restoreFocus(); }}>
             <SheetHeader><SheetTitle>{title}</SheetTitle></SheetHeader>
             <div className="min-w-0 px-4 pb-4">{body}</div>

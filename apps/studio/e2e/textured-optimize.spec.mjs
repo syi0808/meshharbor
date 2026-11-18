@@ -84,7 +84,7 @@ test('Studio rebakes a supported GLB UV atlas and exports both PBR maps', async 
   await chooser.setFiles({ name: sourceName, mimeType: 'model/gltf-binary', buffer: source });
   const selected = page.getByRole('region', { name: 'Selected asset' });
   await expect(selected.getByTitle(sourceName, { exact: true })).toBeVisible();
-  await selected.getByRole('button', { name: 'More tools' }).click();
+  await page.getByRole('button', { name: 'More tools' }).click();
   await page.getByRole('button', { name: 'UV atlas rebake', exact: true }).click();
   await page.getByRole('button', { name: 'Run UV atlas rebake' }).click();
   await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
@@ -140,7 +140,7 @@ test('Studio optimizes a textured GLB without changing its materials or textures
     const y = handle.y + handle.height / 2;
     await page.mouse.move(x, y);
     await page.mouse.down();
-    await page.mouse.move(x - 56, y, { steps: 6 });
+    await page.mouse.move(x + 56, y, { steps: 6 });
     await page.mouse.up();
     await expect.poll(inspectorWidth).toBeGreaterThan(initialWidth);
     const targetInput = page.getByRole('spinbutton', { name: 'Triangle target' });

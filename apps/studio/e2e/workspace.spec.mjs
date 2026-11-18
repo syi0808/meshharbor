@@ -20,20 +20,20 @@ test('the icon rail overlays a label and the desktop library remembers its resiz
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
   const jobs = page.getByRole('button', { name: 'Jobs', exact: true });
   await expect(jobs).toHaveText('');
-  const rail = page.getByRole('group', { name: 'Studio sidebar' });
+  const rail = page.getByRole('group', { name: 'Asset inventory' });
   const railWidth = await rail.evaluate(element => element.getBoundingClientRect().width);
   await jobs.hover();
   const tooltip = page.locator('[data-slot="tooltip-content"]');
   await expect(tooltip).toBeVisible();
   await expect(tooltip).toContainText('Jobs');
-  await expect(tooltip).toHaveAttribute('data-side', 'right');
+  await expect(tooltip).toHaveAttribute('data-side', 'left');
   await expect.poll(() => rail.evaluate(element => element.getBoundingClientRect().width)).toBe(railWidth);
 
   const library = page.locator('#workbench-sidebar-dock');
   const panelWidth = () => library.evaluate(element => Math.round(element.getBoundingClientRect().width));
   const initialWidth = await panelWidth();
   const handle = page.getByRole('separator', { name: 'Resize library panel' });
-  await handle.press('ArrowRight');
+  await handle.press('ArrowLeft');
   await expect.poll(panelWidth).toBeGreaterThan(initialWidth);
   const resizedWidth = await panelWidth();
   await page.reload();
@@ -77,7 +77,7 @@ test('long model names do not overlap row metadata at narrow panel and mobile wi
   await assertNoOverflow(dock);
   const handle = page.getByRole('separator', { name: 'Resize library panel' });
   const defaultWidth = await dock.evaluate(element => element.clientWidth);
-  await handle.press('ArrowLeft');
+  await handle.press('ArrowRight');
   await expect.poll(() => dock.evaluate(element => element.clientWidth)).toBeLessThan(defaultWidth);
   await assertNoOverflow(dock);
 
