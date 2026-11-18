@@ -97,11 +97,12 @@ FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 
 
-## Phosphor React icons
+## Phosphor React icons and shadcn/ui
 
 MIT License
 
 Copyright (c) 2020 Phosphor Icons
+Copyright (c) 2023 shadcn
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

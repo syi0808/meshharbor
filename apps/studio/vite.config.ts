@@ -1,14 +1,19 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
+import { fileURLToPath } from 'node:url';
 import { createDevSecurityMiddleware } from './dev-security.mjs';
 
 export default defineConfig({
-  plugins: [react(), {
+  plugins: [react(), tailwindcss(), {
     name: 'meshharbor-local-dev-security',
     configureServer(server) {
       server.middlewares.use(createDevSecurityMiddleware());
     },
   }],
+  resolve: {
+    alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+  },
   server: {
     host: '127.0.0.1',
     port: 5173,

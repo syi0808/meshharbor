@@ -40,11 +40,11 @@ function buildStudy() {
 const study = buildStudy();
 
 export function MeshStudy() {
-  return <svg className="mesh-study" viewBox="0 0 400 280" aria-hidden="true" focusable="false">
+  return <svg className="block w-full max-w-52 justify-self-center lg:max-w-sm" viewBox="0 0 400 280" aria-hidden="true" focusable="false">
     <g strokeWidth=".7" strokeLinejoin="round">
       {study.map(face => <polygon key={face.key} points={face.points}
-        fill={`color-mix(in srgb, var(--studio-accent) ${face.shade * 100}%, var(--studio-canvas))`}
-        stroke="var(--studio-study-edge)" />)}
+        fill={`color-mix(in srgb, var(--accent) ${face.shade * 100}%, #202020)`}
+        stroke="color-mix(in srgb, var(--accent-foreground) 30%, #202020)" />)}
     </g>
   </svg>;
 }

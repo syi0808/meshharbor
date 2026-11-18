@@ -78,7 +78,7 @@ test('Studio optimizes a textured GLB without changing its materials or textures
   const selected = page.getByRole('region', { name: 'Selected asset' });
   await test.step('Import the textured GLB through the Studio file chooser', async () => {
     await page.goto(studioOrigin);
-    await expect(page.getByText('Local engine ready', { exact: true })).toBeVisible();
+    await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
     const [chooser] = await Promise.all([
       page.waitForEvent('filechooser'),
       page.getByRole('button', { name: 'Open GLB', exact: true }).click(),
@@ -99,10 +99,27 @@ test('Studio optimizes a textured GLB without changing its materials or textures
   const result = page.getByRole('radio', { name: 'Result' });
   await test.step('Run Optimize against the local Rust engine', async () => {
     await page.getByRole('button', { name: 'Optimize', exact: true }).click();
-    await page.getByRole('spinbutton', { name: 'Triangle target' }).fill('240');
+    const inspector = page.getByRole('complementary', { name: 'Optimize mesh' });
+    const inspectorWidth = () => inspector.evaluate(element => element.getBoundingClientRect().width);
+    const initialWidth = await inspectorWidth();
+    const handle = await page.getByRole('separator', { name: 'Resize settings panel' }).boundingBox();
+    expect(handle).not.toBeNull();
+    const x = handle.x + handle.width / 2;
+    const y = handle.y + handle.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x - 56, y, { steps: 6 });
+    await page.mouse.up();
+    await expect.poll(inspectorWidth).toBeGreaterThan(initialWidth);
+    const targetInput = page.getByRole('spinbutton', { name: 'Triangle target' });
+    await expect(targetInput).toHaveCSS('height', '28px');
+    await expect(page.getByRole('slider', { name: 'Triangle target' })).toBeVisible();
+    await targetInput.fill('240');
     await page.getByRole('button', { name: 'Optimize mesh' }).click();
     await expect(result).toBeChecked({ timeout: 20_000 });
     await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
+    const library = page.locator('#workbench-sidebar-dock');
+    await expect.poll(() => library.evaluate(element => element.scrollWidth - element.clientWidth)).toBe(0);
   });
 
   await test.step('Compare rendered material views and verify the original download', async () => {

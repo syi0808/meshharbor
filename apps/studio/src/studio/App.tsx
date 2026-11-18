@@ -25,21 +25,26 @@ import {
   type AssetPageFilters,
   type JobReportCardModel,
 } from './api';
-import { Alert, AlertDescription } from '../ui/Alert';
-import { Badge } from '../ui/Badge';
-import { Button } from '../ui/Button';
-import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from '../ui/Dialog';
-import { Input } from '../ui/Input';
-import { Label } from '../ui/Label';
-import { NativeSelect } from '../ui/NativeSelect';
-import { Progress } from '../ui/Progress';
-import { Sheet, SheetClose } from '../ui/Sheet';
-import { Slider } from '../ui/Slider';
-import { ToggleGroup, ToggleGroupItem } from '../ui/ToggleGroup';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { Alert, AlertAction, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty';
+import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
+import { Input } from '@/components/ui/input';
+import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from '@/components/ui/item';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { Progress } from '@/components/ui/progress';
+import { Separator } from '@/components/ui/separator';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Slider } from '@/components/ui/slider';
+import { Spinner } from '@/components/ui/spinner';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { ModelPreview } from './ModelPreview';
 import { MeshStudy } from './MeshStudy';
 import { RuntimeSetup } from './RuntimeSetup';
-import { useWorkbenchSidebar, WorkbenchSidebar } from './WorkbenchSidebar';
+import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
 import { formatVersionSizes, inspectorForAsset, shouldHighlightExport, WORKBENCH_INSPECTOR_SHEET_QUERY, type Inspector } from './workbench-state';
 import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
 
@@ -170,7 +175,7 @@ export function App() {
     return () => media.removeEventListener('change', update);
   }, []);
   const sidebar = useWorkbenchSidebar();
-  const [workbenchNode, setWorkbenchNode] = useState<HTMLElement | null>(null);
+  const workbenchRef = useRef<HTMLElement>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -1042,101 +1047,135 @@ export function App() {
   function restoreInspectorFocus() {
     const trigger = inspectorTrigger.current;
     if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus();
-    else workbenchNode?.querySelector<HTMLButtonElement>('.workbench-view-actions button')?.focus();
+    else workbenchRef.current?.querySelector<HTMLButtonElement>('[data-slot="model-tools"] button')?.focus();
   }
   function closeInspector() {
     setInspector(null);
     restoreInspectorFocus();
   }
   const jobFeedback = isRunning ? (
-    <div className="workspace-job">
-      <div className="workspace-job-copy" role="status">
-        <span className="spinner small" aria-hidden="true" />
+    <div className="grid gap-2 rounded-lg border bg-card p-3 text-xs text-card-foreground">
+      <div className="flex flex-wrap items-center gap-2" role="status">
+        {runtimeJobRunning
+          ? <Spinner role="progressbar" aria-label="Job progress" />
+          : <Spinner aria-hidden="true" />}
         <strong>{job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating' : job.state === 'cancelling' ? 'Cancelling' : 'Working'}</strong>
         <span>{studioOperationLabel(job.operation)}{!runtimeJobRunning && ` · ${job.progress}%`}</span>
       </div>
-      <Progress value={runtimeJobRunning ? null : job.progress} aria-label="Job progress" />
-      {isQueuedJobCancellable(job) && <Button variant="outline" size="sm" className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</Button>}
+      {!runtimeJobRunning && <Progress value={job.progress} aria-label="Job progress" />}
+      {isQueuedJobCancellable(job) && <Button variant="outline" size="sm" className="justify-self-start" onClick={() => void cancelJob()}>Cancel queued job</Button>}
     </div>
   ) : null;
   const feedback = !error && reportCard && exportIsPrimary && notice ? (
     <span className="sr-only" role="status">{notice}</span>
   ) : (error || notice) ? (
-    <Alert className={`toast ${error ? 'toast-error' : 'toast-success'}`} variant={error ? 'destructive' : 'default'} role={error ? 'alert' : 'status'}>
+    <Alert variant={error ? 'destructive' : 'default'} role={error ? 'alert' : 'status'}>
       {error && <WarningCircleIcon aria-hidden="true" />}
       <AlertDescription>{error ?? notice}</AlertDescription>
-      <Button variant="ghost" size="icon-sm" onClick={() => { setError(null); closeNotice(); }} aria-label="Dismiss"><XIcon /></Button>
+      <AlertAction><Button variant="ghost" size="icon-sm" onClick={() => { setError(null); closeNotice(); }} aria-label="Dismiss"><XIcon /></Button></AlertAction>
     </Alert>
   ) : null;
 
   function renderAssetRow(asset: Asset) {
     return (
-      <Button key={asset.id} variant="ghost" aria-pressed={asset.id === selectedId}
-        className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`}
-        onClick={() => { selectAsset(asset); if (sidebar.narrow) sidebar.setPanel(null); }}>
-        <span className="asset-row-icon">{asset.kind === 'mesh' ? <CubeIcon aria-hidden="true" /> : <FileImageIcon aria-hidden="true" />}</span>
-        <span className="asset-row-name">
-          <strong title={asset.name}>{asset.name}</strong>
-          <small>{asset.source_asset_id ? 'Result' : 'Original'} · {formatSize(asset.byte_size)}</small>
-        </span>
-        {asset.kind === 'mesh' && <span className="asset-row-tris">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small>tris</small></span>}
-      </Button>
+      <Item key={asset.id} size="xs" variant={asset.id === selectedId ? 'muted' : 'default'} asChild className="min-w-0 flex-nowrap text-left hover:bg-muted">
+        <button type="button" aria-pressed={asset.id === selectedId}
+          onClick={() => { selectAsset(asset); if (sidebar.narrow) sidebar.setPanel(null); }}>
+          <ItemMedia variant="icon" className="text-muted-foreground">{asset.kind === 'mesh' ? <CubeIcon aria-hidden="true" /> : <FileImageIcon aria-hidden="true" />}</ItemMedia>
+          <ItemContent className="min-w-0">
+            <ItemTitle className="min-w-0"><span className="truncate" title={asset.name}>{asset.name}</span></ItemTitle>
+            <ItemDescription>{asset.source_asset_id ? 'Result' : 'Original'} · {formatSize(asset.byte_size)}</ItemDescription>
+          </ItemContent>
+          {asset.kind === 'mesh' && <ItemActions><span className="text-right tabular-nums text-muted-foreground">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small className="block">tris</small></span></ItemActions>}
+        </button>
+      </Item>
     );
   }
 
   function inspectorBody() {
     return <>
-      {openInspector === 'optimize' && <div className="operation-card">
-        <p className="operation-description">Reduce polygon count while keeping the original file intact and preserving material references.</p>
-        <div data-slot="field" className="field-label-row"><Label htmlFor="triangle-target">Triangle target</Label><span className="field-hint">Goal, not a guarantee</span></div>
-        <div className="number-input-wrap"><Input id="triangle-target" type="number" min="1" max="10000000" step="1" value={targetTriangles} onChange={(event) => setTargetTriangles(Number(event.target.value))} disabled={!selectedAsset || isRunning || busy} /><span>tris</span></div>
-        <div className="range-row"><span>Smaller</span><Slider label="Triangle target" min={1} max={Math.max(4, triangleCount || 20000)} step={1} value={[Math.max(1, Math.min(targetTriangles, Math.max(4, triangleCount || 20000)))]} onValueChange={([value]) => setTargetTriangles(value)} disabled={!selectedAsset || isRunning || busy} /><span>More detail</span></div>
-        <details data-slot="collapsible" className="settings-disclosure"><summary>Shape protection</summary>
-        <div className="field-label-row tolerance-label"><span>Error tolerance</span><span className="mono-value">{maxError.toFixed(3)}</span></div>
-        <Slider id="error-budget" label="Maximum geometric error" min={0.001} max={0.08} step={0.001} value={[maxError]} onValueChange={([value]) => setMaxError(value)} disabled={!selectedAsset || isRunning || busy} />
-        <div className="control-footnote">A lower tolerance may stop above your target to protect shape.</div>
-        </details>
-        <div className="preserve-note"><span className="preserve-check">✓</span><span>Keeps the original file</span><span className="preserve-check">✓</span><span>Keeps UV and material references</span></div>
-        {!(isRunning && job.operation === 'mesh.simplify') && <Button className="simplify-button" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><span className="spinner small" /> Working…</> : <><SlidersHorizontalIcon aria-hidden="true" /> Optimize mesh <span className="button-arrow">→</span></>}</Button>}
+      {openInspector === 'optimize' && <div className="grid gap-4 p-4 text-xs/relaxed">
+        <p className="text-muted-foreground">Reduce polygon count while keeping the original file intact and preserving material references.</p>
+        <Field>
+          <FieldLabel htmlFor="triangle-target">Triangle target</FieldLabel>
+          <Input id="triangle-target" type="number" min="1" max="10000000" step="1" value={targetTriangles} onChange={(event) => setTargetTriangles(Number(event.target.value))} disabled={!selectedAsset || isRunning || busy} />
+          <FieldDescription>Goal, not a guarantee</FieldDescription>
+        </Field>
+        <div className="flex items-center gap-2 text-muted-foreground [&>span]:shrink-0">
+          <span>Smaller</span>
+          <Slider className="min-w-0 flex-1" aria-label="Triangle target" min={1} max={Math.max(4, triangleCount || 20000)} step={1} value={[Math.max(1, Math.min(targetTriangles, Math.max(4, triangleCount || 20000)))]} onValueChange={([value]) => setTargetTriangles(value)} disabled={!selectedAsset || isRunning || busy} />
+          <span>More detail</span>
+        </div>
+        <Accordion type="single" collapsible>
+          <AccordionItem value="shape-protection">
+            <AccordionTrigger>Shape protection</AccordionTrigger>
+            <AccordionContent>
+              <div className="grid gap-3">
+                <div className="flex items-center justify-between gap-2"><span>Error tolerance</span><span className="font-mono tabular-nums">{maxError.toFixed(3)}</span></div>
+                <Slider aria-label="Maximum geometric error" min={0.001} max={0.08} step={0.001} value={[maxError]} onValueChange={([value]) => setMaxError(value)} disabled={!selectedAsset || isRunning || busy} />
+                <p className="text-muted-foreground">A lower tolerance may stop above your target to protect shape.</p>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
+        <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 text-muted-foreground"><span className="text-primary">✓</span><span>Keeps the original file</span><span className="text-primary">✓</span><span>Keeps UV and material references</span></div>
+        {!(isRunning && job.operation === 'mesh.simplify') && <Button className="w-full" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : <><SlidersHorizontalIcon aria-hidden="true" /> Optimize mesh</>}</Button>}
       </div>}
 
-      {openInspector === 'generation' && <section className="operation-card generation-card" id="image-generation">
-          <details data-slot="collapsible" className="settings-disclosure"><summary>Model settings</summary>
-          <div data-slot="field" className="field-label-row"><Label htmlFor="generation-backend">Backend</Label><span className="field-hint">Auto selects this host’s backend</span></div>
-          <NativeSelect id="generation-backend" value={generationBackend} onChange={(event) => setGenerationBackend(event.target.value)} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning}>
-            <option value="auto">Automatic</option>
-            <option value="pixal3d-mlx">Pixal3D MLX (Apple Silicon)</option>
-            <option value="pixal3d-cuda">Pixal3D CUDA (Linux/NVIDIA)</option>
-          </NativeSelect>
-          <div data-slot="field" className="field-label-row"><Label htmlFor="texture-size">Texture size</Label><span className="field-hint">Higher uses more memory</span></div>
-          <NativeSelect id="texture-size" value={textureSize} onChange={(event) => setTextureSize(Number(event.target.value))} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning}>
-            <option value={512}>512</option><option value={1024}>1024</option><option value={2048}>2048</option>
-          </NativeSelect>
-          <div className="field-label-row generation-face-label"><Label htmlFor="target-faces">Soft face target</Label><span className="field-hint">Not a hard cap</span></div>
-          <div className="number-input-wrap"><Input id="target-faces" type="number" min="4" max="1000000" step="1000" value={targetFaces} onChange={(event) => setTargetFaces(Number(event.target.value))} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning} /><span>faces</span></div>
-          </details>
-          {canGenerate && !(isRunning && job.operation === 'image.generate') && <Button className="simplify-button" disabled={busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><span className="spinner small" /> Working…</> : <>Generate 3D <span className="button-arrow">→</span></>}</Button>}
-          {!canGenerate && <div className="generation-setup">
+      {openInspector === 'generation' && <section className="grid gap-4 p-4 text-xs/relaxed" id="image-generation">
+          <Accordion type="single" collapsible>
+            <AccordionItem value="model-settings">
+              <AccordionTrigger>Model settings</AccordionTrigger>
+              <AccordionContent>
+                <div className="grid gap-4">
+                  <Field>
+                    <FieldLabel htmlFor="generation-backend">Backend</FieldLabel>
+                    <NativeSelect className="w-full" id="generation-backend" value={generationBackend} onChange={(event) => setGenerationBackend(event.target.value)} disabled={busy || isRunning}>
+                      <NativeSelectOption value="auto">Automatic</NativeSelectOption>
+                      <NativeSelectOption value="pixal3d-mlx">Pixal3D MLX (Apple Silicon)</NativeSelectOption>
+                      <NativeSelectOption value="pixal3d-cuda">Pixal3D CUDA (Linux/NVIDIA)</NativeSelectOption>
+                    </NativeSelect>
+                  </Field>
+                  <Field>
+                    <FieldLabel htmlFor="texture-size">Texture size</FieldLabel>
+                    <NativeSelect className="w-full" id="texture-size" value={textureSize} onChange={(event) => setTextureSize(Number(event.target.value))} disabled={busy || isRunning}>
+                      <NativeSelectOption value={512}>512</NativeSelectOption><NativeSelectOption value={1024}>1024</NativeSelectOption><NativeSelectOption value={2048}>2048</NativeSelectOption>
+                    </NativeSelect>
+                    <FieldDescription>Higher uses more memory</FieldDescription>
+                  </Field>
+                  <Field>
+                    <FieldLabel htmlFor="target-faces">Soft face target</FieldLabel>
+                    <Input id="target-faces" type="number" min="4" max="1000000" step="1000" value={targetFaces} onChange={(event) => setTargetFaces(Number(event.target.value))} disabled={busy || isRunning} />
+                    <FieldDescription>Not a hard cap</FieldDescription>
+                  </Field>
+                </div>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
+          {canGenerate && !(isRunning && job.operation === 'image.generate') && <Button className="w-full" disabled={busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
+          {!canGenerate && <div className="grid gap-2 text-muted-foreground">
             <p>{selectedGenerationBackend?.installable ? 'Prepare a local runtime before generating.' : 'This backend is not available on this computer.'} Existing GLBs do not require a model runtime.</p>
             <Button variant={selectedGenerationBackend?.installable ? 'default' : 'secondary'} onClick={() => openRuntime(selectedGenerationBackend?.id)}>Runtime setup</Button>
           </div>}
         </section>}
 
       {openInspector === 'tools' && <>
-      <div className="operation-card mesh-tools-card" id="mesh-tools">
-        <p className="operation-description">Mesh processing creates a new asset. Input checks are read-only. Your source file is never overwritten.</p>
-        <div className="mesh-tool-list">
+      <div className="grid gap-4 p-4 text-xs/relaxed" id="mesh-tools">
+        <p className="text-muted-foreground">Mesh processing creates a new asset. Input checks are read-only. Your source file is never overwritten.</p>
+        <Accordion type="single" collapsible>
           {meshOperationOptions.map((tool) => {
             const available = operations.find((operation) => operation.id === tool.id)?.implemented === true;
             const processing = isRunning && job.operation === tool.id;
             return (
-              <details className="mesh-tool-item settings-disclosure" name="mesh-tool" key={tool.id}>
-                <summary>{tool.title}</summary>
-                <p>{tool.description}</p>
+              <AccordionItem key={tool.id} value={tool.id}>
+                <AccordionTrigger>{tool.title}</AccordionTrigger>
+                <AccordionContent>
+                <div className="grid gap-2">
+                <p className="text-muted-foreground">{tool.description}</p>
                 {tool.id === 'mesh.retopology' && (
                   <>
                     <Button
-                      variant="secondary" size="sm" className="mesh-tool-button"
+                      variant="secondary" size="sm" className="w-full"
                       disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || busy || checkingRetopology || connection !== 'connected' || isRunning}
                       onClick={() => void checkRetopologyInput()}
                     >
@@ -1149,27 +1188,42 @@ export function App() {
                 )}
                 {!processing && (
                   <Button
-                    className="mesh-tool-button"
+                    className="w-full"
                     disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || !available || busy || checkingRetopology || connection !== 'connected' || isRunning}
                     onClick={() => void runMeshOperation(tool.id)}
                   >
-                    Run {tool.title}<span className="button-arrow">→</span>
+                    Run {tool.title}
                   </Button>
                 )}
-              </details>
+                </div>
+                </AccordionContent>
+              </AccordionItem>
             );
           })}
-        </div>
+        </Accordion>
       </div>
 
-      <details className="capability-card settings-disclosure"><summary>Retopology availability</summary><p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is unavailable until a signature-verified, manifest-matched managed sidecar is supported; adjacent binaries are intentionally ignored. Editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p><div className="capability-foot"><span>QuadriFlow backend</span><span className="capability-status">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>{quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}<Button onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</Button><div className="capability-foot"><span>CUDA backend</span><span className="capability-status">{backendStatus('pixal3d-cuda')}</span></div><div className="capability-foot"><span>Apple MLX backend</span><span className="capability-status">{backendStatus('pixal3d-mlx')}</span></div></details>
+      <details className="mx-4 mb-4 grid gap-2 border-y py-3 text-xs/relaxed [&>summary]:cursor-pointer [&>p]:my-2 [&>p]:text-muted-foreground"><summary>Retopology availability</summary><p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is unavailable until a signature-verified, manifest-matched managed sidecar is supported; adjacent binaries are intentionally ignored. Editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p><div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>QuadriFlow backend</span><span className="text-muted-foreground">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>{quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}<Button onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</Button><div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>CUDA backend</span><span className="text-muted-foreground">{backendStatus('pixal3d-cuda')}</span></div><div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>Apple MLX backend</span><span className="text-muted-foreground">{backendStatus('pixal3d-mlx')}</span></div></details>
       </>}
     </>;
   }
 
+  const desktopInspector = openInspector && !inspectorIsSheet ? (
+    <aside className="h-full min-w-0 overflow-auto overscroll-contain" id="workbench-inspector" data-tool={openInspector}
+      aria-labelledby="workbench-inspector-title" onKeyDown={event => {
+        if (event.key === 'Escape') { event.stopPropagation(); closeInspector(); }
+      }}>
+      <div className="flex items-center justify-between gap-2 border-b px-4 py-2 font-heading text-sm font-medium">
+        <h2 id="workbench-inspector-title">{inspectorTitle}</h2>
+        <Button variant="ghost" size="icon-sm" title="Close settings" aria-label="Close settings" onClick={closeInspector}><SidebarSimpleIcon aria-hidden="true" /></Button>
+      </div>
+      {inspectorBody()}
+    </aside>
+  ) : null;
+
   return (
     <Dialog open={showEngineDialog} onOpenChange={setShowEngineDialog}>
-      <div className="app-shell studio-app mh-shadcn-theme" onDragOver={(event) => {
+      <div className="flex min-h-dvh min-w-0 flex-col bg-background min-[881px]:h-dvh min-[881px]:overflow-hidden" onDragOver={(event) => {
       if (!event.dataTransfer.types.includes('Files')) return;
       event.preventDefault();
       setDragging(true);
@@ -1181,51 +1235,43 @@ export function App() {
       setDragging(false);
       void importFiles(event.dataTransfer.files);
     }}>
-      <header className="topbar studio-topbar">
-        <div className="brand-lockup">
-          <div className="brand-mark"><span /><span /><span /></div>
-          <span className="brand-name">mesh<span>harbor</span></span>
-          <span className="brand-divider" />
-          <span className="product-label">Studio</span>
-        </div>
-          {selectedAsset && <div className="import-actions studio-file-actions" role="group" aria-label="File actions">
-            <Button variant="secondary" size="sm" className="import-button" aria-label="New from image" title="New from image" onClick={() => imageInputRef.current?.click()} disabled={busy}><ImageSquareIcon aria-hidden="true" /> <span>New from image</span></Button>
-            <Button variant="secondary" size="sm" className="import-button" aria-label="Open GLB" title="Open GLB" onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon aria-hidden="true" /> <span>Open GLB</span></Button>
-            {quadArtifact && <Button variant="secondary" size="sm" className="import-button" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
-            {selectedAsset.kind === 'mesh' && <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" className="export-glb" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> <span>Export GLB</span></Button>}
+      <header className="z-10 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b bg-background px-4 py-2">
+        <span className="font-heading text-sm font-medium">meshharbor</span>
+          {selectedAsset && <div className="order-last flex w-full flex-wrap items-center gap-2 md:order-0 md:ml-auto md:w-auto" role="group" aria-label="File actions">
+            <Button variant="secondary" size="sm" aria-label="New from image" title="New from image" onClick={() => imageInputRef.current?.click()} disabled={busy}><ImageSquareIcon aria-hidden="true" /> <span>New from image</span></Button>
+            <Button variant="secondary" size="sm" aria-label="Open GLB" title="Open GLB" onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon aria-hidden="true" /> <span>Open GLB</span></Button>
+            {quadArtifact && <Button variant="secondary" size="sm" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
+            {selectedAsset.kind === 'mesh' && <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> <span>Export GLB</span></Button>}
           </div>}
-        <div className="topbar-actions">
-          <div className={`engine-status ${connection}`} role="status" title={runtime ? `${runtime.platform} · ${runtime.status.replaceAll('_', ' ')}` : undefined}><i />{connection === 'connected' ? 'Local engine ready' : connection === 'connecting' ? 'Connecting…' : 'Engine offline'}</div>
-          <DialogTrigger asChild><Button variant="ghost" size="sm" className="engine-trigger" aria-label="Engine and runtimes"><CpuIcon aria-hidden="true" /><span>Runtime</span></Button></DialogTrigger>
+        <div className={selectedAsset ? 'ml-auto flex items-center gap-2 md:ml-0' : 'ml-auto flex items-center gap-2'}>
+          <DialogTrigger asChild><Button variant="ghost" size="sm" aria-label="Engine and runtimes"><CpuIcon data-icon="inline-start" aria-hidden="true" /><span>Runtime</span></Button></DialogTrigger>
         </div>
       </header>
 
-      <main className="workbench fullscreen-workbench" ref={setWorkbenchNode}>
+      <main className="relative flex min-h-0 min-w-0 flex-1 flex-col" ref={workbenchRef} data-connection={connection}>
           <h1 className="sr-only">MeshHarbor Studio</h1>
           <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" tabIndex={-1} type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={imageInputRef} className="sr-only" aria-label="Choose images" tabIndex={-1} type="file" multiple accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-          {!showInspectorSheet && !showEngineDialog && <div className="workbench-feedback">
+          {!showInspectorSheet && !showEngineDialog && <div className="pointer-events-none fixed inset-x-3 bottom-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto">
             {feedback}
             {jobFeedback}
           </div>}
 
-          <div className="workbench-grid"
-            data-sidebar={sidebar.panel ? 'expanded' : 'collapsed'}
-            data-inspector={openInspector && !inspectorIsSheet ? 'open' : 'closed'}>
-            <WorkbenchSidebar state={sidebar} portal={workbenchNode}
+            <WorkbenchLayout state={sidebar} inspector={desktopInspector}
               assets={
-              <div className="library-section" id="asset-library">
-                <div className="section-heading">
+              <div className="grid min-w-0 grid-cols-1 gap-3 text-xs" id="asset-library">
+                <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
                   <span>Local library</span>
-                  <Button variant="ghost" size="sm" className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
+                  <Button variant="ghost" size="sm" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
                 </div>
-                {showLibraryFilters && <><form className="asset-search" onSubmit={(event) => {
+                {showLibraryFilters && <><form className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2" onSubmit={(event) => {
                   event.preventDefault();
                   applyAssetBrowserFilters({ ...assetFilters, query: assetSearchInput.trim() });
                 }}>
-                  <Label className="asset-search-input">
-                    <span>Filename</span>
+                  <Field className="min-w-0">
+                    <FieldLabel htmlFor="asset-filename">Filename</FieldLabel>
                     <Input
+                      id="asset-filename"
                       aria-label="Search assets by filename"
                       type="search"
                       maxLength={256}
@@ -1237,13 +1283,15 @@ export function App() {
                       }}
                       placeholder="Search assets"
                     />
-                  </Label>
-                  <Button type="submit" variant="outline" size="sm" className="asset-filter-button" disabled={connection !== 'connected'}>Search</Button>
+                  </Field>
+                  <Button type="submit" variant="outline" disabled={connection !== 'connected'}>Search</Button>
                 </form>
-                <div className="asset-filters">
-                  <Label>
-                    <span>Type</span>
+                <div className="grid grid-cols-2 gap-2">
+                  <Field className="min-w-0">
+                    <FieldLabel htmlFor="asset-kind">Type</FieldLabel>
                     <NativeSelect
+                      className="w-full"
+                      id="asset-kind"
                       aria-label="Filter assets by type"
                       value={assetFilters.kind}
                       disabled={connection !== 'connected'}
@@ -1253,14 +1301,16 @@ export function App() {
                         kind: event.currentTarget.value as AssetKindFilter,
                       })}
                     >
-                      <option value="all">All types</option>
-                      <option value="mesh">3D models</option>
-                      <option value="image">Images</option>
+                      <NativeSelectOption value="all">All types</NativeSelectOption>
+                      <NativeSelectOption value="mesh">3D models</NativeSelectOption>
+                      <NativeSelectOption value="image">Images</NativeSelectOption>
                     </NativeSelect>
-                  </Label>
-                  <Label>
-                    <span>Origin</span>
+                  </Field>
+                  <Field className="min-w-0">
+                    <FieldLabel htmlFor="asset-origin">Origin</FieldLabel>
                     <NativeSelect
+                      className="w-full"
+                      id="asset-origin"
                       aria-label="Filter assets by origin"
                       value={assetFilters.origin}
                       disabled={connection !== 'connected'}
@@ -1270,33 +1320,33 @@ export function App() {
                         origin: event.currentTarget.value as AssetOriginFilter,
                       })}
                     >
-                      <option value="all">All assets</option>
-                      <option value="original">Originals</option>
-                      <option value="derived">Generated results</option>
+                      <NativeSelectOption value="all">All assets</NativeSelectOption>
+                      <NativeSelectOption value="original">Originals</NativeSelectOption>
+                      <NativeSelectOption value="derived">Generated results</NativeSelectOption>
                     </NativeSelect>
-                  </Label>
+                  </Field>
                   {hasActiveAssetFilters && (
-                    <Button type="button" variant="ghost" size="sm" className="text-button asset-reset" onClick={() => applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS)}>
+                    <Button type="button" variant="ghost" size="sm" className="col-span-2 justify-self-start" onClick={() => applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS)}>
                       Clear filters
                     </Button>
                   )}
                 </div></>}
-                {matchingAssets.length > 0 && <p className="asset-library-note" aria-live="polite">
+                {matchingAssets.length > 0 && <p className="text-xs text-muted-foreground" aria-live="polite">
                   {assetPageLoading ? 'Loading assets…' : `${matchingAssets.length} loaded ${hasActiveAssetFilters ? 'result' : 'asset'}${matchingAssets.length === 1 ? '' : 's'}`}
                 </p>}
                 {matchingAssets.length === 0
-                  ? <div className="library-empty" role="status">
+                  ? <Empty role="status"><EmptyHeader><EmptyDescription>
                       {assetPageLoading ? 'Loading assets…' : hasActiveAssetFilters
                         ? 'No matching assets' : 'Imported files and results appear here'}
-                    </div>
-                  : <div className="asset-list">{matchingAssets.map(renderAssetRow)}</div>}
-                {pinnedAssets.length > 0 && <section className="asset-pinned" aria-label="Current selection and comparison">
-                  <h3 className="asset-library-note">Current selection</h3>
-                  <div className="asset-list">{pinnedAssets.map(renderAssetRow)}</div>
+                    </EmptyDescription></EmptyHeader></Empty>
+                  : <div className="grid grid-cols-1 gap-1">{matchingAssets.map(renderAssetRow)}</div>}
+                {pinnedAssets.length > 0 && <section className="grid grid-cols-1 gap-2 border-t pt-3" aria-label="Current selection and comparison">
+                  <h3 className="text-xs text-muted-foreground">Current selection</h3>
+                  <div className="grid grid-cols-1 gap-1">{pinnedAssets.map(renderAssetRow)}</div>
                 </section>}
                 {assetNextCursor && (
-                  <div className="asset-load-more">
-                    <Button type="button" variant="outline" size="sm" className="asset-filter-button" onClick={() => void requestAssetPage(api, assetFilters, true)} disabled={assetPageLoading || connection !== 'connected'}>
+                  <div className="flex justify-center">
+                    <Button type="button" variant="outline" size="sm" onClick={() => void requestAssetPage(api, assetFilters, true)} disabled={assetPageLoading || connection !== 'connected'}>
                       {assetPageLoading ? 'Loading…' : 'Load more assets'}
                     </Button>
                   </div>
@@ -1304,57 +1354,57 @@ export function App() {
               </div>
               }
               jobs={
-              <section className="job-history" aria-label="Recent jobs">
-                <div className="section-heading">
+              <section className="grid min-w-0 grid-cols-1 gap-3 text-xs" aria-label="Recent jobs">
+                <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
                   <div><span>Recent activity</span></div>
-                  <Button variant="ghost" size="sm" className="text-button" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
+                  <Button variant="ghost" size="sm" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
                 </div>
                 {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
-                  <details className="job-history-note"><summary>Recover an interrupted job</summary>
+                  <details className="rounded-lg border p-2 text-muted-foreground [&>summary]:cursor-pointer"><summary>Recover an interrupted job</summary>
                     <p>Checking a record does not resume it. If the engine exited unexpectedly, stop all REST/MCP processes for this data directory before running <code>meshharbor jobs recover-interrupted --confirm-no-running-meshharbor</code>.</p>
                   </details>}
                 {recentJobs.length === 0
-                  ? <div className="job-history-empty">No saved jobs yet.</div>
-                  : <div className="job-history-list">{recentJobs.slice(0, 8).map((savedJob) => (
-                    <div className={`job-history-row ${savedJob.id === job?.id ? 'selected' : ''}`} key={savedJob.id}>
-                      <div className="job-history-copy"><strong>{studioOperationLabel(savedJob.operation)}</strong><small>Updated {formatJobTime(savedJob.updated_at)}</small></div>
-                      <div className="job-history-status" data-state={savedJob.state}><strong>{savedJob.state === 'succeeded' ? 'Complete' : savedJob.state[0].toUpperCase() + savedJob.state.slice(1)}</strong>{isActiveJob(savedJob) && <span>{savedJob.progress}%</span>}</div>
-                      <Button variant="ghost" size="sm" className="job-history-open" onClick={() => { void openRecentJob(savedJob.id); if (sidebar.narrow) sidebar.setPanel(null); }} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</Button>
+                  ? <Empty><EmptyHeader><EmptyDescription>No saved jobs yet.</EmptyDescription></EmptyHeader></Empty>
+                  : <div className="grid gap-2">{recentJobs.slice(0, 8).map((savedJob) => (
+                    <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-2 data-[selected=true]:bg-muted" data-selected={savedJob.id === job?.id} key={savedJob.id}>
+                      <div className="grid min-w-0 flex-1 gap-1 wrap-anywhere [&>strong]:font-medium [&>small]:text-muted-foreground"><strong>{studioOperationLabel(savedJob.operation)}</strong><small>Updated {formatJobTime(savedJob.updated_at)}</small></div>
+                      <div className="shrink-0 text-right text-xs tabular-nums text-muted-foreground data-[state=failed]:text-destructive [&>strong]:block" data-state={savedJob.state}><strong>{savedJob.state === 'succeeded' ? 'Complete' : savedJob.state[0].toUpperCase() + savedJob.state.slice(1)}</strong>{isActiveJob(savedJob) && <span>{savedJob.progress}%</span>}</div>
+                      <Button variant="ghost" size="sm" onClick={() => { void openRecentJob(savedJob.id); if (sidebar.narrow) sidebar.setPanel(null); }} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</Button>
                     </div>
                   ))}</div>}
               </section>
               }
-            />
+            >
 
-            <section className="viewer-column workbench-viewer" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
-              {!selectedAsset ? <div className="studio-start">
-                <div className="studio-start-intro">
-                  <h2>Start with a model or an image</h2>
-                  <p>Inspect and refine a GLB, or turn a reference image into a 3D model on this computer.</p>
-                  <div className="studio-start-actions">
-                    <Button onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon aria-hidden="true" /> Open GLB</Button>
-                    <Button variant="outline" onClick={() => imageInputRef.current?.click()} disabled={busy}><ImageSquareIcon aria-hidden="true" /> Create from image</Button>
+            <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-800" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
+              {!selectedAsset ? <div className="grid min-h-80 flex-1 content-center items-center justify-center gap-4 p-6 lg:grid-cols-[minmax(0,22rem)_minmax(0,24rem)] lg:gap-8">
+                <div className="order-2 grid min-w-0 gap-4 lg:order-first">
+                  <h2 className="font-heading text-2xl font-medium lg:text-3xl">Start with a model or an image</h2>
+                  <p className="text-sm text-muted-foreground">Inspect and refine a GLB, or turn a reference image into a 3D model on this computer.</p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon data-icon="inline-start" aria-hidden="true" /> Open GLB</Button>
+                    <Button variant="outline" onClick={() => imageInputRef.current?.click()} disabled={busy}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Create from image</Button>
                   </div>
-                  <p className="studio-start-formats">Drop a GLB, PNG or JPEG here</p>
+                  <p className="text-xs text-muted-foreground">Drop a GLB, PNG or JPEG here</p>
                 </div>
                 <MeshStudy />
-              </div> : <div className="viewer-card">
-                <div className="workbench-commandbar">
-                <div className="viewer-toolbar">
-                  <div className="viewer-title">{selectedAsset.kind === 'image' ? <FileImageIcon aria-hidden="true" /> : <CubeIcon aria-hidden="true" />} <span className="viewer-filename" title={selectedAsset.name}>{selectedAsset.name}</span></div>
+              </div> : <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-card p-2 text-card-foreground">
+                <div className="flex min-w-0 flex-1 items-center justify-between gap-2 max-sm:basis-full">
+                  <div className="flex min-w-0 items-center gap-2 text-xs">{selectedAsset.kind === 'image' ? <FileImageIcon aria-hidden="true" /> : <CubeIcon aria-hidden="true" />} <span className="truncate font-medium" title={selectedAsset.name}>{selectedAsset.name}</span></div>
                   {selectedComparisonPair && (
-                    <ToggleGroup className="view-toggle" type="single" orientation="horizontal"
+                    <ToggleGroup className="shrink-0" type="single" orientation="horizontal" size="sm" variant="outline" spacing={0}
                       aria-label="Preview version" aria-busy={comparisonLoadingSide !== null}
                       disabled={comparisonLoadingSide !== null || busy || connection !== 'connected'}
                       value={activeView} onValueChange={value => {
                         if ((value === 'source' || value === 'result') && value !== activeView) void selectComparisonSide(value);
                       }}>
-                      <ToggleGroupItem className={activeView === 'source' ? 'active' : ''} value="source">Original</ToggleGroupItem>
-                      <ToggleGroupItem className={activeView === 'result' ? 'active' : ''} value="result">Result</ToggleGroupItem>
+                      <ToggleGroupItem value="source">Original</ToggleGroupItem>
+                      <ToggleGroupItem value="result">Result</ToggleGroupItem>
                     </ToggleGroup>
                   )}
                 </div>
-                <div className="workbench-view-actions" role="group" aria-label="Model tools">
+                <div className="flex shrink-0 flex-wrap items-center gap-2" data-slot="model-tools" role="group" aria-label="Model tools">
                 {selectedAsset.kind === 'image' ? (
                   <Button variant="secondary" size="sm" aria-expanded={openInspector === 'generation'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'generation' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('generation', event.currentTarget)}><SlidersHorizontalIcon aria-hidden="true" /> Generation settings</Button>
                 ) : (
@@ -1366,33 +1416,33 @@ export function App() {
                 </div>
                 </div>
                 <ModelPreview asset={previewAsset} comparison={previewComparison} loadModel={loadPreview} onError={reportPreviewError} />
-                {showVersionStats && <div className="workbench-comparison-meta" role="group" aria-label="Original to result comparison">
+                {showVersionStats && <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t bg-card px-3 py-2 text-xs tabular-nums text-muted-foreground [&_strong]:font-medium [&_strong]:text-foreground" role="group" aria-label="Original to result comparison">
                   {typeof beforeTriangles === 'number' && typeof afterTriangles === 'number' && <span>Triangles <strong>{beforeTriangles.toLocaleString()} → {afterTriangles.toLocaleString()}</strong></span>}
                   {comparisonSizes && <span>GLB size <strong>{comparisonSizes}</strong></span>}
                 </div>}
                 {selectedAsset && (
-                  <div className="asset-meta-strip">
-                    <div className="asset-meta-main"><Badge variant="outline" className="file-badge">{selectedAsset.kind === 'mesh' ? 'GLB' : selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPG'}</Badge><div><span>{formatSize(selectedAsset.byte_size)} · {selectedAsset.kind === 'mesh' ? `${Number(selectedAsset.metadata.mesh_count ?? 0)} mesh${Number(selectedAsset.metadata.mesh_count ?? 0) === 1 ? '' : 'es'}` : 'Reference image'}</span></div></div>
-                    <div className="meta-divider" />
-                    {selectedAsset.kind === 'mesh' ? <><div className="meta-stat"><span>Triangles</span><strong>{triangleCount.toLocaleString()}</strong></div><div className="meta-stat"><span>Materials</span><strong>{Number(selectedAsset.metadata.material_count ?? 0)}</strong></div></> : <div className="meta-stat"><span>Input</span><strong>{selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPEG'}</strong></div>}
-                    <div className="meta-stat"><span>Version</span><strong>{selectedAsset.source_asset_id ? 'Result' : 'Original'}</strong></div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t bg-card px-3 py-2 text-xs tabular-nums">
+                    <div className="flex items-center gap-2 text-muted-foreground"><Badge variant="outline">{selectedAsset.kind === 'mesh' ? 'GLB' : selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPG'}</Badge><div><span>{formatSize(selectedAsset.byte_size)} · {selectedAsset.kind === 'mesh' ? `${Number(selectedAsset.metadata.mesh_count ?? 0)} mesh${Number(selectedAsset.metadata.mesh_count ?? 0) === 1 ? '' : 'es'}` : 'Reference image'}</span></div></div>
+                    <Separator orientation="vertical" className="ml-auto hidden h-4 sm:block" />
+                    {selectedAsset.kind === 'mesh' ? <><div className="grid gap-1 [&>span]:text-muted-foreground [&>strong]:font-medium"><span>Triangles</span><strong>{triangleCount.toLocaleString()}</strong></div><div className="grid gap-1 [&>span]:text-muted-foreground [&>strong]:font-medium"><span>Materials</span><strong>{Number(selectedAsset.metadata.material_count ?? 0)}</strong></div></> : <div className="grid gap-1 [&>span]:text-muted-foreground [&>strong]:font-medium"><span>Input</span><strong>{selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPEG'}</strong></div>}
+                    <div className="grid gap-1 [&>span]:text-muted-foreground [&>strong]:font-medium"><span>Version</span><strong>{selectedAsset.source_asset_id ? 'Result' : 'Original'}</strong></div>
                   </div>
                 )}
               {reportCard && (
-                <details className="result-card workbench-result" aria-label={`${reportCard.title} result`}>
+                <details className="max-h-60 shrink-0 overflow-auto border-t bg-card p-3 text-xs [&>summary]:cursor-pointer" aria-label={`${reportCard.title} result`}>
                   <summary>Operation report</summary>
-                  <div className="result-heading"><strong>{reportCard.title} complete</strong></div>
-                  {!reportCard.reportAvailable && <p className="report-unavailable">The operation completed, but its report payload is missing or unreadable.</p>}
-                  <div className="report-metrics">
+                  <div className="mt-3 font-medium"><strong>{reportCard.title} complete</strong></div>
+                  {!reportCard.reportAvailable && <p className="mt-2 text-muted-foreground">The operation completed, but its report payload is missing or unreadable.</p>}
+                  <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
                     {reportCard.metrics.map((metric) => (
-                      <div className="report-metric" key={metric.label}>
+                      <div className="grid min-w-0 gap-1 rounded-md border p-2 break-words [&>span]:text-muted-foreground" key={metric.label}>
                         <span>{metric.label}</span>
                         <strong>{metric.value}</strong>
                       </div>
                     ))}
                   </div>
                   {reportCard.lists.map((list) => (
-                    <div className="report-list" key={list.label}>
+                    <div className="mt-3 grid gap-1 border-t pt-2 text-muted-foreground [&>ul]:ml-4 [&>ul]:list-disc" key={list.label}>
                       <strong>{list.label}</strong>
                       {list.state === 'unavailable' && <p>Not reported.</p>}
                       {list.state === 'empty' && <p>None reported.</p>}
@@ -1401,16 +1451,16 @@ export function App() {
                       {list.omittedCount > 0 && <p>{list.omittedCount.toLocaleString()} additional entries are not shown.</p>}
                     </div>
                   ))}
-                  <section className="report-warnings" aria-label="Warnings">
+                  <section className="mt-3 grid gap-1 border-t pt-2 text-muted-foreground [&>ul]:ml-4 [&>ul]:list-disc" aria-label="Warnings">
                     <strong>Warnings</strong>
                     {reportCard.warningsState === 'unavailable' && <p>{reportCard.warningsMessage}</p>}
                     {reportCard.warningsState === 'empty' && <p>No warnings reported.</p>}
                     {reportCard.warningFormatIssue && <p>Some warning data was missing or invalid; all readable warning text is listed below.</p>}
                     {reportCard.warnings.length > 0 && <ul>{reportCard.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>}
                   </section>
-                  <details className="report-technical">
+                  <details className="mt-3 [&>summary]:cursor-pointer">
                     <summary>Asset and job IDs</summary>
-                    <dl className="report-lineage">
+                    <dl className="mt-2 grid gap-1 break-all text-muted-foreground [&>div]:grid [&>div]:grid-cols-[3rem_minmax(0,1fr)]">
                       <div><dt>Job</dt><dd><code>{reportCard.jobId}</code></dd></div>
                       <div><dt>Input</dt><dd><code>{reportCard.inputAssetId ?? 'Not reported'}</code></dd></div>
                       <div><dt>Result</dt><dd><code>{reportCard.resultAssetId ?? 'Not reported'}</code></dd></div>
@@ -1422,50 +1472,36 @@ export function App() {
 
             </section>
 
-            {openInspector && !inspectorIsSheet && <aside className="settings-column active-inspector workbench-inspector" id="workbench-inspector" data-tool={openInspector}
-              aria-labelledby="workbench-inspector-title" onKeyDown={event => {
-                if (event.key === 'Escape') { event.stopPropagation(); closeInspector(); }
-              }}>
-              <div className="workbench-inspector-heading">
-                <h2 id="workbench-inspector-title">{inspectorTitle}</h2>
-                <Button variant="ghost" size="icon-sm" className="workbench-close" title="Close settings" aria-label="Close settings" onClick={closeInspector}><SidebarSimpleIcon aria-hidden="true" /></Button>
-              </div>
-              {inspectorBody()}
-            </aside>}
-          </div>
-          {showInspectorSheet && <Sheet open={showInspectorSheet} onOpenChange={open => { if (!open) setInspector(null); }}
-            title={inspectorTitle} portal={workbenchNode} side="right" id="workbench-inspector"
-            className="active-inspector workbench-inspector" onCloseAutoFocus={event => {
+            </WorkbenchLayout>
+          {showInspectorSheet && <Sheet open={showInspectorSheet} onOpenChange={open => { if (!open) setInspector(null); }}>
+            <SheetContent side="right" id="workbench-inspector" data-tool={openInspector} aria-describedby={undefined}
+              className="overflow-auto overscroll-contain" onCloseAutoFocus={event => {
               event.preventDefault();
               if (!showEngineDialog) restoreInspectorFocus();
             }}>
-            <div className="workbench-inspector-heading">
-              <h2 aria-hidden="true">{inspectorTitle}</h2>
-              <SheetClose asChild><Button variant="ghost" size="icon-sm" className="workbench-close" aria-label="Close settings" title="Close settings"><SidebarSimpleIcon aria-hidden="true" /></Button></SheetClose>
-            </div>
-            {feedback}
-            {jobFeedback}
-            {inspectorBody()}
+              <SheetHeader><SheetTitle>{inspectorTitle}</SheetTitle></SheetHeader>
+              {(feedback || jobFeedback) && <div className="grid gap-2 px-4">{feedback}{jobFeedback}</div>}
+              {inspectorBody()}
+            </SheetContent>
           </Sheet>}
       </main>
-      {dragging && <div className="drop-overlay"><div className="drop-overlay-card"><span className="drop-icon">↓</span><strong>Drop a GLB or source image here</strong><span>Import starts locally on your computer</span></div></div>}
+      {dragging && <div className="pointer-events-none fixed inset-0 z-30 grid place-items-center bg-background/80 p-4"><div className="grid gap-2 rounded-lg border border-dashed bg-card p-6 text-center text-sm"><span className="text-lg text-primary">↓</span><strong>Drop a GLB or source image here</strong><span>Import starts locally on your computer</span></div></div>}
 
-      <DialogContent className="connect-dialog runtime-dialog" showCloseButton={false}>
-        <div className="connect-heading">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+        <DialogHeader>
           <DialogTitle>Engine and runtimes</DialogTitle>
-          <DialogClose asChild><Button variant="ghost" size="icon-sm" aria-label="Close"><XIcon aria-hidden="true" /></Button></DialogClose>
-        </div>
-        <DialogDescription>{connection === 'connected'
-          ? 'Set up image-to-3D on this computer. Opening and editing GLBs does not need a model runtime.'
-          : 'Studio connects to MeshHarbor on this computer. No token is needed here.'}</DialogDescription>
+          <DialogDescription>{connection === 'connected'
+            ? 'Set up image-to-3D on this computer. Opening and editing GLBs does not need a model runtime.'
+            : 'Studio connects to MeshHarbor on this computer. No token is needed here.'}</DialogDescription>
+        </DialogHeader>
         {connection === 'connected' ? dialogBackend ? <>
-          <div className="runtime-backend-field">
-            <Label htmlFor="runtime-backend">Backend</Label>
-            <NativeSelect id="runtime-backend" value={dialogBackend.id} disabled={busy || runtimeJobRunning} onChange={(event) => setRuntimeDialogBackend(event.target.value)}>
-              <option value="pixal3d-mlx">Apple MLX</option>
-              <option value="pixal3d-cuda">NVIDIA CUDA</option>
+          <Field>
+            <FieldLabel htmlFor="runtime-backend">Backend</FieldLabel>
+            <NativeSelect className="w-full" id="runtime-backend" value={dialogBackend.id} disabled={busy || runtimeJobRunning} onChange={(event) => setRuntimeDialogBackend(event.target.value)}>
+              <NativeSelectOption value="pixal3d-mlx">Apple MLX</NativeSelectOption>
+              <NativeSelectOption value="pixal3d-cuda">NVIDIA CUDA</NativeSelectOption>
             </NativeSelect>
-          </div>
+          </Field>
           {feedback}
           {jobFeedback}
           <RuntimeSetup backend={dialogBackend} disabled={busy || isRunning}
@@ -1474,14 +1510,16 @@ export function App() {
             onSetup={() => void (dialogUsesCuda ? setupPixal3dCudaRuntime : setupPixal3dRuntime)()}
             onDownload={() => void (dialogUsesCuda ? installPixal3dCudaModels : installPixal3dModels)()}
             onConvert={() => void convertPixal3dNaf()} />
-        </> : <p className="runtime-explanation">The engine did not report an image-to-3D backend.</p> : <>
-        <div className="connect-steps"><code>meshharbor serve</code><span>Run in your terminal and leave it open</span></div>
-        {connectionError && <Alert variant="destructive" role="alert" className="dialog-error">
+        </> : <p className="text-muted-foreground">The engine did not report an image-to-3D backend.</p> : <>
+        <div className="grid gap-1 rounded-md border bg-muted p-2 text-muted-foreground [&>code]:text-foreground"><code>meshharbor serve</code><span>Run in your terminal and leave it open</span></div>
+        {connectionError && <Alert variant="destructive" role="alert">
           <WarningCircleIcon aria-hidden="true" />
-          <AlertDescription>Engine offline. Start it in your terminal, then retry.</AlertDescription>
-          <details><summary>Technical details</summary>{connectionError}</details>
+          <AlertDescription>
+            Engine offline. Start it in your terminal, then retry.
+            <details className="mt-1 break-words [&>summary]:cursor-pointer"><summary>Technical details</summary>{connectionError}</details>
+          </AlertDescription>
         </Alert>}
-        <Button className="connect-button" onClick={() => void connect()} disabled={connection === 'connecting'}>
+        <Button onClick={() => void connect()} disabled={connection === 'connecting'}>
           {connection === 'connecting' ? 'Connecting…' : 'Retry connection'}
         </Button>
         </>}

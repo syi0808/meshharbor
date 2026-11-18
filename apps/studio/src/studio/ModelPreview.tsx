@@ -1,4 +1,5 @@
-import { Button } from '../ui/Button';
+import { Button } from '@/components/ui/button';
+import { Spinner } from '@/components/ui/spinner';
 import { CornersOutIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
@@ -16,6 +17,7 @@ import type { Asset } from './types';
 
 const MAX_CANONICAL_SOURCE_FRAMES = 64;
 const canonicalSourceFrameCache = new Map<string, PreviewFrame>();
+const viewportLayout = 'relative isolate min-h-80 min-w-0 flex-1 overflow-hidden bg-neutral-800 min-[881px]:min-h-0';
 type PreviewMode = 'material' | 'solid' | 'wireframe';
 
 export interface PreviewComparison {
@@ -64,14 +66,22 @@ function ImagePreview({ asset, loadModel, onError }: Props & { asset: Asset }) {
   }, [asset.id, loadModel, onError]);
 
   return (
-    <div className="preview-stage image-preview-stage">
-      <div className="image-preview-body">
-        {imageUrl ? <img src={imageUrl} alt={`Preview of ${asset.name}`} /> : <div className="image-preview-empty">Local source image</div>}
+    <div className={viewportLayout}>
+      <div className="absolute inset-0 grid place-items-center overflow-hidden p-6">
+        {imageUrl ? <img src={imageUrl} alt={`Preview of ${asset.name}`} className="max-h-full max-w-full object-contain" /> : <p className="text-sm text-muted-foreground">Local source image</p>}
       </div>
-      {loading && <div className="preview-loading"><span className="spinner" /> Loading image…</div>}
-      <div className="preview-hint">Source image · stays on this device</div>
+      {loading && <PreviewLoading>Loading image…</PreviewLoading>}
+      <p className="absolute right-4 bottom-4 text-xs text-muted-foreground">Source image · stays on this device</p>
     </div>
   );
+}
+
+function PreviewLoading({ children }: { children: string }) {
+  return <div className="absolute inset-0 grid place-items-center" role="status">
+    <span className="inline-flex items-center gap-2 rounded-md border bg-popover px-3 py-2 text-xs text-popover-foreground">
+      <Spinner aria-hidden="true" /> {children}
+    </span>
+  </div>;
 }
 
 function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
@@ -329,24 +339,24 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
   }
 
   return (
-    <div className="preview-stage">
-      <div className="preview-canvas" ref={hostRef} aria-label="Interactive 3D model preview" />
+    <div className={viewportLayout}>
+      <div className="absolute inset-0 [&>canvas]:block [&>canvas]:size-full" ref={hostRef} aria-label="Interactive 3D model preview" />
       {modelReady && (
-        <div className="preview-display-toggle" role="group" aria-label="Viewport controls">
-          <Button type="button" variant="ghost" size="sm" aria-label="Material view" aria-pressed={display === 'material'} onClick={() => setDisplay('material')}>Material</Button>
-          <Button type="button" variant="ghost" size="sm" aria-label="Solid view" aria-pressed={display === 'solid'} onClick={() => setDisplay('solid')}>Solid</Button>
-          <Button type="button" variant="ghost" size="sm" aria-label="Triangle wireframe" aria-pressed={display === 'wireframe'} onClick={() => setDisplay('wireframe')}>Wireframe</Button>
-          <Button type="button" variant="ghost" size="icon-sm" aria-label="Fit view" title="Fit view" className="fit-preview" onClick={fitView}><CornersOutIcon aria-hidden="true" /></Button>
+        <div className="absolute bottom-2 left-2 flex flex-wrap items-center gap-1 rounded-lg border bg-popover p-1 sm:bottom-4 sm:left-4" role="group" aria-label="Viewport controls">
+          <Button type="button" variant={display === 'material' ? 'secondary' : 'ghost'} size="sm" aria-label="Material view" aria-pressed={display === 'material'} onClick={() => setDisplay('material')}>Material</Button>
+          <Button type="button" variant={display === 'solid' ? 'secondary' : 'ghost'} size="sm" aria-label="Solid view" aria-pressed={display === 'solid'} onClick={() => setDisplay('solid')}>Solid</Button>
+          <Button type="button" variant={display === 'wireframe' ? 'secondary' : 'ghost'} size="sm" aria-label="Triangle wireframe" aria-pressed={display === 'wireframe'} onClick={() => setDisplay('wireframe')}>Wireframe</Button>
+          <Button type="button" variant="ghost" size="icon-sm" aria-label="Fit view" title="Fit view" onClick={fitView}><CornersOutIcon aria-hidden="true" /></Button>
         </div>
       )}
       {rendererUnavailable && asset && (
-        <div className="preview-empty preview-fallback" role="status">
-          <p>3D preview unavailable</p>
-          <span>WebGL could not start in this browser. Local optimize and export are still available.</span>
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-6 text-center text-sm" role="status">
+          <p className="font-medium">3D preview unavailable</p>
+          <p className="text-muted-foreground">WebGL could not start in this browser. Local optimize and export are still available.</p>
         </div>
       )}
-      {loading && <div className="preview-loading"><span className="spinner" /> Loading preview…</div>}
-      {modelReady && <div className="preview-hint">Drag to orbit · Scroll to zoom</div>}
+      {loading && <PreviewLoading>Loading preview…</PreviewLoading>}
+      {modelReady && <p className="absolute right-4 bottom-4 hidden text-xs text-muted-foreground lg:block">Drag to orbit · Scroll to zoom</p>}
     </div>
   );
 }
