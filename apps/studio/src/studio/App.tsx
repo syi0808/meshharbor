@@ -1,4 +1,4 @@
-import { Box, CircleAlert, Download, FileImage, ImagePlus, PanelRightClose, Plug, RotateCw, SlidersHorizontal, Wrench, X } from 'lucide-react';
+import { ArrowsClockwiseIcon, CpuIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, ImageSquareIcon, SidebarSimpleIcon, SlidersHorizontalIcon, WarningCircleIcon, WrenchIcon, XIcon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   assetComparisonPairForSelection,
@@ -27,7 +27,6 @@ import {
 } from './api';
 import { Alert, AlertDescription } from '../ui/Alert';
 import { Badge } from '../ui/Badge';
-import { Checkbox } from '../ui/Checkbox';
 import { Button } from '../ui/Button';
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from '../ui/Dialog';
 import { Input } from '../ui/Input';
@@ -38,6 +37,8 @@ import { Sheet, SheetClose } from '../ui/Sheet';
 import { Slider } from '../ui/Slider';
 import { ToggleGroup, ToggleGroupItem } from '../ui/ToggleGroup';
 import { ModelPreview } from './ModelPreview';
+import { MeshStudy } from './MeshStudy';
+import { RuntimeSetup } from './RuntimeSetup';
 import { useWorkbenchSidebar, WorkbenchSidebar } from './WorkbenchSidebar';
 import { formatVersionSizes, inspectorForAsset, shouldHighlightExport, WORKBENCH_INSPECTOR_SHEET_QUERY, type Inspector } from './workbench-state';
 import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
@@ -116,7 +117,8 @@ const meshOperationOptions: Array<{ id: StudioMeshOperationId; title: string; de
 
 export function App() {
   const [connection, setConnection] = useState<Connection>('disconnected');
-  const [showConnect, setShowConnect] = useState(false);
+  const [showEngineDialog, setShowEngineDialog] = useState(false);
+  const [runtimeDialogBackend, setRuntimeDialogBackend] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [operations, setOperations] = useState<Operation[]>([]);
@@ -201,6 +203,7 @@ export function App() {
   const hasActiveAssetFilters = assetFilters.query !== ''
     || assetFilters.kind !== 'all'
     || assetFilters.origin !== 'all';
+  const showLibraryFilters = assets.length > 0 || hasActiveAssetFilters;
   const quadArtifact = quadTopologyArtifact(selectedAsset);
   const quadriflowBackend = runtime?.quadriflow_backend;
   const [checkingRetopology, setCheckingRetopology] = useState(false);
@@ -214,6 +217,15 @@ export function App() {
   const selectedGenerationBackend = generationBackend === 'auto'
     ? automaticBackend
     : runtime?.model_backends.find((backend) => backend.id === generationBackend);
+  const dialogBackend = runtime?.model_backends.find(backend => backend.id === runtimeDialogBackend)
+    ?? automaticBackend;
+  const dialogUsesCuda = dialogBackend?.id === 'pixal3d-cuda';
+
+  function openRuntime(backendId?: string) {
+    setRuntimeDialogBackend(backendId ?? null);
+    if (inspectorIsSheet) setInspector(null);
+    setShowEngineDialog(true);
+  }
 
   async function requestAssetPage(
     client: MeshHarborApi,
@@ -444,7 +456,7 @@ export function App() {
       });
       setAssetPageLoading(false);
       setConnection('connected');
-      setShowConnect(false);
+      setShowEngineDialog(false);
     } catch (cause) {
       setAssetPageLoading(false);
       setConnection('disconnected');
@@ -720,7 +732,7 @@ export function App() {
       return;
     }
     if (connection !== 'connected') {
-      setShowConnect(true);
+      setShowEngineDialog(true);
       setConnectionError('The engine must be running before Studio can import files.');
       return;
     }
@@ -1026,6 +1038,7 @@ export function App() {
   const inspectorTitle = openInspector === 'generation' ? 'Generate model' : openInspector === 'optimize' ? 'Optimize mesh' : 'Mesh tools';
   const showInspectorSheet = inspectorIsSheet && !!openInspector;
   const exportIsPrimary = shouldHighlightExport(activeView, openInspector, isRunning, connection === 'connected');
+  const runtimeJobRunning = isRunning && job.operation.startsWith('runtime.');
   function restoreInspectorFocus() {
     const trigger = inspectorTrigger.current;
     if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus();
@@ -1040,9 +1053,9 @@ export function App() {
       <div className="workspace-job-copy" role="status">
         <span className="spinner small" aria-hidden="true" />
         <strong>{job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating' : job.state === 'cancelling' ? 'Cancelling' : 'Working'}</strong>
-        <span>{studioOperationLabel(job.operation)} · {job.progress}%</span>
+        <span>{studioOperationLabel(job.operation)}{!runtimeJobRunning && ` · ${job.progress}%`}</span>
       </div>
-      <Progress value={job.progress} aria-label="Job progress" />
+      <Progress value={runtimeJobRunning ? null : job.progress} aria-label="Job progress" />
       {isQueuedJobCancellable(job) && <Button variant="outline" size="sm" className="cancel-job" onClick={() => void cancelJob()}>Cancel queued job</Button>}
     </div>
   ) : null;
@@ -1050,9 +1063,9 @@ export function App() {
     <span className="sr-only" role="status">{notice}</span>
   ) : (error || notice) ? (
     <Alert className={`toast ${error ? 'toast-error' : 'toast-success'}`} variant={error ? 'destructive' : 'default'} role={error ? 'alert' : 'status'}>
-      {error && <CircleAlert aria-hidden="true" />}
+      {error && <WarningCircleIcon aria-hidden="true" />}
       <AlertDescription>{error ?? notice}</AlertDescription>
-      <Button variant="ghost" size="icon-sm" onClick={() => { setError(null); closeNotice(); }} aria-label="Dismiss"><X /></Button>
+      <Button variant="ghost" size="icon-sm" onClick={() => { setError(null); closeNotice(); }} aria-label="Dismiss"><XIcon /></Button>
     </Alert>
   ) : null;
 
@@ -1061,7 +1074,7 @@ export function App() {
       <Button key={asset.id} variant="ghost" aria-pressed={asset.id === selectedId}
         className={`asset-row ${asset.id === selectedId ? 'selected' : ''}`}
         onClick={() => { selectAsset(asset); if (sidebar.narrow) sidebar.setPanel(null); }}>
-        <span className="asset-row-icon">{asset.kind === 'mesh' ? <Box aria-hidden="true" /> : <FileImage aria-hidden="true" />}</span>
+        <span className="asset-row-icon">{asset.kind === 'mesh' ? <CubeIcon aria-hidden="true" /> : <FileImageIcon aria-hidden="true" />}</span>
         <span className="asset-row-name">
           <strong title={asset.name}>{asset.name}</strong>
           <small>{asset.source_asset_id ? 'Result' : 'Original'} · {formatSize(asset.byte_size)}</small>
@@ -1084,17 +1097,14 @@ export function App() {
         <div className="control-footnote">A lower tolerance may stop above your target to protect shape.</div>
         </details>
         <div className="preserve-note"><span className="preserve-check">✓</span><span>Keeps the original file</span><span className="preserve-check">✓</span><span>Keeps UV and material references</span></div>
-        {!(isRunning && job.operation === 'mesh.simplify') && <Button className="simplify-button" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><span className="spinner small" /> Working…</> : <><SlidersHorizontal aria-hidden="true" /> Optimize mesh <span className="button-arrow">→</span></>}</Button>}
+        {!(isRunning && job.operation === 'mesh.simplify') && <Button className="simplify-button" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><span className="spinner small" /> Working…</> : <><SlidersHorizontalIcon aria-hidden="true" /> Optimize mesh <span className="button-arrow">→</span></>}</Button>}
       </div>}
 
       {openInspector === 'generation' && <section className="operation-card generation-card" id="image-generation">
-          {!canGenerate && <p className="generation-unavailable">{selectedGenerationBackend?.installable
-            ? 'Set up a local runtime to generate this model. You can still work with GLBs.'
-            : 'Image-to-3D is unavailable on this computer. You can still work with GLBs.'}</p>}
           <details data-slot="collapsible" className="settings-disclosure"><summary>Model settings</summary>
           <div data-slot="field" className="field-label-row"><Label htmlFor="generation-backend">Backend</Label><span className="field-hint">Auto selects this host’s backend</span></div>
           <NativeSelect id="generation-backend" value={generationBackend} onChange={(event) => setGenerationBackend(event.target.value)} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning}>
-            <option value="auto">Auto ({automaticBackend?.id === 'pixal3d-cuda' ? 'CUDA' : 'MLX'})</option>
+            <option value="auto">Automatic</option>
             <option value="pixal3d-mlx">Pixal3D MLX (Apple Silicon)</option>
             <option value="pixal3d-cuda">Pixal3D CUDA (Linux/NVIDIA)</option>
           </NativeSelect>
@@ -1106,29 +1116,10 @@ export function App() {
           <div className="number-input-wrap"><Input id="target-faces" type="number" min="4" max="1000000" step="1000" value={targetFaces} onChange={(event) => setTargetFaces(Number(event.target.value))} disabled={!selectedAsset || selectedAsset.kind !== 'image' || busy || isRunning} /><span>faces</span></div>
           </details>
           {canGenerate && !(isRunning && job.operation === 'image.generate') && <Button className="simplify-button" disabled={busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><span className="spinner small" /> Working…</> : <>Generate 3D <span className="button-arrow">→</span></>}</Button>}
-          <details data-slot="collapsible" className="settings-disclosure runtime-disclosure" open={!canGenerate || undefined}>
-            <summary>{canGenerate ? 'Local runtime' : 'Runtime setup and compatibility'}</summary>
-          <div className="runtime-setup-panel">
-            {(selectedGenerationBackend?.id === 'pixal3d-mlx' || (isRunning && (job.operation === 'runtime.pixal3d.setup' || job.operation === 'runtime.pixal3d.install_models' || job.operation === 'runtime.pixal3d.convert_naf'))) && <>
-            <div className="runtime-panel-heading">Pixal3D MLX setup <span>{mlxBackend?.status.replaceAll('_', ' ') ?? 'engine disconnected'}</span></div>
-
-            {!isRunning && mlxBackend?.installable && !mlxBackend.environment_ready && <><p>MeshHarbor will create a private Python 3.12 environment and install the pinned backend dependencies. Install <a href="https://docs.astral.sh/uv/getting-started/installation/" target="_blank" rel="noreferrer">uv</a> first if it is not already on PATH.</p><Button variant="secondary" size="sm" className="runtime-action" disabled={busy || isRunning || connection !== 'connected'} onClick={() => void setupPixal3dRuntime()}>{busy ? 'Starting…' : 'Set up Python environment'} <span className="button-arrow">→</span></Button></>}
-            {!isRunning && mlxBackend?.environment_ready && !mlxBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime hf-login</code>. The token is entered through Hugging Face's masked prompt and stored only in MeshHarbor's isolated cache.</p><p className="runtime-terms">MeshHarbor’s project license has not been selected in this repository, and model-checkpoint terms remain separate. Review the DINOv3 and NAF checkpoint terms and obtain gated access before continuing. This download uses about 24 GB of disk space, then installs an isolated CPU-only NAF conversion environment.</p><Label className="runtime-consent"><Checkbox checked={modelDownloadAcknowledged} onCheckedChange={value => setModelDownloadAcknowledged(value === true)} disabled={busy || isRunning || connection !== 'connected'} /><span>I have reviewed the model terms, have access to gated DINOv3, and am ready to download the files to this computer.</span></Label><Button variant="secondary" size="sm" className="runtime-action" disabled={!mlxBackend.downloads_enabled || !modelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dModels()}>{busy ? 'Starting…' : 'Download model files'} <span className="button-arrow">↓</span></Button></>}
-            {!isRunning && mlxBackend?.models_downloaded && mlxBackend.naf_conversion_required && <div className="runtime-conversion"><strong>One setup step remains</strong><span>The verified NAF checkpoint needs one-time conversion. MeshHarbor installs the pinned CPU-only converter into a separate environment.</span><Button variant="secondary" size="sm" className="runtime-action" disabled={!mlxBackend.conversion_enabled || busy || isRunning || connection !== 'connected'} onClick={() => void convertPixal3dNaf()}>{busy ? 'Starting…' : 'Finish NAF conversion'} <span className="button-arrow">→</span></Button></div>}
-            {!isRunning && mlxBackend?.installable === false && <p>Pixal3D MLX setup is supported on Apple Silicon macOS only. CUDA setup is a separate Linux/NVIDIA runtime.</p>}
-            </>}
-            {(selectedGenerationBackend?.id === 'pixal3d-cuda' || (isRunning && (job.operation === 'runtime.pixal3d.cuda_setup' || job.operation === 'runtime.pixal3d.cuda_install_models'))) && <>
-            <div className="runtime-panel-heading">Pixal3D CUDA setup <span>{cudaBackend?.status.replaceAll('_', ' ') ?? 'engine disconnected'}</span></div>
-
-            {!isRunning && cudaBackend?.installable && !cudaBackend.environment_ready && <><p>On Linux x86_64 with an NVIDIA GPU, MeshHarbor will create a private Python 3.12 environment, resolve upstream dependency ranges into an app-private lock, install the CUDA 12.4 profile, and run a CUDA/SDPA preflight. This does not download model weights.</p><Button variant="secondary" size="sm" className="runtime-action" disabled={busy || isRunning || connection !== 'connected'} onClick={() => void setupPixal3dCudaRuntime()}>{busy ? 'Starting…' : 'Set up CUDA environment'} <span className="button-arrow">→</span></Button></>}
-            {!isRunning && cudaBackend?.environment_ready && !cudaBackend.models_downloaded && <><p>Sign in in a separate local terminal with <code>meshharbor runtime cuda-hf-login</code>. Hugging Face's prompt stores credentials only in the isolated CUDA cache.</p><p className="runtime-terms">MeshHarbor’s project license has not been selected in this repository; model/checkpoint terms are separate. Review DINOv3, Pixal3D, and NAF terms and obtain gated DINOv3 access first. The download is about 25–30 GB and needs roughly 40 GiB of free disk space.</p><Label className="runtime-consent"><Checkbox checked={cudaModelDownloadAcknowledged} onCheckedChange={value => setCudaModelDownloadAcknowledged(value === true)} disabled={busy || isRunning || connection !== 'connected'} /><span>I reviewed the model terms, have gated DINOv3 access, and approve downloading the CUDA model files to this computer.</span></Label><Button variant="secondary" size="sm" className="runtime-action" disabled={!cudaBackend.downloads_enabled || !cudaModelDownloadAcknowledged || busy || isRunning || connection !== 'connected'} onClick={() => void installPixal3dCudaModels()}>{busy ? 'Starting…' : 'Download CUDA model files'} <span className="button-arrow">↓</span></Button></>}
-            {!isRunning && cudaBackend?.installable === false && <p>Pixal3D CUDA setup is Linux x86_64/NVIDIA only. Use the Apple MLX backend on supported Macs; the CUDA backend is not available on this host.</p>}
-            {cudaBackend?.license_notice && <p className="runtime-terms">{cudaBackend.license_notice}</p>}
-            </>}
-            {!selectedGenerationBackend && <p>No compatible image-to-3D backend was detected. You can still work with existing GLBs.</p>}
-            {isRunning && job.operation.startsWith('runtime.') && <small className="runtime-serial-note">Runtime installation and generation share one local worker.</small>}
-          </div>
-          </details>
+          {!canGenerate && <div className="generation-setup">
+            <p>{selectedGenerationBackend?.installable ? 'Prepare a local runtime before generating.' : 'This backend is not available on this computer.'} Existing GLBs do not require a model runtime.</p>
+            <Button variant={selectedGenerationBackend?.installable ? 'default' : 'secondary'} onClick={() => openRuntime(selectedGenerationBackend?.id)}>Runtime setup</Button>
+          </div>}
         </section>}
 
       {openInspector === 'tools' && <>
@@ -1177,7 +1168,7 @@ export function App() {
   }
 
   return (
-    <Dialog open={showConnect} onOpenChange={setShowConnect}>
+    <Dialog open={showEngineDialog} onOpenChange={setShowEngineDialog}>
       <div className="app-shell studio-app mh-shadcn-theme" onDragOver={(event) => {
       if (!event.dataTransfer.types.includes('Files')) return;
       event.preventDefault();
@@ -1198,14 +1189,14 @@ export function App() {
           <span className="product-label">Studio</span>
         </div>
           {selectedAsset && <div className="import-actions studio-file-actions" role="group" aria-label="File actions">
-            <Button variant="secondary" size="sm" className="import-button" aria-label="New from image" title="New from image" onClick={() => imageInputRef.current?.click()} disabled={busy}><ImagePlus aria-hidden="true" /> <span>New from image</span></Button>
-            <Button variant="secondary" size="sm" className="import-button" aria-label="Open GLB" title="Open GLB" onClick={() => fileInputRef.current?.click()} disabled={busy}><Box aria-hidden="true" /> <span>Open GLB</span></Button>
+            <Button variant="secondary" size="sm" className="import-button" aria-label="New from image" title="New from image" onClick={() => imageInputRef.current?.click()} disabled={busy}><ImageSquareIcon aria-hidden="true" /> <span>New from image</span></Button>
+            <Button variant="secondary" size="sm" className="import-button" aria-label="Open GLB" title="Open GLB" onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon aria-hidden="true" /> <span>Open GLB</span></Button>
             {quadArtifact && <Button variant="secondary" size="sm" className="import-button" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
-            {selectedAsset.kind === 'mesh' && <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" className="export-glb" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><Download aria-hidden="true" /> <span>Export GLB</span></Button>}
+            {selectedAsset.kind === 'mesh' && <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" className="export-glb" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> <span>Export GLB</span></Button>}
           </div>}
         <div className="topbar-actions">
           <div className={`engine-status ${connection}`} role="status" title={runtime ? `${runtime.platform} · ${runtime.status.replaceAll('_', ' ')}` : undefined}><i />{connection === 'connected' ? 'Local engine ready' : connection === 'connecting' ? 'Connecting…' : 'Engine offline'}</div>
-          <DialogTrigger asChild><Button variant="ghost" size="icon-sm" className="engine-trigger" aria-label="Connect engine" title="Connect local engine"><Plug aria-hidden="true" /></Button></DialogTrigger>
+          <DialogTrigger asChild><Button variant="ghost" size="sm" className="engine-trigger" aria-label="Engine and runtimes"><CpuIcon aria-hidden="true" /><span>Runtime</span></Button></DialogTrigger>
         </div>
       </header>
 
@@ -1213,7 +1204,7 @@ export function App() {
           <h1 className="sr-only">MeshHarbor Studio</h1>
           <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" tabIndex={-1} type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={imageInputRef} className="sr-only" aria-label="Choose images" tabIndex={-1} type="file" multiple accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-          {!showInspectorSheet && !showConnect && <div className="workbench-feedback">
+          {!showInspectorSheet && !showEngineDialog && <div className="workbench-feedback">
             {feedback}
             {jobFeedback}
           </div>}
@@ -1226,9 +1217,9 @@ export function App() {
               <div className="library-section" id="asset-library">
                 <div className="section-heading">
                   <span>Local library</span>
-                  <Button variant="ghost" size="sm" className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <RotateCw aria-hidden="true" /></Button>
+                  <Button variant="ghost" size="sm" className="text-button" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
                 </div>
-                <form className="asset-search" onSubmit={(event) => {
+                {showLibraryFilters && <><form className="asset-search" onSubmit={(event) => {
                   event.preventDefault();
                   applyAssetBrowserFilters({ ...assetFilters, query: assetSearchInput.trim() });
                 }}>
@@ -1289,7 +1280,7 @@ export function App() {
                       Clear filters
                     </Button>
                   )}
-                </div>
+                </div></>}
                 {matchingAssets.length > 0 && <p className="asset-library-note" aria-live="polite">
                   {assetPageLoading ? 'Loading assets…' : `${matchingAssets.length} loaded ${hasActiveAssetFilters ? 'result' : 'asset'}${matchingAssets.length === 1 ? '' : 's'}`}
                 </p>}
@@ -1316,7 +1307,7 @@ export function App() {
               <section className="job-history" aria-label="Recent jobs">
                 <div className="section-heading">
                   <div><span>Recent activity</span></div>
-                  <Button variant="ghost" size="sm" className="text-button" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <RotateCw aria-hidden="true" /></Button>
+                  <Button variant="ghost" size="sm" className="text-button" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
                 </div>
                 {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
                   <details className="job-history-note"><summary>Recover an interrupted job</summary>
@@ -1337,16 +1328,20 @@ export function App() {
 
             <section className="viewer-column workbench-viewer" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
               {!selectedAsset ? <div className="studio-start">
-                <h2>Open a model or image</h2>
-                <p>Drop a GLB, PNG or JPEG to start.</p>
-                <div className="studio-start-actions">
-                  <Button onClick={() => imageInputRef.current?.click()} disabled={busy}><ImagePlus aria-hidden="true" /> Create from image</Button>
-                  <Button variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()} disabled={busy}><Box aria-hidden="true" /> <span>Open GLB</span></Button>
+                <div className="studio-start-intro">
+                  <h2>Start with a model or an image</h2>
+                  <p>Inspect and refine a GLB, or turn a reference image into a 3D model on this computer.</p>
+                  <div className="studio-start-actions">
+                    <Button onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon aria-hidden="true" /> Open GLB</Button>
+                    <Button variant="outline" onClick={() => imageInputRef.current?.click()} disabled={busy}><ImageSquareIcon aria-hidden="true" /> Create from image</Button>
+                  </div>
+                  <p className="studio-start-formats">Drop a GLB, PNG or JPEG here</p>
                 </div>
+                <MeshStudy />
               </div> : <div className="viewer-card">
                 <div className="workbench-commandbar">
                 <div className="viewer-toolbar">
-                  <div className="viewer-title">{selectedAsset.kind === 'image' ? <FileImage aria-hidden="true" /> : <Box aria-hidden="true" />} <span className="viewer-filename" title={selectedAsset.name}>{selectedAsset.name}</span></div>
+                  <div className="viewer-title">{selectedAsset.kind === 'image' ? <FileImageIcon aria-hidden="true" /> : <CubeIcon aria-hidden="true" />} <span className="viewer-filename" title={selectedAsset.name}>{selectedAsset.name}</span></div>
                   {selectedComparisonPair && (
                     <ToggleGroup className="view-toggle" type="single" orientation="horizontal"
                       aria-label="Preview version" aria-busy={comparisonLoadingSide !== null}
@@ -1361,11 +1356,11 @@ export function App() {
                 </div>
                 <div className="workbench-view-actions" role="group" aria-label="Model tools">
                 {selectedAsset.kind === 'image' ? (
-                  <Button variant="secondary" size="sm" aria-expanded={openInspector === 'generation'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'generation' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('generation', event.currentTarget)}><SlidersHorizontal aria-hidden="true" /> Generation settings</Button>
+                  <Button variant="secondary" size="sm" aria-expanded={openInspector === 'generation'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'generation' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('generation', event.currentTarget)}><SlidersHorizontalIcon aria-hidden="true" /> Generation settings</Button>
                 ) : (
                   <>
-                    <Button variant="secondary" size="sm" aria-expanded={openInspector === 'optimize'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'optimize' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('optimize', event.currentTarget)}><SlidersHorizontal aria-hidden="true" /> Optimize</Button>
-                    <Button variant="secondary" size="sm" aria-expanded={openInspector === 'tools'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'tools' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('tools', event.currentTarget)}><Wrench aria-hidden="true" /> More tools</Button>
+                    <Button variant={!openInspector && !exportIsPrimary && canSimplify && !isRunning ? 'default' : 'secondary'} size="sm" aria-expanded={openInspector === 'optimize'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'optimize' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('optimize', event.currentTarget)}><SlidersHorizontalIcon aria-hidden="true" /> Optimize</Button>
+                    <Button variant="secondary" size="sm" aria-expanded={openInspector === 'tools'} aria-haspopup={inspectorIsSheet ? 'dialog' : undefined} aria-controls={openInspector === 'tools' ? 'workbench-inspector' : undefined} onClick={event => toggleInspector('tools', event.currentTarget)}><WrenchIcon aria-hidden="true" /> More tools</Button>
                   </>
                 )}
                 </div>
@@ -1377,10 +1372,10 @@ export function App() {
                 </div>}
                 {selectedAsset && (
                   <div className="asset-meta-strip">
-                    <div className="asset-meta-main"><Badge variant="outline" className="file-badge">{selectedAsset.kind === 'mesh' ? 'GLB' : selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPG'}</Badge><div><strong>{selectedAsset.name}</strong><span>{formatSize(selectedAsset.byte_size)} · {selectedAsset.kind === 'mesh' ? `${Number(selectedAsset.metadata.mesh_count ?? 0)} mesh${Number(selectedAsset.metadata.mesh_count ?? 0) === 1 ? '' : 'es'}` : 'Image asset'}</span></div></div>
+                    <div className="asset-meta-main"><Badge variant="outline" className="file-badge">{selectedAsset.kind === 'mesh' ? 'GLB' : selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPG'}</Badge><div><span>{formatSize(selectedAsset.byte_size)} · {selectedAsset.kind === 'mesh' ? `${Number(selectedAsset.metadata.mesh_count ?? 0)} mesh${Number(selectedAsset.metadata.mesh_count ?? 0) === 1 ? '' : 'es'}` : 'Reference image'}</span></div></div>
                     <div className="meta-divider" />
                     {selectedAsset.kind === 'mesh' ? <><div className="meta-stat"><span>Triangles</span><strong>{triangleCount.toLocaleString()}</strong></div><div className="meta-stat"><span>Materials</span><strong>{Number(selectedAsset.metadata.material_count ?? 0)}</strong></div></> : <div className="meta-stat"><span>Input</span><strong>{selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPEG'}</strong></div>}
-                    <div className="meta-stat"><span>File</span><strong className="status-ready">Imported</strong></div>
+                    <div className="meta-stat"><span>Version</span><strong>{selectedAsset.source_asset_id ? 'Result' : 'Original'}</strong></div>
                   </div>
                 )}
               {reportCard && (
@@ -1433,7 +1428,7 @@ export function App() {
               }}>
               <div className="workbench-inspector-heading">
                 <h2 id="workbench-inspector-title">{inspectorTitle}</h2>
-                <Button variant="ghost" size="icon-sm" className="workbench-close" title="Close settings" aria-label="Close settings" onClick={closeInspector}><PanelRightClose aria-hidden="true" /></Button>
+                <Button variant="ghost" size="icon-sm" className="workbench-close" title="Close settings" aria-label="Close settings" onClick={closeInspector}><SidebarSimpleIcon aria-hidden="true" /></Button>
               </div>
               {inspectorBody()}
             </aside>}
@@ -1442,11 +1437,11 @@ export function App() {
             title={inspectorTitle} portal={workbenchNode} side="right" id="workbench-inspector"
             className="active-inspector workbench-inspector" onCloseAutoFocus={event => {
               event.preventDefault();
-              restoreInspectorFocus();
+              if (!showEngineDialog) restoreInspectorFocus();
             }}>
             <div className="workbench-inspector-heading">
               <h2 aria-hidden="true">{inspectorTitle}</h2>
-              <SheetClose asChild><Button variant="ghost" size="icon-sm" className="workbench-close" aria-label="Close settings" title="Close settings"><PanelRightClose aria-hidden="true" /></Button></SheetClose>
+              <SheetClose asChild><Button variant="ghost" size="icon-sm" className="workbench-close" aria-label="Close settings" title="Close settings"><SidebarSimpleIcon aria-hidden="true" /></Button></SheetClose>
             </div>
             {feedback}
             {jobFeedback}
@@ -1455,21 +1450,41 @@ export function App() {
       </main>
       {dragging && <div className="drop-overlay"><div className="drop-overlay-card"><span className="drop-icon">↓</span><strong>Drop a GLB or source image here</strong><span>Import starts locally on your computer</span></div></div>}
 
-      <DialogContent className="connect-dialog" showCloseButton={false}>
+      <DialogContent className="connect-dialog runtime-dialog" showCloseButton={false}>
         <div className="connect-heading">
-          <DialogTitle>Connect local engine</DialogTitle>
-          <DialogClose asChild><Button variant="ghost" size="icon-sm" aria-label="Close"><X /></Button></DialogClose>
+          <DialogTitle>Engine and runtimes</DialogTitle>
+          <DialogClose asChild><Button variant="ghost" size="icon-sm" aria-label="Close"><XIcon aria-hidden="true" /></Button></DialogClose>
         </div>
-        <DialogDescription>Studio connects to MeshHarbor on this computer. No token is needed here.</DialogDescription>
+        <DialogDescription>{connection === 'connected'
+          ? 'Set up image-to-3D on this computer. Opening and editing GLBs does not need a model runtime.'
+          : 'Studio connects to MeshHarbor on this computer. No token is needed here.'}</DialogDescription>
+        {connection === 'connected' ? dialogBackend ? <>
+          <div className="runtime-backend-field">
+            <Label htmlFor="runtime-backend">Backend</Label>
+            <NativeSelect id="runtime-backend" value={dialogBackend.id} disabled={busy || runtimeJobRunning} onChange={(event) => setRuntimeDialogBackend(event.target.value)}>
+              <option value="pixal3d-mlx">Apple MLX</option>
+              <option value="pixal3d-cuda">NVIDIA CUDA</option>
+            </NativeSelect>
+          </div>
+          {feedback}
+          {jobFeedback}
+          <RuntimeSetup backend={dialogBackend} disabled={busy || isRunning}
+            acknowledged={dialogUsesCuda ? cudaModelDownloadAcknowledged : modelDownloadAcknowledged}
+            onAcknowledge={dialogUsesCuda ? setCudaModelDownloadAcknowledged : setModelDownloadAcknowledged}
+            onSetup={() => void (dialogUsesCuda ? setupPixal3dCudaRuntime : setupPixal3dRuntime)()}
+            onDownload={() => void (dialogUsesCuda ? installPixal3dCudaModels : installPixal3dModels)()}
+            onConvert={() => void convertPixal3dNaf()} />
+        </> : <p className="runtime-explanation">The engine did not report an image-to-3D backend.</p> : <>
         <div className="connect-steps"><code>meshharbor serve</code><span>Run in your terminal and leave it open</span></div>
         {connectionError && <Alert variant="destructive" role="alert" className="dialog-error">
-          <CircleAlert aria-hidden="true" />
+          <WarningCircleIcon aria-hidden="true" />
           <AlertDescription>Engine offline. Start it in your terminal, then retry.</AlertDescription>
           <details><summary>Technical details</summary>{connectionError}</details>
         </Alert>}
         <Button className="connect-button" onClick={() => void connect()} disabled={connection === 'connecting'}>
           {connection === 'connecting' ? 'Connecting…' : 'Retry connection'}
         </Button>
+        </>}
       </DialogContent>
       </div>
     </Dialog>

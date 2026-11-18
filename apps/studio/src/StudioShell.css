@@ -13,15 +13,15 @@
 .studio-app .studio-topbar {
   position: relative;
   height: auto;
-  min-height: 52px;
+  min-height: 56px;
   gap: 12px;
-  padding: 6px 14px;
+  padding: 8px 16px;
   background: var(--background);
   border-bottom-color: var(--border);
 }
 
 .studio-app .brand-lockup { width: auto; }
-.studio-app .brand-mark { box-shadow: none; }
+.studio-app .brand-mark { background: var(--accent); box-shadow: none; border: 1px solid var(--border); }
 .studio-app .brand-name,
 .studio-app .brand-name span { color: var(--foreground); }
 .studio-app .brand-divider { border-color: var(--border); }
@@ -34,14 +34,11 @@
 .studio-file-actions { margin-inline: auto 0; flex-wrap: wrap; min-width: 0; }
 .studio-file-actions + .topbar-actions { margin-left: 0; }
 .studio-file-actions svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.75;
+  width: 16px;
+  height: 16px;
   flex: none;
 }
-.studio-file-actions .button { height: 32px; padding-inline: 9px; white-space: nowrap; }
+.studio-app .studio-file-actions [data-slot="button"] { min-height: 32px; padding-inline: 12px; white-space: nowrap; }
 
 .studio-app .fullscreen-workbench {
   --wb-line-soft: var(--border);
@@ -252,7 +249,7 @@
 
 
 /* Shell-specific layout for shadcn controls and portal surfaces. */
-html, body, #root { min-width: 0; background: #16171a; }
+html, body, #root { min-width: 0; background: #0a0a0a; }
 body { color-scheme: dark; }
 .studio-topbar .brand-lockup { min-width: 0; }
 .studio-file-actions [data-slot="button"] { min-width: 0; }

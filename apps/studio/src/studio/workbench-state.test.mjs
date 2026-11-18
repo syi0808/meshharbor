@@ -1,14 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { decodeSidebarPanel, formatVersionSizes, inspectorForAsset, shouldHighlightExport, toggleSidebarPanel } from './workbench-state.ts';
+import { decodeSidebarPanel, formatVersionSizes, inspectorForAsset, runtimeSetupStage, shouldHighlightExport, toggleSidebarPanel } from './workbench-state.ts';
 
 test('sidebar stores only known panels and can switch or close', () => {
   assert.equal(decodeSidebarPanel('assets'), 'assets');
   assert.equal(decodeSidebarPanel('jobs'), 'jobs');
-  for (const value of [null, '', 'true', 'unknown']) assert.equal(decodeSidebarPanel(value), null);
+  assert.equal(decodeSidebarPanel(null), 'assets');
+  for (const value of ['closed', '', 'true', 'unknown']) assert.equal(decodeSidebarPanel(value), null);
   assert.equal(toggleSidebarPanel(null, 'assets'), 'assets');
   assert.equal(toggleSidebarPanel('assets', 'jobs'), 'jobs');
   assert.equal(toggleSidebarPanel('jobs', 'jobs'), null);
+});
+
+test('runtime setup distinguishes the environment, model files, and inference readiness', () => {
+  assert.equal(runtimeSetupStage({ installable: false }), 'unsupported');
+  assert.equal(runtimeSetupStage({ installable: true }), 'environment');
+  assert.equal(runtimeSetupStage({ installable: true, environment_ready: true }), 'models');
+  assert.equal(runtimeSetupStage({ installable: true, environment_ready: true, models_downloaded: true, naf_conversion_required: true }), 'conversion');
+  assert.equal(runtimeSetupStage({ installable: true, environment_ready: true, models_downloaded: true }), 'incomplete');
+  assert.equal(runtimeSetupStage({ installable: true, ready: true }), 'ready');
 });
 
 test('only tools that match the selected input can open', () => {

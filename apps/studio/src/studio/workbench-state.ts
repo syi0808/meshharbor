@@ -6,7 +6,22 @@ export const WORKBENCH_INSPECTOR_SHEET_QUERY = '(max-width: 880px)';
 export const WORKBENCH_NARROW_QUERY = '(max-width: 760px)';
 
 export function decodeSidebarPanel(value: string | null): SidebarPanel | null {
+  if (value === null) return 'assets';
   return value === 'assets' || value === 'jobs' ? value : null;
+}
+
+export function runtimeSetupStage(backend: {
+  installable: boolean;
+  ready?: boolean;
+  environment_ready?: boolean;
+  models_downloaded?: boolean;
+  naf_conversion_required?: boolean;
+}): 'ready' | 'unsupported' | 'environment' | 'models' | 'conversion' | 'incomplete' {
+  if (backend.ready) return 'ready';
+  if (!backend.installable) return 'unsupported';
+  if (!backend.environment_ready) return 'environment';
+  if (!backend.models_downloaded) return 'models';
+  return backend.naf_conversion_required ? 'conversion' : 'incomplete';
 }
 
 export function toggleSidebarPanel(current: SidebarPanel | null, requested: SidebarPanel): SidebarPanel | null {

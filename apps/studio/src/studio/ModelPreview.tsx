@@ -1,10 +1,11 @@
 import { Button } from '../ui/Button';
+import { CornersOutIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { applyTriangleWireframe, isLocalPreviewResource, restorePreviewMaterials } from './preview-display';
+import { applyPreviewMaterial, isLocalPreviewResource, restorePreviewMaterials } from './preview-display';
 import {
   previewFrameFromBounds,
   shouldPreserveComparisonCamera,
@@ -15,6 +16,7 @@ import type { Asset } from './types';
 
 const MAX_CANONICAL_SOURCE_FRAMES = 64;
 const canonicalSourceFrameCache = new Map<string, PreviewFrame>();
+type PreviewMode = 'material' | 'solid' | 'wireframe';
 
 export interface PreviewComparison {
   /** Stable, pair-specific identity. Keep it unchanged when switching sides. */
@@ -78,17 +80,19 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const currentModelRef = useRef<THREE.Group | null>(null);
+  const frameRef = useRef<PreviewFrame | null>(null);
   const currentAssetIdRef = useRef<string | null>(null);
   const activeComparisonGroupRef = useRef<string | null>(null);
   const onErrorRef = useRef(onError);
-  const wireframePreviewRef = useRef<{
+  const displayRef = useRef<{
     meshes: THREE.Mesh[];
     originalMaterials: Map<THREE.Mesh, THREE.Material | THREE.Material[]>;
-    material: THREE.MeshBasicMaterial;
+    wireframe: THREE.MeshBasicMaterial;
+    solid: THREE.MeshStandardMaterial;
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [modelReady, setModelReady] = useState(false);
-  const [wireframe, setWireframe] = useState(false);
+  const [display, setDisplay] = useState<PreviewMode>('material');
   const [rendererUnavailable, setRendererUnavailable] = useState(false);
 
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
@@ -99,7 +103,7 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     if (!host) return;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#202225');
+    scene.background = new THREE.Color('#202020');
     const camera = new THREE.PerspectiveCamera(36, 1, 0.01, 1000);
     camera.position.set(3.6, 2.5, 4.2);
     let renderer: THREE.WebGLRenderer;
@@ -158,11 +162,12 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
       observer.disconnect();
       controls.dispose();
       renderer.dispose();
-      const preview = wireframePreviewRef.current;
+      const preview = displayRef.current;
       if (preview) {
         restorePreviewMaterials(preview.originalMaterials);
-        preview.material.dispose();
-        wireframePreviewRef.current = null;
+        preview.wireframe.dispose();
+        preview.solid.dispose();
+        displayRef.current = null;
       }
       if (currentModelRef.current) {
         scene.remove(currentModelRef.current);
@@ -183,12 +188,14 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     const scene = sceneRef.current;
     const camera = cameraRef.current;
     const controls = controlsRef.current;
-    const preview = wireframePreviewRef.current;
+    const preview = displayRef.current;
     if (preview) {
       restorePreviewMaterials(preview.originalMaterials);
-      preview.material.dispose();
-      wireframePreviewRef.current = null;
+      preview.wireframe.dispose();
+      preview.solid.dispose();
+      displayRef.current = null;
     }
+    frameRef.current = null;
     if (currentModelRef.current && scene) {
       scene.remove(currentModelRef.current);
       disposeGroup(currentModelRef.current);
@@ -212,7 +219,7 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     );
     if (!preserveCamera) {
       activeComparisonGroupRef.current = null;
-      setWireframe(false);
+      setDisplay('material');
     }
     setLoading(true);
 
@@ -274,9 +281,11 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
         const nextPreview = {
           meshes,
           originalMaterials: new Map<THREE.Mesh, THREE.Material | THREE.Material[]>(),
-          material: new THREE.MeshBasicMaterial({ color: '#a7c7ba', wireframe: true, toneMapped: false }),
+          wireframe: new THREE.MeshBasicMaterial({ color: '#a7c7ba', wireframe: true, toneMapped: false }),
+          solid: new THREE.MeshStandardMaterial({ color: '#a6a6a6', roughness: 0.82 }),
         };
-        wireframePreviewRef.current = nextPreview;
+        displayRef.current = nextPreview;
+        frameRef.current = frame;
         currentModelRef.current = model;
         currentAssetIdRef.current = asset.id;
         scene.add(model);
@@ -307,22 +316,27 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
   ]);
 
   useEffect(() => {
-    const preview = wireframePreviewRef.current;
+    const preview = displayRef.current;
     if (!preview) return;
-    if (wireframe) {
-      applyTriangleWireframe(preview.meshes, preview.material, preview.originalMaterials);
-    } else {
-      restorePreviewMaterials(preview.originalMaterials);
+    restorePreviewMaterials(preview.originalMaterials);
+    if (display !== 'material') applyPreviewMaterial(preview.meshes, preview[display], preview.originalMaterials);
+  }, [display, modelReady]);
+
+  function fitView() {
+    if (cameraRef.current && controlsRef.current && frameRef.current) {
+      fitCameraToFrame(cameraRef.current, controlsRef.current, frameRef.current);
     }
-  }, [wireframe, modelReady]);
+  }
 
   return (
     <div className="preview-stage">
       <div className="preview-canvas" ref={hostRef} aria-label="Interactive 3D model preview" />
       {modelReady && (
-        <div className="preview-display-toggle" role="group" aria-label="3D preview display">
-          <Button type="button" variant="ghost" size="sm" aria-pressed={!wireframe} onClick={() => setWireframe(false)}>Material view</Button>
-          <Button type="button" variant="ghost" size="sm" aria-pressed={wireframe} onClick={() => setWireframe(true)}>Triangle wireframe</Button>
+        <div className="preview-display-toggle" role="group" aria-label="Viewport controls">
+          <Button type="button" variant="ghost" size="sm" aria-label="Material view" aria-pressed={display === 'material'} onClick={() => setDisplay('material')}>Material</Button>
+          <Button type="button" variant="ghost" size="sm" aria-label="Solid view" aria-pressed={display === 'solid'} onClick={() => setDisplay('solid')}>Solid</Button>
+          <Button type="button" variant="ghost" size="sm" aria-label="Triangle wireframe" aria-pressed={display === 'wireframe'} onClick={() => setDisplay('wireframe')}>Wireframe</Button>
+          <Button type="button" variant="ghost" size="icon-sm" aria-label="Fit view" title="Fit view" className="fit-preview" onClick={fitView}><CornersOutIcon aria-hidden="true" /></Button>
         </div>
       )}
       {rendererUnavailable && asset && (
@@ -331,17 +345,8 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
           <span>WebGL could not start in this browser. Local optimize and export are still available.</span>
         </div>
       )}
-      {!asset && (
-        <div className="preview-empty">
-          <div className="empty-orbit orbit-one" />
-          <div className="empty-orbit orbit-two" />
-          <div className="empty-cube"><span /><span /><span /><span /></div>
-          <p>Import a GLB or source image to get started</p>
-          <span>Your model stays on this device</span>
-        </div>
-      )}
       {loading && <div className="preview-loading"><span className="spinner" /> Loading preview…</div>}
-      {asset && !loading && !rendererUnavailable && <div className="preview-hint"><span className="mouse-glyph">↻</span> Drag to orbit <i /> Scroll to zoom</div>}
+      {modelReady && <div className="preview-hint">Drag to orbit · Scroll to zoom</div>}
     </div>
   );
 }
@@ -417,7 +422,7 @@ function frameFromObject(model: THREE.Object3D): PreviewFrame | null {
 
 function fitCameraToFrame(camera: THREE.PerspectiveCamera, controls: OrbitControls, frame: PreviewFrame) {
   const target = new THREE.Vector3(...frame.target);
-  const distance = frame.maxDimension * 1.65;
+  const distance = frame.maxDimension * 1.65 / Math.min(camera.aspect, 1);
   camera.position.set(target.x + distance, target.y + distance * 0.72, target.z + distance * 1.15);
   camera.near = frame.maxDimension / 1000;
   camera.far = frame.maxDimension * 100;

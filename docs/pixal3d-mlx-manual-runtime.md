@@ -40,7 +40,7 @@ Import a PNG/JPEG using Studio or `meshharbor import`, then run:
 meshharbor generate asset_<image-id> --output ./generated.glb
 ~~~
 
-Studio also exposes explicit environment setup, model-download progress, and image-generation jobs. The download action requires an acknowledgment that the user has completed the gated access process. `meshharbor runtime hf-login` remains a separate terminal command so the UI never receives a token. Setup/download progress is shown as an activity indicator; detailed package and per-file transfer output appears in the engine terminal.
+Studio exposes explicit environment setup and model download from **Runtime** in the app bar, even before you import anything. These are separate actions. The download requires an acknowledgment that the user has completed the gated access process. `meshharbor runtime hf-login` remains a separate terminal command so the UI never receives a token. Setup/download progress is shown as an activity indicator; detailed package and per-file transfer output appears in the engine terminal.
 
 Generation uses the fixed reviewed 512 profile, the local pinned Pixal3D/DINOv3/NAF files, Hugging Face offline mode, no background-removal model, and the fan hole filler. The first DINOv3 cache revision must be the pinned revision `ea8dc2863c51be0a264bab82070e3e8836b02d51`. The managed HF cache is dedicated to MeshHarbor and avoids changing/deleting the user's existing HF cache.
 
@@ -55,6 +55,5 @@ Generation uses the fixed reviewed 512 profile, the local pinned Pixal3D/DINOv3/
 
 ## Validation status
 
-- The current executor has no `cargo`, `rustc`, or `rustfmt` on `PATH`; after the latest managed-runtime and source-bundling changes, Rust formatting, compilation, and tests remain unverified.
-- This environment is not Apple Silicon macOS. Managed MLX installation, HF gated access, model download, and inference have not been exercised.
-- Studio security tests can run independently. The npm package cache is absent here, so the TypeScript bundle/browser workflow may remain unverified.
+- On 2026-11-18, CLI and embedded Studio setup both succeeded on an Apple M3 Pro running macOS 26.2. Each used a separate temporary data directory with no `uv` on PATH. MeshHarbor bootstrapped uv 0.13.8, installed Python 3.12.16, and installed the locked dependencies. A small MLX calculation ran on the Metal GPU.
+- The Studio setup job succeeded and the runtime reported an installed Python environment, no downloaded models, and not ready for inference. No account login, model download, NAF conversion, or image-to-3D inference was attempted. CUDA was unavailable on this host.

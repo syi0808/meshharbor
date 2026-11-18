@@ -1,15 +1,8 @@
-import { expect, test as base } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
-import { withEmbeddedStudio } from '../../../scripts/embedded-studio-test-server.mjs';
+import { test } from './studio-fixture.mjs';
 import { fixtureTriangles, inspectTexturedGlb, texturedGlb } from './textured-glb.mjs';
-
-const executable = process.platform === 'win32' ? 'meshharbor.exe' : 'meshharbor';
-const binary = process.env.MESHHARBOR_BINARY ?? fileURLToPath(new URL(`../../../target/debug/${executable}`, import.meta.url));
-const test = base.extend({
-  studioOrigin: async ({}, use) => withEmbeddedStudio(binary, use),
-});
 
 function patchColor(red, green, blue) {
   if (red > green + 35 && red > blue + 35) return 'red';
@@ -92,7 +85,14 @@ test('Studio optimizes a textured GLB without changing its materials or textures
     ]);
     await chooser.setFiles({ name: sourceName, mimeType: 'model/gltf-binary', buffer: source });
     await expect(selected.getByTitle(sourceName, { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Material view', pressed: true })).toBeVisible();
+    const material = page.getByRole('button', { name: 'Material view' });
+    const solid = page.getByRole('button', { name: 'Solid view' });
+    await expect(material).toHaveAttribute('aria-pressed', 'true');
+    await solid.click();
+    await expect(solid).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: 'Fit view' }).click();
+    await material.click();
+    await expect(material).toHaveAttribute('aria-pressed', 'true');
   });
 
   const original = page.getByRole('radio', { name: 'Original' });

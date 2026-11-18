@@ -3,25 +3,41 @@
  * Tokens intentionally use an isolated --mh-* namespace so legacy light-theme
  * globals and Radix portals cannot leak into the graphite workspace.
  */
+@font-face {
+  font-family: "Inter Variable";
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Noto Sans Variable";
+  src: url("@fontsource-variable/noto-sans/files/noto-sans-latin-wght-normal.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 .mh-shadcn-theme {
-  --mh-background: #16171a;
-  --mh-foreground: #e9ebed;
-  --mh-card: #1b1d20;
-  --mh-popover: #202226;
+  --mh-font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --mh-font-heading: "Noto Sans Variable", var(--mh-font-sans);
+  --mh-background: oklch(0.145 0 0);
+  --mh-foreground: oklch(0.985 0 0);
+  --mh-card: oklch(0.205 0 0);
+  --mh-popover: oklch(0.205 0 0);
   --mh-primary: #82d7b8;
   --mh-primary-foreground: #14231d;
-  --mh-secondary: #27292d;
-  --mh-secondary-foreground: #e1e5e7;
-  --mh-muted: #25272b;
-  --mh-muted-foreground: #adb3ba;
+  --mh-secondary: oklch(0.269 0 0);
+  --mh-secondary-foreground: var(--mh-foreground);
+  --mh-muted: oklch(0.269 0 0);
+  --mh-muted-foreground: oklch(0.708 0 0);
   --mh-accent: #2a3d35;
   --mh-accent-foreground: #afe5d0;
-  --mh-destructive: #d46770;
+  --mh-destructive: oklch(0.704 0.191 22.216);
   --mh-destructive-foreground: #fff7f7;
-  --mh-border: #35383d;
-  --mh-input: #3b3f45;
+  --mh-border: oklch(1 0 0 / 10%);
+  --mh-input: oklch(1 0 0 / 15%);
   --mh-ring: #8ac9b3;
-  --mh-radius: 0.5rem;
+  --mh-radius: 0.45rem;
   /* Canonical shadcn semantic aliases consumed by shell and design contexts. */
   --background: var(--mh-background);
   --foreground: var(--mh-foreground);
@@ -43,21 +59,26 @@
   --input: var(--mh-input);
   --ring: var(--mh-ring);
   --radius: var(--mh-radius);
-  --sidebar: #1b1d20;
-  --sidebar-foreground: #e9ebed;
-  --sidebar-primary: #82d7b8;
-  --sidebar-primary-foreground: #14231d;
-  --sidebar-accent: #2a3d35;
-  --sidebar-accent-foreground: #afe5d0;
-  --sidebar-border: #35383d;
-  --sidebar-ring: #8ac9b3;
-  --chart-1: #82d7b8;
-  --chart-2: #76a9cd;
-  --chart-3: #d3b06c;
-  --chart-4: #b196d5;
-  --chart-5: #db7b82;
+  --sidebar: var(--mh-card);
+  --sidebar-foreground: var(--mh-foreground);
+  --sidebar-primary: var(--mh-primary);
+  --sidebar-primary-foreground: var(--mh-primary-foreground);
+  --sidebar-accent: var(--mh-accent);
+  --sidebar-accent-foreground: var(--mh-accent-foreground);
+  --sidebar-border: var(--mh-border);
+  --sidebar-ring: var(--mh-ring);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
   color: var(--mh-foreground);
   color-scheme: dark;
+  font-family: var(--mh-font-sans);
+}
+
+.mh-shadcn-theme :is(h1, h2, h3, [data-slot="dialog-title"]) {
+  font-family: var(--mh-font-heading);
 }
 
 .shadcn-button {
@@ -70,8 +91,8 @@
   border-radius: calc(var(--mh-radius) - 0.125rem);
   color: var(--mh-foreground);
   font: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
+  font-size: 0.75rem;
+  font-weight: 500;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
@@ -100,28 +121,28 @@
 .shadcn-button--default { background: var(--mh-primary); color: var(--mh-primary-foreground); }
 .shadcn-button--default:hover:not(:disabled) { background: #a0e2c8; }
 .shadcn-button--secondary { background: var(--mh-secondary); border-color: var(--mh-border); color: var(--mh-secondary-foreground); }
-.shadcn-button--secondary:hover:not(:disabled) { background: #303338; border-color: #474b51; }
+.shadcn-button--secondary:hover:not(:disabled) { background: color-mix(in oklch, var(--mh-secondary), var(--mh-foreground) 5%); }
 .shadcn-button--ghost { background: transparent; color: var(--mh-secondary-foreground); }
-.shadcn-button--ghost:hover:not(:disabled) { background: #282b2f; color: var(--mh-foreground); }
-.shadcn-button--outline { border-color: var(--mh-border); background: transparent; color: var(--mh-secondary-foreground); }
-.shadcn-button--outline:hover:not(:disabled) { background: #25272b; border-color: #4b4f56; color: var(--mh-foreground); }
+.shadcn-button--ghost:hover:not(:disabled), .shadcn-button--ghost[aria-expanded="true"] { background: var(--mh-muted); color: var(--mh-foreground); }
+.shadcn-button--outline { border-color: var(--mh-border); background: color-mix(in oklch, var(--mh-input), transparent 70%); color: var(--mh-secondary-foreground); }
+.shadcn-button--outline:hover:not(:disabled) { background: var(--mh-muted); color: var(--mh-foreground); }
 .shadcn-button--destructive { background: var(--mh-destructive); color: var(--mh-destructive-foreground); }
 .shadcn-button--destructive:hover:not(:disabled) { background: #e27880; }
 .shadcn-button:active:not(:disabled) { transform: translateY(1px); }
 .shadcn-button svg { width: 1rem; height: 1rem; flex: none; }
 
-.shadcn-button-size--default { min-height: 2.25rem; padding: 0 0.875rem; }
-.shadcn-button-size--sm { min-height: 2rem; padding: 0 0.6875rem; font-size: 0.75rem; }
-.shadcn-button-size--xs { min-height: 1.75rem; padding: 0 0.5rem; font-size: 0.6875rem; }
-.shadcn-button-size--lg { min-height: 2.5rem; padding: 0 1.125rem; }
+.shadcn-button-size--default { min-height: 1.75rem; padding: 0 0.5rem; }
+.shadcn-button-size--sm { min-height: 1.5rem; padding: 0 0.5rem; }
+.shadcn-button-size--xs { min-height: 1.25rem; padding: 0 0.5rem; font-size: 0.625rem; }
+.shadcn-button-size--lg { min-height: 2rem; padding: 0 0.625rem; }
 .shadcn-button-size--icon,
 .shadcn-button-size--icon-sm,
 .shadcn-button-size--icon-xs,
 .shadcn-button-size--icon-lg { aspect-ratio: 1; padding: 0; }
-.shadcn-button-size--icon { width: 2.25rem; }
-.shadcn-button-size--icon-sm { width: 2rem; }
-.shadcn-button-size--icon-xs { width: 1.75rem; }
-.shadcn-button-size--icon-lg { width: 2.5rem; }
+.shadcn-button-size--icon { width: 1.75rem; }
+.shadcn-button-size--icon-sm { width: 1.5rem; }
+.shadcn-button-size--icon-xs { width: 1.25rem; }
+.shadcn-button-size--icon-lg { width: 2rem; }
 
 .shadcn-input,
 .shadcn-native-select {

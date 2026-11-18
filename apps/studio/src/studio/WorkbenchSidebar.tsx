@@ -1,5 +1,5 @@
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/Collapsible';
-import { Boxes, ListTodo, PanelLeftClose } from 'lucide-react';
+import { ListChecksIcon, SidebarSimpleIcon, StackIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from '../ui/Button';
 import { Sheet, SheetClose } from '../ui/Sheet';
@@ -12,14 +12,14 @@ import {
 } from './workbench-state';
 
 const sections = [
-  { key: 'assets', label: 'Assets', icon: Boxes },
-  { key: 'jobs', label: 'Jobs', icon: ListTodo },
+  { key: 'assets', label: 'Assets', icon: StackIcon },
+  { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
 ] as const;
 
 export function useWorkbenchSidebar() {
   const [desktopPanel, setDesktopPanel] = useState<SidebarPanel | null>(() => {
     try { return decodeSidebarPanel(window.localStorage.getItem(DESKTOP_SIDEBAR_KEY)); }
-    catch { return null; }
+    catch { return decodeSidebarPanel(null); }
   });
   const [mobilePanel, setMobilePanel] = useState<SidebarPanel | null>(null);
   const [narrow, setNarrow] = useState(() => window.matchMedia(WORKBENCH_NARROW_QUERY).matches);
@@ -37,8 +37,7 @@ export function useWorkbenchSidebar() {
     if (narrow) return setMobilePanel(next);
     setDesktopPanel(next);
     try {
-      if (next) window.localStorage.setItem(DESKTOP_SIDEBAR_KEY, next);
-      else window.localStorage.removeItem(DESKTOP_SIDEBAR_KEY);
+      window.localStorage.setItem(DESKTOP_SIDEBAR_KEY, next ?? 'closed');
     } catch { /* Workbench remains usable if storage is disabled. */ }
   }
   return { narrow, panel: narrow ? mobilePanel : desktopPanel, setPanel };
@@ -74,11 +73,11 @@ export function WorkbenchSidebar({
         <h2>{title}</h2>
         {narrow ? (
           <SheetClose asChild><Button variant="ghost" size="icon-sm" className="workbench-close" aria-label="Close sidebar" title="Close sidebar">
-            <PanelLeftClose aria-hidden="true" />
+            <SidebarSimpleIcon aria-hidden="true" />
           </Button></SheetClose>
         ) : (
           <CollapsibleTrigger asChild><Button variant="ghost" size="icon-sm" className="workbench-close" aria-controls="workbench-sidebar-dock" aria-label="Collapse sidebar" title="Collapse sidebar">
-            <PanelLeftClose aria-hidden="true" />
+            <SidebarSimpleIcon aria-hidden="true" />
           </Button></CollapsibleTrigger>
         )}
       </div>
@@ -109,7 +108,7 @@ export function WorkbenchSidebar({
                 setPanel(toggleSidebarPanel(panel, key));
               }}
               key={key}
-            ><Icon aria-hidden="true" /></Button>
+            ><Icon aria-hidden="true" /><span>{label}</span></Button>
           ))}
         </div>
         {!narrow && <CollapsibleContent className="workbench-dock" id="workbench-sidebar-dock" aria-label={title} onKeyDown={event => {

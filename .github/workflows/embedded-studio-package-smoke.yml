@@ -112,7 +112,7 @@ jobs:
         working-directory: apps/studio
         run: npx --no playwright install --with-deps --only-shell chromium
 
-      - name: Verify textured GLB workflow in Chromium
+      - name: Verify Studio workflows in Chromium
         id: studio_browser_regression
         if: runner.os == 'Linux'
         working-directory: apps/studio

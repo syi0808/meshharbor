@@ -1,5 +1,5 @@
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { X } from 'lucide-react';
+import { XIcon } from '@phosphor-icons/react';
 import { forwardRef, type HTMLAttributes } from 'react';
 import './shadcn.css';
 import { cn } from './utils';
@@ -59,7 +59,7 @@ export const DialogContent = forwardRef<
         {children}
         {showCloseButton && (
           <DialogPrimitive.Close className="shadcn-dialog-close" aria-label="Close" data-slot="dialog-close">
-            <X aria-hidden="true" />
+            <XIcon aria-hidden="true" />
           </DialogPrimitive.Close>
         )}
       </DialogPrimitive.Content>

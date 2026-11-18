@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyTriangleWireframe, isLocalPreviewResource, restorePreviewMaterials } from './preview-display.ts';
+import { applyPreviewMaterial, isLocalPreviewResource, restorePreviewMaterials } from './preview-display.ts';
 
 test('triangle wireframe swaps preview materials and restores original references without changing geometry', () => {
   const sharedMaterial = { name: 'shared material', wireframe: false };
@@ -17,7 +17,7 @@ test('triangle wireframe swaps preview materials and restores original reference
   const wireframeMaterial = { name: 'temporary triangle wireframe', wireframe: true };
   const originals = new Map();
 
-  applyTriangleWireframe(meshes, wireframeMaterial, originals);
+  applyPreviewMaterial(meshes, wireframeMaterial, originals);
 
   assert.strictEqual(firstMesh.material, wireframeMaterial);
   assert.deepEqual(groupedMesh.material, [wireframeMaterial, wireframeMaterial]);
@@ -34,7 +34,7 @@ test('triangle wireframe swaps preview materials and restores original reference
   assert.strictEqual(secondSharedMesh.geometry, geometryThree);
 
   const appliedGroupedMaterials = groupedMesh.material;
-  applyTriangleWireframe(meshes, wireframeMaterial, originals);
+  applyPreviewMaterial(meshes, wireframeMaterial, originals);
   assert.strictEqual(groupedMesh.material, appliedGroupedMaterials, 'repeated toggles must not replace the captured original');
 
   restorePreviewMaterials(originals);
@@ -43,7 +43,7 @@ test('triangle wireframe swaps preview materials and restores original reference
   assert.strictEqual(secondSharedMesh.material, sharedMaterial);
   assert.equal(originals.size, 0);
 
-  applyTriangleWireframe(meshes, wireframeMaterial, originals);
+  applyPreviewMaterial(meshes, wireframeMaterial, originals);
   restorePreviewMaterials(originals);
   assert.strictEqual(groupedMesh.material, multiMaterials, 'a later toggle cycle still restores the same original array');
 });

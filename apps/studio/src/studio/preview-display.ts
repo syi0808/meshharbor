@@ -2,12 +2,12 @@ export interface PreviewMaterialTarget {
   material: unknown;
 }
 
-export function applyTriangleWireframe<
+export function applyPreviewMaterial<
   Mesh extends PreviewMaterialTarget,
   Material,
 >(
   meshes: readonly Mesh[],
-  wireframeMaterial: Material,
+  previewMaterial: Material,
   originalMaterials: Map<Mesh, Mesh['material']>,
 ) {
   for (const mesh of meshes) {
@@ -17,8 +17,8 @@ export function applyTriangleWireframe<
     originalMaterials.set(mesh, original);
     mesh.material = (
       Array.isArray(original)
-        ? original.map(() => wireframeMaterial)
-        : wireframeMaterial
+        ? original.map(() => previewMaterial)
+        : previewMaterial
     ) as Mesh['material'];
   }
 }
