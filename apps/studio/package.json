@@ -9,7 +9,8 @@
     "preview": "vite preview --host 127.0.0.1",
     "test": "npm run test:security && npm run test:api && node --test src/studio/preview-display.test.mjs src/studio/preview-camera.test.mjs src/studio/workbench-state.test.mjs",
     "test:security": "node --test dev-security.test.mjs",
-    "test:api": "node --test src/studio/api.test.mjs"
+    "test:api": "node --test src/studio/api.test.mjs",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@radix-ui/react-collapsible": "1.2.1",
@@ -23,9 +24,11 @@
     "vite": "7.1.12"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.1",
     "@types/react": "19.1.16",
     "@types/react-dom": "19.1.9",
     "@types/three": "0.181.0",
+    "pngjs": "7.0.0",
     "typescript": "5.9.3"
   }
 }

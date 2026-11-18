@@ -29,4 +29,6 @@ node scripts/smoke_embedded_studio.mjs target/release/meshharbor.exe
 
 The script starts the built binary on a temporary loopback port and in a fresh temporary data directory. It verifies the health endpoint, loads the embedded Studio root page, fetches each referenced JavaScript/CSS asset, and then stops the server and removes its temporary data directory. It does not use existing MeshHarbor data, install Python or model packages, or access a model host.
 
-This is a production-binary integration smoke, not an installer or release package. It does not publish a binary artifact, code-sign an executable, exercise browser rendering/visual behavior, or validate image-to-3D inference. The separate QuadriFlow source and candidate workflows are not invoked by this package smoke.
+The HTTP smoke does not exercise browser rendering. The Linux job also runs a separate [Chromium regression](../apps/studio/README.md#browser-regression) against the same built binary. It uses a generated textured GLB to exercise import, Optimize, Original/Result comparison, and export, checking both rendered texture patches and the downloaded GLB.
+
+These checks do not publish a binary artifact, code-sign an executable, build an installer or release package, validate real-asset PBR fidelity, or exercise image-to-3D inference. This workflow does not invoke the separate QuadriFlow source or candidate workflows.

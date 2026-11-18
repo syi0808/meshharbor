@@ -13,6 +13,7 @@ on:
       - "Cargo.lock"
       - "crates/**"
       - "runtimes/pixal3d/**"
+      - "scripts/embedded-studio-test-server.mjs"
       - "scripts/smoke_embedded_studio.mjs"
   pull_request:
     branches:
@@ -25,6 +26,7 @@ on:
       - "Cargo.lock"
       - "crates/**"
       - "runtimes/pixal3d/**"
+      - "scripts/embedded-studio-test-server.mjs"
       - "scripts/smoke_embedded_studio.mjs"
 
 permissions:
@@ -104,3 +106,25 @@ jobs:
         env:
           MESHHARBOR_BINARY: target/release/meshharbor${{ runner.os == 'Windows' && '.exe' || '' }}
         run: node scripts/smoke_embedded_studio.mjs "$MESHHARBOR_BINARY"
+
+      - name: Install headless Chromium for Studio regression
+        if: runner.os == 'Linux'
+        working-directory: apps/studio
+        run: npx --no playwright install --with-deps --only-shell chromium
+
+      - name: Verify textured GLB workflow in Chromium
+        id: studio_browser_regression
+        if: runner.os == 'Linux'
+        working-directory: apps/studio
+        env:
+          MESHHARBOR_BINARY: ${{ github.workspace }}/target/release/meshharbor
+        run: npm run test:e2e
+
+      - name: Collect Studio regression diagnostics
+        if: failure() && steps.studio_browser_regression.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: studio-browser-regression
+          path: apps/studio/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

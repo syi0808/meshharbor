@@ -1,6 +1,7 @@
 node_modules/
 dist/
 target/
+/apps/studio/test-results/
 .env
 .meshharbor/
 data/

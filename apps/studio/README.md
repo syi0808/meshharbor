@@ -47,6 +47,25 @@ Run `npm run test:security` to exercise the Vite middleware's anti-framing heade
 
 The preview uses Three.js and the browser's WebGL implementation. No remote fonts, images, or model-viewer scripts are loaded by the Studio page.
 
+## Browser regression
+
+From the repository root, build the client before compiling the binary:
+
+```sh
+cd apps/studio
+npm ci --ignore-scripts --no-audit --no-fund
+npm run build
+npx --no playwright install --only-shell chromium
+cd ../..
+cargo build --locked --package meshharbor --bin meshharbor
+cd apps/studio
+npm run test:e2e
+```
+
+On Linux, add `--with-deps` to the Chromium install command if system libraries are missing. Set `MESHHARBOR_BINARY` to test a different embedded build. The test starts and stops a loopback engine with a temporary data directory; no model setup or account is needed.
+
+Headless Chromium imports a generated two-material GLB via the file picker, runs **Optimize**, switches between **Original** and **Result**, and downloads both. It checks that both material views render the same four color patches and that the result wireframe shows the simplified mesh. The original download must match the input byte for byte, and the result must have fewer triangles with identical material bindings, UVs, normals, and embedded base-color and metallic/roughness PNG bytes. This is one deterministic fixture, not broad PBR, cross-browser, or real-asset visual QA.
+
 ## Persisted job history
 
 Studio loads up to 20 recent job records from the local engine on connection. Opening a completed record can restore its derived asset in the preview. Checking a queued/running record is read-only and never resumes or restarts work; use **Refresh** to fetch the newest saved state. If the engine exited unexpectedly, a saved active state may be stale. Stop every REST/MCP process using the same data directory, then run `meshharbor jobs recover-interrupted --confirm-no-running-meshharbor` before retrying. The job history is not a process-liveness check.
