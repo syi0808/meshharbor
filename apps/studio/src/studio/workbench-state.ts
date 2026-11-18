@@ -24,10 +24,6 @@ export function runtimeSetupStage(backend: {
   return backend.naf_conversion_required ? 'conversion' : 'incomplete';
 }
 
-export function toggleSidebarPanel(current: SidebarPanel | null, requested: SidebarPanel): SidebarPanel | null {
-  return current === requested ? null : requested;
-}
-
 export function inspectorForAsset(inspector: Inspector | null, kind: 'mesh' | 'image' | undefined): Inspector | null {
   if (inspector === 'generation') return inspector;
   if (kind === 'mesh') return inspector === 'optimize' || inspector === 'tools' ? inspector : null;

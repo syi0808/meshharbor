@@ -4,11 +4,9 @@ import { CornersOutIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { applyPreviewMaterial, isLocalPreviewResource, restorePreviewMaterials } from './preview-display';
+import { applyPreviewMaterial, restorePreviewMaterials } from './preview-display';
+import { configurePreviewRenderer, createPreviewScene, disposePreviewModel, frameFromObject, loadPreviewModel } from './preview-model';
 import {
-  previewFrameFromBounds,
   shouldPreserveComparisonCamera,
   shouldPreserveSourceTransition,
   type PreviewFrame,
@@ -31,7 +29,7 @@ export interface PreviewComparison {
 
 interface Props {
   asset: Asset | null;
-  loadModel: (asset: Asset) => Promise<Blob>;
+  loadModel: (asset: Asset, signal?: AbortSignal) => Promise<Blob>;
   onError: (message: string) => void;
   comparison?: PreviewComparison | null;
 }
@@ -47,9 +45,10 @@ function ImagePreview({ asset, loadModel, onError }: Props & { asset: Asset }) {
 
   useEffect(() => {
     let disposed = false;
+    const controller = new AbortController();
     let objectUrl: string | null = null;
     setLoading(true);
-    void loadModel(asset)
+    void loadModel(asset, controller.signal)
       .then((blob) => {
         objectUrl = URL.createObjectURL(blob);
         if (disposed) URL.revokeObjectURL(objectUrl);
@@ -61,6 +60,7 @@ function ImagePreview({ asset, loadModel, onError }: Props & { asset: Asset }) {
       .finally(() => { if (!disposed) setLoading(false); });
     return () => {
       disposed = true;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [asset.id, loadModel, onError]);
@@ -112,8 +112,7 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     const host = hostRef.current;
     if (!host) return;
 
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#202020');
+    const scene = createPreviewScene();
     const camera = new THREE.PerspectiveCamera(36, 1, 0.01, 1000);
     camera.position.set(3.6, 2.5, 4.2);
     let renderer: THREE.WebGLRenderer;
@@ -126,18 +125,9 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     }
     setRendererUnavailable(false);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1;
+    configurePreviewRenderer(renderer);
     host.replaceChildren(renderer.domElement);
 
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x8a928b, 2.1));
-    const key = new THREE.DirectionalLight(0xffffff, 2.4);
-    key.position.set(4, 6, 5);
-    scene.add(key);
-    const fill = new THREE.DirectionalLight(0xc9ddff, 1.2);
-    fill.position.set(-4, 2, -3);
-    scene.add(fill);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.07;
@@ -181,7 +171,7 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
       }
       if (currentModelRef.current) {
         scene.remove(currentModelRef.current);
-        disposeGroup(currentModelRef.current);
+        disposePreviewModel(currentModelRef.current);
         currentModelRef.current = null;
       }
       sceneRef.current = null;
@@ -194,7 +184,8 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
   }, []);
 
   useEffect(() => {
-    let disposed = false;
+    const controller = new AbortController();
+    const { signal } = controller;
     const scene = sceneRef.current;
     const camera = cameraRef.current;
     const controls = controlsRef.current;
@@ -208,7 +199,7 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     frameRef.current = null;
     if (currentModelRef.current && scene) {
       scene.remove(currentModelRef.current);
-      disposeGroup(currentModelRef.current);
+      disposePreviewModel(currentModelRef.current);
       currentModelRef.current = null;
     }
     setModelReady(false);
@@ -217,7 +208,7 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     if (!asset || asset.kind !== 'mesh' || !scene || !camera || !controls) {
       currentAssetIdRef.current = null;
       activeComparisonGroupRef.current = null;
-      return () => { disposed = true; };
+      return () => controller.abort();
     }
 
     const validComparison = comparisonForAsset(asset, comparison);
@@ -233,26 +224,7 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     }
     setLoading(true);
 
-    const loadScene = async (source: Asset): Promise<THREE.Group> => {
-      const blob = await loadModel(source);
-      if (disposed) throw new PreviewRequestCancelled();
-      const buffer = await blob.arrayBuffer();
-      if (disposed) throw new PreviewRequestCancelled();
-      ensureEmbeddedGlbResources(buffer);
-      const manager = new THREE.LoadingManager();
-      manager.setURLModifier((url) => {
-        if (isLocalPreviewResource(url, window.location.origin)) return url;
-        throw new Error('External GLB resources are blocked in local preview. Embed textures and buffers in the GLB first.');
-      });
-      const loader = new GLTFLoader(manager);
-      loader.setMeshoptDecoder(MeshoptDecoder);
-      const gltf = await loader.parseAsync(buffer, '');
-      if (disposed) {
-        disposeGroup(gltf.scene);
-        throw new PreviewRequestCancelled();
-      }
-      return gltf.scene;
-    };
+    const loadScene = async (source: Asset) => loadPreviewModel(await loadModel(source, signal), signal);
 
     void (async () => {
       let model: THREE.Group | null = null;
@@ -266,14 +238,14 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
         if (validComparison && !sourceFrame && asset.id !== validComparison.sourceAsset.id) {
           const sourceModel = await loadScene(validComparison.sourceAsset);
           sourceFrame = frameFromObject(sourceModel);
-          disposeGroup(sourceModel);
+          disposePreviewModel(sourceModel);
           if (!sourceFrame) throw new Error('The original GLB has no finite, non-degenerate preview bounds.');
         }
-        if (disposed) return;
+        if (signal.aborted) return;
 
         model = await loadScene(asset);
-        if (disposed) {
-          disposeGroup(model);
+        if (signal.aborted) {
+          disposePreviewModel(model);
           return;
         }
 
@@ -304,16 +276,16 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
         activeComparisonGroupRef.current = validComparison?.groupId ?? null;
         setModelReady(meshes.length > 0);
       } catch (error: unknown) {
-        if (model && currentModelRef.current !== model) disposeGroup(model);
-        if (!disposed && !(error instanceof PreviewRequestCancelled)) {
+        if (model && currentModelRef.current !== model) disposePreviewModel(model);
+        if (!signal.aborted) {
           onErrorRef.current(error instanceof Error ? error.message : 'Could not load the asset.');
         }
       } finally {
-        if (!disposed) setLoading(false);
+        if (!signal.aborted) setLoading(false);
       }
     })();
 
-    return () => { disposed = true; };
+    return () => controller.abort();
   }, [
     asset?.id,
     asset?.kind,
@@ -361,30 +333,6 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
   );
 }
 
-function ensureEmbeddedGlbResources(buffer: ArrayBuffer) {
-  const view = new DataView(buffer);
-  if (view.byteLength < 20 || view.getUint32(0, true) !== 0x46546c67 || view.getUint32(4, true) !== 2) {
-    throw new Error('Preview requires a valid GLB version 2 file.');
-  }
-  const jsonLength = view.getUint32(12, true);
-  const jsonType = view.getUint32(16, true);
-  if (jsonType !== 0x4e4f534a || 20 + jsonLength > view.byteLength) {
-    throw new Error('The GLB JSON chunk is invalid.');
-  }
-  const jsonBytes = new Uint8Array(buffer, 20, jsonLength);
-  let document: { buffers?: Array<{ uri?: string }>; images?: Array<{ uri?: string }> };
-  try {
-    document = JSON.parse(new TextDecoder().decode(jsonBytes)) as typeof document;
-  } catch {
-    throw new Error('The GLB JSON chunk could not be read.');
-  }
-  const externalResource = [...(document.buffers ?? []), ...(document.images ?? [])]
-    .some((resource) => resource.uri !== undefined && !resource.uri.startsWith('data:'));
-  if (externalResource) {
-    throw new Error('This GLB references external buffers or textures. The local preview blocks external requests; embed those resources first.');
-  }
-}
-
 function comparisonForAsset(asset: Asset, comparison: PreviewComparison | null | undefined): PreviewComparison | null {
   if (!comparison
     || !comparison.groupId.trim()
@@ -419,17 +367,6 @@ function cacheCanonicalSourceFrame(key: string, frame: PreviewFrame) {
   }
 }
 
-function frameFromObject(model: THREE.Object3D): PreviewFrame | null {
-  const bounds = new THREE.Box3().setFromObject(model);
-  if (bounds.isEmpty()) return null;
-  const min = bounds.min;
-  const max = bounds.max;
-  return previewFrameFromBounds({
-    min: [min.x, min.y, min.z],
-    max: [max.x, max.y, max.z],
-  });
-}
-
 function fitCameraToFrame(camera: THREE.PerspectiveCamera, controls: OrbitControls, frame: PreviewFrame) {
   const target = new THREE.Vector3(...frame.target);
   const distance = frame.maxDimension * 1.65 / Math.min(camera.aspect, 1);
@@ -441,26 +378,5 @@ function fitCameraToFrame(camera: THREE.PerspectiveCamera, controls: OrbitContro
   controls.minDistance = frame.maxDimension * 0.2;
   controls.maxDistance = frame.maxDimension * 12;
   controls.update();
-}
-
-class PreviewRequestCancelled extends Error {
-  constructor() {
-    super('Preview request was superseded.');
-    this.name = 'PreviewRequestCancelled';
-  }
-}
-
-function disposeGroup(group: THREE.Group) {
-  group.traverse((node) => {
-    if (!(node instanceof THREE.Mesh)) return;
-    node.geometry.dispose();
-    const materials = Array.isArray(node.material) ? node.material : [node.material];
-    for (const material of materials) {
-      for (const value of Object.values(material)) {
-        if (value instanceof THREE.Texture) value.dispose();
-      }
-      material.dispose();
-    }
-  });
 }
 

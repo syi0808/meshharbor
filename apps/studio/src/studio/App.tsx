@@ -1,4 +1,4 @@
-import { ArrowsClockwiseIcon, CpuIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, ImageSquareIcon, SidebarSimpleIcon, SlidersHorizontalIcon, WarningCircleIcon, WrenchIcon, XIcon } from '@phosphor-icons/react';
+import { ArrowsClockwiseIcon, CpuIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, ImageSquareIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WarningCircleIcon, WrenchIcon, XIcon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   assetComparisonPairForSelection,
@@ -33,7 +33,6 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty';
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from '@/components/ui/item';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
@@ -43,6 +42,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ModelPreview } from './ModelPreview';
+import { AssetGalleryCard } from './AssetGalleryCard';
 import { MeshStudy } from './MeshStudy';
 import { RuntimeSetup } from './RuntimeSetup';
 import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
@@ -59,6 +59,7 @@ interface AssetBrowserFilters {
 }
 
 const ASSET_PAGE_SIZE = 50;
+const ASSET_GALLERY_GRID = 'grid min-w-0 grid-cols-2 gap-2 @min-[380px]:grid-cols-3';
 const EMPTY_ASSET_BROWSER_FILTERS: AssetBrowserFilters = { query: '', kind: 'all', origin: 'all' };
 
 function toAssetPageFilters(filters: AssetBrowserFilters): AssetPageFilters {
@@ -711,9 +712,9 @@ export function App() {
     }
     : null;
 
-  const loadPreview = useCallback((asset: Asset) => {
+  const loadPreview = useCallback((asset: Asset, signal?: AbortSignal) => {
     if (connection !== 'connected') return Promise.reject(new Error('The local MeshHarbor engine is offline.'));
-    return api.artifact(asset);
+    return api.artifact(asset, signal);
   }, [api, connection]);
   const reportPreviewError = useCallback((message: string) => setError(`Preview: ${message}`), []);
 
@@ -1100,20 +1101,9 @@ export function App() {
     </Alert>
   ) : null;
 
-  function renderAssetRow(asset: Asset) {
-    return (
-      <Item key={asset.id} size="xs" variant={asset.id === selectedId ? 'muted' : 'default'} asChild className="min-w-0 flex-nowrap text-left hover:bg-muted">
-        <button type="button" aria-pressed={asset.id === selectedId}
-          onClick={() => { selectAsset(asset); if (sidebar.narrow) sidebar.setPanel(null); }}>
-          <ItemMedia variant="icon" className="text-muted-foreground">{asset.kind === 'mesh' ? <CubeIcon aria-hidden="true" /> : <FileImageIcon aria-hidden="true" />}</ItemMedia>
-          <ItemContent className="min-w-0">
-            <ItemTitle className="min-w-0 w-full"><span className="block min-w-0 truncate" title={asset.name}>{asset.name}</span></ItemTitle>
-            <ItemDescription>{asset.source_asset_id ? 'Result' : 'Original'} · {formatSize(asset.byte_size)}</ItemDescription>
-          </ItemContent>
-          {asset.kind === 'mesh' && <ItemActions className="shrink-0"><span className="text-right tabular-nums text-muted-foreground">{Number(asset.metadata.triangles ?? 0).toLocaleString()} <small className="block">tris</small></span></ItemActions>}
-        </button>
-      </Item>
-    );
+  function renderAssetCard(asset: Asset) {
+    return <AssetGalleryCard key={asset.id} asset={asset} loadPreview={loadPreview} selected={asset.id === selectedId}
+      onSelect={() => { selectAsset(asset); if (sidebar.narrow) sidebar.setPanel(null); }} />;
   }
 
   function inspectorBody() {
@@ -1321,6 +1311,10 @@ export function App() {
             {selectedAsset.kind === 'mesh' && <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> <span>Export GLB</span></Button>}
           </div>}
         <div className={selectedAsset ? 'ml-auto flex items-center gap-2 md:ml-0' : 'ml-auto flex items-center gap-2'}>
+          <Button variant={sidebar.panel ? 'secondary' : 'ghost'} size="sm" ref={sidebar.triggerRef}
+            aria-expanded={sidebar.panel !== null} aria-haspopup={sidebar.narrow ? 'dialog' : undefined}
+            aria-controls={sidebar.panel ? (sidebar.narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
+            onClick={sidebar.toggleInventory}><SquaresFourIcon aria-hidden="true" /> Inventory</Button>
           <DialogTrigger asChild><Button variant="ghost" size="sm" aria-label="Engine and runtimes"><CpuIcon data-icon="inline-start" aria-hidden="true" /><span>Runtime</span></Button></DialogTrigger>
         </div>
       </header>
@@ -1337,21 +1331,21 @@ export function App() {
 
             <WorkbenchLayout state={sidebar} inspector={desktopInspector} tools={toolRail}
               assets={
-              <div className="grid min-w-0 grid-cols-1 gap-3 text-xs" id="asset-library">
-                <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
-                  <span>Local library</span>
-                  <Button variant="ghost" size="sm" onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
-                </div>
-                <Button variant="outline" size="sm" className="w-full" disabled={busy || connection !== 'connected'}
-                  onClick={() => inventoryInputRef.current?.click()}>Import assets</Button>
-                {showLibraryFilters && <><form className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2" onSubmit={(event) => {
+              <div className="@container min-w-0 text-xs" id="asset-library">
+                <div className="grid min-w-0 gap-2 border-b px-3 py-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Button variant="outline" size="sm" className="min-w-0 flex-1 justify-center" disabled={busy || connection !== 'connected'}
+                      onClick={() => inventoryInputRef.current?.click()}><PlusIcon aria-hidden="true" /> Import assets</Button>
+                    <Button variant="ghost" size="icon-sm" aria-label="Refresh assets" title="Refresh assets"
+                      onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}><ArrowsClockwiseIcon aria-hidden="true" /></Button>
+                  </div>
+                {showLibraryFilters && <><form role="search" aria-label="Asset inventory" className="relative" onSubmit={(event) => {
                   event.preventDefault();
                   applyAssetBrowserFilters({ ...assetFilters, query: assetSearchInput.trim() });
                 }}>
-                  <Field className="min-w-0">
-                    <FieldLabel htmlFor="asset-filename">Filename</FieldLabel>
                     <Input
                       id="asset-filename"
+                      className="pr-8"
                       aria-label="Search assets by filename"
                       type="search"
                       maxLength={256}
@@ -1363,10 +1357,12 @@ export function App() {
                       }}
                       placeholder="Search assets"
                     />
-                  </Field>
-                  <Button type="submit" variant="outline" disabled={connection !== 'connected'}>Search</Button>
+                  <Button type="submit" aria-label="Search" title="Search" variant="ghost" size="icon-xs"
+                    className="absolute top-1/2 right-1 -translate-y-1/2" disabled={connection !== 'connected'}><MagnifyingGlassIcon aria-hidden="true" /></Button>
                 </form>
-                <div className="grid grid-cols-2 gap-2">
+                <details className="min-w-0">
+                  <summary className="w-fit cursor-pointer rounded-sm px-0.5 text-muted-foreground hover:text-foreground">Filters{hasActiveAssetFilters ? ' · Active' : ''}</summary>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
                   <Field className="min-w-0">
                     <FieldLabel htmlFor="asset-kind">Type</FieldLabel>
                     <NativeSelect
@@ -1410,7 +1406,10 @@ export function App() {
                       Clear filters
                     </Button>
                   )}
-                </div></>}
+                  </div>
+                </details></>}
+                </div>
+                <div className="grid min-w-0 gap-3 px-3 py-3">
                 {matchingAssets.length > 0 && <p className="text-xs text-muted-foreground" aria-live="polite">
                   {assetPageLoading ? 'Loading assets…' : `${matchingAssets.length} loaded ${hasActiveAssetFilters ? 'result' : 'asset'}${matchingAssets.length === 1 ? '' : 's'}`}
                 </p>}
@@ -1419,10 +1418,10 @@ export function App() {
                       {assetPageLoading ? 'Loading assets…' : hasActiveAssetFilters
                         ? 'No matching assets' : 'Imported files and results appear here'}
                     </EmptyDescription></EmptyHeader></Empty>
-                  : <div className="grid grid-cols-1 gap-1">{matchingAssets.map(renderAssetRow)}</div>}
+                  : <div className={ASSET_GALLERY_GRID}>{matchingAssets.map(renderAssetCard)}</div>}
                 {pinnedAssets.length > 0 && <section className="grid grid-cols-1 gap-2 border-t pt-3" aria-label="Current selection and comparison">
                   <h3 className="text-xs text-muted-foreground">Current selection</h3>
-                  <div className="grid grid-cols-1 gap-1">{pinnedAssets.map(renderAssetRow)}</div>
+                  <div className={ASSET_GALLERY_GRID}>{pinnedAssets.map(renderAssetCard)}</div>
                 </section>}
                 {assetNextCursor && (
                   <div className="flex justify-center">
@@ -1431,10 +1430,11 @@ export function App() {
                     </Button>
                   </div>
                 )}
+                </div>
               </div>
               }
               jobs={
-              <section className="grid min-w-0 grid-cols-1 gap-3 text-xs" aria-label="Recent jobs">
+              <section className="grid min-w-0 grid-cols-1 gap-3 p-3 text-xs" aria-label="Recent jobs">
                 <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
                   <div><span>Recent activity</span></div>
                   <Button variant="ghost" size="sm" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>

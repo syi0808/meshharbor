@@ -705,23 +705,24 @@ export class MeshHarborApi {
     });
   }
 
-  artifact(asset: Asset): Promise<Blob> {
+  artifact(asset: Asset, signal?: AbortSignal): Promise<Blob> {
     // Quad OBJ is an editing artifact, never an image or GLB preview fallback.
     const candidates = asset.artifacts.filter((entry) => entry.kind !== 'quad_topology' && entry.kind !== 'quad_obj');
     const artifact = candidates.find((entry) => entry.mime_type === asset.mime_type)
       ?? candidates.find((entry) => entry.kind === 'source') ?? candidates[0];
     if (!artifact) throw new Error('This asset has no downloadable artifact.');
-    return this.downloadArtifact(artifact);
+    return this.downloadArtifact(artifact, signal);
   }
 
-  downloadArtifact(artifact: Artifact): Promise<Blob> {
-    return this.requestBlob(`/api/v1/artifacts/${encodeURIComponent(artifact.id)}`);
+  downloadArtifact(artifact: Artifact, signal?: AbortSignal): Promise<Blob> {
+    return this.requestBlob(`/api/v1/artifacts/${encodeURIComponent(artifact.id)}`, signal);
   }
 
-  private async requestBlob(path: string): Promise<Blob> {
+  private async requestBlob(path: string, signal?: AbortSignal): Promise<Blob> {
     const response = await fetch(path, {
       headers: this.dashboardHeaders,
       mode: 'cors',
+      signal,
     });
     if (!response.ok) throw new Error(`Artifact download failed (${response.status}).`);
     return response.blob();

@@ -21,7 +21,7 @@ test('desktop docks flank the viewport, then become drawers without horizontal o
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
   const tools = page.getByRole('group', { name: 'Model tools' });
-  const inventory = page.getByRole('group', { name: 'Asset inventory' });
+  const inventory = page.getByRole('banner').getByRole('button', { name: 'Inventory', exact: true });
   await expect(tools.getByRole('button', { name: 'Optimize' })).toBeDisabled();
   await chooseFile(page, page.getByRole('button', { name: 'Open GLB', exact: true }), 'layout.glb',
     'model/gltf-binary', texturedGlb());
@@ -46,10 +46,9 @@ test('desktop docks flank the viewport, then become drawers without horizontal o
 
   await page.setViewportSize({ width: 390, height: 700 });
   await expect(rightDock).toHaveCount(0);
-  const assets = inventory.getByRole('button', { name: 'Assets' });
-  expect((await assets.boundingBox()).y).toBeGreaterThanOrEqual((await selected.boundingBox()).y + (await selected.boundingBox()).height);
-  await assets.click();
-  const sheet = page.getByRole('dialog', { name: 'Assets' });
+  expect((await inventory.boundingBox()).y).toBeLessThan((await selected.boundingBox()).y);
+  await inventory.click();
+  const sheet = page.getByRole('dialog', { name: 'Inventory' });
   await expect(sheet.getByRole('button', { name: 'Import assets' })).toBeVisible();
   await expect.poll(async () => {
     const { x, width } = await sheet.boundingBox();

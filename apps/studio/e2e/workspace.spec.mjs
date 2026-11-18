@@ -5,31 +5,29 @@ import { texturedGlb } from './textured-glb.mjs';
 test('the desktop library opens on first visit and remembers a collapsed dock', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
-  const assets = page.getByRole('button', { name: 'Assets', exact: true });
-  await expect(assets).toHaveAttribute('aria-expanded', 'true');
+  const inventory = page.getByRole('button', { name: 'Inventory', exact: true });
+  await expect(inventory).toHaveAttribute('aria-expanded', 'true');
   await page.getByRole('button', { name: 'Collapse sidebar' }).click();
-  await expect(assets).toBeFocused();
+  await expect(inventory).toBeFocused();
   await page.reload();
-  await expect(assets).toHaveAttribute('aria-expanded', 'false');
-  await assets.click();
-  await expect(assets).toHaveAttribute('aria-expanded', 'true');
+  await expect(inventory).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('button', { name: 'Jobs', exact: true })).toHaveCount(0);
+  await inventory.click();
+  await expect(inventory).toHaveAttribute('aria-expanded', 'true');
 });
 
-test('the icon rail overlays a label and the desktop library remembers its resized width', async ({ page, studioOrigin }) => {
+test('Inventory views stay inside the resizable right dock', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  const library = page.getByRole('complementary', { name: 'Inventory' });
+  const views = library.getByRole('group', { name: 'Inventory views' });
   const jobs = page.getByRole('button', { name: 'Jobs', exact: true });
-  await expect(jobs).toHaveText('');
-  const rail = page.getByRole('group', { name: 'Asset inventory' });
-  const railWidth = await rail.evaluate(element => element.getBoundingClientRect().width);
-  await jobs.hover();
-  const tooltip = page.locator('[data-slot="tooltip-content"]');
-  await expect(tooltip).toBeVisible();
-  await expect(tooltip).toContainText('Jobs');
-  await expect(tooltip).toHaveAttribute('data-side', 'left');
-  await expect.poll(() => rail.evaluate(element => element.getBoundingClientRect().width)).toBe(railWidth);
-
-  const library = page.locator('#workbench-sidebar-dock');
+  await expect(views.getByRole('button', { name: 'Assets', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await views.getByRole('button', { name: 'Jobs', exact: true }).click();
+  await expect(jobs).toHaveAttribute('aria-pressed', 'true');
+  await expect(library.getByText('No saved jobs yet.')).toBeVisible();
+  const bounds = await library.boundingBox();
+  expect(Math.round(bounds.x + bounds.width)).toBe(1280);
   const panelWidth = () => library.evaluate(element => Math.round(element.getBoundingClientRect().width));
   const initialWidth = await panelWidth();
   const handle = page.getByRole('separator', { name: 'Resize library panel' });
@@ -38,9 +36,10 @@ test('the icon rail overlays a label and the desktop library remembers its resiz
   const resizedWidth = await panelWidth();
   await page.reload();
   await expect.poll(panelWidth).toBe(resizedWidth);
+  await expect(jobs).toHaveAttribute('aria-pressed', 'true');
 });
 
-test('long model names do not overlap row metadata at narrow panel and mobile widths', async ({ page, studioOrigin }) => {
+test('long model names do not overflow gallery cards at narrow panel and mobile widths', async ({ page, studioOrigin }) => {
   const name = 'MeshHarbor-reference-asset-with-an-extraordinarily-long-name-generated-simplified.glb';
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
@@ -53,23 +52,19 @@ test('long model names do not overlap row metadata at narrow panel and mobile wi
   const assertNoOverflow = async (library) => {
     const item = library.getByRole('button', { name: new RegExp(name.replace('.', '\\.')) });
     await expect(item).toBeVisible();
-    await expect(item.getByText('tris', { exact: true })).toBeVisible();
+    await expect(item.getByText(/tris · Original/)).toBeVisible();
     await expect(item.getByTitle(name, { exact: true })).toHaveCSS('text-overflow', 'ellipsis');
-    const bounds = await item.evaluate((row) => {
-      const filename = row.querySelector('[data-slot="item-title"] span');
-      const metadata = row.querySelector('[data-slot="item-actions"]');
+    const bounds = await item.evaluate((card) => {
+      const filename = card.querySelector('[title]');
       return {
         truncated: filename.scrollWidth > filename.clientWidth,
         titleRight: filename.getBoundingClientRect().right,
-        metadataLeft: metadata.getBoundingClientRect().left,
-        metadataRight: metadata.getBoundingClientRect().right,
-        rowRight: row.getBoundingClientRect().right,
-        overflow: row.scrollWidth - row.clientWidth,
+        cardRight: card.getBoundingClientRect().right,
+        overflow: card.scrollWidth - card.clientWidth,
       };
     });
     expect(bounds.truncated).toBe(true);
-    expect(bounds.titleRight).toBeLessThan(bounds.metadataLeft);
-    expect(bounds.metadataRight).toBeLessThan(bounds.rowRight);
+    expect(bounds.titleRight).toBeLessThan(bounds.cardRight);
     expect(bounds.overflow).toBe(0);
   };
 
@@ -82,10 +77,10 @@ test('long model names do not overlap row metadata at narrow panel and mobile wi
   await assertNoOverflow(dock);
 
   await page.setViewportSize({ width: 320, height: 720 });
-  const assets = page.getByRole('button', { name: 'Assets', exact: true });
-  await expect(assets).toHaveAttribute('aria-expanded', 'false');
-  await assets.click();
-  await assertNoOverflow(page.getByRole('dialog', { name: 'Assets' }));
+  const inventory = page.getByRole('button', { name: 'Inventory', exact: true });
+  await expect(inventory).toHaveAttribute('aria-expanded', 'false');
+  await inventory.click();
+  await assertNoOverflow(page.getByRole('dialog', { name: 'Inventory' }));
   expect(await page.locator('html').evaluate(element => element.scrollWidth)).toBe(320);
 });
 
@@ -151,16 +146,16 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   });
 
   await page.goto(studioOrigin);
-  const assets = page.getByRole('button', { name: 'Assets', exact: true });
-  await expect(assets).toHaveAttribute('aria-expanded', 'false');
+  const inventory = page.getByRole('button', { name: 'Inventory', exact: true });
+  await expect(inventory).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
-  await assets.click();
-  const library = page.getByRole('dialog', { name: 'Assets' });
+  await inventory.click();
+  const library = page.getByRole('dialog', { name: 'Inventory' });
   await expect(library).toBeVisible();
   await expect(page.getByRole('separator', { name: 'Resize library panel' })).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(library).toBeHidden();
-  await expect(assets).toBeFocused();
+  await expect(inventory).toBeFocused();
   const runtime = page.getByRole('button', { name: 'Engine and runtimes' });
   await runtime.click();
   const dialog = page.getByRole('dialog', { name: 'Engine and runtimes' });

@@ -1,21 +1,18 @@
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { ListChecksIcon, SidebarSimpleIcon, StackIcon } from '@phosphor-icons/react';
+import { ListChecksIcon, SidebarSimpleIcon, SquaresFourIcon } from '@phosphor-icons/react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useDefaultLayout } from 'react-resizable-panels';
 import { Button } from '@/components/ui/button';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   decodeSidebarPanel,
   DESKTOP_SIDEBAR_KEY,
-  toggleSidebarPanel,
   WORKBENCH_NARROW_QUERY,
   type SidebarPanel,
 } from './workbench-state';
 
 const sections = [
-  { key: 'assets', label: 'Assets', icon: StackIcon },
+  { key: 'assets', label: 'Assets', icon: SquaresFourIcon },
   { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
 ] as const;
 
@@ -36,6 +33,8 @@ export function useWorkbenchSidebar() {
     catch { return decodeSidebarPanel(null); }
   });
   const [mobilePanel, setMobilePanel] = useState<SidebarPanel | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const lastPanel = useRef<SidebarPanel>(desktopPanel ?? 'assets');
   const [narrow, setNarrow] = useState(() => window.matchMedia(WORKBENCH_NARROW_QUERY).matches);
   useEffect(() => {
     const media = window.matchMedia(WORKBENCH_NARROW_QUERY);
@@ -48,13 +47,18 @@ export function useWorkbenchSidebar() {
     return () => media.removeEventListener('change', update);
   }, []);
   function setPanel(next: SidebarPanel | null) {
+    if (next) lastPanel.current = next;
     if (narrow) return setMobilePanel(next);
     setDesktopPanel(next);
     try {
       window.localStorage.setItem(DESKTOP_SIDEBAR_KEY, next ?? 'closed');
     } catch { /* Workbench remains usable if storage is disabled. */ }
   }
-  return { narrow, panel: narrow ? mobilePanel : desktopPanel, setPanel };
+  const panel = narrow ? mobilePanel : desktopPanel;
+  return {
+    narrow, panel, setPanel, triggerRef,
+    toggleInventory: () => setPanel(panel ? null : lastPanel.current),
+  };
 }
 
 export function WorkbenchLayout({
@@ -67,10 +71,7 @@ export function WorkbenchLayout({
   inspector: ReactNode;
   children: ReactNode;
 }) {
-  const { panel, narrow, setPanel } = state;
-  const rail = useRef<HTMLDivElement>(null);
-  const lastTrigger = useRef<HTMLButtonElement | null>(null);
-  const title = panel === 'jobs' ? 'Jobs' : 'Assets';
+  const { panel, narrow, setPanel, triggerRef } = state;
   const desktopDockOpen = !narrow && panel !== null;
   const inspectorOpen = Boolean(inspector);
   const panelIds = useMemo(() => [
@@ -85,28 +86,30 @@ export function WorkbenchLayout({
     onlySaveAfterUserInteractions: true,
   });
 
-  const restoreFocus = () => {
-    const trigger = lastTrigger.current;
-    if (trigger?.isConnected) trigger.focus();
-    else rail.current?.querySelector<HTMLButtonElement>(`button[data-panel="${panel ?? 'assets'}"]`)?.focus();
-  };
+  const restoreFocus = () => triggerRef.current?.focus();
 
   function onCollapse() {
     setPanel(null);
     if (!narrow) requestAnimationFrame(restoreFocus);
   }
 
-  const body = panel === 'assets' ? assets : panel === 'jobs' ? jobs : null;
+  const views = <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1" role="group" aria-label="Inventory views">
+    {sections.map(({ key, label, icon: Icon }) => (
+      <Button key={key} type="button" variant={panel === key ? 'outline' : 'ghost'} size="sm" aria-pressed={panel === key}
+        onClick={() => setPanel(key)}><Icon aria-hidden="true" />{label}</Button>
+    ))}
+  </div>;
+  const body = <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
+    {panel === 'assets' ? assets : panel === 'jobs' ? jobs : null}
+  </div>;
+
   return (
-    <Collapsible asChild open={desktopDockOpen} onOpenChange={open => {
-      if (!open && !narrow) onCollapse();
-    }}>
       <div className={narrow
-        ? 'grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)_auto]'
-        : 'grid min-h-0 min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)_auto]'}>
-        <div className={narrow ? 'col-start-1 row-start-2 border-t bg-sidebar' : 'border-r bg-sidebar'}>{tools}</div>
+        ? 'grid min-h-0 min-w-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto]'
+        : 'grid min-h-0 min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)]'}>
+        <div className={narrow ? 'row-start-2 border-t bg-sidebar' : 'border-r bg-sidebar'}>{tools}</div>
         <ResizablePanelGroup id="studio-panels" orientation="horizontal"
-          className={narrow ? 'col-span-2 col-start-1 row-start-1 min-h-0 min-w-0' : 'min-h-0 min-w-0'}
+          className={narrow ? 'row-start-1 min-h-0 min-w-0' : 'min-h-0 min-w-0'}
           defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
           {inspectorOpen && <>
             <ResizablePanel id="inspector" defaultSize={288} minSize={240} maxSize={416} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
@@ -119,63 +122,35 @@ export function WorkbenchLayout({
           </ResizablePanel>
           {desktopDockOpen && <>
             <ResizableHandle withHandle aria-label="Resize library panel" />
-            <ResizablePanel id="library" defaultSize={248} minSize={224} maxSize={416} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
-              <CollapsibleContent id="workbench-sidebar-dock" aria-label={title} className="h-full min-w-0 overflow-auto overscroll-contain p-4"
+            <ResizablePanel id="library" defaultSize={304} minSize={224} maxSize={480} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
+              <aside id="workbench-sidebar-dock" aria-labelledby="workbench-inventory-title" className="flex h-full min-w-0 flex-col"
                 onKeyDown={event => {
                   if (event.key === 'Escape') {
                     event.stopPropagation();
                     onCollapse();
                   }
                 }}>
-                <div className="mb-4 flex items-center justify-between gap-2">
-                  <h2 className="font-heading text-sm font-medium">{title}</h2>
-                  <CollapsibleTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" aria-label="Collapse sidebar" title="Collapse sidebar">
+                <div className="grid shrink-0 gap-2 border-b px-3 pt-2 pb-3">
+                  <div className="flex min-h-6 items-center justify-between gap-2">
+                    <h2 id="workbench-inventory-title" className="font-heading text-sm font-medium">Inventory</h2>
+                    <Button variant="ghost" size="icon-sm" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={onCollapse}>
                       <SidebarSimpleIcon aria-hidden="true" />
                     </Button>
-                  </CollapsibleTrigger>
+                  </div>
+                  {views}
                 </div>
                 {body}
-              </CollapsibleContent>
+              </aside>
             </ResizablePanel>
           </>}
         </ResizablePanelGroup>
-        <div className={narrow ? 'col-start-2 row-start-2 border-t border-l bg-sidebar' : 'border-l bg-sidebar'}>
-          <div className={narrow ? 'flex gap-1 p-2' : 'flex flex-col gap-2 p-2'} role="group" aria-label="Asset inventory" ref={rail}>
-            <TooltipProvider delayDuration={180} disableHoverableContent>
-              {sections.map(({ key, label, icon: Icon }) => (
-                <Tooltip key={key}>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant={panel === key ? 'secondary' : 'ghost'}
-                      size="icon"
-                      aria-label={label}
-                      data-panel={key}
-                      aria-pressed={panel === key}
-                      aria-expanded={panel === key}
-                      aria-controls={panel === key ? (narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
-                      aria-haspopup={narrow ? 'dialog' : undefined}
-                      onClick={(event) => {
-                        lastTrigger.current = event.currentTarget;
-                        setPanel(toggleSidebarPanel(panel, key));
-                      }}
-                    ><Icon aria-hidden="true" /></Button>
-                  </TooltipTrigger>
-                  <TooltipContent side={narrow ? 'top' : 'left'} sideOffset={8}>{label}</TooltipContent>
-                </Tooltip>
-              ))}
-            </TooltipProvider>
-          </div>
-        </div>
         {narrow && <Sheet open={panel !== null} onOpenChange={open => { if (!open) onCollapse(); }}>
-          <SheetContent id="workbench-sidebar-drawer" side="right" aria-describedby={undefined} className="overflow-auto overscroll-contain max-sm:w-full"
+          <SheetContent id="workbench-sidebar-drawer" side="right" aria-describedby={undefined} className="min-h-0 max-sm:w-full"
             onCloseAutoFocus={event => { event.preventDefault(); restoreFocus(); }}>
-            <SheetHeader><SheetTitle>{title}</SheetTitle></SheetHeader>
-            <div className="min-w-0 px-4 pb-4">{body}</div>
+            <SheetHeader className="shrink-0 gap-3 border-b px-3 pt-4 pb-3"><SheetTitle>Inventory</SheetTitle>{views}</SheetHeader>
+            {body}
           </SheetContent>
         </Sheet>}
       </div>
-    </Collapsible>
   );
 }

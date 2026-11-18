@@ -1,15 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { decodeSidebarPanel, formatVersionSizes, inspectorForAsset, runtimeSetupStage, shouldHighlightExport, toggleSidebarPanel } from './workbench-state.ts';
+import { decodeSidebarPanel, formatVersionSizes, inspectorForAsset, runtimeSetupStage, shouldHighlightExport } from './workbench-state.ts';
 
-test('sidebar stores only known panels and can switch or close', () => {
+test('sidebar storage restores only known panels', () => {
   assert.equal(decodeSidebarPanel('assets'), 'assets');
   assert.equal(decodeSidebarPanel('jobs'), 'jobs');
   assert.equal(decodeSidebarPanel(null), 'assets');
   for (const value of ['closed', '', 'true', 'unknown']) assert.equal(decodeSidebarPanel(value), null);
-  assert.equal(toggleSidebarPanel(null, 'assets'), 'assets');
-  assert.equal(toggleSidebarPanel('assets', 'jobs'), 'jobs');
-  assert.equal(toggleSidebarPanel('jobs', 'jobs'), null);
 });
 
 test('runtime setup distinguishes the environment, model files, and inference readiness', () => {
