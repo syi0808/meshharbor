@@ -1,4 +1,4 @@
-import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, HuggingFaceAccess, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, HuggingFaceAccess, HuggingFaceBrowserLogin, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
 
 export const MAX_ASSET_IMPORT_FILES = 10;
 export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
@@ -639,6 +639,18 @@ export class MeshHarborApi {
       body: JSON.stringify({ token }),
       cache: 'no-store',
       redirect: 'error',
+    });
+  }
+
+  startHuggingFaceBrowserLogin(backend: RuntimeBackendId): Promise<HuggingFaceBrowserLogin> {
+    return this.request(`/api/v1/runtime/${backend}/huggingface/browser`, {
+      method: 'POST', cache: 'no-store', redirect: 'error',
+    });
+  }
+
+  huggingFaceBrowserLogin(backend: RuntimeBackendId, id: string, cancel = false): Promise<HuggingFaceBrowserLogin> {
+    return this.request(`/api/v1/runtime/${backend}/huggingface/browser/${encodeURIComponent(id)}`, {
+      method: cancel ? 'DELETE' : 'GET', cache: 'no-store', redirect: 'error',
     });
   }
 

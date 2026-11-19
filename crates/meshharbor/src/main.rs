@@ -30,6 +30,7 @@ use tracing_subscriber::EnvFilter;
 
 include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
 
+mod browser_login;
 mod data_dir_lock;
 
 /// Prevents fork/exec lock tests from inheriting another test's live advisory-lock descriptor.
@@ -980,6 +981,14 @@ fn api_router(state: AppState, token: String) -> Router {
         .route("/api/v1/health", get(api_health))
         .route("/api/v1/runtime", get(api_runtime))
         .route(
+            "/api/v1/runtime/{backend}/huggingface/browser",
+            post(browser_login::start),
+        )
+        .route(
+            "/api/v1/runtime/{backend}/huggingface/browser/{session}",
+            get(browser_login::status).delete(browser_login::cancel),
+        )
+        .route(
             "/api/v1/runtime/{backend}/huggingface",
             post(api_huggingface_access)
                 .delete(api_disconnect_huggingface)
@@ -1036,6 +1045,9 @@ fn api_router(state: AppState, token: String) -> Router {
         .route("/api/v1/jobs/{job_id}/cancel", post(api_cancel_job))
         .route("/api/v1/artifacts/{artifact_id}", get(api_read_artifact))
         .fallback(api_studio_fallback)
+        .layer(axum::Extension(
+            browser_login::BrowserLoginSessions::default(),
+        ))
         .layer(middleware::from_fn_with_state(token, authenticate))
         .with_state(state)
 }
@@ -1108,7 +1120,10 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         && (origin_matches_host
             || (safe_read && request.headers().get(header::ORIGIN).is_none() && same_origin_fetch));
     let dashboard_only = path.starts_with("/api/v1/runtime/")
-        && (path.ends_with("/huggingface") || path.ends_with("/model-files"));
+        && (path.ends_with("/huggingface")
+            || path.ends_with("/model-files")
+            || path.ends_with("/huggingface/browser")
+            || path.contains("/huggingface/browser/"));
     if dashboard_authorized || (authorized && !dashboard_only) {
         next.run(request).await
     } else {

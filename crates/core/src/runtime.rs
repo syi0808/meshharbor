@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     CoreError, CoreResult, HuggingFaceAccess,
     huggingface_access::{check_access, require_access},
+    huggingface_browser::access_python,
     uv_bootstrap::ensure_uv,
 };
 
@@ -100,7 +101,8 @@ impl Pixal3dRuntimeManager {
                 "Set up the MLX Python environment before connecting Hugging Face.".into(),
             ));
         }
-        check_access(self.python_command(&python), token)
+        let access_python = access_python(&self.runtime_root).unwrap_or(python);
+        check_access(self.python_command(&access_python), token)
     }
 
     /// Provision a managed Python 3.12 and the source-pinned, locked MLX
@@ -236,7 +238,12 @@ impl Pixal3dRuntimeManager {
         eprintln!(
             "[1/3] Checking access to the gated DINOv3 model before downloading large checkpoints…"
         );
-        require_access(self.python_command(python), "meshharbor runtime hf-login")?;
+        let access_python =
+            access_python(&self.runtime_root).unwrap_or_else(|| python.to_path_buf());
+        require_access(
+            self.python_command(&access_python),
+            "meshharbor runtime hf-login",
+        )?;
 
         eprintln!(
             "[2/3] Downloading pinned model files. Large files can take time; progress is shown below…"

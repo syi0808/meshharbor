@@ -42,6 +42,10 @@ impl Pixal3dProfile {
         self.entries(root, CREDENTIAL_FILES)
     }
 
+    pub(crate) fn ensure_managed_credentials(self, root: &Path) -> CoreResult<()> {
+        self.credential_entries(root).map(drop)
+    }
+
     fn model_entries(self, root: &Path) -> CoreResult<Vec<LocalEntry>> {
         if matches!(self, Self::Mlx) && std::env::var_os("MESHHARBOR_PIXAL3D_WEIGHTS_DIR").is_some()
         {
@@ -93,7 +97,13 @@ impl Pixal3dProfile {
     }
 
     pub fn disconnect_huggingface(self, root: &Path) -> CoreResult<()> {
-        remove_entries(self.credential_entries(root)?)
+        let entries = self.credential_entries(root)?;
+        let hf_home = root
+            .join("runtimes")
+            .join(self.backend())
+            .join("home/.cache/huggingface");
+        crate::huggingface_browser::clear_staged_credentials(&hf_home)?;
+        remove_entries(entries)
     }
 
     pub fn remove_models(self, root: &Path) -> CoreResult<()> {

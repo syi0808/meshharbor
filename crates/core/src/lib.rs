@@ -6,6 +6,7 @@ mod cuda_runtime;
 mod generation;
 mod glb;
 mod huggingface_access;
+mod huggingface_browser;
 mod model_storage;
 mod operation;
 mod parts;
@@ -26,6 +27,7 @@ pub use glb::{
     compress_mesh_glb, inspect_asset, optimize_render_glb, retopology_glb, simplify_glb,
 };
 pub use huggingface_access::HuggingFaceAccess;
+pub use huggingface_browser::HuggingFaceBrowserTool;
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
 pub use model_storage::Pixal3dProfile;
 pub use operation::{

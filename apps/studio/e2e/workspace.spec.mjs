@@ -189,9 +189,11 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await storage.getByRole('button', { name: 'Manage Hugging Face connection' }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
   await expect(connections.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
-  await expect(connections.getByRole('link', { name: 'Create a Hugging Face token' })).toHaveAttribute('href', 'https://huggingface.co/settings/tokens');
-  await connections.getByRole('button', { name: 'Check saved token' }).click();
+  await expect(connections.getByRole('button', { name: 'Sign in with browser' })).toBeEnabled();
+  await connections.getByRole('button', { name: 'Check saved access' }).click();
   await expect(connections.getByText('No token is saved', { exact: false })).toBeVisible();
+  await connections.getByText('Use an access token instead').click();
+  await expect(connections.getByRole('link', { name: 'Create a Hugging Face token' })).toHaveAttribute('href', 'https://huggingface.co/settings/tokens');
   const token = connections.getByLabel('Hugging Face access token');
   const connect = connections.getByRole('button', { name: 'Connect token' });
   await expect(token).toHaveAttribute('type', 'password');
@@ -212,6 +214,60 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await page.getByRole('button', { name: 'Workbench', exact: true }).click();
   await expect(page).toHaveURL(studioOrigin + '/');
   await expect(settings).toBeFocused();
+});
+
+test('browser sign-in handles cancellation and verifies DINOv3 separately', async ({ page, studioOrigin }) => {
+  let sessionNumber = 0;
+  let cancelled = false;
+  let approved = false;
+  let tokenSaved = false;
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
+    platform: 'macos',
+    status: 'ready_for_mesh_operations',
+    model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', status: 'experimental_opt_in', backend_ids: ['pixal3d-mlx'] }],
+    model_backends: [{
+      id: 'pixal3d-mlx', installable: true, environment_ready: true, downloads_enabled: true,
+      local_files: { token_saved: tokenSaved, disconnect_available: tokenSaved, credentials_managed: true },
+    }],
+  } }));
+  await page.route('**/api/v1/runtime/pixal3d-mlx/huggingface/browser', route => {
+    expect(route.request().method()).toBe('POST');
+    cancelled = false;
+    return route.fulfill({ status: 202, json: { id: String(++sessionNumber), state: 'preparing' } });
+  });
+  await page.route('**/api/v1/runtime/pixal3d-mlx/huggingface/browser/*', route => {
+    const id = String(sessionNumber);
+    if (route.request().method() === 'DELETE') cancelled = true;
+    if (cancelled) return route.fulfill({ json: { id, state: 'cancelled' } });
+    if (approved) {
+      tokenSaved = true;
+      return route.fulfill({ json: { id, state: 'signed_in', access: 'access_denied' } });
+    }
+    return route.fulfill({ json: { id, state: 'awaiting_authorization', user_code: 'TEST-CODE', expires_in: 300 } });
+  });
+  await page.route('**/api/v1/runtime/pixal3d-mlx/huggingface', route => {
+    expect(route.request().postDataJSON()).toEqual({});
+    return route.fulfill({ json: 'verified' });
+  });
+  await page.goto(studioOrigin + '/settings/connections');
+  const connections = page.getByRole('main', { name: 'Connections' });
+  const signIn = connections.getByRole('button', { name: 'Sign in with browser' });
+  await expect(connections.getByLabel('Hugging Face access token')).toBeHidden();
+  await signIn.click();
+  await expect(connections.getByText('TEST-CODE')).toBeVisible();
+  await expect(connections.getByRole('link', { name: 'Open Hugging Face' })).toHaveAttribute('href', 'https://huggingface.co/oauth/device');
+  await connections.getByRole('button', { name: 'Cancel sign-in' }).click();
+  await expect(connections.getByText('Hugging Face sign-in cancelled.')).toBeVisible();
+  await signIn.click();
+  await expect(connections.getByText('TEST-CODE')).toBeVisible();
+  approved = true;
+  await expect(connections.getByText('Signed in to Hugging Face for Apple MLX.')).toBeVisible();
+  await expect(connections.getByText('DINOv3 access denied', { exact: false })).toBeVisible();
+  await expect(connections.getByRole('button', { name: 'View downloads' })).toHaveCount(0);
+  await connections.getByRole('button', { name: 'Check saved access' }).click();
+  await expect(connections.getByText('DINOv3 file access verified.')).toBeVisible();
+  await connections.getByRole('button', { name: 'View downloads' }).click();
+  await expect(page.getByRole('button', { name: 'Download model files' })).toBeDisabled();
 });
 
 test('settings deep links and confirmations manage one local profile at a time', async ({ page, studioOrigin }) => {

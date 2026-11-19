@@ -37,6 +37,12 @@ export interface Operation {
 
 export type HuggingFaceAccess = 'not_connected' | 'access_denied' | 'verified';
 export type RuntimeBackendId = 'pixal3d-mlx' | 'pixal3d-cuda';
+export type HuggingFaceBrowserLogin = { id: string } & (
+  | { state: 'preparing' | 'checking_access' | 'cancelled' | 'expired' }
+  | { state: 'awaiting_authorization'; user_code: string; expires_in: number }
+  | { state: 'signed_in'; access: HuggingFaceAccess | null }
+  | { state: 'failed'; message: string }
+);
 
 export interface RuntimeInfo {
   status: string;

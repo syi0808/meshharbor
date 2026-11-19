@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import type { MeshHarborApi } from './api';
-import type { HuggingFaceAccess, Job, RuntimeBackendId, RuntimeInfo } from './types';
+import type { HuggingFaceAccess, HuggingFaceBrowserLogin, Job, RuntimeBackendId, RuntimeInfo } from './types';
 import { runtimeSetupStage } from './workbench-state';
 
 const sections = {
@@ -31,7 +31,7 @@ const profiles = {
 const profileIds: RuntimeBackendId[] = ['pixal3d-mlx', 'pixal3d-cuda'];
 type Backend = RuntimeInfo['model_backends'][number];
 type RemovalScope = 'huggingface' | 'model-files';
-type AccessStatus = HuggingFaceAccess | 'checking';
+type AccessStatus = HuggingFaceAccess | 'checking' | 'unavailable';
 type VisitSettings = (section: SettingsSection, backend?: RuntimeBackendId) => void;
 
 export function settingsSectionFromPath(path: string): SettingsSection | null {
@@ -70,12 +70,58 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [removal, setRemoval] = useState<{ backend: RuntimeBackendId; scope: RemovalScope } | null>(null);
+  const [browserLogin, setBrowserLogin] = useState<{ backend: RuntimeBackendId; session: HuggingFaceBrowserLogin } | null>(null);
   const selectedId = backendId ?? (runtime?.platform === 'linux' ? 'pixal3d-cuda' : 'pixal3d-mlx');
   const selected = runtime?.model_backends.find(backend => backend.id === selectedId);
-  const disabled = pending || busy;
+  const browserBackend = browserLogin?.backend;
+  const browserSessionId = browserLogin?.session.id;
+  const browserActive = browserLogin && browserLoginIsActive(browserLogin.session);
+  const disabled = pending || busy || Boolean(browserActive);
   const sectionInfo = sections[section];
   const runtimeJobs = jobs.filter(job => job.operation.startsWith('runtime.')).slice(0, 6);
   useEffect(() => { heading.current?.focus(); }, [section]);
+  useEffect(() => {
+    if (!browserBackend || !browserSessionId) return;
+    let stopped = false;
+    let timer = 0;
+    let failures = 0;
+    async function poll(backend: RuntimeBackendId, id: string) {
+      try {
+        const session = await api.huggingFaceBrowserLogin(backend, id);
+        if (stopped) return;
+        failures = 0;
+        setBrowserLogin({ backend, session });
+        if (browserLoginIsActive(session)) {
+          timer = window.setTimeout(() => void poll(backend, id), 1000);
+          return;
+        }
+        if (session.state === 'signed_in') {
+          setAccess(current => ({ ...current, [backend]: session.access === 'not_connected' ? 'unavailable' : session.access ?? 'unavailable' }));
+          setNotice(`Signed in to Hugging Face for ${profiles[backend].title}.`);
+          try {
+            const nextRuntime = await api.runtime();
+            if (!stopped) onRuntimeChange(nextRuntime);
+          } catch {
+            if (!stopped) setError('Signed in, but the local status could not be refreshed. Select Refresh status to retry.');
+          }
+        } else if (session.state === 'failed' || session.state === 'expired') {
+          setError(session.state === 'failed' ? session.message : 'The Hugging Face code expired. Start browser sign-in again.');
+        } else if (session.state === 'cancelled') {
+          setNotice('Hugging Face sign-in cancelled.');
+        }
+      } catch {
+        if (stopped) return;
+        if (++failures < 3) {
+          timer = window.setTimeout(() => void poll(backend, id), 1000);
+        } else {
+          setBrowserLogin(null);
+          setError('Could not check browser sign-in. Select browser sign-in again to reconnect.');
+        }
+      }
+    }
+    void poll(browserBackend, browserSessionId);
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [api, browserBackend, browserSessionId, onRuntimeChange]);
 
   async function perform(action: () => Promise<void>) {
     setPending(true);
@@ -101,6 +147,20 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
         throw cause;
       }
       onRuntimeChange(await api.runtime());
+    });
+  }
+
+  function startBrowserLogin(backend: RuntimeBackendId) {
+    void perform(async () => {
+      const session = await api.startHuggingFaceBrowserLogin(backend);
+      setBrowserLogin({ backend, session });
+    });
+  }
+
+  function cancelBrowserLogin() {
+    if (!browserLogin) return;
+    void perform(async () => {
+      await api.huggingFaceBrowserLogin(browserLogin.backend, browserLogin.session.id, true);
     });
   }
 
@@ -156,6 +216,10 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
         </div>
         {feedback}
         {jobFeedback}
+        {section !== 'connections' && browserActive && <Alert role="status">
+          <AlertDescription>Hugging Face sign-in is in progress.</AlertDescription>
+          <Button variant="outline" onClick={() => onVisit('connections', browserBackend)}>Return to sign-in</Button>
+        </Alert>}
         {notice && <Alert role="status"><AlertDescription>{notice}</AlertDescription></Alert>}
         {error && <Alert variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>}
         {connection !== 'connected' ? <section className="grid justify-items-start gap-2 rounded-lg border bg-card p-4">
@@ -196,13 +260,15 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
             <NativeSelect id="settings-backend" className="w-full" value={selectedId} onChange={event => {
               const choice = profileIds.find(id => id === event.target.value);
               if (choice) onProfileChange(choice);
-            }}>
+            }} disabled={Boolean(browserActive)}>
               {profileIds.map(id => <NativeSelectOption value={id} key={id}>{profiles[id].title}</NativeSelectOption>)}
             </NativeSelect>
           </Field>}
           {section !== 'models' && !selected && <p className="text-muted-foreground">The local engine did not report this backend.</p>}
           {section === 'connections' && selected && <HuggingFaceConnection key={selectedId}
             backend={selected} access={access[selectedId]} disabled={disabled}
+            browserSession={browserLogin?.backend === selectedId && browserActive ? browserLogin.session : null}
+            cancelling={pending} onStartBrowser={() => startBrowserLogin(selectedId)} onCancelBrowser={cancelBrowserLogin}
             onCheck={token => verify(selectedId, token)}
             onDisconnect={() => openRemoval(selectedId, 'huggingface')}
             onNext={() => onVisit('storage', selectedId)} />}
@@ -261,12 +327,19 @@ function profileStatus(backend: Backend) {
 const accessMessages: Record<AccessStatus, string> = {
   checking: 'Checking DINOv3 file access…',
   verified: 'DINOv3 file access verified.',
-  not_connected: 'No token is saved for this backend. Create and connect one above.',
-  access_denied: 'DINOv3 access denied. Check your approval on Hugging Face and use a token with gated read access.',
+  not_connected: 'No token is saved for this backend. Sign in or connect a token.',
+  access_denied: 'DINOv3 access denied. Request access on the model page with the same account, then check access again.',
+  unavailable: 'DINOv3 file access could not be checked. Try checking access again.',
 };
 
-function HuggingFaceConnection({ backend, access, disabled, onCheck, onDisconnect, onNext }: {
+function browserLoginIsActive(session: HuggingFaceBrowserLogin) {
+  return session.state === 'preparing' || session.state === 'awaiting_authorization' || session.state === 'checking_access';
+}
+
+function HuggingFaceConnection({ backend, access, disabled, browserSession, cancelling, onStartBrowser, onCancelBrowser, onCheck, onDisconnect, onNext }: {
   backend: Backend; access?: AccessStatus; disabled: boolean;
+  browserSession: HuggingFaceBrowserLogin | null; cancelling: boolean;
+  onStartBrowser: () => void; onCancelBrowser: () => void;
   onCheck: (token?: string) => void; onDisconnect: () => void; onNext: () => void;
 }) {
   const local = backend.local_files;
@@ -283,24 +356,40 @@ function HuggingFaceConnection({ backend, access, disabled, onCheck, onDisconnec
       <Badge variant="outline">{access === 'verified' ? 'Access verified' : local?.token_saved ? 'Token saved' : local?.credentials_managed === false ? 'Custom storage' : 'Not connected'}</Badge>
     </div>
     {canConnect ? <>
-      <ol className="grid list-decimal gap-2 pl-5 text-sm">
-        <li><a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a> on Hugging Face.</li>
-        <li><a className="text-primary underline underline-offset-4" href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Create a Hugging Face token</a> in the same account with read access to public gated repositories.</li>
-      </ol>
-      <form method="post" autoComplete="off" className="grid gap-2" onSubmit={connectToken}>
-        <Label htmlFor="huggingface-token">Hugging Face access token</Label>
-        <Input id="huggingface-token" name="token" type="password" placeholder="hf_…" maxLength={512} required disabled={disabled} autoComplete="off" className="max-w-md" />
-        <p className="text-xs text-muted-foreground">New tokens replace the active token only after MeshHarbor verifies access to the checkpoint file.</p>
+      <div className="grid gap-3">
+        <p className="text-muted-foreground">Sign in through Hugging Face without creating or copying a token. The first sign-in prepares a private Hugging Face CLI.</p>
+        {browserSession?.state === 'preparing' && <p role="status">Preparing browser sign-in…</p>}
+        {browserSession?.state === 'checking_access' && <p role="status">Checking DINOv3 file access…</p>}
+        {browserSession?.state === 'awaiting_authorization' && (
+          <div className="grid justify-items-start gap-2 rounded-md border bg-background p-3">
+            <p>Enter this one-time code on Hugging Face:</p>
+            <code className="text-lg font-semibold tracking-widest select-all">{browserSession.user_code}</code>
+            <p className="text-xs text-muted-foreground">The code is valid for up to {Math.ceil(browserSession.expires_in / 60)} minutes. MeshHarbor waits for approval.</p>
+            <Button asChild><a href="https://huggingface.co/oauth/device" target="_blank" rel="noreferrer">Open Hugging Face</a></Button>
+          </div>
+        )}
         <div className="flex flex-wrap gap-2">
-          <Button type="submit" disabled={disabled}>{local?.token_saved ? 'Replace token' : 'Connect token'}</Button>
-          <Button type="button" variant="outline" disabled={disabled} onClick={() => onCheck()}>Check saved token</Button>
+          {browserSession
+            ? <Button variant="outline" disabled={cancelling} onClick={onCancelBrowser}>Cancel sign-in</Button>
+            : <Button disabled={disabled || local?.credentials_managed === false} onClick={onStartBrowser}>{local?.token_saved ? 'Sign in again in browser' : 'Sign in with browser'}</Button>}
+          <Button type="button" variant="outline" disabled={disabled} onClick={() => onCheck()}>Check saved access</Button>
           {access === 'verified' && <Button type="button" variant="outline" onClick={onNext}>View downloads</Button>}
         </div>
-      </form>
+        <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a> if this account is not approved yet.</p>
+      </div>
+      <details className="rounded-md border p-3 [&>summary]:cursor-pointer">
+        <summary>Use an access token instead</summary>
+        <form method="post" autoComplete="off" className="mt-3 grid justify-items-start gap-2" onSubmit={connectToken}>
+          <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Create a Hugging Face token</a> in the same account with gated read access.</p>
+          <Label htmlFor="huggingface-token">Hugging Face access token</Label>
+          <Input id="huggingface-token" name="token" type="password" placeholder="hf_…" maxLength={512} required disabled={disabled} autoComplete="off" className="max-w-md" />
+          <Button type="submit" disabled={disabled}>{local?.token_saved ? 'Replace token' : 'Connect token'}</Button>
+        </form>
+      </details>
     </> : <p className="text-muted-foreground">{backend.installable ? 'Set up the Python environment in Models before connecting a token.' : 'This backend cannot verify a token on this computer.'}</p>}
     {access && <p role="status" className="text-muted-foreground">{accessMessages[access]}</p>}
     {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={onDisconnect}>Disconnect locally</Button></div>}
-    {local?.credentials_managed === false && <p className="text-muted-foreground">Studio cannot remove credentials from custom or linked runtime directories.</p>}
+    {local?.credentials_managed === false && <p className="text-muted-foreground">Browser sign-in and local disconnect require the default managed credential directory. For this profile, use an access token instead.</p>}
   </section>;
 }
 

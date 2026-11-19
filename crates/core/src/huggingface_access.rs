@@ -10,7 +10,7 @@ use crate::{CoreError, CoreResult};
 pub(crate) const DINO_REVISION: &str = "ea8dc2863c51be0a264bab82070e3e8836b02d51";
 const ACCESS_SCRIPT: &str = include_str!("huggingface_access.py");
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HuggingFaceAccess {
     NotConnected,

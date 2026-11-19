@@ -18,6 +18,7 @@ use crate::{
     CoreError, CoreResult, HuggingFaceAccess,
     generation::RuntimeReadiness,
     huggingface_access::{DINO_REVISION, check_access, require_access},
+    huggingface_browser::access_python,
     runtime::RuntimeSetupReport,
     uv_bootstrap::ensure_uv,
 };
@@ -80,7 +81,8 @@ impl Pixal3dCudaRuntimeManager {
                 "Set up the CUDA Python environment before connecting Hugging Face.".into(),
             ));
         }
-        check_access(self.python_command(&python), token)
+        let access_python = access_python(&self.runtime_root).unwrap_or(python);
+        check_access(self.python_command(&access_python), token)
     }
 
     fn hf_home(&self) -> PathBuf {
@@ -333,8 +335,10 @@ impl Pixal3dCudaRuntimeManager {
         std::fs::create_dir_all(self.hf_home())?;
 
         eprintln!("[1/2] Checking the user's existing DINOv3 access before large model downloads…");
+        let access_python =
+            access_python(&self.runtime_root).unwrap_or_else(|| python.to_path_buf());
         require_access(
-            self.python_command(python),
+            self.python_command(&access_python),
             "meshharbor runtime cuda-hf-login",
         )?;
 
