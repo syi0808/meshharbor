@@ -92,7 +92,7 @@ export function WorkbenchLayout({
       <div className={narrow
         ? 'grid min-h-0 min-w-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto]'
         : 'grid min-h-0 min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)]'}>
-        <div className={narrow ? 'row-start-2 border-t bg-sidebar' : 'relative z-30 w-12'}>{tools}</div>
+        <div className={narrow ? 'row-start-2 border-t bg-sidebar' : 'w-18 border-r border-sidebar-border bg-sidebar'}>{tools}</div>
         <ResizablePanelGroup id="studio-panels" orientation="horizontal"
           className={narrow ? 'row-start-1 min-h-0 min-w-0' : 'min-h-0 min-w-0'}
           defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>

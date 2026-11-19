@@ -1008,10 +1008,11 @@ export function App() {
   const showVersionStats = previewComparison && comparisonResult
     && (typeof beforeTriangles === 'number' || comparisonSizes);
   const activeTool = inspectorForAsset(selectedTool, selectedAsset?.kind) ?? 'generation';
-  function toggleInspector(next: Inspector, trigger: HTMLButtonElement) {
+  function selectInspector(next: Inspector, trigger: HTMLButtonElement) {
+    if (openInspector === next) return;
     inspectorTrigger.current = trigger;
     setSelectedTool(next);
-    setInspector(current => current === next ? null : next);
+    setInspector(next);
   }
   const inspectorTitle = openInspector === 'generation' ? 'Generate model' : openInspector === 'optimize' ? 'Optimize mesh' : openInspector === 'jobs' ? 'Jobs' : 'Mesh tools';
   const closeInspectorLabel = openInspector === 'jobs' ? 'Close jobs' : 'Close settings';
@@ -1224,29 +1225,25 @@ export function App() {
   }
 
   const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools"
-    className={sidebar.narrow
-      ? 'flex gap-1 p-2'
-      : 'group absolute inset-y-0 left-0 flex w-full flex-col gap-1 overflow-hidden bg-sidebar p-2 transition-[width] duration-150 after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:border-r after:border-sidebar-border hover:w-32 has-[:focus-visible]:w-32 motion-reduce:transition-none'}>
+    className={sidebar.narrow ? 'grid grid-cols-4 gap-1 p-1.5' : 'flex h-full flex-col gap-1 p-1.5'}>
       {([
         { key: 'generation', label: 'New model', icon: ImageSquareIcon },
         { key: 'optimize', label: 'Optimize', icon: SlidersHorizontalIcon },
         { key: 'tools', label: 'More tools', icon: WrenchIcon },
         { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
       ] as const).map(({ key, label, icon: Icon }) => (
-        <Button key={key} type="button" size="sm" variant={sidebar.narrow && activeTool === key ? 'secondary' : 'ghost'}
-          className={sidebar.narrow
-            ? 'h-auto min-w-0 flex-1 flex-col gap-1 px-1 py-1.5'
-            : 'h-8 w-full min-w-0 justify-start gap-2 overflow-hidden border-0 px-0 hover:bg-transparent aria-expanded:bg-transparent dark:hover:bg-transparent'}
-          aria-label={label} aria-pressed={activeTool === key} aria-expanded={openInspector === key}
+        <Button key={key} type="button" size="sm" variant="ghost"
+          className="h-auto min-w-0 flex-col gap-0.5 border-0 px-1 py-1 hover:bg-transparent aria-expanded:bg-transparent dark:hover:bg-transparent"
+          aria-current={activeTool === key ? true : undefined} aria-expanded={openInspector === key}
           aria-controls={openInspector === key ? 'workbench-inspector' : undefined}
           aria-haspopup={inspectorIsSheet ? 'dialog' : undefined}
           disabled={(key === 'optimize' || key === 'tools') && selectedAsset?.kind !== 'mesh'}
-          onClick={event => toggleInspector(key, event.currentTarget)}>
-          <span data-slot="tool-icon" aria-hidden="true" className={sidebar.narrow ? undefined
-            : 'grid size-8 shrink-0 place-items-center rounded-md transition-colors group-hover/button:bg-sidebar-accent group-aria-pressed/button:bg-sidebar-accent group-aria-pressed/button:text-primary motion-reduce:transition-none'}>
-            <Icon className={sidebar.narrow ? 'shrink-0' : 'size-4'} />
+          onClick={event => selectInspector(key, event.currentTarget)}>
+          <span data-slot="tool-icon" aria-hidden="true"
+            className="grid size-8 shrink-0 place-items-center rounded-md transition-colors group-hover/button:bg-sidebar-accent group-aria-[current=true]/button:bg-sidebar-accent group-aria-[current=true]/button:text-primary motion-reduce:transition-none">
+            <Icon className="size-5" />
           </span>
-          <span data-slot="tool-label" aria-hidden="true" className={sidebar.narrow ? 'text-[0.625rem]' : 'opacity-0 transition-opacity group-hover:opacity-100 group-has-[:focus-visible]:opacity-100 motion-reduce:transition-none'}>{label}</span>
+          <span data-slot="tool-label" className="text-[0.6875rem] leading-tight text-muted-foreground group-hover/button:text-foreground group-aria-[current=true]/button:text-foreground">{label}</span>
         </Button>
       ))}
   </div>;
@@ -1266,8 +1263,8 @@ export function App() {
   return (
     <>
       <Toaster theme={theme} closeButton visibleToasts={3} containerAriaLabel="Notifications"
-        offset={{ right: 12, bottom: sidebar.narrow ? 64 : 12 }}
-        mobileOffset={{ left: 12, right: 12, bottom: 64 }} />
+        offset={{ right: 12, bottom: sidebar.narrow ? 80 : 12 }}
+        mobileOffset={{ left: 12, right: 12, bottom: 80 }} />
       <SettingsPage api={api} section={settingsSection} backendId={settingsBackend} runtime={runtime}
         connection={connection} connectionError={connectionError} busy={busy || isRunning || installingBackend}
         jobFeedback={jobFeedback} jobs={recentJobs} operationLabel={studioOperationLabel}
@@ -1307,7 +1304,7 @@ export function App() {
           <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" tabIndex={-1} type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={inventoryInputRef} className="sr-only" aria-label="Choose image files" tabIndex={-1} type="file" multiple accept=".png,.jpg,.jpeg,image/png,image/jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={imageInputRef} className="sr-only" aria-label="Choose reference file" tabIndex={-1} type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files, 'reference'); event.currentTarget.value = ''; }} />
-          {!showInspectorSheet && !settingsSection && workbenchActivity && <div className={`pointer-events-none fixed inset-x-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto ${sidebar.narrow ? 'bottom-16' : 'bottom-3'}`}>
+          {!showInspectorSheet && !settingsSection && workbenchActivity && <div className={`pointer-events-none fixed inset-x-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto ${sidebar.narrow ? 'bottom-20' : 'bottom-3'}`}>
             {workbenchActivity}
           </div>}
 
@@ -1418,7 +1415,7 @@ export function App() {
                       if (assetFilters.kind !== 'mesh') applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS);
                       sidebar.setOpen(true);
                     }}><CubeIcon data-icon="inline-start" aria-hidden="true" /> Browse inventory</Button>
-                    <Button variant="outline" onClick={event => toggleInspector('generation', event.currentTarget)}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Create from image</Button>
+                    <Button variant="outline" onClick={event => selectInspector('generation', event.currentTarget)}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Create from image</Button>
                   </div>
                   <p className="text-xs text-muted-foreground">Drop a GLB, PNG or JPEG here</p>
                 </div>

@@ -47,6 +47,8 @@ test('desktop docks flank the viewport, then become drawers without horizontal o
   await page.setViewportSize({ width: 390, height: 700 });
   await expect(rightDock).toHaveCount(0);
   const jobs = tools.getByRole('button', { name: 'Jobs', exact: true });
+  await expect(jobs.locator('[data-slot="tool-label"]')).toBeVisible();
+  await expect(jobs.locator('svg')).toHaveCSS('width', '20px');
   await jobs.click();
   const jobsSheet = page.getByRole('dialog', { name: 'Jobs' });
   await expect(jobsSheet.getByText('No saved jobs yet.')).toBeVisible();
