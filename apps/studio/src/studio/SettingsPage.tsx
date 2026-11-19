@@ -9,7 +9,8 @@ import { Field, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
-import { useToast } from '@/components/ui/toast';
+import { Disclosure } from './Disclosure';
+import { notify } from './notify';
 import type { MeshHarborApi } from './api';
 import type { HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, RuntimeBackendId, RuntimeInfo } from './types';
 import { runtimeSetupStage } from './workbench-state';
@@ -67,7 +68,6 @@ interface Props {
 }
 
 export function SettingsPage({ api, section, backendId, runtime, connection, connectionError, busy, jobFeedback, theme, jobs, operationLabel, onVisit, onProfileChange, onClose, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
-  const notify = useToast();
   const heading = useRef<HTMLHeadingElement>(null);
   const cancelRemoval = useRef<HTMLButtonElement>(null);
   const removalTrigger = useRef<HTMLElement | null>(null);
@@ -130,7 +130,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
     }
     void poll(browserBackend, browserSessionId);
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [api, browserBackend, browserSessionId, notify, onRuntimeChange]);
+  }, [api, browserBackend, browserSessionId, onRuntimeChange]);
 
   async function perform(action: () => Promise<void>) {
     setPending(true);
@@ -428,15 +428,14 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
           <Button type="button" variant="outline" disabled={disabled} onClick={() => onCheck()}>Check sign-in</Button>
         </div>
       </div>
-      <details className="rounded-md border p-3 [&>summary]:cursor-pointer">
-        <summary>Use an access token instead</summary>
+      <Disclosure className="rounded-md border p-3" title="Use an access token instead">
         <form method="post" autoComplete="off" className="mt-3 grid justify-items-start gap-2" onSubmit={connectToken}>
           <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Create a Hugging Face token</a> or use an existing one.</p>
           <Label htmlFor="huggingface-token">Hugging Face access token</Label>
           <Input id="huggingface-token" name="token" type="password" placeholder="hf_…" maxLength={512} required disabled={disabled} autoComplete="off" className="max-w-md" />
           <Button type="submit" disabled={disabled}>{local?.token_saved ? 'Replace token' : 'Connect token'}</Button>
         </form>
-      </details>
+      </Disclosure>
     </> : <p className="text-muted-foreground">{backend.installable ? 'Set up the Python environment in Models before connecting a token.' : 'This backend cannot verify a token on this computer.'}</p>}
     {account === 'checking' && <p role="status" className="text-muted-foreground">{accountMessages.checking}</p>}
     {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={onDisconnect}>Disconnect locally</Button></div>}

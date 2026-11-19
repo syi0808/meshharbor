@@ -1,5 +1,6 @@
 import { CheckIcon, CubeIcon, ImageSquareIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState } from 'react';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { assetThumbnail } from './asset-thumbnails';
 import type { Asset } from './types';
@@ -51,10 +52,10 @@ export function AssetGalleryCard({
   }, [asset.id, asset.kind, asset.sha256, loadPreview, visible]);
 
   return (
-    <button type="button" ref={card} onClick={onSelect} aria-pressed={selected}
+    <Button type="button" variant="outline" ref={card} onClick={onSelect} aria-pressed={selected}
       className={cn(
-        'group grid min-w-0 gap-0 overflow-hidden rounded-lg border bg-card text-left text-card-foreground transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring',
-        selected ? 'border-primary bg-accent' : 'hover:border-muted-foreground/60 hover:bg-muted',
+        'grid h-auto min-w-0 justify-normal gap-0 overflow-hidden rounded-lg bg-card p-0 text-left text-card-foreground transition-colors dark:bg-card',
+        selected ? 'border-primary bg-accent hover:bg-accent dark:bg-accent' : 'hover:border-muted-foreground/60 hover:bg-muted',
       )}>
       <span className="relative grid aspect-square w-full min-w-0 place-items-center overflow-hidden bg-neutral-800">
         {image?.hash === asset.sha256
@@ -74,6 +75,6 @@ export function AssetGalleryCard({
           {' · '}{asset.source_asset_id ? 'Result' : 'Original'}
         </span>
       </span>
-    </button>
+    </Button>
   );
 }

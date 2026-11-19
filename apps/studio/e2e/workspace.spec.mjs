@@ -164,6 +164,7 @@ test('preferences can switch the theme and remember it across reloads', async ({
 });
 
 test('refresh results use one global toast across settings and workbench', async ({ page, studioOrigin }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
   let failRefresh = false;
   await page.route('**/api/v1/jobs?limit=20', route => failRefresh
     ? route.fulfill({ status: 503, json: { error: 'Job list unavailable.' } })
@@ -176,6 +177,9 @@ test('refresh results use one global toast across settings and workbench', async
   await refresh.click();
   const refreshed = toasts.getByText('Local status refreshed.');
   await expect(refreshed).toBeVisible();
+  const notification = toasts.locator('[data-sonner-toast][data-type=success]');
+  await expect(notification).toHaveAttribute('data-mounted', 'true');
+  expect(await notification.evaluate(element => getComputedStyle(element).transitionProperty)).toContain('opacity');
   await expect(settings.getByText('Local status refreshed.')).toHaveCount(0);
   await toasts.getByRole('button', { name: 'Dismiss notification' }).click();
   await expect(refreshed).toHaveCount(0);

@@ -1,6 +1,5 @@
 import { ArrowsClockwiseIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GearSixIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WrenchIcon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Tabs } from 'radix-ui';
 import {
   assetComparisonPairForSelection,
   assetComparisonPairFromJob,
@@ -39,12 +38,15 @@ import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Slider } from '@/components/ui/slider';
 import { Spinner } from '@/components/ui/spinner';
-import { useToast } from '@/components/ui/toast';
+import { Toaster } from '@/components/ui/sonner';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { ModelPreview } from './ModelPreview';
 import { AssetGalleryCard } from './AssetGalleryCard';
+import { Disclosure } from './Disclosure';
 import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
+import { notify } from './notify';
 import { SettingsPage, settingsSectionFromPath, type RuntimeAction, type SettingsSection } from './SettingsPage';
 import { applyStudioTheme, loadStudioTheme } from './theme';
 import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
@@ -128,7 +130,6 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; descript
 ];
 
 export function App() {
-  const notify = useToast();
   const [theme, setTheme] = useState(loadStudioTheme);
   useLayoutEffect(() => { applyStudioTheme(theme); }, [theme]);
   const [connection, setConnection] = useState<Connection>('disconnected');
@@ -449,7 +450,7 @@ export function App() {
     } finally {
       setInstallingBackend(false);
     }
-  }, [api, installingBackend, notify, quadriflowBackend?.install_available]);
+  }, [api, installingBackend, quadriflowBackend?.install_available]);
 
   const connect = useCallback(async (announce = false) => {
     historySelectionGuard.current.invalidate();
@@ -501,7 +502,7 @@ export function App() {
       setConnectionError(message);
       if (announce) notify('error', `Could not connect to the local engine. ${message}`);
     }
-  }, [api, notify]);
+  }, [api]);
 
   useEffect(() => { void connect(); }, [connect]);
 
@@ -684,7 +685,7 @@ export function App() {
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [api, job?.id, job?.state, notify]);
+  }, [api, job?.id, job?.state]);
 
   useEffect(() => {
     if (!job) return;
@@ -735,7 +736,7 @@ export function App() {
     if (connection !== 'connected') return Promise.reject(new Error('The local MeshHarbor engine is offline.'));
     return api.artifact(asset, signal);
   }, [api, connection]);
-  const reportPreviewError = useCallback((message: string) => notify('error', `Preview: ${message}`), [notify]);
+  const reportPreviewError = useCallback((message: string) => notify('error', `Preview: ${message}`), []);
 
   function selectAsset(asset: Asset) {
     if (asset.kind !== 'mesh') setInspector(current => inspectorForAsset(current, asset.kind));
@@ -1062,9 +1063,9 @@ export function App() {
             <Button variant="ghost" size="sm" onClick={() => void refreshJobHistory()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
           </div>
           {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
-            <details className="rounded-lg border p-2 wrap-anywhere text-muted-foreground [&>summary]:cursor-pointer"><summary>Recover an interrupted job</summary>
+            <Disclosure className="rounded-lg border p-2 wrap-anywhere text-muted-foreground" title="Recover an interrupted job">
               <p>Checking a record does not resume it. If the engine exited unexpectedly, stop all REST/MCP processes for this data directory before running <code>meshharbor jobs recover-interrupted --confirm-no-running-meshharbor</code>.</p>
-            </details>}
+            </Disclosure>}
           {recentJobs.length === 0
             ? <Empty><EmptyHeader><EmptyDescription>No saved jobs yet.</EmptyDescription></EmptyHeader></Empty>
             : <div className="grid gap-2">{recentJobs.slice(0, 8).map((savedJob) => (
@@ -1209,7 +1210,15 @@ export function App() {
         </Accordion>
       </div>
 
-      <details className="mx-4 mb-4 grid gap-2 border-y py-3 text-xs/relaxed [&>summary]:cursor-pointer [&>p]:my-2 [&>p]:text-muted-foreground"><summary>Retopology availability</summary><p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is unavailable until a signature-verified, manifest-matched managed sidecar is supported; adjacent binaries are intentionally ignored. Editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p><div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>QuadriFlow backend</span><span className="text-muted-foreground">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>{quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}<Button onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</Button><div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>CUDA backend</span><span className="text-muted-foreground">{backendStatus('pixal3d-cuda')}</span></div><div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>Apple MLX backend</span><span className="text-muted-foreground">{backendStatus('pixal3d-mlx')}</span></div></details>
+      <Disclosure className="mx-4 mb-4 border-y py-3 text-xs/relaxed" title="Retopology availability"
+        contentClassName="[&>p]:my-2 [&>p]:text-muted-foreground">
+        <p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is unavailable until a signature-verified, manifest-matched managed sidecar is supported; adjacent binaries are intentionally ignored. Editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p>
+        <div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>QuadriFlow backend</span><span className="text-muted-foreground">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>
+        {quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}
+        <Button onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</Button>
+        <div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>CUDA backend</span><span className="text-muted-foreground">{backendStatus('pixal3d-cuda')}</span></div>
+        <div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>Apple MLX backend</span><span className="text-muted-foreground">{backendStatus('pixal3d-mlx')}</span></div>
+      </Disclosure>
       </>}
     </>;
   }
@@ -1256,6 +1265,9 @@ export function App() {
 
   return (
     <>
+      <Toaster theme={theme} closeButton visibleToasts={3} containerAriaLabel="Notifications"
+        offset={{ right: 12, bottom: sidebar.narrow ? 64 : 12 }}
+        mobileOffset={{ left: 12, right: 12, bottom: 64 }} />
       <SettingsPage api={api} section={settingsSection} backendId={settingsBackend} runtime={runtime}
         connection={connection} connectionError={connectionError} busy={busy || isRunning || installingBackend}
         jobFeedback={jobFeedback} jobs={recentJobs} operationLabel={studioOperationLabel}
@@ -1301,14 +1313,14 @@ export function App() {
 
             <WorkbenchLayout state={settingsSection && sidebar.narrow ? { ...sidebar, open: false } : sidebar} inspector={desktopInspector} tools={toolRail}
               assets={
-              <Tabs.Root value={assetFilters.kind} onValueChange={kind => {
+              <Tabs value={assetFilters.kind} onValueChange={kind => {
                 if (kind === 'mesh' || kind === 'image') applyAssetBrowserFilters({ ...EMPTY_ASSET_BROWSER_FILTERS, kind });
               }} className="@container min-w-0 text-xs" id="asset-library">
-                <Tabs.List aria-label="Asset types" className="grid grid-cols-2 gap-1 border-b px-3 py-2">
-                  <Tabs.Trigger value="mesh" asChild><Button variant={assetFilters.kind === 'mesh' ? 'secondary' : 'ghost'}>3D models</Button></Tabs.Trigger>
-                  <Tabs.Trigger value="image" asChild><Button variant={assetFilters.kind === 'image' ? 'secondary' : 'ghost'}>Images</Button></Tabs.Trigger>
-                </Tabs.List>
-                <Tabs.Content value={assetFilters.kind} className="outline-none focus-visible:outline-ring">
+                <TabsList aria-label="Asset types" className="mx-3 mt-2 grid w-auto grid-cols-2">
+                  <TabsTrigger value="mesh">3D models</TabsTrigger>
+                  <TabsTrigger value="image">Images</TabsTrigger>
+                </TabsList>
+                <TabsContent value={assetFilters.kind} className="focus-visible:outline-ring">
                 <div className="grid min-w-0 gap-2 border-b px-3 py-3">
                   <div className="flex min-w-0 items-center gap-2">
                     <Button variant="outline" size="sm" className="min-w-0 flex-1 justify-center" disabled={busy || connection !== 'connected'}
@@ -1339,8 +1351,7 @@ export function App() {
                   <Button type="submit" aria-label="Search" title="Search" variant="ghost" size="icon-xs"
                     className="absolute top-1/2 right-1 -translate-y-1/2" disabled={connection !== 'connected'}><MagnifyingGlassIcon aria-hidden="true" /></Button>
                 </form>
-                <details className="min-w-0">
-                  <summary className="w-fit cursor-pointer rounded-sm px-0.5 text-muted-foreground hover:text-foreground">Filters{hasActiveAssetFilters ? ' · Active' : ''}</summary>
+                <Disclosure className="min-w-0 text-muted-foreground" title={hasActiveAssetFilters ? 'Filters · Active' : 'Filters'}>
                   <div className="mt-2 grid gap-2">
                   <Field className="min-w-0">
                     <FieldLabel htmlFor="asset-origin">Origin</FieldLabel>
@@ -1367,7 +1378,7 @@ export function App() {
                     </Button>
                   )}
                   </div>
-                </details></>}
+                </Disclosure></>}
                 </div>
                 <div className="grid min-w-0 gap-3 px-3 py-3">
                 {matchingAssets.length > 0 && <p className="text-xs text-muted-foreground" aria-live="polite">
@@ -1391,8 +1402,8 @@ export function App() {
                   </div>
                 )}
                 </div>
-                </Tabs.Content>
-              </Tabs.Root>
+                </TabsContent>
+              </Tabs>
               }
             >
 
@@ -1450,8 +1461,7 @@ export function App() {
                   </div>
                 )}
               {reportCard && (
-                <details className="max-h-60 shrink-0 overflow-auto border-t bg-card p-3 text-xs [&>summary]:cursor-pointer" aria-label={`${reportCard.title} result`}>
-                  <summary>Operation report</summary>
+                <Disclosure className="max-h-60 shrink-0 overflow-auto border-t bg-card p-3 text-xs" label={`${reportCard.title} result`} title="Operation report">
                   <div className="mt-3 font-medium"><strong>{reportCard.title} complete</strong></div>
                   {!reportCard.reportAvailable && <p className="mt-2 text-muted-foreground">The operation completed, but its report payload is missing or unreadable.</p>}
                   <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -1479,15 +1489,14 @@ export function App() {
                     {reportCard.warningFormatIssue && <p>Some warning data was missing or invalid; all readable warning text is listed below.</p>}
                     {reportCard.warnings.length > 0 && <ul>{reportCard.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>}
                   </section>
-                  <details className="mt-3 [&>summary]:cursor-pointer">
-                    <summary>Asset and job IDs</summary>
+                  <Disclosure className="mt-3" title="Asset and job IDs">
                     <dl className="mt-2 grid gap-1 break-all text-muted-foreground [&>div]:grid [&>div]:grid-cols-[3rem_minmax(0,1fr)]">
                       <div><dt>Job</dt><dd><code>{reportCard.jobId}</code></dd></div>
                       <div><dt>Input</dt><dd><code>{reportCard.inputAssetId ?? 'Not reported'}</code></dd></div>
                       <div><dt>Result</dt><dd><code>{reportCard.resultAssetId ?? 'Not reported'}</code></dd></div>
                     </dl>
-                  </details>
-                </details>
+                  </Disclosure>
+                </Disclosure>
               )}
               </div>}
 
