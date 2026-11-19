@@ -1044,6 +1044,14 @@ fn api_router(state: AppState, token: String) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_ASSET_BYTES)),
         )
         .route("/api/v1/assets/page", get(api_list_asset_page))
+        .route(
+            "/api/v1/models/{model_id}/versions",
+            get(api_model_versions),
+        )
+        .route(
+            "/api/v1/models/{model_id}/current",
+            axum::routing::put(api_restore_model_version),
+        )
         .route("/api/v1/assets/{asset_id}", get(api_get_asset))
         .route("/api/v1/assets/{asset_id}/simplify", post(api_simplify))
         .route(
@@ -1511,13 +1519,22 @@ async fn api_list_asset_page(
     State(state): State<AppState>,
     Query(query): Query<AssetPageQuery>,
 ) -> Result<Json<meshharbor_core::AssetPage>, ApiError> {
-    Ok(Json(state.core.store().list_assets_page(
-        query.limit.unwrap_or(50),
-        query.cursor.as_deref(),
-        query.q.as_deref(),
-        query.kind,
-        query.derived,
-    )?))
+    let store = state.core.store();
+    let limit = query.limit.unwrap_or(50);
+    let cursor = query.cursor.as_deref();
+    let search = query.q.as_deref();
+    let page = if query.models_only.unwrap_or(false) {
+        if query.kind == Some(meshharbor_core::AssetKind::Image) {
+            return Err(CoreError::InvalidInput(
+                "The model inventory only contains meshes.".into(),
+            )
+            .into());
+        }
+        store.list_models_page(limit, cursor, search, query.derived)?
+    } else {
+        store.list_assets_page(limit, cursor, search, query.kind, query.derived)?
+    };
+    Ok(Json(page))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1527,6 +1544,44 @@ struct AssetPageQuery {
     q: Option<String>,
     kind: Option<meshharbor_core::AssetKind>,
     derived: Option<bool>,
+    models_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelVersionsQuery {
+    limit: Option<usize>,
+    before: Option<u64>,
+}
+
+async fn api_model_versions(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    Query(query): Query<ModelVersionsQuery>,
+) -> Result<Json<meshharbor_core::ModelVersionPage>, ApiError> {
+    Ok(Json(state.core.store().list_model_versions(
+        &model_id,
+        query.limit.unwrap_or(20),
+        query.before,
+    )?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreModelVersion {
+    asset_id: String,
+}
+
+async fn api_restore_model_version(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    Json(body): Json<RestoreModelVersion>,
+) -> Result<Json<meshharbor_core::Asset>, ApiError> {
+    Ok(Json(
+        state
+            .core
+            .store()
+            .restore_model_version(&model_id, &body.asset_id)?,
+    ))
 }
 
 async fn api_import_asset(
@@ -2894,6 +2949,111 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert!(page.next_cursor.is_some());
 
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_inventory_lists_current_versions_and_restore_cannot_cross_models() {
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-model-versions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let core = OperationCore::open(&root).unwrap();
+        let bytes = minimal_triangle_glb();
+        let original = core.import_asset("Original.glb", &bytes).unwrap();
+        let other = core.import_asset("Other.glb", &bytes).unwrap();
+        let edited = core
+            .store()
+            .import_derived_asset(
+                "New filename.glb",
+                &bytes,
+                &original.id,
+                json!({"operation":"mesh.cleanup"}),
+            )
+            .unwrap();
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: Arc::new(Semaphore::new(1)),
+            },
+            "token".into(),
+        );
+        let request = |method: Method, uri: String, body: Body| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header(header::HOST, "localhost:7432")
+                            .header(header::AUTHORIZATION, "Bearer token")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(body)
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+            }
+        };
+        let (status, page) = request(
+            Method::GET,
+            "/api/v1/assets/page?models_only=true&q=original".into(),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["id"], edited.id);
+        assert_eq!(page["items"][0]["model"]["name"], original.name);
+        let current_path = format!("/api/v1/models/{}/current", original.id);
+        let (status, _) = request(
+            Method::PUT,
+            current_path.clone(),
+            Body::from(json!({"asset_id":other.id}).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, restored) = request(
+            Method::PUT,
+            current_path,
+            Body::from(json!({"asset_id":original.id}).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(restored["model"]["current_asset_id"], original.id);
+        let branch = core
+            .store()
+            .import_derived_asset(
+                "Parted branch.glb",
+                &bytes,
+                &edited.id,
+                json!({"operation":"mesh.separate_parts"}),
+            )
+            .unwrap();
+        let (status, history) = request(
+            Method::GET,
+            format!("/api/v1/models/{}/versions", original.id),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(history["current_asset_id"], original.id);
+        assert_eq!(history["items"][0]["asset_id"], branch.id);
+        assert_eq!(history["items"][0]["parent_number"], 2);
+        assert_eq!(history["items"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            core.store()
+                .read_artifact(&edited.artifacts[0].id)
+                .unwrap()
+                .bytes,
+            bytes
+        );
+        drop(app);
         drop(core);
         std::fs::remove_dir_all(root).unwrap();
     }

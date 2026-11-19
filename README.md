@@ -108,8 +108,12 @@ When `MESHHARBOR_API_TOKEN` is unset, a per-run temporary bearer token is genera
 - `GET /api/v1/assets?limit=50`; `POST /api/v1/assets?filename=scene.glb` with raw file bytes
 - `GET /api/v1/assets/page?limit=50&cursor=<asset_id>&q=<filename>&kind=image|mesh&derived=true|false` returns `{items,next_cursor}` newest-first; filters are optional, and `next_cursor` can be sent back to load older assets
 - `GET /api/v1/assets/{asset_id}`; `POST /api/v1/assets/{asset_id}/simplify`
+- `GET /api/v1/assets/page?models_only=true` lists each mesh model once, returning its current asset; search, origin filters, and cursors use the original model record
+- `GET /api/v1/models/{model_id}/versions?limit=20&before=<version_number>` returns numbered versions, their parent version, and the current asset ID; `PUT /api/v1/models/{model_id}/current` with `{"asset_id":"..."}` restores a version of that model
 - `GET /api/v1/jobs?limit=20` (recent persisted jobs; read-only), `POST /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`, `POST /api/v1/jobs/{job_id}/cancel`
 - `GET /api/v1/artifacts/{artifact_id}`
+
+A mesh derived from another mesh is an immutable version of the same model. A GLB import or the result of image-to-3D generation starts a new model. A new edit advances the current version only if it was based on the current version; an edit from an older version creates a branch without replacing the current one. Restoring changes the current pointer, not any stored file. Existing data is grouped by its recorded source lineage on first open; the latest saved version becomes current. The existing asset endpoints, CLI, MCP, and job results still address individual assets.
 
 For `image.generate`, `GET /api/v1/runtime` exposes `model_backends[].generation.parameters`, `view_modes`, and `max_views`. Keep base fields such as `seed` at the top level of job parameters and put catalog fields marked `tuning: true` under `parameters.tuning`. The engine validates values against the selected backend before queuing the job.
 

@@ -66,7 +66,8 @@ pub use retopology::{
 };
 pub use runtime::{Pixal3dRuntimeManager, RuntimeSetupReport};
 pub use store::{
-    Artifact, Asset, AssetKind, AssetPage, CoreError, CoreResult, Job, JobState, Store,
+    Artifact, Asset, AssetKind, AssetPage, CoreError, CoreResult, Job, JobState, ModelIdentity,
+    ModelVersion, ModelVersionPage, Store,
 };
 
 #[cfg(test)]

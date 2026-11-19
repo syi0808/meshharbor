@@ -337,6 +337,9 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     .unwrap();
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
     let asset: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(asset["model"]["id"], generated_asset_id);
+    assert_eq!(asset["model"]["generated"], true);
+    assert_eq!(asset["model_version"], 1);
     let derived = asset["artifacts"]
         .as_array()
         .unwrap()

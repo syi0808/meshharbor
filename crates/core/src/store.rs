@@ -88,12 +88,40 @@ pub struct Asset {
     pub metadata: Value,
     pub created_at: String,
     pub artifacts: Vec<Artifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetPage {
     pub items: Vec<Asset>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelIdentity {
+    pub id: String,
+    pub name: String,
+    pub generated: bool,
+    pub current_asset_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelVersion {
+    pub asset_id: String,
+    pub number: u64,
+    pub parent_number: Option<u64>,
+    pub operation: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelVersionPage {
+    pub items: Vec<ModelVersion>,
+    pub current_asset_id: String,
+    pub next_before: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -244,6 +272,7 @@ impl Store {
         if !columns.iter().any(|column| column == "stage") {
             migration.execute("ALTER TABLE jobs ADD COLUMN stage TEXT", [])?;
         }
+        migrate_model_versions(&migration)?;
         migration.commit()?;
         Ok(Self {
             root,
@@ -362,11 +391,36 @@ impl Store {
         let artifact_id = format!("artifact_{}", Uuid::new_v4().simple());
         let created_at = timestamp()?;
         let metadata_json = serde_json::to_string(&metadata)?;
-        let conn = self.connection.lock().expect("SQLite mutex poisoned");
-        let transaction = conn.unchecked_transaction()?;
+        let mut conn = self.connection.lock().expect("SQLite mutex poisoned");
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let model_id = if descriptor.kind == AssetKind::Mesh {
+            let source_model_id = match source_asset_id {
+                Some(source_id) => transaction
+                    .query_row(
+                        "SELECT model_id FROM assets WHERE id=?1",
+                        [source_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten(),
+                None => None,
+            };
+            Some(source_model_id.unwrap_or_else(|| asset_id.clone()))
+        } else {
+            None
+        };
+        let model_version = match model_id.as_deref() {
+            Some(id) if id == asset_id => Some(1),
+            Some(id) => Some(transaction.query_row(
+                "SELECT COALESCE(MAX(model_version),0)+1 FROM assets WHERE model_id=?1",
+                [id],
+                |row| row.get::<_, i64>(0),
+            )?),
+            None => None,
+        };
         transaction.execute(
-            "INSERT INTO assets (id,name,kind,mime_type,sha256,byte_size,source_asset_id,metadata_json,created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT INTO assets (id,name,kind,mime_type,sha256,byte_size,source_asset_id,metadata_json,created_at,model_id,model_version)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 asset_id,
                 safe_name,
@@ -376,7 +430,9 @@ impl Store {
                 bytes.len() as i64,
                 source_asset_id,
                 metadata_json,
-                created_at
+                created_at,
+                model_id,
+                model_version,
             ],
         )?;
         transaction.execute(
@@ -408,6 +464,19 @@ impl Store {
                     created_at
                 ],
             )?;
+        }
+        if let Some(model_id) = model_id {
+            if model_id == asset_id {
+                transaction.execute(
+                    "INSERT INTO model_heads (model_id,current_asset_id) VALUES (?1,?1)",
+                    [&asset_id],
+                )?;
+            } else {
+                transaction.execute(
+                    "UPDATE model_heads SET current_asset_id=?1 WHERE model_id=?2 AND current_asset_id=?3",
+                    params![asset_id, model_id, source_asset_id],
+                )?;
+            }
         }
         transaction.commit()?;
         drop(conn);
@@ -450,10 +519,17 @@ impl Store {
 
     pub fn get_asset(&self, id: &str) -> CoreResult<Option<Asset>> {
         let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        Self::read_asset(&conn, id)
+    }
+
+    fn read_asset(conn: &Connection, id: &str) -> CoreResult<Option<Asset>> {
         let row = conn
             .query_row(
-                "SELECT id,name,kind,mime_type,sha256,byte_size,source_asset_id,metadata_json,created_at
-                 FROM assets WHERE id=?1",
+                "SELECT version.id,version.name,version.kind,version.mime_type,version.sha256,version.byte_size,
+                        version.source_asset_id,version.metadata_json,version.created_at,
+                        root.id,root.name,root.source_asset_id IS NOT NULL,head.current_asset_id,version.model_version
+                 FROM assets AS version LEFT JOIN assets AS root ON root.id=version.model_id
+                 LEFT JOIN model_heads AS head ON head.model_id=root.id WHERE version.id=?1",
                 [id],
                 |row| {
                     Ok((
@@ -466,6 +542,11 @@ impl Store {
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                        row.get::<_, bool>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                        row.get::<_, Option<i64>>(13)?,
                     ))
                 },
             )
@@ -480,6 +561,11 @@ impl Store {
             source_asset_id,
             metadata_json,
             created_at,
+            model_id,
+            model_name,
+            model_generated,
+            current_asset_id,
+            model_version,
         )) = row
         else {
             return Ok(None);
@@ -509,6 +595,16 @@ impl Store {
             metadata: serde_json::from_str(&metadata_json)?,
             created_at,
             artifacts,
+            model_version: model_version.map(|number| number as u64),
+            model: match (model_id, model_name, current_asset_id) {
+                (Some(id), Some(name), Some(current_asset_id)) => Some(ModelIdentity {
+                    id,
+                    name,
+                    generated: model_generated,
+                    current_asset_id,
+                }),
+                _ => None,
+            },
         }))
     }
 
@@ -540,6 +636,28 @@ impl Store {
         kind: Option<AssetKind>,
         derived: Option<bool>,
     ) -> CoreResult<AssetPage> {
+        self.read_asset_page(limit, cursor, query, kind, derived, false)
+    }
+
+    pub fn list_models_page(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+        query: Option<&str>,
+        generated: Option<bool>,
+    ) -> CoreResult<AssetPage> {
+        self.read_asset_page(limit, cursor, query, Some(AssetKind::Mesh), generated, true)
+    }
+
+    fn read_asset_page(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+        query: Option<&str>,
+        kind: Option<AssetKind>,
+        derived: Option<bool>,
+        models_only: bool,
+    ) -> CoreResult<AssetPage> {
         const MAX_PAGE_SIZE: usize = 100;
         const MAX_SEARCH_BYTES: usize = 256;
 
@@ -563,26 +681,30 @@ impl Store {
             pattern
         });
 
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        let transaction = conn.unchecked_transaction()?;
         let asset_ids = {
-            let conn = self.connection.lock().expect("SQLite mutex poisoned");
             let cursor_created_at = match cursor {
                 Some(cursor) => Some(
-                    conn.query_row(
-                        "SELECT created_at FROM assets WHERE id=?1",
-                        [cursor],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                    .ok_or_else(|| {
-                        CoreError::InvalidInput("Asset page cursor is unknown.".into())
-                    })?,
+                    transaction
+                        .query_row(
+                            "SELECT created_at FROM assets WHERE id=?1 AND (NOT ?2 OR id=model_id)",
+                            params![cursor, models_only],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?
+                        .ok_or_else(|| {
+                            CoreError::InvalidInput("Asset page cursor is unknown.".into())
+                        })?,
                 ),
                 None => None,
             };
-            let mut statement = conn.prepare(
-                "SELECT id FROM assets
+            let mut statement = transaction.prepare(
+                "SELECT id, COALESCE(model_heads.current_asset_id, id) FROM assets
+                 LEFT JOIN model_heads ON ?7 AND model_heads.model_id=assets.id
                  WHERE (?1 IS NULL OR name LIKE ?1 ESCAPE '\\')
                    AND (?2 IS NULL OR kind = ?2)
+                   AND (NOT ?7 OR assets.model_id=assets.id)
                    AND (?3 IS NULL
                         OR (?3 = 1 AND source_asset_id IS NOT NULL)
                         OR (?3 = 0 AND source_asset_id IS NULL))
@@ -598,22 +720,101 @@ impl Store {
                     cursor_created_at,
                     cursor,
                     (page_size + 1) as i64,
+                    models_only,
                 ],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
         let has_more = asset_ids.len() > page_size;
         let page_ids = &asset_ids[..asset_ids.len().min(page_size)];
-        let next_cursor = has_more.then(|| page_ids.last().cloned()).flatten();
+        let next_cursor = has_more
+            .then(|| page_ids.last().map(|(root, _)| root.clone()))
+            .flatten();
         let mut items = Vec::with_capacity(page_ids.len());
-        for id in page_ids {
-            if let Some(asset) = self.get_asset(id)? {
+        for (_, id) in page_ids {
+            if let Some(asset) = Self::read_asset(&transaction, id)? {
                 items.push(asset);
             }
         }
+        transaction.commit()?;
         Ok(AssetPage { items, next_cursor })
+    }
+
+    pub fn list_model_versions(
+        &self,
+        model_id: &str,
+        limit: usize,
+        before: Option<u64>,
+    ) -> CoreResult<ModelVersionPage> {
+        let page_size = limit.clamp(1, 100);
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        let transaction = conn.unchecked_transaction()?;
+        let current_asset_id = transaction
+            .query_row(
+                "SELECT current_asset_id FROM model_heads WHERE model_id=?1",
+                [model_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| CoreError::NotFound("Model was not found.".into()))?;
+        let mut items = {
+            let mut statement = transaction.prepare(
+                "SELECT version.id,version.model_version,parent.model_version,
+                        json_extract(version.metadata_json,'$.operation'),version.created_at
+                 FROM assets AS version LEFT JOIN assets AS parent ON parent.id=version.source_asset_id AND parent.model_id=?1
+                 WHERE version.model_id=?1 AND (?2 IS NULL OR version.model_version < ?2)
+                 ORDER BY version.model_version DESC LIMIT ?3",
+            )?;
+            let rows = statement.query_map(
+                params![
+                    model_id,
+                    before.map(|value| value.min(i64::MAX as u64) as i64),
+                    (page_size + 1) as i64
+                ],
+                |row| {
+                    Ok(ModelVersion {
+                        asset_id: row.get(0)?,
+                        number: row.get::<_, i64>(1)? as u64,
+                        parent_number: row.get::<_, Option<i64>>(2)?.map(|number| number as u64),
+                        operation: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                },
+            )?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        transaction.commit()?;
+        let has_more = items.len() > page_size;
+        items.truncate(page_size);
+        let next_before = has_more
+            .then(|| items.last().map(|item| item.number))
+            .flatten();
+        Ok(ModelVersionPage {
+            items,
+            current_asset_id,
+            next_before,
+        })
+    }
+
+    pub fn restore_model_version(&self, model_id: &str, asset_id: &str) -> CoreResult<Asset> {
+        let mut conn = self.connection.lock().expect("SQLite mutex poisoned");
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let written = transaction.execute(
+            "UPDATE model_heads SET current_asset_id=?2 WHERE model_id=?1
+             AND EXISTS (SELECT 1 FROM assets WHERE model_id=?1 AND id=?2)",
+            params![model_id, asset_id],
+        )?;
+        if written == 0 {
+            return Err(CoreError::NotFound(
+                "That version does not belong to this model.".into(),
+            ));
+        }
+        let asset = Self::read_asset(&transaction, asset_id)?
+            .ok_or_else(|| CoreError::NotFound("Model version was not found.".into()))?;
+        transaction.commit()?;
+        Ok(asset)
     }
 
     /// List persisted job records, newest update first. This does not resume or modify jobs.
@@ -1036,6 +1237,43 @@ fn verify_existing_content_addressed(
     Ok(())
 }
 
+fn migrate_model_versions(transaction: &Transaction<'_>) -> CoreResult<()> {
+    let has_model_id: bool = transaction.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('assets') WHERE name='model_id')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_model_id {
+        return Ok(());
+    }
+    transaction.execute_batch(
+        "ALTER TABLE assets ADD COLUMN model_id TEXT REFERENCES assets(id) ON DELETE RESTRICT;
+         ALTER TABLE assets ADD COLUMN model_version INTEGER CHECK(model_version > 0);
+         CREATE INDEX assets_source_idx ON assets(source_asset_id);
+         CREATE TABLE model_heads (
+            model_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE RESTRICT,
+            current_asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE RESTRICT
+         );
+         WITH RECURSIVE lineage(asset_id, root_id) AS (
+            SELECT mesh.id,mesh.id FROM assets AS mesh
+            LEFT JOIN assets AS parent ON parent.id=mesh.source_asset_id
+            WHERE mesh.kind='mesh' AND (parent.kind IS NULL OR parent.kind<>'mesh')
+            UNION ALL
+            SELECT child.id,lineage.root_id FROM lineage
+            JOIN assets AS child ON child.source_asset_id=lineage.asset_id AND child.kind='mesh'
+         ), numbered AS (
+            SELECT lineage.asset_id,lineage.root_id,row_number() OVER (PARTITION BY lineage.root_id ORDER BY mesh.rowid) AS number
+            FROM lineage JOIN assets AS mesh ON mesh.id=lineage.asset_id
+         )
+         UPDATE assets SET model_id=numbered.root_id,model_version=numbered.number FROM numbered WHERE assets.id=numbered.asset_id;
+         CREATE UNIQUE INDEX assets_model_idx ON assets(model_id,model_version);
+         INSERT INTO model_heads(model_id,current_asset_id)
+         SELECT root.id,(SELECT id FROM assets WHERE model_id=root.id ORDER BY model_version DESC LIMIT 1)
+         FROM assets AS root WHERE root.model_id=root.id;",
+    )?;
+    Ok(())
+}
+
 fn job_state_from_transaction(transaction: &Transaction<'_>, id: &str) -> CoreResult<JobState> {
     let state = transaction
         .query_row("SELECT state FROM jobs WHERE id=?1", [id], |row| {
@@ -1132,6 +1370,60 @@ mod tests {
             store.get_asset(&imported.id).unwrap().unwrap().sha256,
             imported.sha256
         );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_legacy_model_lineage_without_merging_image_based_generations() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        {
+            let conn = store.connection.lock().unwrap();
+            conn.execute_batch(
+                "DROP TABLE model_heads;
+                 DROP INDEX assets_model_idx;
+                 DROP INDEX assets_source_idx;
+                 ALTER TABLE assets DROP COLUMN model_version;
+                 ALTER TABLE assets DROP COLUMN model_id;",
+            )
+            .unwrap();
+            for (id, kind, parent) in [
+                ("reference", "image", None),
+                ("generated", "mesh", Some("reference")),
+                ("cleanup", "mesh", Some("generated")),
+                ("retopology", "mesh", Some("cleanup")),
+                ("separate-model", "mesh", Some("reference")),
+            ] {
+                conn.execute(
+                    "INSERT INTO assets (id,name,kind,mime_type,sha256,byte_size,source_asset_id,metadata_json,created_at)
+                     VALUES (?1,?1,?2,'model/gltf-binary','fixture',0,?3,'{}','1000')",
+                    params![id, kind, parent],
+                ).unwrap();
+            }
+        }
+        drop(store);
+        let store = Store::open(&dir).unwrap();
+        let page = store.list_models_page(10, None, None, Some(true)).unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|asset| asset.id.as_str())
+                .collect::<Vec<_>>(),
+            ["retopology", "separate-model"]
+        );
+        assert_eq!(page.items[0].model.as_ref().unwrap().id, "generated");
+        let history = store.list_model_versions("generated", 2, None).unwrap();
+        assert_eq!(history.current_asset_id, "retopology");
+        assert_eq!(history.items[0].number, 3);
+        assert_eq!(history.items[0].parent_number, Some(2));
+        assert_eq!(history.next_before, Some(2));
+        let older = store
+            .list_model_versions("generated", 2, history.next_before)
+            .unwrap();
+        assert_eq!(older.items[0].asset_id, "generated");
+        assert_eq!(older.items[0].number, 1);
+        assert!(older.next_before.is_none());
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
