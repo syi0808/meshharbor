@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 
 use crate::{
     Asset, AtlasBakeError, AtlasBakeOptions, CoreError, CoreResult, GenerationOptions,
-    GenerationResult, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dRuntimeManager,
-    QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport, SimplificationReport,
-    Store, bake_glb, cleanup_glb, compress_mesh_glb, inspect_asset,
+    GenerationResult, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dProfile,
+    Pixal3dRuntimeManager, QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport,
+    SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb, inspect_asset,
     install_bundled_quadriflow_sidecar, optimize_render_glb, separate_components, simplify_glb,
 };
 
@@ -26,6 +26,7 @@ pub struct RuntimeDoctor {
     pub platform: String,
     pub operations: Vec<String>,
     pub model_backends: Vec<Value>,
+    pub model_catalog: Vec<Value>,
     pub quadriflow_backend: QuadriFlowBackendStatus,
     pub notes: Vec<String>,
 }
@@ -337,6 +338,7 @@ impl OperationCore {
         if let Some(readiness) = &cuda {
             model_backends.push(json!({
                 "id": readiness.backend_id,
+                "local_files": Pixal3dProfile::Cuda.local_files(self.store.root()),
                 "ready": readiness.ready,
                 "status": if readiness.ready { "ready_paths_unverified" }
                     else if !cuda_manager.host_supported() { "unsupported_host_or_nvidia_gpu_missing" }
@@ -360,6 +362,7 @@ impl OperationCore {
         if let Some(readiness) = &mlx {
             model_backends.push(json!({
                 "id": readiness.backend_id,
+                "local_files": Pixal3dProfile::Mlx.local_files(self.store.root()),
                 "ready": readiness.ready,
                 "status": if readiness.ready {
                     "ready_paths_unverified"
@@ -389,11 +392,27 @@ impl OperationCore {
                 "missing": readiness.missing,
             }));
         }
+        let pixal3d: Value =
+            serde_json::from_str(include_str!("../../../registry/models/pixal3d.json"))
+                .expect("bundled Pixal3D registry must be valid JSON");
+        let pixal3d_backends = pixal3d["backends"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|backend| backend["id"].as_str())
+            .map(|profile| format!("pixal3d-{profile}"))
+            .collect::<Vec<_>>();
         RuntimeDoctor {
             status: "ready_for_mesh_operations".into(),
             platform: std::env::consts::OS.to_string(),
             operations: supported,
             model_backends,
+            model_catalog: vec![json!({
+                "id": pixal3d["id"],
+                "title": pixal3d["title"],
+                "status": pixal3d["status"],
+                "backend_ids": pixal3d_backends,
+            })],
             quadriflow_backend: self.quadriflow_backend_status(),
             notes: vec![
                 "The Rust core includes CPU mesh simplification, conservative cleanup, shared-index connected-part splitting, xatlas UV atlas rebaking, render cache/overdraw optimization, and required KHR_meshopt_compression output; this does not yet constitute a full cross-platform Studio or one-file distribution.".into(),

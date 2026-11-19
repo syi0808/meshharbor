@@ -138,9 +138,12 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
     cameraRef.current = camera;
     controlsRef.current = controls;
 
+    let visible = false;
     const resize = () => {
-      const width = Math.max(host.clientWidth, 1);
-      const height = Math.max(host.clientHeight, 1);
+      const width = host.clientWidth;
+      const height = host.clientHeight;
+      visible = width > 0 && height > 0;
+      if (!visible) return;
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
@@ -151,8 +154,10 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
 
     let frame = 0;
     const render = () => {
-      controls.update();
-      renderer.render(scene, camera);
+      if (visible) {
+        controls.update();
+        renderer.render(scene, camera);
+      }
       frame = requestAnimationFrame(render);
     };
     render();

@@ -91,7 +91,7 @@ The app stores source assets, managed Python environments, and isolated Hugging 
 
 All processes using the same data directory coordinate through OS advisory locks. REST and MCP may run together; interrupted-job recovery refuses to run while either service is active. Pixal3D runtime setup, downloads, Hugging Face login, and conversion take an exclusive runtime lock, while image generation takes a compatible shared lock. This prevents those MeshHarbor actions from racing over managed Python environments or Hugging Face caches. If an incompatible operation is already active, the new operation fails fast with a retry message. The operating system releases locks when a process exits or crashes, and separate data directories do not block one another. This coordinates MeshHarbor processes only; it is not a lock on unrelated software that accesses the same files. After force-killing MeshHarbor during a managed uv/Python command, verify the spawned uv/Python child has exited before retrying; the OS releases the parent process's lock, and orphaned child supervision is not yet implemented.
 
-For image-to-3D setup without the terminal, open **Runtime** in Studio. The panel links to Hugging Face for DINOv3 access and token creation, then verifies and connects the token locally before asking for download consent. See [Studio model access](apps/studio/README.md#image-to-3d-model-access).
+For image-to-3D setup without the terminal, open **Settings** in Studio. Browse supported models, connect or disconnect Hugging Face, and download or remove model files without removing the runtime or your assets. See [Studio settings](apps/studio/README.md#settings).
 
 ## REST API
 

@@ -10,12 +10,12 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use clap::{Parser, Subcommand};
 use meshharbor_core::{
     CoreError, GenerationOptions, MAX_ASSET_BYTES, OperationCore, Pixal3dCudaRuntimeManager,
-    Pixal3dRuntimeManager,
+    Pixal3dProfile, Pixal3dRuntimeManager, RuntimeDoctor,
 };
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -981,7 +981,13 @@ fn api_router(state: AppState, token: String) -> Router {
         .route("/api/v1/runtime", get(api_runtime))
         .route(
             "/api/v1/runtime/{backend}/huggingface",
-            post(api_huggingface_access).layer(DefaultBodyLimit::max(2048)),
+            post(api_huggingface_access)
+                .delete(api_disconnect_huggingface)
+                .layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/api/v1/runtime/{backend}/model-files",
+            delete(api_remove_model_files).layer(DefaultBodyLimit::max(1024)),
         )
         .route(
             "/api/v1/backends/quadriflow",
@@ -1101,7 +1107,8 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         == Some(DASHBOARD_MARKER)
         && (origin_matches_host
             || (safe_read && request.headers().get(header::ORIGIN).is_none() && same_origin_fetch));
-    let dashboard_only = path.starts_with("/api/v1/runtime/") && path.ends_with("/huggingface");
+    let dashboard_only = path.starts_with("/api/v1/runtime/")
+        && (path.ends_with("/huggingface") || path.ends_with("/model-files"));
     if dashboard_authorized || (authorized && !dashboard_only) {
         next.run(request).await
     } else {
@@ -1283,22 +1290,82 @@ async fn api_huggingface_access(
 ) -> Result<impl IntoResponse, ApiError> {
     let Json(payload) = payload
         .map_err(|_| CoreError::InvalidInput("Invalid Hugging Face connection request.".into()))?;
+    let profile = Pixal3dProfile::from_backend(&backend)?;
     let access = task::spawn_blocking(move || {
         let root = state.core.store().root();
         let _runtime_lock = acquire_runtime_write_lock(root)?;
-        match backend.as_str() {
-            "pixal3d-mlx" => {
+        match profile {
+            Pixal3dProfile::Mlx => {
                 Pixal3dRuntimeManager::new(root).huggingface_access(payload.token.as_deref())
             }
-            "pixal3d-cuda" => {
+            Pixal3dProfile::Cuda => {
                 Pixal3dCudaRuntimeManager::new(root).huggingface_access(payload.token.as_deref())
             }
-            _ => Err(CoreError::InvalidInput("Unknown Pixal3D backend.".into())),
         }
     })
     .await
     .map_err(|_| CoreError::OperationUnavailable("Hugging Face access worker failed.".into()))??;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(access)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeRemovalConfirmation {
+    confirmed: bool,
+}
+
+async fn api_disconnect_huggingface(
+    State(state): State<AppState>,
+    Path(backend): Path<String>,
+    Json(confirmation): Json<RuntimeRemovalConfirmation>,
+) -> Result<Json<RuntimeDoctor>, ApiError> {
+    remove_runtime_files(
+        state.core,
+        &backend,
+        confirmation,
+        Pixal3dProfile::disconnect_huggingface,
+    )
+    .await
+}
+
+async fn api_remove_model_files(
+    State(state): State<AppState>,
+    Path(backend): Path<String>,
+    Json(confirmation): Json<RuntimeRemovalConfirmation>,
+) -> Result<Json<RuntimeDoctor>, ApiError> {
+    remove_runtime_files(
+        state.core,
+        &backend,
+        confirmation,
+        Pixal3dProfile::remove_models,
+    )
+    .await
+}
+
+async fn remove_runtime_files(
+    core: OperationCore,
+    backend: &str,
+    confirmation: RuntimeRemovalConfirmation,
+    remove: fn(Pixal3dProfile, &std::path::Path) -> Result<(), CoreError>,
+) -> Result<Json<RuntimeDoctor>, ApiError> {
+    let profile = Pixal3dProfile::from_backend(backend)?;
+    if !confirmation.confirmed {
+        return Err(CoreError::InvalidInput(
+            "Confirm removal before changing local runtime files.".into(),
+        )
+        .into());
+    }
+    let runtime = task::spawn_blocking(move || {
+        let root = core.store().root();
+        let _runtime_lock = acquire_runtime_write_lock(root)?;
+        remove(profile, root)?;
+        Ok::<_, CoreError>(core.runtime_doctor())
+    })
+    .await
+    .map_err(|_| {
+        CoreError::OperationUnavailable("Local runtime file removal worker failed.".into())
+    })??;
+    Ok(Json(runtime))
 }
 
 async fn api_start_runtime_setup(
@@ -3522,6 +3589,112 @@ mod tests {
             }
         }
         assert!(core.store().list_jobs(20).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_removal_is_confirmed_scoped_and_runtime_locked() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-settings-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let mlx = root.join("runtimes/pixal3d-mlx");
+        let hf = mlx.join("home/.cache/huggingface");
+        let partial = hf.join("hub/models--TencentARC--Pixal3D/blobs/partial.incomplete");
+        let dino = hf.join("hub/models--facebook--dinov3-vitl16-pretrain-lvd1689m/blobs/pinned");
+        let xet = hf.join("xet/cache");
+        let naf = mlx.join("weights/naf_release.safetensors");
+        let token = hf.join("token");
+        let named_tokens = hf.join("stored_tokens");
+        let environment = mlx.join(".venv/bin/python");
+        let other_repo = hf.join("hub/models--keep--unrelated/blob");
+        let other_profile = root.join("runtimes/pixal3d-cuda/home/.cache/huggingface/token");
+        let artifact = root.join("artifacts/keep");
+        for path in [
+            &partial,
+            &dino,
+            &xet,
+            &naf,
+            &token,
+            &named_tokens,
+            &environment,
+            &other_repo,
+            &other_profile,
+            &artifact,
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fixture data").unwrap();
+        }
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: Arc::new(Semaphore::new(1)),
+            },
+            "private-test-token".into(),
+        );
+        let request = |scope: &str, origin: &str, confirmed: bool| {
+            axum::http::Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/api/v1/runtime/pixal3d-mlx/{scope}"))
+                .header(header::HOST, "127.0.0.1:7432")
+                .header(header::ORIGIN, origin)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-meshharbor-dashboard", "local-ui-v1")
+                .body(Body::from(json!({"confirmed": confirmed}).to_string()))
+                .unwrap()
+        };
+        let same_origin = "http://127.0.0.1:7432";
+        let generation = acquire_generation_runtime_lock(&root).unwrap();
+        for (origin, confirmed, expected) in [
+            ("http://127.0.0.1:5173", true, StatusCode::FORBIDDEN),
+            (same_origin, false, StatusCode::BAD_REQUEST),
+            (same_origin, true, StatusCode::CONFLICT),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request("model-files", origin, confirmed))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            assert!(partial.is_file());
+        }
+        drop(generation);
+
+        let removed = app
+            .clone()
+            .oneshot(request("model-files", same_origin, true))
+            .await
+            .unwrap();
+        assert_eq!(removed.status(), StatusCode::OK);
+        let info: RuntimeDoctor =
+            serde_json::from_slice(&removed.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let mlx_status = info
+            .model_backends
+            .iter()
+            .find(|backend| backend["id"] == "pixal3d-mlx")
+            .unwrap();
+        assert_eq!(mlx_status["local_files"]["remove_models_available"], false);
+        assert_eq!(mlx_status["local_files"]["token_saved"], true);
+        assert!(
+            ![&partial, &dino, &xet, &naf]
+                .into_iter()
+                .any(|path| path.exists())
+        );
+        assert!(
+            [&token, &named_tokens, &environment, &other_repo, &artifact]
+                .into_iter()
+                .all(|path| path.is_file())
+        );
+
+        let disconnected = app
+            .oneshot(request("huggingface", same_origin, true))
+            .await
+            .unwrap();
+        assert_eq!(disconnected.status(), StatusCode::OK);
+        assert!(!token.exists());
+        assert!(!named_tokens.exists());
+        assert!(other_profile.is_file());
+        assert!(other_repo.is_file());
         std::fs::remove_dir_all(root).unwrap();
     }
 

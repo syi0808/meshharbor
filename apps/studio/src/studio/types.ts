@@ -36,11 +36,13 @@ export interface Operation {
 }
 
 export type HuggingFaceAccess = 'not_connected' | 'access_denied' | 'verified';
+export type RuntimeBackendId = 'pixal3d-mlx' | 'pixal3d-cuda';
 
 export interface RuntimeInfo {
   status: string;
   platform: string;
   operations: string[];
+  model_catalog: Array<{ id: string; title: string; status: string; backend_ids: string[] }>;
   quadriflow_backend: {
     backend_id: string;
     status: string;
@@ -69,6 +71,13 @@ export interface RuntimeInfo {
     python?: string;
     gated_model_access_required?: boolean;
     license_notice?: string;
+    local_files?: {
+      token_saved: boolean;
+      disconnect_available: boolean;
+      remove_models_available: boolean;
+      credentials_managed: boolean;
+      model_files_managed: boolean;
+    };
   }>;
   notes: string[];
 }

@@ -88,20 +88,19 @@ test('long model names do not overflow gallery cards at narrow panel and mobile 
   expect(await page.locator('html').evaluate(element => element.scrollWidth)).toBe(320);
 });
 
-test('buttons, native selects and dialogs keep the official Mira dimensions', async ({ page, studioOrigin }) => {
+test('workbench and settings controls keep the official Mira dimensions', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
   await expect(page.getByRole('banner').getByText('meshharbor', { exact: true })).toBeVisible();
   await expect(page.getByRole('banner')).not.toContainText(/Studio|Local engine ready/);
   await expect(page.getByRole('button', { name: 'Open GLB' })).toHaveCSS('height', '28px');
-  const runtime = page.getByRole('button', { name: 'Engine and runtimes' });
-  await expect(runtime).toHaveCSS('height', '24px');
-  await expect(runtime).toHaveCSS('column-gap', '4px');
-  await runtime.click();
-  const dialog = page.getByRole('dialog', { name: 'Engine and runtimes' });
-  await expect(dialog).toHaveCSS('display', 'grid');
-  await expect(dialog).toHaveCSS('padding', '16px');
-  await expect(dialog.getByLabel('Backend')).toHaveCSS('height', '28px');
+  const settings = page.getByRole('button', { name: 'Settings', exact: true });
+  await expect(settings).toHaveCSS('height', '24px');
+  await expect(settings).toHaveCSS('column-gap', '4px');
+  await settings.click();
+  await expect(page.getByRole('heading', { name: 'Pixal3D' })).toBeVisible();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(page.getByLabel('Backend')).toHaveCSS('height', '28px');
   expect(await page.locator('html').evaluate(element => getComputedStyle(element).getPropertyValue('--primary').trim())).toBe('#82d7b8');
 });
 
@@ -121,6 +120,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
     platform: 'macos',
     status: 'ready_for_mesh_operations',
+    model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', status: 'experimental_opt_in', backend_ids: ['pixal3d-mlx', 'pixal3d-cuda'] }],
     model_backends: [{
       id: 'pixal3d-mlx',
       installable: true,
@@ -167,43 +167,105 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await page.keyboard.press('Escape');
   await expect(library).toBeHidden();
   await expect(inventory).toBeFocused();
-  const runtime = page.getByRole('button', { name: 'Engine and runtimes' });
-  await runtime.click();
-  const dialog = page.getByRole('dialog', { name: 'Engine and runtimes' });
-  const setup = dialog.getByRole('button', { name: 'Set up Python environment' });
-  await expect(dialog.getByText('No model files are downloaded', { exact: false })).toBeVisible();
+  const settings = page.getByRole('button', { name: 'Settings', exact: true });
+  await settings.click();
+  await expect(page).toHaveURL(/\/settings\/models$/);
+  const main = page.getByRole('main', { name: 'Models' });
+  const setup = main.getByRole('button', { name: 'Set up Python environment' });
+  await expect(main.getByText('Not supported here')).toBeVisible();
   await setup.click();
-  const progress = dialog.getByRole('progressbar', { name: 'Job progress' });
+  const progress = main.getByRole('progressbar', { name: 'Job progress' });
   await expect(progress).toBeVisible();
   await expect(progress).not.toHaveAttribute('aria-valuenow');
   await expect(setup).toBeDisabled();
   finishSetup = true;
-  await expect(dialog.getByText('Installed', { exact: true })).toBeVisible();
-  await expect(dialog.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
-  await expect(dialog.getByRole('link', { name: 'Create a Hugging Face token' })).toHaveAttribute('href', 'https://huggingface.co/settings/tokens');
-  const download = dialog.getByRole('button', { name: 'Download model files' });
-  const consent = dialog.getByRole('checkbox', { name: 'I reviewed the model terms and approve this download.' });
+  await expect(main.getByText('Download required')).toBeVisible();
+  await main.getByRole('button', { name: 'View downloads' }).click();
+  const storage = page.getByRole('main', { name: 'Downloads & storage' });
+  const download = storage.getByRole('button', { name: 'Download model files' });
+  const consent = storage.getByRole('checkbox', { name: 'I reviewed the model terms and approve this download.' });
   await expect(download).toBeDisabled();
   await expect(consent).toBeDisabled();
-  await dialog.getByRole('button', { name: 'Check saved token' }).click();
-  await expect(dialog.getByText('No token is saved', { exact: false })).toBeVisible();
-  const token = dialog.getByLabel('Hugging Face access token');
-  const connect = dialog.getByRole('button', { name: 'Connect token' });
+  await storage.getByRole('button', { name: 'Manage Hugging Face connection' }).click();
+  const connections = page.getByRole('main', { name: 'Connections' });
+  await expect(connections.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
+  await expect(connections.getByRole('link', { name: 'Create a Hugging Face token' })).toHaveAttribute('href', 'https://huggingface.co/settings/tokens');
+  await connections.getByRole('button', { name: 'Check saved token' }).click();
+  await expect(connections.getByText('No token is saved', { exact: false })).toBeVisible();
+  const token = connections.getByLabel('Hugging Face access token');
+  const connect = connections.getByRole('button', { name: 'Connect token' });
   await expect(token).toHaveAttribute('type', 'password');
   await token.fill('hf_testdenied');
   await connect.click();
-  await expect(dialog.getByText('DINOv3 access denied', { exact: false })).toBeVisible();
+  await expect(connections.getByText('DINOv3 access denied', { exact: false })).toBeVisible();
   await expect(token).toHaveValue('');
-  await expect(download).toBeDisabled();
   await token.fill('hf_testapproved');
   await connect.click();
-  await expect(dialog.getByText('DINOv3 file access verified.')).toBeVisible();
+  await expect(connections.getByText('DINOv3 file access verified.')).toBeVisible();
   await expect(token).toHaveValue('');
+  await connections.getByRole('button', { name: 'View downloads' }).click();
   await expect(download).toBeDisabled();
   await consent.check();
   await expect(download).toBeEnabled();
   expect(downloads).toBe(0);
-  await page.keyboard.press('Escape');
-  await expect(dialog).toBeHidden();
-  await expect(runtime).toBeFocused();
+  expect(await page.locator('html').evaluate(element => element.scrollWidth)).toBe(390);
+  await page.getByRole('button', { name: 'Workbench', exact: true }).click();
+  await expect(page).toHaveURL(studioOrigin + '/');
+  await expect(settings).toBeFocused();
+});
+
+test('settings deep links and confirmations manage one local profile at a time', async ({ page, studioOrigin }) => {
+  let tokenSaved = true;
+  let modelsInstalled = true;
+  const calls = [];
+  const runtime = () => ({
+    platform: 'macos',
+    status: 'ready_for_mesh_operations',
+    model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', status: 'experimental_opt_in', backend_ids: ['pixal3d-mlx', 'pixal3d-cuda'] }],
+    model_backends: [{
+      id: 'pixal3d-mlx', installable: true, ready: modelsInstalled,
+      environment_ready: true, downloads_enabled: !modelsInstalled, models_downloaded: modelsInstalled,
+      local_files: { token_saved: tokenSaved, disconnect_available: tokenSaved, remove_models_available: modelsInstalled, credentials_managed: true, model_files_managed: true },
+    }, { id: 'pixal3d-cuda', installable: false }],
+  });
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: runtime() }));
+  for (const scope of ['model-files', 'huggingface']) {
+    await page.route(`**/api/v1/runtime/pixal3d-mlx/${scope}`, route => {
+      expect(route.request().method()).toBe('DELETE');
+      expect(route.request().postDataJSON()).toEqual({ confirmed: true });
+      calls.push(scope);
+      if (scope === 'model-files') modelsInstalled = false;
+      else tokenSaved = false;
+      return route.fulfill({ json: runtime() });
+    });
+  }
+  await page.goto(studioOrigin + '/settings/storage');
+  const storage = page.getByRole('main', { name: 'Downloads & storage' });
+  const uninstall = storage.getByRole('button', { name: 'Uninstall model files' });
+  await expect(storage.getByText('Installed', { exact: true })).toBeVisible();
+  await uninstall.click();
+  const remove = page.getByRole('dialog', { name: 'Remove model files?' });
+  await expect(remove).toContainText('all Studio assets stay in place');
+  await remove.getByRole('button', { name: 'Cancel' }).click();
+  await expect(uninstall).toBeFocused();
+  expect(calls).toEqual([]);
+  await uninstall.click();
+  await remove.getByRole('button', { name: 'Remove files' }).click();
+  await expect(storage.getByText('Not installed', { exact: true })).toBeVisible();
+  await expect(storage.getByRole('button', { name: 'Verify saved token' })).toBeVisible();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  const connections = page.getByRole('main', { name: 'Connections' });
+  await expect(connections.getByText('Token saved', { exact: true })).toBeVisible();
+  await connections.getByLabel('Backend').selectOption('pixal3d-cuda');
+  await expect(connections.getByRole('button', { name: 'Disconnect locally' })).toHaveCount(0);
+  await connections.getByLabel('Backend').selectOption('pixal3d-mlx');
+  await connections.getByRole('button', { name: 'Disconnect locally' }).click();
+  const disconnect = page.getByRole('dialog', { name: 'Disconnect Hugging Face?' });
+  await expect(disconnect).toContainText('does not revoke the token');
+  await disconnect.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(connections.getByText('Not connected', { exact: true })).toBeVisible();
+  expect(calls).toEqual(['model-files', 'huggingface']);
+  await page.goBack();
+  await expect(storage.getByText('Not installed', { exact: true })).toBeVisible();
+  await expect(storage.getByRole('button', { name: 'Verify saved token' })).toHaveCount(0);
 });

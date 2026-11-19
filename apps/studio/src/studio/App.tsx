@@ -1,4 +1,4 @@
-import { ArrowsClockwiseIcon, CpuIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WarningCircleIcon, WrenchIcon, XIcon } from '@phosphor-icons/react';
+import { ArrowsClockwiseIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GearSixIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WarningCircleIcon, WrenchIcon, XIcon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   assetComparisonPairForSelection,
@@ -29,7 +29,6 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { Alert, AlertAction, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty';
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
@@ -44,10 +43,10 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { ModelPreview } from './ModelPreview';
 import { AssetGalleryCard } from './AssetGalleryCard';
 import { MeshStudy } from './MeshStudy';
-import { RuntimeSetup } from './RuntimeSetup';
+import { SettingsPage, settingsSectionFromPath, type RuntimeAction, type SettingsSection } from './SettingsPage';
 import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
 import { formatVersionSizes, inspectorForAsset, shouldHighlightExport, WORKBENCH_INSPECTOR_SHEET_QUERY, type Inspector } from './workbench-state';
-import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeInfo } from './types';
+import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeBackendId, RuntimeInfo } from './types';
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
 type AssetKindFilter = AssetKind | 'all';
@@ -128,8 +127,16 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; descript
 
 export function App() {
   const [connection, setConnection] = useState<Connection>('disconnected');
-  const [showEngineDialog, setShowEngineDialog] = useState(false);
-  const [runtimeDialogBackend, setRuntimeDialogBackend] = useState<string | null>(null);
+  const [settingsSection, setSettingsSection] = useState(() => settingsSectionFromPath(window.location.pathname));
+  const [settingsBackend, setSettingsBackend] = useState<RuntimeBackendId | null>(null);
+  const settingsTrigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    function onPopState() {
+      setSettingsSection(settingsSectionFromPath(window.location.pathname));
+    }
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [operations, setOperations] = useState<Operation[]>([]);
@@ -159,8 +166,6 @@ export function App() {
   const [generationBackend, setGenerationBackend] = useState('auto');
   const [generationSource, setGenerationSource] = useState<Asset | null>(null);
   const [generationResult, setGenerationResult] = useState<Job | null>(null);
-  const [modelDownloadAcknowledged, setModelDownloadAcknowledged] = useState(false);
-  const [cudaModelDownloadAcknowledged, setCudaModelDownloadAcknowledged] = useState(false);
   const historySelectionGuard = useRef(new LatestRequestGuard());
   const recentJobsRequestGuard = useRef(new LatestRequestGuard());
   const [job, setJobState] = useState<Job | null>(null);
@@ -234,14 +239,24 @@ export function App() {
   const selectedGenerationBackend = generationBackend === 'auto'
     ? automaticBackend
     : runtime?.model_backends.find((backend) => backend.id === generationBackend);
-  const dialogBackend = runtime?.model_backends.find(backend => backend.id === runtimeDialogBackend)
-    ?? automaticBackend;
-  const dialogUsesCuda = dialogBackend?.id === 'pixal3d-cuda';
+  function openSettings(section: SettingsSection, backendId?: RuntimeBackendId) {
+    if (backendId) setSettingsBackend(backendId);
+    if (inspectorIsSheet) setInspector(null);
+    if (sidebar.narrow && sidebar.open) sidebar.setOpen(false);
+    const path = `/settings/${section}`;
+    if (window.location.pathname !== path) window.history.pushState(null, '', path);
+    setSettingsSection(section);
+  }
+
+  function closeSettings() {
+    window.history.pushState(null, '', '/');
+    setSettingsSection(null);
+    requestAnimationFrame(() => settingsTrigger.current?.focus());
+  }
 
   function openRuntime(backendId?: string) {
-    setRuntimeDialogBackend(backendId ?? null);
-    if (inspectorIsSheet) setInspector(null);
-    setShowEngineDialog(true);
+    const profile = backendId === 'pixal3d-mlx' || backendId === 'pixal3d-cuda' ? backendId : undefined;
+    openSettings(selectedGenerationBackend?.environment_ready ? 'storage' : 'models', profile);
   }
 
   async function requestAssetPage(
@@ -473,7 +488,6 @@ export function App() {
       });
       setAssetPageLoading(false);
       setConnection('connected');
-      setShowEngineDialog(false);
     } catch (cause) {
       setAssetPageLoading(false);
       setConnection('disconnected');
@@ -535,14 +549,12 @@ export function App() {
             setReportJob(null);
             setRuntime(runtimeInfo);
             setOperations(operationList);
-            setModelDownloadAcknowledged(false);
-            setCudaModelDownloadAcknowledged(false);
             setNotice(latest.operation === 'runtime.pixal3d.setup'
-              ? 'The isolated Python environment is ready. Sign into Hugging Face from a local terminal before downloading gated model files.'
+              ? 'The isolated Python environment is ready. Connect Hugging Face in Settings before downloading model files.'
               : latest.operation === 'runtime.pixal3d.install_models'
                 ? 'Pinned model files are ready. MeshHarbor completed the one-time NAF conversion in an isolated tool environment.'
                 : latest.operation === 'runtime.pixal3d.cuda_setup'
-                  ? 'The isolated CUDA environment and GPU preflight are ready. Sign into Hugging Face in a local terminal before the model download.'
+                  ? 'The isolated CUDA environment and GPU preflight are ready. Connect Hugging Face in Settings before downloading model files.'
                   : latest.operation === 'runtime.pixal3d.cuda_install_models'
                     ? 'Pinned CUDA model files are ready. Generation can now run offline on this NVIDIA host.'
                     : 'The NAF checkpoint is converted and the Pixal3D runtime is ready.');
@@ -759,7 +771,7 @@ export function App() {
       return;
     }
     if (connection !== 'connected') {
-      setShowEngineDialog(true);
+      openSettings('models');
       setConnectionError('The engine must be running before Studio can import files.');
       return;
     }
@@ -926,80 +938,22 @@ export function App() {
     }
   }
 
-  async function setupPixal3dRuntime() {
+  async function runRuntimeAction(backend: RuntimeBackendId, action: RuntimeAction) {
+    if (busy || isRunning || connection !== 'connected') return;
     invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
     try {
-      const nextJob = await api.setupPixal3dRuntime();
+      const cuda = backend === 'pixal3d-cuda';
+      const nextJob = action === 'setup'
+        ? await (cuda ? api.setupPixal3dCudaRuntime() : api.setupPixal3dRuntime())
+        : action === 'download'
+          ? await (cuda ? api.installPixal3dCudaModels() : api.installPixal3dModels())
+          : await api.convertPixal3dNaf();
       setJob(nextJob);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not set up the Pixal3D runtime.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function installPixal3dModels() {
-    if (!modelDownloadAcknowledged) return;
-    invalidateHistoryRequests();
-    setError(null);
-    setNotice(null);
-    setBusy(true);
-    try {
-      const nextJob = await api.installPixal3dModels();
-      setJob(nextJob);
-      setModelDownloadAcknowledged(false);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not start the model download.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function convertPixal3dNaf() {
-    invalidateHistoryRequests();
-    setError(null);
-    setNotice(null);
-    setBusy(true);
-    try {
-      const nextJob = await api.convertPixal3dNaf();
-      setJob(nextJob);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not prepare the NAF converter.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function setupPixal3dCudaRuntime() {
-    invalidateHistoryRequests();
-    setError(null);
-    setNotice(null);
-    setBusy(true);
-    try {
-      const nextJob = await api.setupPixal3dCudaRuntime();
-      setJob(nextJob);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not set up the Pixal3D CUDA runtime.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function installPixal3dCudaModels() {
-    if (!cudaModelDownloadAcknowledged) return;
-    invalidateHistoryRequests();
-    setError(null);
-    setNotice(null);
-    setBusy(true);
-    try {
-      const nextJob = await api.installPixal3dCudaModels();
-      setJob(nextJob);
-      setCudaModelDownloadAcknowledged(false);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not start the CUDA model download.');
+      setError(cause instanceof Error ? cause.message : 'Could not start the runtime operation.');
     } finally {
       setBusy(false);
     }
@@ -1067,7 +1021,6 @@ export function App() {
   const closeInspectorLabel = openInspector === 'jobs' ? 'Close jobs' : 'Close settings';
   const showInspectorSheet = inspectorIsSheet && !!openInspector;
   const exportIsPrimary = shouldHighlightExport(activeView, openInspector, isRunning, connection === 'connected');
-  const runtimeJobRunning = isRunning && job.operation.startsWith('runtime.');
   const jobShowsProgress = isRunning && displaysJobProgress(job.operation);
   function restoreInspectorFocus() {
     const trigger = inspectorTrigger.current;
@@ -1209,7 +1162,7 @@ export function App() {
           {canGenerate && !(isRunning && job.operation === 'image.generate') && <Button className="w-full" disabled={!generationSource || busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
           {!canGenerate && <div className="grid gap-2 text-muted-foreground">
             <p>{selectedGenerationBackend?.installable ? 'Prepare a local runtime before generating.' : 'This backend is not available on this computer.'} Existing GLBs do not require a model runtime.</p>
-            <Button variant={selectedGenerationBackend?.installable ? 'default' : 'secondary'} onClick={() => openRuntime(selectedGenerationBackend?.id)}>Runtime setup</Button>
+            <Button variant={selectedGenerationBackend?.installable ? 'default' : 'secondary'} onClick={() => openRuntime(selectedGenerationBackend?.id)}>Open model setup</Button>
           </div>}
           {generationResult?.result?.asset_id && <Button variant="secondary" className="w-full" disabled={busy || isRunning} onClick={() => {
             closeInspector();
@@ -1313,8 +1266,14 @@ export function App() {
   ) : null;
 
   return (
-    <Dialog open={showEngineDialog} onOpenChange={setShowEngineDialog}>
-      <div className="flex min-h-dvh min-w-0 flex-col bg-background min-[881px]:h-dvh min-[881px]:overflow-hidden" onDragOver={(event) => {
+    <>
+      {settingsSection && <SettingsPage api={api} section={settingsSection} backendId={settingsBackend} runtime={runtime}
+        connection={connection} connectionError={connectionError} busy={busy || isRunning || installingBackend}
+        feedback={feedback} jobFeedback={jobFeedback} jobs={recentJobs} operationLabel={studioOperationLabel}
+        onVisit={openSettings} onProfileChange={setSettingsBackend} onClose={closeSettings}
+        onReconnect={() => void connect()} onRefreshJobs={refreshRecentJobs} onRuntimeChange={setRuntime}
+        onRuntimeAction={(backend, action) => void runRuntimeAction(backend, action)} />}
+      <div className={`${settingsSection ? 'hidden' : 'flex'} min-h-dvh min-w-0 flex-col bg-background min-[881px]:h-dvh min-[881px]:overflow-hidden`} onDragOver={(event) => {
       if (!event.dataTransfer.types.includes('Files')) return;
       event.preventDefault();
       setDragging(true);
@@ -1338,7 +1297,7 @@ export function App() {
             aria-expanded={sidebar.open} aria-haspopup={sidebar.narrow ? 'dialog' : undefined}
             aria-controls={sidebar.open ? (sidebar.narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
             onClick={sidebar.toggleInventory}><SquaresFourIcon aria-hidden="true" /> Inventory</Button>
-          <DialogTrigger asChild><Button variant="ghost" size="sm" aria-label="Engine and runtimes"><CpuIcon data-icon="inline-start" aria-hidden="true" /><span>Runtime</span></Button></DialogTrigger>
+          <Button variant="ghost" size="sm" ref={settingsTrigger} onClick={() => openSettings('models')}><GearSixIcon data-icon="inline-start" aria-hidden="true" /> Settings</Button>
         </div>
       </header>
 
@@ -1347,12 +1306,12 @@ export function App() {
           <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" tabIndex={-1} type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={inventoryInputRef} className="sr-only" aria-label="Choose inventory files" tabIndex={-1} type="file" multiple accept=".glb,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={imageInputRef} className="sr-only" aria-label="Choose reference file" tabIndex={-1} type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files, 'reference'); event.currentTarget.value = ''; }} />
-          {!showInspectorSheet && !showEngineDialog && <div className={`pointer-events-none fixed inset-x-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto ${sidebar.narrow ? 'bottom-16' : 'bottom-3'}`}>
+          {!showInspectorSheet && !settingsSection && <div className={`pointer-events-none fixed inset-x-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto ${sidebar.narrow ? 'bottom-16' : 'bottom-3'}`}>
             {feedback}
             {jobFeedback}
           </div>}
 
-            <WorkbenchLayout state={sidebar} inspector={desktopInspector} tools={toolRail}
+            <WorkbenchLayout state={settingsSection && sidebar.narrow ? { ...sidebar, open: false } : sidebar} inspector={desktopInspector} tools={toolRail}
               assets={
               <div className="@container min-w-0 text-xs" id="asset-library">
                 <div className="grid min-w-0 gap-2 border-b px-3 py-3">
@@ -1552,11 +1511,11 @@ export function App() {
             </section>
 
             </WorkbenchLayout>
-          {showInspectorSheet && <Sheet open={showInspectorSheet} onOpenChange={open => { if (!open) setInspector(null); }}>
+          {showInspectorSheet && !settingsSection && <Sheet open={showInspectorSheet} onOpenChange={open => { if (!open) setInspector(null); }}>
             <SheetContent side="left" id="workbench-inspector" data-tool={openInspector} aria-describedby={undefined}
               className="overflow-auto overscroll-contain max-sm:w-full" onCloseAutoFocus={event => {
               event.preventDefault();
-              if (!showEngineDialog) restoreInspectorFocus();
+              restoreInspectorFocus();
             }}>
               <SheetHeader><SheetTitle>{inspectorTitle}</SheetTitle></SheetHeader>
               {(feedback || jobFeedback) && <div className="grid gap-2 px-4">{feedback}{jobFeedback}</div>}
@@ -1566,46 +1525,8 @@ export function App() {
       </main>
       {dragging && <div className="pointer-events-none fixed inset-0 z-30 grid place-items-center bg-background/80 p-4"><div className="grid gap-2 rounded-lg border border-dashed bg-card p-6 text-center text-sm"><span className="text-lg text-primary">↓</span><strong>Drop a GLB or source image here</strong><span>Import starts locally on your computer</span></div></div>}
 
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Engine and runtimes</DialogTitle>
-          <DialogDescription>{connection === 'connected'
-            ? 'Set up image-to-3D on this computer. Opening and editing GLBs does not need a model runtime.'
-            : 'Studio connects to MeshHarbor on this computer. No token is needed here.'}</DialogDescription>
-        </DialogHeader>
-        {connection === 'connected' ? dialogBackend ? <>
-          <Field>
-            <FieldLabel htmlFor="runtime-backend">Backend</FieldLabel>
-            <NativeSelect className="w-full" id="runtime-backend" value={dialogBackend.id} disabled={busy || runtimeJobRunning} onChange={(event) => setRuntimeDialogBackend(event.target.value)}>
-              <NativeSelectOption value="pixal3d-mlx">Apple MLX</NativeSelectOption>
-              <NativeSelectOption value="pixal3d-cuda">NVIDIA CUDA</NativeSelectOption>
-            </NativeSelect>
-          </Field>
-          {feedback}
-          {jobFeedback}
-          <RuntimeSetup key={dialogBackend.id} backend={dialogBackend} disabled={busy || isRunning}
-            acknowledged={dialogUsesCuda ? cudaModelDownloadAcknowledged : modelDownloadAcknowledged}
-            onAcknowledge={dialogUsesCuda ? setCudaModelDownloadAcknowledged : setModelDownloadAcknowledged}
-            onCheckAccess={token => api.checkHuggingFaceAccess(dialogUsesCuda ? 'pixal3d-cuda' : 'pixal3d-mlx', token)}
-            onSetup={() => void (dialogUsesCuda ? setupPixal3dCudaRuntime : setupPixal3dRuntime)()}
-            onDownload={() => void (dialogUsesCuda ? installPixal3dCudaModels : installPixal3dModels)()}
-            onConvert={() => void convertPixal3dNaf()} />
-        </> : <p className="text-muted-foreground">The engine did not report an image-to-3D backend.</p> : <>
-        <div className="grid gap-1 rounded-md border bg-muted p-2 text-muted-foreground [&>code]:text-foreground"><code>meshharbor serve</code><span>Run in your terminal and leave it open</span></div>
-        {connectionError && <Alert variant="destructive" role="alert">
-          <WarningCircleIcon aria-hidden="true" />
-          <AlertDescription>
-            Engine offline. Start it in your terminal, then retry.
-            <details className="mt-1 break-words [&>summary]:cursor-pointer"><summary>Technical details</summary>{connectionError}</details>
-          </AlertDescription>
-        </Alert>}
-        <Button onClick={() => void connect()} disabled={connection === 'connecting'}>
-          {connection === 'connecting' ? 'Connecting…' : 'Retry connection'}
-        </Button>
-        </>}
-      </DialogContent>
       </div>
-    </Dialog>
+    </>
   );
 }
 

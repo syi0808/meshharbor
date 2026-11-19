@@ -4,7 +4,7 @@ This is the single-screen Studio client for the local MeshHarbor engine. It impo
 
 ## Workspace flow
 
-Studio is one edge-to-edge workbench: tools on the left, the viewport in the center, and the inventory on the right. **Open GLB** selects a model for inspection. **Import assets** in the library accepts GLB or PNG/JPEG. **New model** opens a separate image-to-3D form whether or not a model is selected. Choose a reference in that form or explicitly attach a displayed image via **Use as reference**. **Runtime** in the app bar distinguishes Python setup from the separately approved model download. A missing generation runtime does not block opening and optimizing local GLBs.
+Studio's workbench has tools on the left, the viewport in the center, and the inventory on the right. **Open GLB** selects a model for inspection. **Import assets** in the library accepts GLB or PNG/JPEG. **New model** opens a separate image-to-3D form whether or not a model is selected. Choose a reference in that form or explicitly attach a displayed image via **Use as reference**. **Settings** in the app bar opens a separate management page. A missing generation runtime does not block opening and optimizing local GLBs.
 
 The right **Inventory** dock opens on a first desktop visit. Browse the thumbnail grid, search by filename, or expand **Filters**. Use **Inventory** in the header to reopen it; there is no right-hand icon rail. **Jobs** opens recent activity from the left tool rail, even when no asset is selected. The left icons show labels on hover or keyboard focus without shifting the layout. Drag either desktop divider or focus it and use the arrow keys; Studio remembers the Inventory's visibility and panel sizes. Tool settings and Jobs open in a left drawer at 1024px or less. At 760px or less **Inventory** opens a right drawer without changing the desktop layout.
 
@@ -47,11 +47,15 @@ Dashboard API calls use an explicit non-simple header plus an exact same-origin 
 
 The marker is not a secret or local-process authentication: another process running as the same OS user can forge browser headers and is within this single-user local trust boundary. These checks are for hostile websites, cross-origin forms, and other local web origins. They do not defend against malicious code already running as the user. Non-dashboard clients can continue using the bearer token printed by the Rust server. The Rust API and Vite server must remain bound to loopback.
 
-## Image-to-3D model access
+## Settings
 
-In **Runtime**, set up the Python environment for the selected backend. Use the Studio links to request DINOv3 access and create a read-only Hugging Face token in the same account. Terms, access requests, and token creation stay on Hugging Face. Back in Studio, use **Connect token**, or **Check saved token** if you previously signed in with the CLI. Studio enables the download consent only after a metadata-only request for the pinned DINOv3 checkpoint file confirms access, without transferring weights.
+Settings has its own URLs and keeps the workbench selection and preview intact. Use **Workbench** to return. The same three sections appear in a side navigation on desktop and across the top on narrow screens.
 
-The loopback endpoint accepts only same-origin Studio requests. A verified token is stored in the selected backend's isolated Hugging Face cache, not in browser storage or job history. MLX and CUDA keep separate credentials. Revoke the token in Hugging Face settings if you no longer need it.
+- **Models** lists supported generation models and their backend requirements. Pixal3D is one model with Apple MLX and NVIDIA CUDA execution profiles. Set up Python for a compatible profile independently of downloading weights.
+- **Connections** shows whether a backend has a saved Hugging Face token, without making a network request. Use the official links for DINOv3 access and token creation, then connect, replace, or verify the token in Studio. **Disconnect locally** clears this backend's isolated Hugging Face token files, not your normal Hugging Face cache or remote token. Revoke on Hugging Face if needed.
+- **Downloads & storage** shows model availability, estimated download size, and recent setup and download jobs. Verify access and approve the transfer separately. **Uninstall model files** also clears partial transfers and this profile's Xet cache. It keeps the Python environment, credentials, and imported or generated assets. Custom or linked storage locations are not removed by Studio.
+
+The first-time flow is **Models → set up environment → Connections → verify access → Downloads & storage → approve download**. The local endpoints for credentials and removal accept only same-origin Studio requests. Access verification is a metadata-only request for the pinned checkpoint file and does not transfer weights.
 
 ## Build
 

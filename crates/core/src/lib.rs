@@ -6,6 +6,7 @@ mod cuda_runtime;
 mod generation;
 mod glb;
 mod huggingface_access;
+mod model_storage;
 mod operation;
 mod parts;
 mod quadriflow;
@@ -26,6 +27,7 @@ pub use glb::{
 };
 pub use huggingface_access::HuggingFaceAccess;
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
+pub use model_storage::Pixal3dProfile;
 pub use operation::{
     MeshOperationResult, OperationCore, OperationDescriptor, RuntimeDoctor, SimplificationResult,
 };

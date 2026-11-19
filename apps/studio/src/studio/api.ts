@@ -1,4 +1,4 @@
-import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, HuggingFaceAccess, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, HuggingFaceAccess, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
 
 export const MAX_ASSET_IMPORT_FILES = 10;
 export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
@@ -633,10 +633,19 @@ export class MeshHarborApi {
     return this.request('/api/v1/runtime');
   }
 
-  checkHuggingFaceAccess(backend: 'pixal3d-mlx' | 'pixal3d-cuda', token?: string): Promise<HuggingFaceAccess> {
+  checkHuggingFaceAccess(backend: RuntimeBackendId, token?: string): Promise<HuggingFaceAccess> {
     return this.request(`/api/v1/runtime/${backend}/huggingface`, {
       method: 'POST',
       body: JSON.stringify({ token }),
+      cache: 'no-store',
+      redirect: 'error',
+    });
+  }
+
+  removeRuntimeFiles(backend: RuntimeBackendId, scope: 'huggingface' | 'model-files'): Promise<RuntimeInfo> {
+    return this.request(`/api/v1/runtime/${backend}/${scope}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ confirmed: true }),
       cache: 'no-store',
       redirect: 'error',
     });

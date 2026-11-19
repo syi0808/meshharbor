@@ -56,8 +56,9 @@ inherit ambient tokens or user Python packages.
 
 ## Studio, REST, and MCP
 
-Studio shows separate MLX and CUDA setup panels, an automatic/platform backend
-selector, and a distinct consent checkbox for the CUDA download. The same
+Studio **Settings** shows MLX and CUDA as Pixal3D execution profiles and has
+separate Connections and Downloads & storage sections. The workbench has an
+automatic/platform backend selector. The same
 generation option (`backend_id: "auto" | "pixal3d-mlx" | "pixal3d-cuda"`) is
 accepted by the CLI, `POST /api/v1/jobs` `image.generate`, and MCP
 `start_image_generation`. Runtime setup/model installation are asynchronous:
