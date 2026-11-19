@@ -129,7 +129,17 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   const texture = generate.getByLabel('Texture size');
   await expect(texture.locator('option')).toHaveText(['1024', '2048']);
   await texture.selectOption('2048');
-  await generate.getByLabel('Texture sampling steps').fill('18');
+  const sampling = generate.getByRole('button', { name: 'Sampling', exact: true });
+  const output = generate.getByRole('button', { name: 'Output', exact: true });
+  const samplingSteps = generate.getByLabel('Texture sampling steps');
+  await samplingSteps.fill('18');
+  await sampling.click();
+  await expect(sampling).toHaveAttribute('aria-expanded', 'false');
+  await expect(samplingSteps).toBeHidden();
+  await expect(output).toHaveAttribute('aria-expanded', 'true');
+  await expect(seed).toBeVisible();
+  await sampling.press('Enter');
+  await expect(samplingSteps).toHaveValue('18');
   const faces = generate.getByLabel('Soft face target');
   await faces.fill('3');
   await expect(faces).toHaveAttribute('aria-invalid', 'true');
@@ -158,6 +168,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
     created_at: String(Date.now()),
     updated_at: String(Date.now()),
   };
+  let generationState = 'queued';
   await page.route('**/api/v1/jobs', async route => {
     const payload = route.request().postDataJSON();
     expect(payload.operation).toBe('image.generate');
@@ -166,11 +177,32 @@ test('generation uses its explicit reference and leaves the inspected GLB select
     await route.fulfill({ status: 202, json: { ...job, state: 'queued', progress: 0 } });
   });
   await page.route('**/api/v1/jobs/job_generation_layout', route => route.fulfill({ json: {
-    ...job, state: 'succeeded', progress: 100, result: { asset_id: derived.id },
+    ...job,
+    state: generationState,
+    progress: generationState === 'succeeded' ? 100 : generationState === 'running' ? 5 : 0,
+    ...(generationState === 'running' ? { started_at: job.created_at, stage: 'texture_flow' } : {}),
+    ...(generationState === 'succeeded' ? { result: { asset_id: derived.id }, started_at: job.created_at } : {}),
   } }));
   await page.route('**/api/v1/assets/asset_generation_layout', route => route.fulfill({ json: derived }));
   await generateAction.click();
+  const inventory = page.getByRole('complementary', { name: 'Inventory' });
+  const pending = inventory.getByRole('region', { name: 'Models in progress' });
+  await expect(pending.getByText('Waiting for an engine slot')).toBeVisible();
+  await expect(pending.getByText(/^Queue time:/)).toBeVisible();
+  await inventory.getByRole('tab', { name: 'Images' }).click();
+  await expect(pending).toHaveCount(0);
+  await inventory.getByRole('tab', { name: '3D models' }).click();
+  generationState = 'running';
+  await expect(pending.getByText('Generating textures', { exact: true })).toBeVisible();
+  await pending.getByRole('button', { name: 'View progress for reference.png' }).click();
+  await expect(page.getByRole('heading', { name: 'Jobs dashboard' })).toBeFocused();
+  const inProgress = page.getByRole('region', { name: /In progress/ });
+  await expect(inProgress.getByText('Generating textures', { exact: true })).toBeVisible();
+  await expect(inProgress.getByText(/^Elapsed: /)).toBeVisible();
+  await page.getByRole('button', { name: 'Studio', exact: true }).click();
+  generationState = 'succeeded';
   await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Image-to-3D generation complete.', { exact: false })).toBeVisible();
+  await expect(pending).toHaveCount(0);
   await expect(page.locator('#asset-library').getByTitle(derived.name)).toBeVisible();
   await expect(selected.getByTitle(active.name)).toBeVisible();
   await generate.getByRole('button', { name: 'View generated model' }).click();

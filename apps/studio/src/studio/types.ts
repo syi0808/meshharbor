@@ -139,6 +139,7 @@ export interface Job {
   operation: string;
   state: 'queued' | 'running' | 'validating' | 'succeeded' | 'failed' | 'cancelling' | 'cancelled';
   input_asset_id?: string | null;
+  input_asset_name?: string | null;
   progress: number;
   result?: {
     asset_id?: string;
@@ -153,6 +154,8 @@ export interface Job {
   error?: { message?: string } | null;
   created_at: string;
   updated_at: string;
+  started_at?: string | null;
+  stage?: string | null;
 }
 
 export interface SimplificationReport {

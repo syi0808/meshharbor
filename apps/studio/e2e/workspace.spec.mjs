@@ -53,7 +53,7 @@ test('Jobs and storage activity share accessible item rows with failure details'
     id: 'failed-download', operation: 'runtime.pixal3d.install_models', state: 'failed', progress: 0,
     created_at: '1', updated_at: '2', error: { message: 'Local cache is unavailable.' },
   };
-  await page.route('**/api/v1/jobs?limit=20', route => route.fulfill({ json: [recorded] }));
+  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [recorded] }));
   await page.goto(studioOrigin);
   await page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs' }).click();
   const jobsRow = page.getByRole('complementary', { name: 'Jobs' }).getByRole('listitem');
@@ -205,7 +205,7 @@ test('preferences can switch the theme and remember it across reloads', async ({
 test('refresh results use one global toast across settings and workbench', async ({ page, studioOrigin }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   let failRefresh = false;
-  await page.route('**/api/v1/jobs?limit=20', route => failRefresh
+  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => failRefresh
     ? route.fulfill({ status: 503, json: { error: 'Job list unavailable.' } })
     : route.continue());
   await page.goto(studioOrigin + '/settings/models');

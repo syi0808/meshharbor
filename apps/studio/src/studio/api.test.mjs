@@ -317,10 +317,14 @@ test('job history uses a bounded read-only dashboard request', async () => {
     assert.equal((await api.jobs(500))[0].id, 'job-history');
     await api.jobs(-2);
     await api.jobs(Number.NaN);
+    await api.jobs(20, { includeActive: true });
+    await api.jobs(20, { before: 'job+last' });
     assert.deepEqual(calls.map(({ path }) => path), [
       '/api/v1/jobs?limit=100',
       '/api/v1/jobs?limit=1',
       '/api/v1/jobs?limit=20',
+      '/api/v1/jobs?limit=20&include_active=true',
+      '/api/v1/jobs?limit=20&before=job%2Blast',
     ]);
     assert.equal(calls[0].init.method, undefined);
     assert.equal(calls[0].init.body, undefined);

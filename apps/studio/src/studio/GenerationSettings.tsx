@@ -1,3 +1,5 @@
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
@@ -43,6 +45,12 @@ function parametersFor(profile: GenerationModel, posed: boolean) {
   return profile.parameters.filter(parameter => !posed || !parameter.single_view_only);
 }
 
+function hasInvalidInterval(parameter: GenerationParameter, value: string, parameters: GenerationParameter[], draft: Draft): boolean {
+  if (!parameter.id.endsWith('guidance_start')) return false;
+  const end = parameters.find(candidate => candidate.id === parameter.id.replace(/guidance_start$/, 'guidance_end'));
+  return end !== undefined && Number(value) > Number(parameterValue(end, draft));
+}
+
 export function generationParameters(profile: GenerationModel, draft: Draft, posed: boolean): GenerationParameters | null {
   const tuning: GenerationTuning = {};
   const core: Record<string, number> = {};
@@ -72,17 +80,24 @@ export function GenerationParameterFields({ profile, draft, posed, disabled, onC
     const group = parameter.section ?? 'Output';
     sections.set(group, [...(sections.get(group) ?? []), parameter]);
   }
-  return <FieldGroup className="gap-5">
-    {[...sections].map(([section, parameters]) => <FieldSet key={section} className="min-w-0 border-t pt-3">
-      <FieldLegend variant="label" className="mb-0 pr-2 text-muted-foreground">{section}</FieldLegend>
+  return <Accordion key={profile.id} type="multiple" defaultValue={['Output', 'Sampling']} className="min-w-0">
+    {[...sections].map(([section, parameters]) => <AccordionItem key={section} value={section}>
+      <AccordionTrigger className="items-center gap-2 focus-visible:border-ring">
+        <span>{section}</span>
+        {parameters.some(parameter => {
+          const value = parameterValue(parameter, draft);
+          return parseParameter(parameter, value) === null || hasInvalidInterval(parameter, value, profile.parameters, draft);
+        }) && <Badge variant="destructive">Check values</Badge>}
+      </AccordionTrigger>
+      <AccordionContent className="px-1">
+      <FieldSet className="min-w-0">
+      <FieldLegend variant="label" className="sr-only">{section}</FieldLegend>
       <FieldGroup className="gap-3">
         {parameters.map(parameter => {
           const id = `generation-parameter-${parameter.id}`;
           const value = parameterValue(parameter, draft);
           const invalid = parseParameter(parameter, value) === null;
-          const end = profile.parameters.find(candidate => candidate.id === parameter.id.replace(/guidance_start$/, 'guidance_end'));
-          const invalidInterval = parameter.id.endsWith('guidance_start') && end !== undefined
-            && Number(value) > Number(parameterValue(end, draft));
+          const invalidInterval = hasInvalidInterval(parameter, value, profile.parameters, draft);
           const describedBy = [parameter.description && `${id}-description`, (invalid || invalidInterval) && `${id}-error`].filter(Boolean).join(' ') || undefined;
           return <Field key={parameter.id} data-invalid={invalid || invalidInterval || undefined}>
             {parameter.kind === 'boolean' ? <div className="flex items-center gap-2">
@@ -108,6 +123,8 @@ export function GenerationParameterFields({ profile, draft, posed, disabled, onC
           </Field>;
         })}
       </FieldGroup>
-    </FieldSet>)}
-  </FieldGroup>;
+      </FieldSet>
+      </AccordionContent>
+    </AccordionItem>)}
+  </Accordion>;
 }

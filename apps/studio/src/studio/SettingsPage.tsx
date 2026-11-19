@@ -1,4 +1,4 @@
-import { ArrowLeftIcon, ArrowsClockwiseIcon, CubeIcon, HardDrivesIcon, KeyIcon, PaintBrushIcon } from '@phosphor-icons/react';
+import { ArrowLeftIcon, ArrowsClockwiseIcon, CubeIcon, HardDrivesIcon, KeyIcon, ListChecksIcon, PaintBrushIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
@@ -15,6 +15,7 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Sidebar, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider } from '@/components/ui/sidebar';
 import { Disclosure } from './Disclosure';
 import { JobListItem } from './JobListItem';
+import type { StudioActivity } from './JobsDashboard';
 import { notify } from './notify';
 import type { MeshHarborApi } from './api';
 import type { HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, RuntimeBackendId, RuntimeInfo } from './types';
@@ -65,6 +66,8 @@ interface Props {
   onVisit: VisitSettings;
   onProfileChange: (backend: RuntimeBackendId) => void;
   onClose: () => void;
+  onOpenDashboard: () => void;
+  onActivityChange: (activity: StudioActivity | null) => void;
   onReconnect: () => void;
   onRefreshJobs: () => Promise<boolean>;
   onThemeChange: (theme: StudioTheme) => void;
@@ -72,7 +75,7 @@ interface Props {
   onRuntimeAction: (backend: RuntimeBackendId, action: RuntimeAction) => void;
 }
 
-export function SettingsPage({ api, section, backendId, runtime, connection, connectionError, busy, jobFeedback, theme, jobs, operationLabel, onVisit, onProfileChange, onClose, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
+export function SettingsPage({ api, section, backendId, runtime, connection, connectionError, busy, jobFeedback, theme, jobs, operationLabel, onVisit, onProfileChange, onClose, onOpenDashboard, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
   const heading = useRef<HTMLHeadingElement>(null);
   const removalTrigger = useRef<HTMLButtonElement | null>(null);
   const [accounts, setAccounts] = useState<Partial<Record<RuntimeBackendId, AccountStatus>>>({});
@@ -186,6 +189,11 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
     if (!removal || disabled) return;
     const { backend, scope } = removal;
     void perform(async () => {
+      if (scope === 'model-files') onActivityChange({
+        title: 'Remove model files',
+        stage: `Removing local weights for ${profiles[backend].title}`,
+        startedAt: Date.now(),
+      });
       try {
         onRuntimeChange(await api.removeRuntimeFiles(backend, scope));
         if (scope === 'huggingface') {
@@ -195,6 +203,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           ? `Hugging Face disconnected for ${profiles[backend].title} on this computer.`
           : `Pixal3D model files removed for ${profiles[backend].title}.`);
       } finally {
+        if (scope === 'model-files') onActivityChange(null);
         setRemoval(null);
       }
     });
@@ -213,6 +222,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
       <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-4 py-2 sm:px-6">
         <Button variant="ghost" size="sm" onClick={onClose}><ArrowLeftIcon aria-hidden="true" /> Workbench</Button>
         <span className="border-l pl-3 font-heading text-sm font-medium">Settings</span>
+        <Button variant="ghost" size="sm" className="ml-auto" onClick={onOpenDashboard}><ListChecksIcon aria-hidden="true" /> Dashboard</Button>
       </div>
     </header>
     <div className="mx-auto grid max-w-6xl gap-6 px-4 py-5 sm:px-6 md:grid-cols-[12rem_minmax(0,1fr)] md:gap-8 md:py-8">

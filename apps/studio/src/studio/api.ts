@@ -718,9 +718,12 @@ export class MeshHarborApi {
     return this.request(`/api/v1/assets/page?${params.toString()}`);
   }
 
-  jobs(limit = 20): Promise<Job[]> {
+  jobs(limit = 20, options: { includeActive?: boolean; before?: string } = {}): Promise<Job[]> {
     const boundedLimit = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 20;
-    return this.request(`/api/v1/jobs?limit=${boundedLimit}`);
+    const params = new URLSearchParams({ limit: String(boundedLimit) });
+    if (options.includeActive) params.set('include_active', 'true');
+    if (options.before) params.set('before', options.before);
+    return this.request(`/api/v1/jobs?${params}`);
   }
 
   importGlb(file: File): Promise<Asset> {
