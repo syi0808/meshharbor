@@ -36,13 +36,25 @@ export interface Operation {
 }
 
 export type HuggingFaceAccess = 'not_connected' | 'access_denied' | 'verified';
+export type HuggingFaceConnectionStatus = 'not_connected' | 'invalid_token' | 'connected';
 export type RuntimeBackendId = 'pixal3d-mlx' | 'pixal3d-cuda';
 export type HuggingFaceBrowserLogin = { id: string } & (
-  | { state: 'preparing' | 'checking_access' | 'cancelled' | 'expired' }
+  | { state: 'preparing' | 'signed_in' | 'cancelled' | 'expired' }
   | { state: 'awaiting_authorization'; user_code: string; expires_in: number }
-  | { state: 'signed_in'; access: HuggingFaceAccess | null }
   | { state: 'failed'; message: string }
 );
+
+export type GenerationParameter = { id: string; label: string; description: string; default: number } & (
+  | { kind: 'fixed' }
+  | { kind: 'choice'; values: number[] }
+  | { kind: 'integer'; min: number; max?: number }
+);
+
+export interface GenerationProfile {
+  id: string;
+  label: string;
+  parameters: GenerationParameter[];
+}
 
 export interface RuntimeInfo {
   status: string;
@@ -61,6 +73,7 @@ export interface RuntimeInfo {
   };
   model_backends: Array<{
     id: string;
+    generation?: GenerationProfile | null;
     ready?: boolean;
     status: string;
     validation_level?: string;

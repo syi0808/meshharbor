@@ -15,9 +15,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    CoreError, CoreResult, HuggingFaceAccess,
+    CoreError, CoreResult, HuggingFaceAccess, HuggingFaceConnection,
     generation::RuntimeReadiness,
-    huggingface_access::{DINO_REVISION, check_access, require_access},
+    huggingface_access::{DINO_REVISION, check_connection, check_model_access, require_access},
     huggingface_browser::access_python,
     runtime::RuntimeSetupReport,
     uv_bootstrap::ensure_uv,
@@ -73,7 +73,15 @@ impl Pixal3dCudaRuntimeManager {
         self.runtime_root.join("home")
     }
 
-    pub fn huggingface_access(&self, token: Option<&str>) -> CoreResult<HuggingFaceAccess> {
+    pub fn huggingface_connection(&self, token: Option<&str>) -> CoreResult<HuggingFaceConnection> {
+        check_connection(self.huggingface_command()?, token)
+    }
+
+    pub fn huggingface_model_access(&self) -> CoreResult<HuggingFaceAccess> {
+        check_model_access(self.huggingface_command()?)
+    }
+
+    fn huggingface_command(&self) -> CoreResult<Command> {
         self.ensure_supported_host()?;
         let python = self.python_path();
         if !python.is_file() {
@@ -82,7 +90,7 @@ impl Pixal3dCudaRuntimeManager {
             ));
         }
         let access_python = access_python(&self.runtime_root).unwrap_or(python);
-        check_access(self.python_command(&access_python), token)
+        Ok(self.python_command(&access_python))
     }
 
     fn hf_home(&self) -> PathBuf {
@@ -466,7 +474,7 @@ impl Pixal3dCudaRuntimeManager {
                 readiness.missing.join("; ")
             )));
         }
-        validate_generation_options(options)?;
+        options.validate_for_backend("pixal3d-cuda")?;
         let python = self.python_path();
         self.verify_cuda_environment(&python)?;
         std::fs::create_dir_all(output_dir)?;
@@ -697,25 +705,6 @@ fn cuda_environment_is_ready(
         && lockfile.is_file()
         && entrypoint.is_file()
         && read_valid_cuda_preflight_marker(marker)
-}
-
-fn validate_generation_options(options: &crate::GenerationOptions) -> CoreResult<()> {
-    if options.resolution != 512 {
-        return Err(CoreError::InvalidInput(
-            "Pixal3D CUDA exposes only the reviewed 512 geometry profile.".into(),
-        ));
-    }
-    if !matches!(options.texture_size, 512 | 1024 | 2048) {
-        return Err(CoreError::InvalidInput(
-            "texture_size must be 512, 1024, or 2048.".into(),
-        ));
-    }
-    if options.target_faces < 4 {
-        return Err(CoreError::InvalidInput(
-            "target_faces must be at least 4.".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn is_supported_target(os: &str, arch: &str) -> bool {

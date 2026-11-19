@@ -6,7 +6,7 @@ use axum::{
     http::{StatusCode, header},
     response::IntoResponse,
 };
-use meshharbor_core::{CoreError, HuggingFaceAccess, HuggingFaceBrowserTool, Pixal3dProfile};
+use meshharbor_core::{CoreError, HuggingFaceBrowserTool, Pixal3dProfile};
 use serde::Serialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
@@ -39,8 +39,7 @@ struct LoginView {
 enum LoginPhase {
     Preparing,
     AwaitingAuthorization { user_code: String, expires_in: u64 },
-    CheckingAccess,
-    SignedIn { access: Option<HuggingFaceAccess> },
+    SignedIn,
     Cancelled,
     Expired,
     Failed { message: String },
@@ -48,10 +47,7 @@ enum LoginPhase {
 
 impl LoginPhase {
     fn is_active(&self) -> bool {
-        matches!(
-            self,
-            Self::Preparing | Self::AwaitingAuthorization { .. } | Self::CheckingAccess
-        )
+        matches!(self, Self::Preparing | Self::AwaitingAuthorization { .. })
     }
 }
 
@@ -208,15 +204,8 @@ async fn run_login(
         }
         Ok(_) => return Err(login_error()),
     }
-    sessions.set_phase(id, LoginPhase::CheckingAccess).await;
-    let (tool, credentials, access) = task::spawn_blocking(move || {
-        let access = tool.verify(&credentials).ok();
-        (tool, credentials, access)
-    })
-    .await
-    .map_err(|_| login_error())?;
     tool.commit(credentials)?;
-    Ok(LoginPhase::SignedIn { access })
+    Ok(LoginPhase::SignedIn)
 }
 
 fn parse_prompt(line: &str) -> Option<(String, u64)> {

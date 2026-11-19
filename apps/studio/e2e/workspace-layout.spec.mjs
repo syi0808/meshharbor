@@ -66,10 +66,25 @@ test('desktop docks flank the viewport, then become drawers without horizontal o
 });
 
 test('generation uses its explicit reference and leaves the inspected GLB selected until review', async ({ page, studioOrigin }) => {
+  const parameters = (textureOptions, seedDefault) => [
+    { id: 'resolution', kind: 'fixed', label: 'Geometry resolution', description: 'Fixed by the profile.', default: 512 },
+    { id: 'texture_size', kind: 'choice', label: 'Texture size', description: 'Texture resolution.', default: textureOptions[0], values: textureOptions },
+    { id: 'target_faces', kind: 'integer', label: 'Soft face target', description: 'Not a hard cap.', default: 100000, min: 4, max: 1000000 },
+    { id: 'seed', kind: 'integer', label: 'Seed', description: 'Repeatable sampling.', default: seedDefault, min: 0 },
+  ];
   await page.route('**/api/v1/runtime', route => route.fulfill({
-    json: { platform: 'macos', status: 'ready_for_mesh_operations', model_backends: [
-      { id: 'pixal3d-mlx', status: 'ready', installable: true, ready: true },
-    ] },
+    json: {
+      platform: 'macos', status: 'ready_for_mesh_operations',
+      model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', backend_ids: ['pixal3d-mlx', 'pixal3d-cuda', 'unready'] }],
+      model_backends: [
+        { id: 'pixal3d-mlx', status: 'ready', installable: true, ready: true,
+          generation: { id: 'pixal3d-mlx', label: 'Apple MLX', parameters: parameters([512, 1024], 42) } },
+        { id: 'pixal3d-cuda', status: 'ready', installable: true, ready: true,
+          generation: { id: 'pixal3d-cuda', label: 'NVIDIA CUDA', parameters: parameters([1024, 2048], 7) } },
+        { id: 'unready', status: 'setup_required', ready: false,
+          generation: { id: 'unready', label: 'Unready', parameters: [] } },
+      ],
+    },
   }));
   await page.route('**/api/v1/operations', route => route.fulfill({
     json: [{ id: 'image.generate', implemented: true }, { id: 'mesh.simplify', implemented: true }],
@@ -79,6 +94,8 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   const tools = page.getByRole('group', { name: 'Model tools' });
   await tools.getByRole('button', { name: 'New model' }).click();
   const generate = page.getByRole('complementary', { name: 'Generate model' });
+  const model = generate.getByLabel('Generation model');
+  await expect(model.locator('option')).toHaveText(['Pixal3D · Apple MLX', 'Pixal3D · NVIDIA CUDA']);
   await expect(generate.getByRole('button', { name: 'Generate 3D' })).toBeDisabled();
   const active = await chooseFile(page, page.getByRole('button', { name: 'Open GLB', exact: true }), 'inspected.glb',
     'model/gltf-binary', texturedGlb());
@@ -91,6 +108,26 @@ test('generation uses its explicit reference and leaves the inspected GLB select
     'image/png', PNG.sync.write(image));
   await expect(generate.getByTitle(reference.name)).toBeVisible();
   await expect(selected.getByTitle(active.name)).toBeVisible();
+  await generate.getByRole('button', { name: 'Model settings' }).click();
+  const seed = generate.getByLabel('Seed', { exact: true });
+  await expect(seed).toHaveValue('42');
+  await seed.fill('17');
+  await model.selectOption('pixal3d-cuda');
+  await expect(seed).toHaveValue('7');
+  await expect(generate.getByLabel('Geometry resolution')).toHaveAttribute('readonly', '');
+  const texture = generate.getByLabel('Texture size');
+  await expect(texture.locator('option')).toHaveText(['1024', '2048']);
+  await texture.selectOption('2048');
+  const faces = generate.getByLabel('Soft face target');
+  await faces.fill('3');
+  await expect(faces).toHaveAttribute('aria-invalid', 'true');
+  await expect(generate.getByRole('button', { name: 'Generate 3D' })).toBeDisabled();
+  await faces.fill('50001');
+  await model.selectOption('pixal3d-mlx');
+  await expect(seed).toHaveValue('17');
+  await model.selectOption('pixal3d-cuda');
+  await expect(faces).toHaveValue('50001');
+  await seed.fill('0');
   const derived = { ...active, id: 'asset_generation_layout', name: 'new-model.glb', source_asset_id: reference.id };
   const job = {
     id: 'job_generation_layout',
@@ -103,6 +140,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
     const payload = route.request().postDataJSON();
     expect(payload.operation).toBe('image.generate');
     expect(payload.input.asset_id).toBe(reference.id);
+    expect(payload.parameters).toEqual({ backend_id: 'pixal3d-cuda', resolution: 512, texture_size: 2048, target_faces: 50001, seed: 0 });
     await route.fulfill({ status: 202, json: { ...job, state: 'queued', progress: 0 } });
   });
   await page.route('**/api/v1/jobs/job_generation_layout', route => route.fulfill({ json: {

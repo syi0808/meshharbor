@@ -990,9 +990,13 @@ fn api_router(state: AppState, token: String) -> Router {
         )
         .route(
             "/api/v1/runtime/{backend}/huggingface",
-            post(api_huggingface_access)
+            post(api_huggingface_connection)
                 .delete(api_disconnect_huggingface)
                 .layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/api/v1/runtime/{backend}/model-access",
+            post(api_model_access),
         )
         .route(
             "/api/v1/runtime/{backend}/model-files",
@@ -1122,6 +1126,7 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
     let dashboard_only = path.starts_with("/api/v1/runtime/")
         && (path.ends_with("/huggingface")
             || path.ends_with("/model-files")
+            || path.ends_with("/model-access")
             || path.ends_with("/huggingface/browser")
             || path.contains("/huggingface/browser/"));
     if dashboard_authorized || (authorized && !dashboard_only) {
@@ -1294,14 +1299,14 @@ async fn api_install_quadriflow_backend(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct HuggingFaceAccessRequest {
+struct HuggingFaceConnectionRequest {
     token: Option<String>,
 }
 
-async fn api_huggingface_access(
+async fn api_huggingface_connection(
     State(state): State<AppState>,
     Path(backend): Path<String>,
-    payload: Result<Json<HuggingFaceAccessRequest>, JsonRejection>,
+    payload: Result<Json<HuggingFaceConnectionRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let Json(payload) = payload
         .map_err(|_| CoreError::InvalidInput("Invalid Hugging Face connection request.".into()))?;
@@ -1311,15 +1316,34 @@ async fn api_huggingface_access(
         let _runtime_lock = acquire_runtime_write_lock(root)?;
         match profile {
             Pixal3dProfile::Mlx => {
-                Pixal3dRuntimeManager::new(root).huggingface_access(payload.token.as_deref())
+                Pixal3dRuntimeManager::new(root).huggingface_connection(payload.token.as_deref())
             }
-            Pixal3dProfile::Cuda => {
-                Pixal3dCudaRuntimeManager::new(root).huggingface_access(payload.token.as_deref())
-            }
+            Pixal3dProfile::Cuda => Pixal3dCudaRuntimeManager::new(root)
+                .huggingface_connection(payload.token.as_deref()),
         }
     })
     .await
-    .map_err(|_| CoreError::OperationUnavailable("Hugging Face access worker failed.".into()))??;
+    .map_err(|_| {
+        CoreError::OperationUnavailable("Hugging Face connection worker failed.".into())
+    })??;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(access)))
+}
+
+async fn api_model_access(
+    State(state): State<AppState>,
+    Path(backend): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let profile = Pixal3dProfile::from_backend(&backend)?;
+    let access = task::spawn_blocking(move || {
+        let root = state.core.store().root();
+        let _runtime_lock = acquire_runtime_write_lock(root)?;
+        match profile {
+            Pixal3dProfile::Mlx => Pixal3dRuntimeManager::new(root).huggingface_model_access(),
+            Pixal3dProfile::Cuda => Pixal3dCudaRuntimeManager::new(root).huggingface_model_access(),
+        }
+    })
+    .await
+    .map_err(|_| CoreError::OperationUnavailable("Model access worker failed.".into()))??;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(access)))
 }
 
@@ -1858,29 +1882,7 @@ async fn start_generation_job(
             "image.generate requires a previously imported PNG or JPEG image asset.".into(),
         ));
     }
-    if !matches!(
-        options.backend_id.as_str(),
-        "auto" | "pixal3d-mlx" | "pixal3d-cuda"
-    ) {
-        return Err(CoreError::InvalidInput(
-            "backend_id must be auto, pixal3d-mlx, or pixal3d-cuda.".into(),
-        ));
-    }
-    if options.resolution != 512 {
-        return Err(CoreError::InvalidInput(
-            "Both current Pixal3D backends expose only the reviewed 512 geometry profile.".into(),
-        ));
-    }
-    if !matches!(options.texture_size, 512 | 1024 | 2048) {
-        return Err(CoreError::InvalidInput(
-            "texture_size must be 512, 1024, or 2048.".into(),
-        ));
-    }
-    if options.target_faces < 4 {
-        return Err(CoreError::InvalidInput(
-            "target_faces must be at least 4.".into(),
-        ));
-    }
+    options.validate()?;
 
     let parameters = serde_json::to_value(&options)?;
     let job = core
@@ -4363,7 +4365,7 @@ mod tests {
         let body = json!({
             "operation":"image.generate",
             "input":{"asset_id":source.id},
-            "parameters":{"resolution":1024}
+            "parameters":{"backend_id":"pixal3d-mlx","resolution":1024}
         })
         .to_string();
         let response = app
@@ -4385,7 +4387,7 @@ mod tests {
                 &response.into_body().collect().await.unwrap().to_bytes()
             )
             .unwrap()["error"],
-            "invalid request: Both current Pixal3D backends expose only the reviewed 512 geometry profile."
+            "invalid request: resolution is fixed at 512 for pixal3d-mlx."
         );
         std::fs::remove_dir_all(root).unwrap();
     }

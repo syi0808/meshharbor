@@ -43,6 +43,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { ModelPreview } from './ModelPreview';
 import { AssetGalleryCard } from './AssetGalleryCard';
 import { MeshStudy } from './MeshStudy';
+import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
 import { SettingsPage, settingsSectionFromPath, type RuntimeAction, type SettingsSection } from './SettingsPage';
 import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
 import { formatVersionSizes, inspectorForAsset, shouldHighlightExport, WORKBENCH_INSPECTOR_SHEET_QUERY, type Inspector } from './workbench-state';
@@ -161,9 +162,8 @@ export function App() {
   const requestedQuads = Number(targetQuads);
   const validQuadTarget = Number.isInteger(requestedQuads) && requestedQuads >= 4 && requestedQuads <= 50000;
   const [maxError, setMaxError] = useState(0.02);
-  const [textureSize, setTextureSize] = useState(1024);
-  const [targetFaces, setTargetFaces] = useState(100000);
-  const [generationBackend, setGenerationBackend] = useState('auto');
+  const [generationBackend, setGenerationBackend] = useState('');
+  const [generationDrafts, setGenerationDrafts] = useState<Record<string, Record<string, string>>>({});
   const [generationSource, setGenerationSource] = useState<Asset | null>(null);
   const [generationResult, setGenerationResult] = useState<Job | null>(null);
   const historySelectionGuard = useRef(new LatestRequestGuard());
@@ -233,12 +233,10 @@ export function App() {
   const [installingBackend, setInstallingBackend] = useState(false);
   const isRunning = isActiveJob(job);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
-  const mlxBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-mlx');
-  const cudaBackend = runtime?.model_backends.find((backend) => backend.id === 'pixal3d-cuda');
-  const automaticBackend = runtime?.platform === 'linux' ? cudaBackend : mlxBackend;
-  const selectedGenerationBackend = generationBackend === 'auto'
-    ? automaticBackend
-    : runtime?.model_backends.find((backend) => backend.id === generationBackend);
+  const generationProfiles = useMemo(() => readyGenerationProfiles(runtime), [runtime]);
+  const selectedGenerationProfile = generationProfiles.find(profile => profile.id === generationBackend) ?? generationProfiles[0];
+  const generationDraft = selectedGenerationProfile ? generationDrafts[selectedGenerationProfile.id] ?? {} : {};
+  const generationPayload = selectedGenerationProfile ? generationParameters(selectedGenerationProfile, generationDraft) : null;
   function openSettings(section: SettingsSection, backendId?: RuntimeBackendId) {
     if (backendId) setSettingsBackend(backendId);
     if (inspectorIsSheet) setInspector(null);
@@ -252,11 +250,6 @@ export function App() {
     window.history.pushState(null, '', '/');
     setSettingsSection(null);
     requestAnimationFrame(() => settingsTrigger.current?.focus());
-  }
-
-  function openRuntime(backendId?: string) {
-    const profile = backendId === 'pixal3d-mlx' || backendId === 'pixal3d-cuda' ? backendId : undefined;
-    openSettings(selectedGenerationBackend?.environment_ready ? 'storage' : 'models', profile);
   }
 
   async function requestAssetPage(
@@ -922,13 +915,13 @@ export function App() {
   }
 
   async function generate() {
-    if (!generationSource || !canGenerate || busy || isRunning || connection !== 'connected') return;
+    if (!generationSource || !selectedGenerationProfile || !generationPayload || !canGenerate || busy || isRunning || connection !== 'connected') return;
     invalidateHistoryRequests();
     setError(null);
     setNotice(null);
     setBusy(true);
     try {
-      const nextJob = await api.createImageGenerationJob(generationSource.id, generationBackend, textureSize, Math.max(4, Math.floor(targetFaces)));
+      const nextJob = await api.createImageGenerationJob(generationSource.id, selectedGenerationProfile.id, generationPayload);
       setGenerationResult(null);
       setJob(nextJob);
     } catch (cause) {
@@ -997,7 +990,7 @@ export function App() {
   const triangleCount = Number(selectedAsset?.metadata.triangles ?? 0);
   const canSimplify = !!selectedAsset && selectedAsset.kind === 'mesh' && !!operations.find((operation) => operation.id === 'mesh.simplify')?.implemented;
   const canGenerate = !!operations.find((operation) => operation.id === 'image.generate')?.implemented
-    && selectedGenerationBackend?.ready === true;
+    && selectedGenerationProfile !== undefined;
   const isComparingResult = selectedComparisonPair
     ? selectedComparisonPair.resultAssetId === selectedId
     : Boolean(selectedAsset?.source_asset_id);
@@ -1130,39 +1123,32 @@ export function App() {
               {generationSource && <Button variant="ghost" size="sm" onClick={() => setGenerationSource(null)} disabled={busy || isRunning}>Clear</Button>}
             </div>
           </div>
+          {selectedGenerationProfile && <>
+            <Field>
+              <FieldLabel htmlFor="generation-backend">Generation model</FieldLabel>
+              <NativeSelect className="w-full" id="generation-backend" value={selectedGenerationProfile.id}
+                onChange={event => setGenerationBackend(event.target.value)} disabled={busy || isRunning}>
+                {generationProfiles.map(profile => <NativeSelectOption key={profile.id} value={profile.id}>{profile.label}</NativeSelectOption>)}
+              </NativeSelect>
+              <FieldDescription>Only ready local models are listed.</FieldDescription>
+            </Field>
           <Accordion type="single" collapsible>
             <AccordionItem value="model-settings">
               <AccordionTrigger>Model settings</AccordionTrigger>
               <AccordionContent>
-                <div className="grid gap-4">
-                  <Field>
-                    <FieldLabel htmlFor="generation-backend">Backend</FieldLabel>
-                    <NativeSelect className="w-full" id="generation-backend" value={generationBackend} onChange={(event) => setGenerationBackend(event.target.value)} disabled={busy || isRunning}>
-                      <NativeSelectOption value="auto">Automatic</NativeSelectOption>
-                      <NativeSelectOption value="pixal3d-mlx">Pixal3D MLX (Apple Silicon)</NativeSelectOption>
-                      <NativeSelectOption value="pixal3d-cuda">Pixal3D CUDA (Linux/NVIDIA)</NativeSelectOption>
-                    </NativeSelect>
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor="texture-size">Texture size</FieldLabel>
-                    <NativeSelect className="w-full" id="texture-size" value={textureSize} onChange={(event) => setTextureSize(Number(event.target.value))} disabled={busy || isRunning}>
-                      <NativeSelectOption value={512}>512</NativeSelectOption><NativeSelectOption value={1024}>1024</NativeSelectOption><NativeSelectOption value={2048}>2048</NativeSelectOption>
-                    </NativeSelect>
-                    <FieldDescription>Higher uses more memory</FieldDescription>
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor="target-faces">Soft face target</FieldLabel>
-                    <Input id="target-faces" type="number" min="4" max="1000000" step="1000" value={targetFaces} onChange={(event) => setTargetFaces(Number(event.target.value))} disabled={busy || isRunning} />
-                    <FieldDescription>Not a hard cap</FieldDescription>
-                  </Field>
-                </div>
+                <GenerationParameterFields profile={selectedGenerationProfile} draft={generationDraft} disabled={busy || isRunning}
+                  onChange={(id, value) => setGenerationDrafts(current => ({
+                    ...current,
+                    [selectedGenerationProfile.id]: { ...current[selectedGenerationProfile.id], [id]: value },
+                  }))} />
               </AccordionContent>
             </AccordionItem>
           </Accordion>
-          {canGenerate && !(isRunning && job.operation === 'image.generate') && <Button className="w-full" disabled={!generationSource || busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
+          </>}
+          {canGenerate && !(isRunning && job.operation === 'image.generate') && <Button className="w-full" disabled={!generationSource || !generationPayload || busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
           {!canGenerate && <div className="grid gap-2 text-muted-foreground">
-            <p>{selectedGenerationBackend?.installable ? 'Prepare a local runtime before generating.' : 'This backend is not available on this computer.'} Existing GLBs do not require a model runtime.</p>
-            <Button variant={selectedGenerationBackend?.installable ? 'default' : 'secondary'} onClick={() => openRuntime(selectedGenerationBackend?.id)}>Open model setup</Button>
+            <p>No generation model is ready. You can still open and edit existing GLBs.</p>
+            <Button variant="secondary" onClick={() => openSettings('models')}>Open model setup</Button>
           </div>}
           {generationResult?.result?.asset_id && <Button variant="secondary" className="w-full" disabled={busy || isRunning} onClick={() => {
             closeInspector();

@@ -10,12 +10,12 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import type { MeshHarborApi } from './api';
-import type { HuggingFaceAccess, HuggingFaceBrowserLogin, Job, RuntimeBackendId, RuntimeInfo } from './types';
+import type { HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, RuntimeBackendId, RuntimeInfo } from './types';
 import { runtimeSetupStage } from './workbench-state';
 
 const sections = {
   models: { title: 'Models', icon: CubeIcon, description: 'Browse the generation models supported by MeshHarbor and prepare them for this computer.' },
-  connections: { title: 'Connections', icon: KeyIcon, description: 'Manage the credentials MeshHarbor uses to download gated model files.' },
+  connections: { title: 'Connections', icon: KeyIcon, description: 'Manage local sign-in for external services.' },
   storage: { title: 'Downloads & storage', icon: HardDrivesIcon, description: 'Install or remove local model files and review recent setup and download activity.' },
 };
 
@@ -32,6 +32,7 @@ const profileIds: RuntimeBackendId[] = ['pixal3d-mlx', 'pixal3d-cuda'];
 type Backend = RuntimeInfo['model_backends'][number];
 type RemovalScope = 'huggingface' | 'model-files';
 type AccessStatus = HuggingFaceAccess | 'checking' | 'unavailable';
+type AccountStatus = HuggingFaceConnectionStatus | 'checking';
 type VisitSettings = (section: SettingsSection, backend?: RuntimeBackendId) => void;
 
 export function settingsSectionFromPath(path: string): SettingsSection | null {
@@ -66,6 +67,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
   const cancelRemoval = useRef<HTMLButtonElement>(null);
   const removalTrigger = useRef<HTMLElement | null>(null);
   const [access, setAccess] = useState<Partial<Record<RuntimeBackendId, AccessStatus>>>({});
+  const [accounts, setAccounts] = useState<Partial<Record<RuntimeBackendId, AccountStatus>>>({});
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -96,7 +98,8 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           return;
         }
         if (session.state === 'signed_in') {
-          setAccess(current => ({ ...current, [backend]: session.access === 'not_connected' ? 'unavailable' : session.access ?? 'unavailable' }));
+          setAccounts(current => ({ ...current, [backend]: 'connected' }));
+          setAccess(current => ({ ...current, [backend]: undefined }));
           setNotice(`Signed in to Hugging Face for ${profiles[backend].title}.`);
           try {
             const nextRuntime = await api.runtime();
@@ -136,17 +139,28 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
     }
   }
 
-  function verify(backend: RuntimeBackendId, token?: string) {
+  function verifyConnection(backend: RuntimeBackendId, token?: string) {
     void perform(async () => {
-      setAccess(current => ({ ...current, [backend]: 'checking' }));
+      setAccounts(current => ({ ...current, [backend]: 'checking' }));
       try {
-        const result = await api.checkHuggingFaceAccess(backend, token);
-        setAccess(current => ({ ...current, [backend]: result }));
+        const result = await api.checkHuggingFaceConnection(backend, token);
+        setAccounts(current => ({ ...current, [backend]: result }));
+        if ((token !== undefined && result === 'connected') || (token === undefined && result !== 'connected')) {
+          setAccess(current => ({ ...current, [backend]: undefined }));
+        }
       } catch (cause) {
-        setAccess(current => ({ ...current, [backend]: undefined }));
+        setAccounts(current => ({ ...current, [backend]: undefined }));
         throw cause;
       }
       onRuntimeChange(await api.runtime());
+    });
+  }
+
+  function verifyModelAccess(backend: RuntimeBackendId) {
+    void perform(async () => {
+      setAccess(current => ({ ...current, [backend]: 'checking' }));
+      const result = await api.checkModelAccess(backend).catch(() => 'unavailable' as const);
+      setAccess(current => ({ ...current, [backend]: result }));
     });
   }
 
@@ -170,7 +184,10 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
     void perform(async () => {
       try {
         onRuntimeChange(await api.removeRuntimeFiles(backend, scope));
-        if (scope === 'huggingface') setAccess(current => ({ ...current, [backend]: 'not_connected' }));
+        if (scope === 'huggingface') {
+          setAccounts(current => ({ ...current, [backend]: 'not_connected' }));
+          setAccess(current => ({ ...current, [backend]: undefined }));
+        }
         setNotice(scope === 'huggingface'
           ? `Hugging Face disconnected for ${profiles[backend].title} on this computer.`
           : `Pixal3D model files removed for ${profiles[backend].title}.`);
@@ -211,11 +228,13 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           </div>
           {connection === 'connected' && <Button variant="outline" onClick={() => void perform(async () => {
             onRuntimeChange(await api.runtime());
+            setAccess({});
+            setAccounts({});
             await onRefreshJobs();
           })} disabled={disabled}><ArrowsClockwiseIcon aria-hidden="true" /> Refresh status</Button>}
         </div>
-        {feedback}
-        {jobFeedback}
+        {section !== 'connections' && feedback}
+        {section !== 'connections' && jobFeedback}
         {section !== 'connections' && browserActive && <Alert role="status">
           <AlertDescription>Hugging Face sign-in is in progress.</AlertDescription>
           <Button variant="outline" onClick={() => onVisit('connections', browserBackend)}>Return to sign-in</Button>
@@ -266,16 +285,15 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           </Field>}
           {section !== 'models' && !selected && <p className="text-muted-foreground">The local engine did not report this backend.</p>}
           {section === 'connections' && selected && <HuggingFaceConnection key={selectedId}
-            backend={selected} access={access[selectedId]} disabled={disabled}
+            backend={selected} account={accounts[selectedId]} disabled={disabled}
             browserSession={browserLogin?.backend === selectedId && browserActive ? browserLogin.session : null}
             cancelling={pending} onStartBrowser={() => startBrowserLogin(selectedId)} onCancelBrowser={cancelBrowserLogin}
-            onCheck={token => verify(selectedId, token)}
-            onDisconnect={() => openRemoval(selectedId, 'huggingface')}
-            onNext={() => onVisit('storage', selectedId)} />}
+            onCheck={token => verifyConnection(selectedId, token)}
+            onDisconnect={() => openRemoval(selectedId, 'huggingface')} />}
           {section === 'storage' && selected && <ModelStorage key={selectedId} backend={selected} id={selectedId}
             access={access[selectedId]} disabled={disabled}
             onDownload={() => onRuntimeAction(selectedId, 'download')} onConvert={() => onRuntimeAction(selectedId, 'convert')}
-            onSettings={onVisit} onCheck={() => verify(selectedId)}
+            onSettings={onVisit} onCheck={() => verifyModelAccess(selectedId)}
             onRemove={() => openRemoval(selectedId, 'model-files')} />}
           {section === 'storage' && <section className="grid gap-2" aria-labelledby="runtime-activity-heading">
             <h2 id="runtime-activity-heading" className="font-heading text-base font-medium">Recent activity</h2>
@@ -327,20 +345,27 @@ function profileStatus(backend: Backend) {
 const accessMessages: Record<AccessStatus, string> = {
   checking: 'Checking DINOv3 file access…',
   verified: 'DINOv3 file access verified.',
-  not_connected: 'No token is saved for this backend. Sign in or connect a token.',
+  not_connected: 'Connect a Hugging Face account before checking model access.',
   access_denied: 'DINOv3 access denied. Request access on the model page with the same account, then check access again.',
   unavailable: 'DINOv3 file access could not be checked. Try checking access again.',
 };
 
+const accountMessages: Record<AccountStatus, string> = {
+  checking: 'Checking Hugging Face sign-in…',
+  connected: 'Hugging Face account verified.',
+  not_connected: 'No token is saved for this backend. Sign in or connect a token.',
+  invalid_token: 'Hugging Face did not accept this token. Sign in again or use a different token.',
+};
+
 function browserLoginIsActive(session: HuggingFaceBrowserLogin) {
-  return session.state === 'preparing' || session.state === 'awaiting_authorization' || session.state === 'checking_access';
+  return session.state === 'preparing' || session.state === 'awaiting_authorization';
 }
 
-function HuggingFaceConnection({ backend, access, disabled, browserSession, cancelling, onStartBrowser, onCancelBrowser, onCheck, onDisconnect, onNext }: {
-  backend: Backend; access?: AccessStatus; disabled: boolean;
+function HuggingFaceConnection({ backend, account, disabled, browserSession, cancelling, onStartBrowser, onCancelBrowser, onCheck, onDisconnect }: {
+  backend: Backend; account?: AccountStatus; disabled: boolean;
   browserSession: HuggingFaceBrowserLogin | null; cancelling: boolean;
   onStartBrowser: () => void; onCancelBrowser: () => void;
-  onCheck: (token?: string) => void; onDisconnect: () => void; onNext: () => void;
+  onCheck: (token?: string) => void; onDisconnect: () => void;
 }) {
   const local = backend.local_files;
   const canConnect = backend.installable && backend.environment_ready;
@@ -352,14 +377,13 @@ function HuggingFaceConnection({ backend, access, disabled, browserSession, canc
   }
   return <section className="grid gap-4 rounded-lg border bg-card p-4 sm:p-5" aria-label="Hugging Face connection">
     <div className="flex flex-wrap items-center justify-between gap-2">
-      <div><h2 className="font-heading text-base font-medium">Hugging Face</h2><p className="text-muted-foreground">DINOv3 checkpoint access · credentials are separate for each backend.</p></div>
-      <Badge variant="outline">{access === 'verified' ? 'Access verified' : local?.token_saved ? 'Token saved' : local?.credentials_managed === false ? 'Custom storage' : 'Not connected'}</Badge>
+      <div><h2 className="font-heading text-base font-medium">Hugging Face</h2><p className="text-muted-foreground">Credentials are stored locally and separately for each backend.</p></div>
+      <Badge variant="outline">{account === 'connected' ? 'Signed in' : local?.token_saved ? 'Token saved' : local?.credentials_managed === false ? 'Custom storage' : 'Not connected'}</Badge>
     </div>
     {canConnect ? <>
       <div className="grid gap-3">
         <p className="text-muted-foreground">Sign in through Hugging Face without creating or copying a token. The first sign-in prepares a private Hugging Face CLI.</p>
         {browserSession?.state === 'preparing' && <p role="status">Preparing browser sign-in…</p>}
-        {browserSession?.state === 'checking_access' && <p role="status">Checking DINOv3 file access…</p>}
         {browserSession?.state === 'awaiting_authorization' && (
           <div className="grid justify-items-start gap-2 rounded-md border bg-background p-3">
             <p>Enter this one-time code on Hugging Face:</p>
@@ -372,22 +396,20 @@ function HuggingFaceConnection({ backend, access, disabled, browserSession, canc
           {browserSession
             ? <Button variant="outline" disabled={cancelling} onClick={onCancelBrowser}>Cancel sign-in</Button>
             : <Button disabled={disabled || local?.credentials_managed === false} onClick={onStartBrowser}>{local?.token_saved ? 'Sign in again in browser' : 'Sign in with browser'}</Button>}
-          <Button type="button" variant="outline" disabled={disabled} onClick={() => onCheck()}>Check saved access</Button>
-          {access === 'verified' && <Button type="button" variant="outline" onClick={onNext}>View downloads</Button>}
+          <Button type="button" variant="outline" disabled={disabled} onClick={() => onCheck()}>Check sign-in</Button>
         </div>
-        <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a> if this account is not approved yet.</p>
       </div>
       <details className="rounded-md border p-3 [&>summary]:cursor-pointer">
         <summary>Use an access token instead</summary>
         <form method="post" autoComplete="off" className="mt-3 grid justify-items-start gap-2" onSubmit={connectToken}>
-          <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Create a Hugging Face token</a> in the same account with gated read access.</p>
+          <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Create a Hugging Face token</a> or use an existing one.</p>
           <Label htmlFor="huggingface-token">Hugging Face access token</Label>
           <Input id="huggingface-token" name="token" type="password" placeholder="hf_…" maxLength={512} required disabled={disabled} autoComplete="off" className="max-w-md" />
           <Button type="submit" disabled={disabled}>{local?.token_saved ? 'Replace token' : 'Connect token'}</Button>
         </form>
       </details>
     </> : <p className="text-muted-foreground">{backend.installable ? 'Set up the Python environment in Models before connecting a token.' : 'This backend cannot verify a token on this computer.'}</p>}
-    {access && <p role="status" className="text-muted-foreground">{accessMessages[access]}</p>}
+    {account && <p role="status" className="text-muted-foreground">{accountMessages[account]}</p>}
     {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={onDisconnect}>Disconnect locally</Button></div>}
     {local?.credentials_managed === false && <p className="text-muted-foreground">Browser sign-in and local disconnect require the default managed credential directory. For this profile, use an access token instead.</p>}
   </section>;
@@ -410,10 +432,14 @@ function ModelStorage({ backend, id, access, disabled, onDownload, onConvert, on
     {stage === 'environment' && <div className="flex flex-wrap items-center gap-2"><p className="text-muted-foreground">Set up the Python environment first.</p><Button variant="outline" onClick={() => onSettings('models')}>View model setup</Button></div>}
     {stage === 'models' && <div className="grid justify-items-start gap-3">
       <p className="text-muted-foreground">Review the model and checkpoint terms before downloading. Interrupted transfers can reuse cached files.</p>
-      {verificationRequired && <div className="flex flex-wrap gap-2">
-        <Button variant="outline" onClick={() => onSettings('connections', id)}>Manage Hugging Face connection</Button>
-        {local?.token_saved && <Button variant="outline" disabled={disabled} onClick={() => { setConsent(false); onCheck(); }}>Verify saved token</Button>}
-      </div>}
+      <div className="grid gap-2">
+        <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a> on Hugging Face, then check file access for this backend.</p>
+        <div className="flex flex-wrap gap-2">
+          {verificationRequired && <Button variant="outline" onClick={() => onSettings('connections', id)}>Manage Hugging Face connection</Button>}
+          <Button variant="outline" disabled={disabled || local?.token_saved === false && local.credentials_managed}
+            onClick={() => { setConsent(false); onCheck(); }}>Check DINOv3 access</Button>
+        </div>
+      </div>
       {access && <p role="status" className="text-muted-foreground">{accessMessages[access]}</p>}
       <div className="flex items-start gap-2">
         <Checkbox id="model-download-consent" checked={consent && !verificationRequired}

@@ -37,10 +37,9 @@ const PIXAL_CHECKPOINTS: &[&str] = &[
 const MAX_GENERATED_GLB_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GenerationOptions {
     /// Backend selector: `auto`, `pixal3d-mlx`, or `pixal3d-cuda`.
-    #[serde(default = "default_generation_backend")]
     pub backend_id: String,
     /// Reproducible sampler seed.
     pub seed: u64,
@@ -50,22 +49,6 @@ pub struct GenerationOptions {
     pub texture_size: u16,
     /// Soft triangle target. The model may return more faces.
     pub target_faces: u32,
-}
-
-impl Default for GenerationOptions {
-    fn default() -> Self {
-        Self {
-            backend_id: default_generation_backend(),
-            seed: 42,
-            resolution: 512,
-            texture_size: 1024,
-            target_faces: 100_000,
-        }
-    }
-}
-
-fn default_generation_backend() -> String {
-    "auto".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,22 +227,7 @@ impl Pixal3dMlxRuntime {
                 readiness.missing.join("; ")
             )));
         }
-        if options.resolution != 512 {
-            return Err(CoreError::InvalidInput(
-                "The current MLX integration exposes only the reviewed 512 generation profile."
-                    .into(),
-            ));
-        }
-        if !matches!(options.texture_size, 512 | 1024 | 2048) {
-            return Err(CoreError::InvalidInput(
-                "texture_size must be 512, 1024, or 2048.".into(),
-            ));
-        }
-        if options.target_faces < 4 {
-            return Err(CoreError::InvalidInput(
-                "target_faces must be at least 4.".into(),
-            ));
-        }
+        options.validate_for_backend("pixal3d-mlx")?;
 
         let entrypoint = self.prepare_entrypoint()?;
         let python_bin = self.python.parent().ok_or_else(|| {
@@ -516,21 +484,7 @@ pub(crate) fn generate_pixal3d_image(
         &input_bytes,
     )?;
 
-    let selected_backend_id = match options.backend_id.as_str() {
-        "auto" => {
-            if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-                "pixal3d-cuda"
-            } else {
-                "pixal3d-mlx"
-            }
-        }
-        "pixal3d-mlx" | "pixal3d-cuda" => options.backend_id.as_str(),
-        other => {
-            return Err(CoreError::InvalidInput(format!(
-                "Unknown generation backend '{other}'. Choose auto, pixal3d-mlx, or pixal3d-cuda."
-            )));
-        }
-    };
+    let selected_backend_id = options.validated_profile()?.id;
 
     let work_dir = core
         .store()

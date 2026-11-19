@@ -486,7 +486,7 @@ test('Studio backend setup and image-generation flow downloads the generated GLB
     const imported = await api.importImage(image);
     assert.equal(imported.id, 'image-1');
 
-    const submitted = await api.createImageGenerationJob(imported.id, 'pixal3d-cuda', 1024, 50_000);
+    const submitted = await api.createImageGenerationJob(imported.id, 'pixal3d-cuda', { texture_size: 1024, target_faces: 50_000 });
     assert.equal(submitted.id, 'job-1');
     assert.equal((await api.job(submitted.id)).state, 'succeeded');
     const mesh = await api.derivedAsset('mesh-1');

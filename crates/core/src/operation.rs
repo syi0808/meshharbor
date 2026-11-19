@@ -338,6 +338,7 @@ impl OperationCore {
         if let Some(readiness) = &cuda {
             model_backends.push(json!({
                 "id": readiness.backend_id,
+                "generation": crate::generation_catalog::generation_profile(&readiness.backend_id),
                 "local_files": Pixal3dProfile::Cuda.local_files(self.store.root()),
                 "ready": readiness.ready,
                 "status": if readiness.ready { "ready_paths_unverified" }
@@ -362,6 +363,7 @@ impl OperationCore {
         if let Some(readiness) = &mlx {
             model_backends.push(json!({
                 "id": readiness.backend_id,
+                "generation": crate::generation_catalog::generation_profile(&readiness.backend_id),
                 "local_files": Pixal3dProfile::Mlx.local_files(self.store.root()),
                 "ready": readiness.ready,
                 "status": if readiness.ready {

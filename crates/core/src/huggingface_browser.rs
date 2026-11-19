@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::Duration,
 };
 
@@ -9,8 +9,8 @@ use tokio::{process::Command as AsyncCommand, time::timeout};
 use uuid::Uuid;
 
 use crate::{
-    CoreError, CoreResult, HuggingFaceAccess, Pixal3dCudaRuntimeManager, Pixal3dProfile,
-    Pixal3dRuntimeManager, huggingface_access::check_access, uv_bootstrap::ensure_uv,
+    CoreError, CoreResult, Pixal3dCudaRuntimeManager, Pixal3dProfile, Pixal3dRuntimeManager,
+    uv_bootstrap::ensure_uv,
 };
 
 const TOOL_DIR: &str = "hf-browser-cli-1.20.1";
@@ -158,16 +158,6 @@ impl HuggingFaceBrowserTool {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         command
-    }
-
-    pub fn verify(&self, credentials: &BrowserCredentials) -> CoreResult<HuggingFaceAccess> {
-        let python = access_python(&self.runtime_root).ok_or_else(install_error)?;
-        let mut command = Command::new(python);
-        command
-            .env_clear()
-            .env("HOME", &credentials.staged)
-            .env("HF_HOME", &credentials.staged);
-        check_access(command, None)
     }
 
     pub fn commit(&self, credentials: BrowserCredentials) -> CoreResult<()> {

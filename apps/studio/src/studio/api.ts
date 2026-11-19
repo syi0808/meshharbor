@@ -1,4 +1,4 @@
-import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, HuggingFaceAccess, HuggingFaceBrowserLogin, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
 
 export const MAX_ASSET_IMPORT_FILES = 10;
 export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
@@ -633,12 +633,18 @@ export class MeshHarborApi {
     return this.request('/api/v1/runtime');
   }
 
-  checkHuggingFaceAccess(backend: RuntimeBackendId, token?: string): Promise<HuggingFaceAccess> {
+  checkHuggingFaceConnection(backend: RuntimeBackendId, token?: string): Promise<HuggingFaceConnectionStatus> {
     return this.request(`/api/v1/runtime/${backend}/huggingface`, {
       method: 'POST',
       body: JSON.stringify({ token }),
       cache: 'no-store',
       redirect: 'error',
+    });
+  }
+
+  checkModelAccess(backend: RuntimeBackendId): Promise<HuggingFaceAccess> {
+    return this.request(`/api/v1/runtime/${backend}/model-access`, {
+      method: 'POST', cache: 'no-store', redirect: 'error',
     });
   }
 
@@ -791,13 +797,13 @@ export class MeshHarborApi {
     });
   }
 
-  createImageGenerationJob(assetId: string, backendId: string, textureSize: number, targetFaces: number): Promise<Job> {
+  createImageGenerationJob(assetId: string, backendId: string, parameters: Record<string, number>): Promise<Job> {
     return this.request('/api/v1/jobs', {
       method: 'POST',
       body: JSON.stringify({
         operation: 'image.generate',
         input: { asset_id: assetId },
-        parameters: { backend_id: backendId, texture_size: textureSize, target_faces: targetFaces },
+        parameters: { ...parameters, backend_id: backendId },
       }),
     });
   }

@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CoreError, CoreResult, HuggingFaceAccess,
-    huggingface_access::{check_access, require_access},
+    CoreError, CoreResult, HuggingFaceAccess, HuggingFaceConnection,
+    huggingface_access::{check_connection, check_model_access, require_access},
     huggingface_browser::access_python,
     uv_bootstrap::ensure_uv,
 };
@@ -93,7 +93,15 @@ impl Pixal3dRuntimeManager {
         self.runtime_root.join("home")
     }
 
-    pub fn huggingface_access(&self, token: Option<&str>) -> CoreResult<HuggingFaceAccess> {
+    pub fn huggingface_connection(&self, token: Option<&str>) -> CoreResult<HuggingFaceConnection> {
+        check_connection(self.huggingface_command()?, token)
+    }
+
+    pub fn huggingface_model_access(&self) -> CoreResult<HuggingFaceAccess> {
+        check_model_access(self.huggingface_command()?)
+    }
+
+    fn huggingface_command(&self) -> CoreResult<Command> {
         self.ensure_apple_silicon()?;
         let python = self.python_path();
         if !python.is_file() {
@@ -102,7 +110,7 @@ impl Pixal3dRuntimeManager {
             ));
         }
         let access_python = access_python(&self.runtime_root).unwrap_or(python);
-        check_access(self.python_command(&access_python), token)
+        Ok(self.python_command(&access_python))
     }
 
     /// Provision a managed Python 3.12 and the source-pinned, locked MLX
