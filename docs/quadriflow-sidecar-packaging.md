@@ -88,6 +88,44 @@ The Mach-O declared a minimum of macOS 15.0, used an ad-hoc platform signature, 
 
 After completing dependency/notice review, independently validating the SPDX SBOM, and recording redistribution and release approval, publish the approved archive at the canonical GitHub Release URL and pin the exact archive, payload, and bundle in the app manifest. Rebuild the embedded Studio binary and run the release acceptance test on each host targeted by that manifest. See [the Studio release acceptance command](../apps/studio/README.md#quadriflow-release-acceptance). Ordinary tests do not download release assets. The acceptance command requires the normal installer and cannot take a temporary candidate ZIP or local manifest override.
 
+## macOS ARM64 build-input evidence
+
+Historical run #43721747855 attests matched executable builds, not their actual
+header or linker input receipts. A separate local rebuild cannot fill that gap
+for those historical bytes.
+
+For new candidates, both unprivileged `macos-15` build jobs collect native
+compiler depfiles, normalized compile commands, linker tracing and the link map
+from the invocation that creates the candidate. The receipts distinguish
+objects or archive members retained by the linker from inputs it only opened.
+They pin observed file and tool hashes and record the final executable hash,
+SDK, and Mach-O dylib load commands. The gate rejects a mismatch in either the
+executable or the normalized observations. It does not run either executable.
+
+The isolated signer separately attests `macos-build-inputs-pair.json`, which
+binds the executable digest, both receipt hashes, the run/attempt, and two
+immutable artifact IDs. The fresh verification job checks that detached
+attestation and rechecks both included receipts. The existing executable
+attestation and installer policy are unchanged. The workflow is still manual
+on `main`, with temporary Actions artifacts only; neither attestation promotes
+them to a release.
+
+After downloading the freshly verified macOS artifact, cross-check its
+candidate-specific SPDX document (not a historical archive's SBOM):
+
+```sh
+python3 scripts/quadriflow_macos_build_inputs.py check-sbom \
+  --candidate /path/to/verified-macos-candidate --sbom /path/to/sbom.spdx.json
+```
+
+This check compares the executable checksum, observed build components and
+Homebrew versions, and direct macOS runtime dependencies. A retained compiler
+runtime archive member requires an additional SPDX static-link record. Run
+an independent SPDX 2.3 schema/semantic validator and review all license and
+source obligations as separate checks. The receipts do not freeze GitHub's
+runner image or resolve the full dyld closure; they do not certify license
+clearance, complete dependency closure, or release readiness.
+
 ## Notice/SBOM evidence helper
 
 `scripts/quadriflow_notices.py` is an offline, Python standard-library-only tool. It accepts a caller-supplied inventory and writes to a new output directory:

@@ -130,12 +130,12 @@ def _stability_info(info):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def hash_input(path, remaining):
+def hash_input(path, remaining, *, maximum=None):
     with path.open("rb") as stream:
         before = os.fstat(stream.fileno())
         if not stat.S_ISREG(before.st_mode):
             raise ValueError("compiler input is not a regular file")
-        cap = min(MAX_FILE_BYTES, remaining)
+        cap = min(MAX_FILE_BYTES if maximum is None else maximum, remaining)
         if not 0 <= before.st_size <= cap:
             raise ValueError("observed compiler input exceeds the hash budget")
         digest = hashlib.sha256()

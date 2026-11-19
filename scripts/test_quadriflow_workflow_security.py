@@ -61,6 +61,19 @@ class CandidateWorkflowSecurityTests(unittest.TestCase):
         self.assertNotIn("uses: actions/attest@", self.build_workflow)
         self.assertIn("--build-only", self.build_workflow)
 
+    def test_macos_inputs_are_captured_and_attested_before_candidate_upload(self):
+        self.assertIn("quadriflow_macos_build_inputs.py build", self.build_workflow)
+        self.assertIn("quadriflow_macos_build_inputs.py compare", self.pre_sign_gate)
+        self.assertLess(self.sign.index("quadriflow_macos_build_inputs.py compare"),
+                        self.sign.index("Create the candidate attestation using the isolated signer"))
+        self.assertIn("--primary-artifact-id", self.sign)
+        self.assertIn("--independent-artifact-id", self.sign)
+        self.assertIn("subject-path: ${{ runner.temp }}/quadriflow-candidate/primary/macos-build-inputs-pair.json", self.sign)
+        self.assertLess(self.verify.index("gh attestation verify"),
+                        self.verify.index("quadriflow_macos_build_inputs.py verify-pair"))
+        self.assertLess(self.verify.index("quadriflow_macos_build_inputs.py verify-pair"),
+                        self.verify.index("Upload verified temporary candidate evidence"))
+
     def test_signer_requires_each_platform_and_replica_from_distinct_named_jobs(self):
         entries = re.findall(
             r"(?ms)^  (build_[a-z_]+):\n.*?^    with:\n"

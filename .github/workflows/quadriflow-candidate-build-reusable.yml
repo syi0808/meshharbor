@@ -88,7 +88,12 @@ jobs:
           MESHHARBOR_BUILD_TRIGGER: ${{ inputs.build_trigger }}
           MESHHARBOR_PLATFORM: ${{ inputs.platform }}
           MESHHARBOR_BUILD_REPLICA: ${{ inputs.replica }}
-        run: python scripts/quadriflow-platform-smoke.py --build-only
+        run: |
+          if [[ "$MESHHARBOR_PLATFORM" == macos-aarch64 ]]; then
+            python scripts/quadriflow_macos_build_inputs.py build --runner-temp "$RUNNER_TEMP"
+          else
+            python scripts/quadriflow-platform-smoke.py --build-only
+          fi
 
       - name: Upload this replica's unverified candidate
         id: upload_candidate

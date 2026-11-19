@@ -228,6 +228,13 @@ jobs:
             --platform windows-x86_64 \
             --output "$RUNNER_TEMP/quadriflow-pre-sign-gate/materials/windows-provenance.json"
 
+      - name: Require identical observed macOS build inputs before signing
+        run: |
+          root="$RUNNER_TEMP/quadriflow-pre-sign-gate"
+          python scripts/quadriflow_macos_build_inputs.py compare \
+            --primary "$root/macos-primary" --independent "$root/macos-independent" \
+            --source-commit "$GITHUB_SHA" --output "$root/materials/macos-build-inputs-pair.json"
+
   sign-candidate:
     needs:
       - build_linux_primary
@@ -346,6 +353,20 @@ jobs:
           --platform "$CANDIDATE_PLATFORM"
           --output "$PREDICATE_PATH"
 
+      - name: Recheck macOS inputs and bind both immutable build artifacts
+        if: matrix.platform == 'macos-aarch64'
+        env:
+          PRIMARY_ARTIFACT_ID: ${{ steps.select_artifact_ids.outputs.primary }}
+          INDEPENDENT_ARTIFACT_ID: ${{ steps.select_artifact_ids.outputs.independent }}
+        run: |
+          root="$RUNNER_TEMP/quadriflow-candidate"
+          python scripts/quadriflow_macos_build_inputs.py compare \
+            --primary "$root/primary" --independent "$root/independent" --source-commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --primary-artifact-id "$PRIMARY_ARTIFACT_ID" --independent-artifact-id "$INDEPENDENT_ARTIFACT_ID" \
+            --output "$root/primary/macos-build-inputs-pair.json"
+          cp "$root/independent/macos-build-inputs.json" "$root/primary/macos-independent-build-inputs.json"
+
       - name: Create the candidate attestation using the isolated signer
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
@@ -356,6 +377,25 @@ jobs:
           push-to-registry: false
           create-storage-record: false
           show-summary: false
+
+      - name: Attest the macOS input comparison separately from the executable
+        if: matrix.platform == 'macos-aarch64'
+        id: attest_macos_inputs
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: ${{ runner.temp }}/quadriflow-candidate/primary/macos-build-inputs-pair.json
+          predicate-type: https://github.com/syi0808/meshharbor/attestations/quadriflow-macos-build-inputs/v1
+          predicate-path: ${{ runner.temp }}/quadriflow-candidate/primary/macos-build-inputs-pair.json
+          push-to-registry: false
+          create-storage-record: false
+          show-summary: false
+
+      - name: Save the detached macOS input comparison bundle
+        if: matrix.platform == 'macos-aarch64'
+        env:
+          EVIDENCE_BUNDLE: ${{ steps.attest_macos_inputs.outputs.bundle-path }}
+          EVIDENCE_DIR: ${{ runner.temp }}/quadriflow-candidate/primary
+        run: cp "$EVIDENCE_BUNDLE" "$EVIDENCE_DIR/macos-build-inputs.sigstore.json"
 
       - name: Stage the bundle for isolated verification
         env:
@@ -431,6 +471,25 @@ jobs:
           --workflow-run-attempt "$MESHHARBOR_WORKFLOW_RUN_ATTEMPT"
           --platform "$CANDIDATE_PLATFORM"
           --output "$CANDIDATE_DIR/verification.json"
+
+      - name: Verify the detached macOS input evidence and its exact receipts
+        if: matrix.platform == 'macos-aarch64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          evidence="$RUNNER_TEMP/quadriflow-candidate/artifact"
+          trusted_root="$RUNNER_TEMP/quadriflow-build-inputs-trusted-root.jsonl"
+          gh attestation trusted-root > "$trusted_root"
+          gh attestation verify "$evidence/macos-build-inputs-pair.json" \
+            --bundle "$evidence/macos-build-inputs.sigstore.json" --custom-trusted-root "$trusted_root" \
+            --repo "$GITHUB_REPOSITORY" --source-ref refs/heads/main --source-digest "$GITHUB_SHA" \
+            --signer-digest "$WORKFLOW_SHA" --deny-self-hosted-runners \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/quadriflow-candidate-build.yml@refs/heads/main" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --predicate-type https://github.com/syi0808/meshharbor/attestations/quadriflow-macos-build-inputs/v1
+          python scripts/quadriflow_macos_build_inputs.py verify-pair --candidate "$evidence" \
+            --source-commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
 
       - name: Upload verified temporary candidate evidence (not a release)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
