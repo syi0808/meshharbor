@@ -19,23 +19,13 @@ use crate::{
     generation::RuntimeReadiness,
     huggingface_access::{DINO_REVISION, check_connection, check_model_access, require_access},
     huggingface_browser::access_python,
-    huggingface_download::{self, DINO_REPO, PIXAL_REPO, PIXAL_REVISION},
+    huggingface_download::{self, DINO_REPO, PIXAL_CHECKPOINTS, PIXAL_REPOSITORY, PIXAL_REVISION},
     runtime::RuntimeSetupReport,
     uv_bootstrap::ensure_uv,
 };
 
 const PYTHON_REQUEST: &str = "3.12";
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
-const PIXAL_REPOSITORY: &str = "models--TencentARC--Pixal3D";
-const PIXAL_CHECKPOINTS: &[&str] = &[
-    "ss_flow_img_dit_1_3B_64_bf16.safetensors",
-    "ss_dec_conv3d_16l8_fp16.safetensors",
-    "slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
-    "shape_dec_next_dc_f16c32_fp16.safetensors",
-    "slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
-    "slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
-    "tex_dec_next_dc_f16c32_fp16.safetensors",
-];
 const MAX_GENERATED_GLB_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CUDA_PREFLIGHT_BYTES: u64 = 16 * 1024;
 
@@ -334,10 +324,17 @@ impl Pixal3dCudaRuntimeManager {
                 "Run `meshharbor runtime cuda-setup` before installing CUDA models.".into(),
             ));
         }
-        self.install_models_with_python(&python)
+        self.install_models_with_python(
+            &python,
+            huggingface_download::shared_hub_cache().as_deref(),
+        )
     }
 
-    fn install_models_with_python(&self, python: &Path) -> CoreResult<RuntimeSetupReport> {
+    fn install_models_with_python(
+        &self,
+        python: &Path,
+        shared_cache: Option<&Path>,
+    ) -> CoreResult<RuntimeSetupReport> {
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(self.hf_home())?;
@@ -360,21 +357,7 @@ impl Pixal3dCudaRuntimeManager {
             DINO_REVISION,
             ["model.safetensors"],
         )?;
-        let pixal_files = ["pipeline.json".to_owned()]
-            .into_iter()
-            .chain(
-                PIXAL_CHECKPOINTS
-                    .iter()
-                    .map(|filename| format!("ckpts/{filename}")),
-            )
-            .chain(["--max-workers".to_owned(), "2".to_owned()]);
-        huggingface_download::download(
-            &self.runtime_root,
-            &home,
-            PIXAL_REPO,
-            PIXAL_REVISION,
-            pixal_files,
-        )?;
+        huggingface_download::download_pixal3d(&self.runtime_root, &home, shared_cache, false)?;
 
         let mut naf = self.python_command(python);
         naf.current_dir(&self.upstream_root)
@@ -1111,7 +1094,11 @@ PIXAL_PAYLOAD
         );
 
         let partial = manager.hf_home().join("hub/.cache/download/partial");
-        assert!(manager.install_models_with_python(&fake_python).is_err());
+        assert!(
+            manager
+                .install_models_with_python(&fake_python, None)
+                .is_err()
+        );
         assert!(
             !manager
                 .hf_home()
@@ -1123,12 +1110,15 @@ PIXAL_PAYLOAD
             "partial checkpoint bytes"
         );
 
-        let report = manager.install_models_with_python(&fake_python).unwrap();
+        let report = manager
+            .install_models_with_python(&fake_python, None)
+            .unwrap();
         assert_eq!(report.status, "model_files_ready");
         assert!(manager.readiness().models_downloaded);
         let dino = format!("download {DINO_REPO} --revision {DINO_REVISION} model.safetensors");
         let pixal = format!(
-            "download {PIXAL_REPO} --revision {PIXAL_REVISION} pipeline.json {} --max-workers 2",
+            "download {} --revision {PIXAL_REVISION} pipeline.json {} --max-workers 2",
+            huggingface_download::PIXAL_REPO,
             PIXAL_CHECKPOINTS
                 .iter()
                 .map(|filename| format!("ckpts/{filename}"))

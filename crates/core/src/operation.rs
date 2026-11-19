@@ -333,13 +333,16 @@ impl OperationCore {
             .collect();
         let cuda_manager = Pixal3dCudaRuntimeManager::new(self.store.root());
         let cuda = Some(cuda_manager.readiness());
-        let mlx = Some(Pixal3dMlxRuntime::discover(self.store.root()).readiness());
+        let mlx_runtime = Pixal3dMlxRuntime::discover(self.store.root());
+        let mlx = Some(mlx_runtime.readiness());
+        let shared_cache = crate::huggingface_download::shared_hub_cache();
         let mut model_backends = Vec::new();
         if let Some(readiness) = &cuda {
             model_backends.push(json!({
                 "id": readiness.backend_id,
                 "generation": crate::generation_catalog::generation_profile(&readiness.backend_id),
                 "local_files": Pixal3dProfile::Cuda.local_files(self.store.root()),
+                "pixal3d_cache": crate::huggingface_download::pixal_cache_status(&cuda_manager.home_path(), shared_cache.as_deref()),
                 "ready": readiness.ready,
                 "status": if readiness.ready { "ready_paths_unverified" }
                     else if !cuda_manager.host_supported() { "unsupported_host_or_nvidia_gpu_missing" }
@@ -365,6 +368,7 @@ impl OperationCore {
                 "id": readiness.backend_id,
                 "generation": crate::generation_catalog::generation_profile(&readiness.backend_id),
                 "local_files": Pixal3dProfile::Mlx.local_files(self.store.root()),
+                "pixal3d_cache": crate::huggingface_download::pixal_cache_status(&mlx_runtime.home, shared_cache.as_deref()),
                 "ready": readiness.ready,
                 "status": if readiness.ready {
                     "ready_paths_unverified"

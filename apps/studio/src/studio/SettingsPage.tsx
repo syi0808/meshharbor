@@ -28,8 +28,8 @@ export type RuntimeAction = 'setup' | 'download' | 'convert';
 
 const sectionIds: SettingsSection[] = ['models', 'connections', 'storage', 'preferences'];
 const profiles = {
-  'pixal3d-mlx': { title: 'Apple MLX', platform: 'macOS · Apple Silicon', download: '~24 GB', free: '25 GB' },
-  'pixal3d-cuda': { title: 'NVIDIA CUDA', platform: 'Linux x86-64 · NVIDIA GPU', download: '25–30 GB', free: '40 GiB' },
+  'pixal3d-mlx': { title: 'Apple MLX', platform: 'macOS · Apple Silicon', download: '24 GB' },
+  'pixal3d-cuda': { title: 'NVIDIA CUDA', platform: 'Linux x86-64 · NVIDIA GPU', download: '30 GB' },
 } satisfies Record<RuntimeBackendId, object>;
 
 const profileIds: RuntimeBackendId[] = ['pixal3d-mlx', 'pixal3d-cuda'];
@@ -71,7 +71,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
   const heading = useRef<HTMLHeadingElement>(null);
   const cancelRemoval = useRef<HTMLButtonElement>(null);
   const removalTrigger = useRef<HTMLElement | null>(null);
-  const [access, setAccess] = useState<Partial<Record<RuntimeBackendId, AccessStatus>>>({});
   const [accounts, setAccounts] = useState<Partial<Record<RuntimeBackendId, AccountStatus>>>({});
   const [pending, setPending] = useState(false);
   const [removal, setRemoval] = useState<{ backend: RuntimeBackendId; scope: RemovalScope } | null>(null);
@@ -104,7 +103,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
         }
         if (session.state === 'signed_in') {
           setAccounts(current => ({ ...current, [backend]: 'connected' }));
-          setAccess(current => ({ ...current, [backend]: undefined }));
           try {
             const nextRuntime = await api.runtime();
             if (stopped) return;
@@ -150,9 +148,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
       try {
         result = await api.checkHuggingFaceConnection(backend, token);
         setAccounts(current => ({ ...current, [backend]: result }));
-        if ((token !== undefined && result === 'connected') || (token === undefined && result !== 'connected')) {
-          setAccess(current => ({ ...current, [backend]: undefined }));
-        }
       } catch (cause) {
         setAccounts(current => ({ ...current, [backend]: undefined }));
         throw cause;
@@ -166,15 +161,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
         }
       }
       notify(result === 'connected' ? 'success' : result === 'invalid_token' ? 'error' : 'warning', accountMessages[result]);
-    });
-  }
-
-  function verifyModelAccess(backend: RuntimeBackendId) {
-    void perform(async () => {
-      setAccess(current => ({ ...current, [backend]: 'checking' }));
-      const result = await api.checkModelAccess(backend).catch(() => 'unavailable' as const);
-      setAccess(current => ({ ...current, [backend]: result }));
-      notify(result === 'verified' ? 'success' : result === 'unavailable' ? 'error' : 'warning', accessMessages[result]);
     });
   }
 
@@ -200,7 +186,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
         onRuntimeChange(await api.removeRuntimeFiles(backend, scope));
         if (scope === 'huggingface') {
           setAccounts(current => ({ ...current, [backend]: 'not_connected' }));
-          setAccess(current => ({ ...current, [backend]: undefined }));
         }
         notify('success', scope === 'huggingface'
           ? `Hugging Face disconnected for ${profiles[backend].title} on this computer.`
@@ -244,7 +229,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           </div>
           {section !== 'preferences' && connection === 'connected' && <Button variant="outline" onClick={() => void perform(async () => {
             onRuntimeChange(await api.runtime());
-            setAccess({});
             setAccounts({});
             await onRefreshJobs();
             notify('success', 'Local status refreshed.');
@@ -319,10 +303,10 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
             cancelling={pending} onStartBrowser={() => startBrowserLogin(selectedId)} onCancelBrowser={cancelBrowserLogin}
             onCheck={token => verifyConnection(selectedId, token)}
             onDisconnect={() => openRemoval(selectedId, 'huggingface')} />}
-          {section === 'storage' && selected && <ModelStorage key={selectedId} backend={selected} id={selectedId}
-            access={access[selectedId]} disabled={disabled}
+          {section === 'storage' && selected && <ModelStorage key={selectedId} api={api} backend={selected} id={selectedId}
+            disabled={disabled}
             onDownload={() => onRuntimeAction(selectedId, 'download')} onConvert={() => onRuntimeAction(selectedId, 'convert')}
-            onSettings={onVisit} onCheck={() => verifyModelAccess(selectedId)}
+            onSettings={onVisit}
             onRemove={() => openRemoval(selectedId, 'model-files')} />}
           {section === 'storage' && <section className="grid gap-2" aria-labelledby="runtime-activity-heading">
             <h2 id="runtime-activity-heading" className="font-heading text-base font-medium">Recent activity</h2>
@@ -374,9 +358,9 @@ function profileStatus(backend: Backend) {
 const accessMessages: Record<AccessStatus, string> = {
   checking: 'Checking DINOv3 file access…',
   verified: 'DINOv3 file access verified.',
-  not_connected: 'Connect a Hugging Face account before checking model access.',
-  access_denied: 'DINOv3 access denied. Request access on the model page with the same account, then check access again.',
-  unavailable: 'DINOv3 file access could not be checked. Try checking access again.',
+  not_connected: 'Sign in to Hugging Face to check DINOv3 file access.',
+  access_denied: 'DINOv3 access denied. Request access on the model page with the same account, then return here.',
+  unavailable: 'Could not verify DINOv3 access. Select Refresh status to retry.',
 };
 
 const accountMessages: Record<AccountStatus, string> = {
@@ -443,35 +427,62 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
   </section>;
 }
 
-function ModelStorage({ backend, id, access, disabled, onDownload, onConvert, onSettings, onCheck, onRemove }: {
-  backend: Backend; id: RuntimeBackendId; access?: AccessStatus; disabled: boolean;
-  onDownload: () => void; onConvert: () => void; onSettings: VisitSettings; onCheck: () => void; onRemove: () => void;
+function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onSettings, onRemove }: {
+  api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
+  onDownload: () => void; onConvert: () => void; onSettings: VisitSettings; onRemove: () => void;
 }) {
   const [consent, setConsent] = useState(false);
+  const [access, setAccess] = useState<AccessStatus>('checking');
   const stage = runtimeSetupStage(backend);
   const local = backend.local_files;
-  const verificationRequired = access !== 'verified';
+  const needsConnection = local?.credentials_managed === true && !local.token_saved;
+  const accessStatus = needsConnection ? 'not_connected' : access;
+  const verificationRequired = accessStatus !== 'verified';
+  const cache = backend.pixal3d_cache;
+  useEffect(() => {
+    if (stage !== 'models' || !backend.downloads_enabled || disabled || needsConnection) return;
+    const controller = new AbortController();
+    let checking = false;
+    async function check() {
+      if (checking || controller.signal.aborted) return;
+      checking = true;
+      setAccess('checking');
+      const result = await api.checkModelAccess(id, controller.signal).catch(() => 'unavailable' as const);
+      if (!controller.signal.aborted) setAccess(result);
+      checking = false;
+    }
+    const initialCheck = window.setTimeout(() => void check(), 0);
+    const onFocus = () => void check();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearTimeout(initialCheck);
+      window.removeEventListener('focus', onFocus);
+      controller.abort();
+    };
+  }, [api, backend, disabled, id, needsConnection, stage]);
+
   return <section className="grid gap-4 rounded-lg border bg-card p-4 sm:p-5" aria-label="Model files">
     <div className="flex flex-wrap items-start justify-between gap-2">
-      <div><h2 className="font-heading text-base font-medium">Pixal3D · {profiles[id].title}</h2><p className="text-muted-foreground">{profiles[id].download} download · allow around {profiles[id].free} free</p></div>
+      <div><h2 className="font-heading text-base font-medium">Pixal3D · {profiles[id].title}</h2><p className="text-muted-foreground">Up to {profiles[id].download} without cached files</p></div>
       <Badge variant={backend.ready ? 'secondary' : 'outline'}>{backend.ready ? 'Installed' : backend.models_downloaded ? 'Files present' : local?.remove_models_available ? 'Cached files present' : 'Not installed'}</Badge>
     </div>
     {stage === 'unsupported' && <p className="text-muted-foreground">This backend is not supported on this computer.</p>}
     {stage === 'environment' && <div className="flex flex-wrap items-center gap-2"><p className="text-muted-foreground">Set up the Python environment first.</p><Button variant="outline" onClick={() => onSettings('models')}>View model setup</Button></div>}
     {stage === 'models' && <div className="grid justify-items-start gap-3">
-      <p className="text-muted-foreground">Review the model and checkpoint terms before downloading. Interrupted transfers can reuse cached files.</p>
+      {cache && <p className="text-muted-foreground">
+        {cache.local_checkpoints}/{cache.total_checkpoints} Pixal3D checkpoints in this backend’s cache.
+        {cache.reusable_checkpoints > 0 && ` ${cache.reusable_checkpoints} more can be reused from your existing Hugging Face cache.`}
+        {' DINOv3 and NAF are handled separately.'}
+      </p>}
       <div className="grid gap-2">
-        <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a> on Hugging Face, then check file access for this backend.</p>
-        <div className="flex flex-wrap gap-2">
-          {verificationRequired && <Button variant="outline" onClick={() => onSettings('connections', id)}>Manage Hugging Face connection</Button>}
-          <Button variant="outline" disabled={disabled || local?.token_saved === false && local.credentials_managed}
-            onClick={() => { setConsent(false); onCheck(); }}>Check DINOv3 access</Button>
-        </div>
+        <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a> on Hugging Face. Studio checks file access automatically.</p>
+        {verificationRequired && accessStatus !== 'checking' && <Button className="justify-self-start" variant="outline" onClick={() => onSettings('connections', id)}>Manage Hugging Face connection</Button>}
       </div>
-      {access === 'checking' && <p role="status" className="text-muted-foreground">{accessMessages.checking}</p>}
-      {access === 'verified' && <Badge variant="secondary">File access verified</Badge>}
+      <div role="status" className="text-muted-foreground">
+        {accessStatus === 'verified' ? <Badge variant="secondary">{accessMessages.verified}</Badge> : accessMessages[accessStatus]}
+      </div>
       <div className="flex items-start gap-2">
-        <Checkbox id="model-download-consent" checked={consent && !verificationRequired}
+        <Checkbox id="model-download-consent" checked={consent}
           disabled={disabled || verificationRequired || !backend.downloads_enabled} onCheckedChange={value => setConsent(value === true)} />
         <Label htmlFor="model-download-consent" className="leading-relaxed">I reviewed the model terms and approve this download.</Label>
       </div>

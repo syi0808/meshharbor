@@ -220,7 +220,9 @@ test('refresh results use one global toast across settings and workbench', async
 test('on a narrow viewport setup is accessible without an asset and never starts a model download', async ({ page, studioOrigin }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   let finishSetup = false;
+  let tokenSaved = false;
   let downloads = 0;
+  let modelAccessChecks = 0;
   const createdAt = String(Date.now());
   const setupJob = {
     id: 'setup-mlx',
@@ -242,6 +244,8 @@ test('on a narrow viewport setup is accessible without an asset and never starts
       downloads_enabled: true,
       weights_included: false,
       models_downloaded: false,
+      local_files: { token_saved: tokenSaved, credentials_managed: true },
+      pixal3d_cache: { local_checkpoints: 0, reusable_checkpoints: 7, total_checkpoints: 7 },
     }, {
       id: 'pixal3d-cuda',
       installable: false,
@@ -265,10 +269,14 @@ test('on a narrow viewport setup is accessible without an asset and never starts
     const { token } = route.request().postDataJSON();
     expect(route.request().method()).toBe('POST');
     expect(route.request().headers()['x-meshharbor-dashboard']).toBe('local-ui-v1');
+    if (token === 'hf_testapproved') tokenSaved = true;
     return route.fulfill({ json: token === 'hf_testapproved'
       ? 'connected' : token ? 'invalid_token' : 'not_connected' });
   });
-  await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', route => route.fulfill({ json: 'verified' }));
+  await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', route => {
+    modelAccessChecks++;
+    return route.fulfill({ json: 'verified' });
+  });
 
   await page.goto(studioOrigin);
   const inventory = page.getByRole('button', { name: 'Inventory', exact: true });
@@ -302,6 +310,8 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(storage.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
   await expect(download).toBeDisabled();
   await expect(consent).toBeDisabled();
+  await expect(storage.getByText(/7 more can be reused/)).toBeVisible();
+  expect(modelAccessChecks).toBe(0);
   await storage.getByRole('button', { name: 'Manage Hugging Face connection' }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
   await expect(connections).not.toContainText('DINOv3');
@@ -322,9 +332,9 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(toasts.getByText('Hugging Face account verified.')).toBeVisible();
   await expect(token).toHaveValue('');
   await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
-  await expect(consent).toBeDisabled();
-  await storage.getByRole('button', { name: 'Check DINOv3 access' }).click();
-  await expect(toasts.getByText('DINOv3 file access verified.')).toBeVisible();
+  await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toHaveCount(0);
+  await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
+  expect(modelAccessChecks).toBeGreaterThan(0);
   await expect(download).toBeDisabled();
   await consent.check();
   await expect(download).toBeEnabled();
@@ -335,7 +345,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(settings).toBeFocused();
 });
 
-test('browser sign-in handles cancellation and verifies DINOv3 separately', async ({ page, studioOrigin }) => {
+test('browser sign-in leaves DINOv3 to storage, which rechecks access on return', async ({ page, studioOrigin }) => {
   let sessionNumber = 0;
   let cancelled = false;
   let approved = false;
@@ -394,16 +404,12 @@ test('browser sign-in handles cancellation and verifies DINOv3 separately', asyn
   await expect(connections).not.toContainText('DINOv3');
   await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
   const storage = page.getByRole('main', { name: 'Downloads & storage' });
-  const check = storage.getByRole('button', { name: 'Check DINOv3 access' });
   const download = storage.getByRole('button', { name: 'Download model files' });
-  await check.click();
-  await expect(toasts.getByText('DINOv3 access denied', { exact: false })).toBeVisible();
+  await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toHaveCount(0);
+  await expect(storage.getByText('DINOv3 access denied.', { exact: false })).toBeVisible();
   await expect(download).toBeDisabled();
-  await page.getByRole('button', { name: 'Connections', exact: true }).click();
-  await expect(connections).not.toContainText('DINOv3');
-  await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
-  await check.click();
-  await expect(toasts.getByText('DINOv3 file access verified.')).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
   await expect(download).toBeDisabled();
 });
 
@@ -422,6 +428,7 @@ test('settings deep links and confirmations manage one local profile at a time',
     }, { id: 'pixal3d-cuda', installable: false }],
   });
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: runtime() }));
+  await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', route => route.fulfill({ json: 'verified' }));
   for (const scope of ['model-files', 'huggingface']) {
     await page.route(`**/api/v1/runtime/pixal3d-mlx/${scope}`, route => {
       expect(route.request().method()).toBe('DELETE');
@@ -447,7 +454,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   await remove.getByRole('button', { name: 'Remove files' }).click();
   await expect(toasts.getByText('Pixal3D model files removed for Apple MLX.')).toBeVisible();
   await expect(storage.getByText('Not installed', { exact: true })).toBeVisible();
-  await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toBeEnabled();
+  await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
   await expect(connections.getByText('Token saved', { exact: true })).toBeVisible();
@@ -463,5 +470,6 @@ test('settings deep links and confirmations manage one local profile at a time',
   expect(calls).toEqual(['model-files', 'huggingface']);
   await page.goBack();
   await expect(storage.getByText('Not installed', { exact: true })).toBeVisible();
-  await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toBeDisabled();
+  await expect(storage.getByText('Sign in to Hugging Face to check DINOv3 file access.')).toBeVisible();
+  await expect(storage.getByRole('button', { name: 'Download model files' })).toBeDisabled();
 });

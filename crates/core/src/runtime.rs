@@ -17,7 +17,7 @@ use crate::{
     CoreError, CoreResult, HuggingFaceAccess, HuggingFaceConnection,
     huggingface_access::{DINO_REVISION, check_connection, check_model_access, require_access},
     huggingface_browser::access_python,
-    huggingface_download::{self, DINO_REPO, PIXAL_REPO, PIXAL_REVISION},
+    huggingface_download::{self, DINO_REPO},
     uv_bootstrap::ensure_uv,
 };
 
@@ -231,13 +231,18 @@ impl Pixal3dRuntimeManager {
             )));
         }
         let uv = ensure_uv(&self.runtime_root)?;
-        self.install_models_with_tools(&uv, &python)
+        self.install_models_with_tools(
+            &uv,
+            &python,
+            huggingface_download::shared_hub_cache().as_deref(),
+        )
     }
 
     fn install_models_with_tools(
         &self,
         uv: &Path,
         python: &Path,
+        shared_cache: Option<&Path>,
     ) -> CoreResult<RuntimeSetupReport> {
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
@@ -254,9 +259,7 @@ impl Pixal3dRuntimeManager {
             "meshharbor runtime hf-login",
         )?;
 
-        eprintln!(
-            "[2/3] Downloading pinned model files. Large files can take time; progress is shown below…"
-        );
+        eprintln!("[2/3] Preparing pinned model files and reusing the cache where possible…");
         eprintln!("Downloading pinned gated DINOv3 files with hf…");
         huggingface_download::download(
             &self.runtime_root,
@@ -265,23 +268,7 @@ impl Pixal3dRuntimeManager {
             DINO_REVISION,
             ["model.safetensors", "config.json", "--max-workers", "1"],
         )?;
-        eprintln!("Downloading seven pinned Pixal3D checkpoints with hf (~24 GB)…");
-        huggingface_download::download(
-            &self.runtime_root,
-            &home,
-            PIXAL_REPO,
-            PIXAL_REVISION,
-            [
-                "--include",
-                "ckpts/*.safetensors",
-                "--include",
-                "ckpts/*.json",
-                "--include",
-                "pipeline.json",
-                "--max-workers",
-                "2",
-            ],
-        )?;
+        huggingface_download::download_pixal3d(&self.runtime_root, &home, shared_cache, true)?;
         let mut verify = self.python_command(python);
         verify
             .current_dir(&self.source_root)
@@ -307,7 +294,7 @@ impl Pixal3dRuntimeManager {
             runtime_root: self.runtime_root.clone(),
             python: python.to_path_buf(),
             lockfile: self.source_root.join("uv.lock"),
-            message: "Pinned Pixal3D and gated DINOv3 snapshots were downloaded; Pixal3D/NAF hashes were verified, and NAF was converted in an isolated CPU-only environment.".into(),
+            message: "Pinned Pixal3D and gated DINOv3 snapshots are ready; Pixal3D/NAF hashes were verified, and NAF was converted in an isolated CPU-only environment.".into(),
         })
     }
 
@@ -871,15 +858,15 @@ fi
         let partial = hf_home.join("hub/.cache/download/partial");
         let unused_uv = root.join("unused-uv");
 
-        let first = manager.install_models_with_tools(&unused_uv, &fake_python);
+        let first = manager.install_models_with_tools(&unused_uv, &fake_python, None);
         let error = first.expect_err("the fake Pixal3D download fails once");
-        assert!(error.to_string().contains(PIXAL_REPO));
+        assert!(error.to_string().contains(huggingface_download::PIXAL_REPO));
         assert_eq!(
             fs::read_to_string(&partial).unwrap(),
             "partial checkpoint bytes"
         );
 
-        let second = manager.install_models_with_tools(&unused_uv, &fake_python);
+        let second = manager.install_models_with_tools(&unused_uv, &fake_python, None);
         let error = second.expect_err("fake fixture must reach the pinned checkpoint hash check");
         assert!(error.to_string().contains("checksum mismatch"));
         let steps = fs::read_to_string(manager.home_path().join("download-steps")).unwrap();
@@ -887,7 +874,10 @@ fi
             "download {DINO_REPO} --revision {DINO_REVISION} model.safetensors config.json --max-workers 1"
         );
         let pixal = format!(
-            "download {PIXAL_REPO} --revision {PIXAL_REVISION} --include ckpts/*.safetensors --include ckpts/*.json --include pipeline.json --max-workers 2"
+            "download {} --revision {} {} --max-workers 2",
+            huggingface_download::PIXAL_REPO,
+            huggingface_download::PIXAL_REVISION,
+            huggingface_download::pixal_files(true).join(" "),
         );
         assert_eq!(
             steps.lines().collect::<Vec<_>>(),

@@ -90,6 +90,11 @@ export interface RuntimeInfo {
     python?: string;
     gated_model_access_required?: boolean;
     license_notice?: string;
+    pixal3d_cache?: {
+      local_checkpoints: number;
+      reusable_checkpoints: number;
+      total_checkpoints: number;
+    };
     local_files?: {
       token_saved: boolean;
       disconnect_available: boolean;

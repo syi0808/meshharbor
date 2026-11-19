@@ -16,24 +16,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    Asset, AssetKind, CoreError, CoreResult, MAX_IMAGE_BYTES, OperationCore, inspect_asset,
+    Asset, AssetKind, CoreError, CoreResult, MAX_IMAGE_BYTES, OperationCore,
+    huggingface_download::{PIXAL_CHECKPOINTS, PIXAL_REPOSITORY, PIXAL_REVISION},
+    inspect_asset,
 };
 use crate::{cuda_runtime::Pixal3dCudaRuntimeManager, runtime::Pixal3dRuntimeManager};
 
-const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
-const PIXAL_REPOSITORY: &str = "models--TencentARC--Pixal3D";
 const DINO_REVISION: &str = "ea8dc2863c51be0a264bab82070e3e8836b02d51";
-
-const PIXAL_CHECKPOINTS: &[&str] = &[
-    "ss_flow_img_dit_1_3B_64_bf16.safetensors",
-    "ss_dec_conv3d_16l8_fp16.safetensors",
-    "slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
-    "shape_dec_next_dc_f16c32_fp16.safetensors",
-    "slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
-    "slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
-    "tex_dec_next_dc_f16c32_fp16.safetensors",
-];
 const MAX_GENERATED_GLB_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

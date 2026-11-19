@@ -642,9 +642,9 @@ export class MeshHarborApi {
     });
   }
 
-  checkModelAccess(backend: RuntimeBackendId): Promise<HuggingFaceAccess> {
+  checkModelAccess(backend: RuntimeBackendId, signal?: AbortSignal): Promise<HuggingFaceAccess> {
     return this.request(`/api/v1/runtime/${backend}/model-access`, {
-      method: 'POST', cache: 'no-store', redirect: 'error',
+      method: 'POST', cache: 'no-store', redirect: 'error', signal,
     });
   }
 
