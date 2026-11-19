@@ -38,7 +38,7 @@ test('desktop docks flank the viewport, then become drawers without horizontal o
   const toolSheet = page.getByRole('dialog', { name: 'Optimize mesh' });
   await expect(toolSheet).toBeVisible();
   await expect(rightDock).toBeVisible();
-  expect((await toolSheet.boundingBox()).x).toBeCloseTo(0, 0);
+  await expect.poll(async () => Math.round((await toolSheet.boundingBox()).x)).toBe(0);
   expect(await page.locator('html').evaluate(element => element.scrollWidth)).toBe(1024);
   await page.keyboard.press('Escape');
   await expect(toolSheet).toBeHidden();
@@ -56,7 +56,7 @@ test('desktop docks flank the viewport, then become drawers without horizontal o
   expect((await inventory.boundingBox()).y).toBeLessThan((await selected.boundingBox()).y);
   await inventory.click();
   const sheet = page.getByRole('dialog', { name: 'Inventory' });
-  await expect(sheet.getByRole('button', { name: 'Import assets' })).toBeVisible();
+  await expect(sheet.getByRole('button', { name: 'Open GLB' })).toBeVisible();
   await expect(sheet.getByRole('button', { name: 'Jobs', exact: true })).toHaveCount(0);
   await expect.poll(async () => {
     const { x, width } = await sheet.boundingBox();
@@ -148,6 +148,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   } }));
   await page.route('**/api/v1/assets/asset_generation_layout', route => route.fulfill({ json: derived }));
   await generate.getByRole('button', { name: 'Generate 3D' }).click();
+  await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Image-to-3D generation complete.', { exact: false })).toBeVisible();
   await expect(page.locator('#asset-library').getByTitle(derived.name)).toBeVisible();
   await expect(selected.getByTitle(active.name)).toBeVisible();
   await generate.getByRole('button', { name: 'View generated model' }).click();

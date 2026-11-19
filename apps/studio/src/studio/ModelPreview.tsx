@@ -12,10 +12,11 @@ import {
   type PreviewFrame,
 } from './preview-camera';
 import type { Asset } from './types';
+import type { StudioTheme } from './theme';
 
 const MAX_CANONICAL_SOURCE_FRAMES = 64;
 const canonicalSourceFrameCache = new Map<string, PreviewFrame>();
-const viewportLayout = 'relative isolate min-h-80 min-w-0 flex-1 overflow-hidden bg-neutral-800 min-[881px]:min-h-0';
+const viewportLayout = 'relative isolate min-h-80 min-w-0 flex-1 overflow-hidden bg-muted dark:bg-neutral-800 min-[881px]:min-h-0';
 type PreviewMode = 'material' | 'solid' | 'wireframe';
 
 export interface PreviewComparison {
@@ -32,6 +33,7 @@ interface Props {
   loadModel: (asset: Asset, signal?: AbortSignal) => Promise<Blob>;
   onError: (message: string) => void;
   comparison?: PreviewComparison | null;
+  theme: StudioTheme;
 }
 
 export function ModelPreview(props: Props) {
@@ -84,7 +86,7 @@ function PreviewLoading({ children }: { children: string }) {
   </div>;
 }
 
-function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
+function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -187,6 +189,10 @@ function MeshPreview({ asset, loadModel, onError, comparison }: Props) {
       host.replaceChildren();
     };
   }, []);
+
+  useEffect(() => {
+    if (sceneRef.current) sceneRef.current.background = new THREE.Color(theme === 'dark' ? '#202020' : '#eeeeef');
+  }, [theme]);
 
   useEffect(() => {
     const controller = new AbortController();

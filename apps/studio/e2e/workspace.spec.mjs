@@ -26,12 +26,14 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   const activity = page.getByRole('complementary', { name: 'Jobs' });
   const viewport = page.getByRole('region', { name: 'Start a model' });
   await expect(activity.getByText('No saved jobs yet.')).toBeVisible();
-  await expect(library.getByRole('button', { name: 'Import assets' })).toBeVisible();
+  await expect(library.getByRole('button', { name: 'Open GLB' })).toBeVisible();
   const [left, center, right] = await Promise.all([activity.boundingBox(), viewport.boundingBox(), library.boundingBox()]);
   expect(left.x + left.width).toBeLessThanOrEqual(center.x);
   expect(Math.round(right.x + right.width)).toBe(1280);
   await activity.getByRole('button', { name: 'Close jobs' }).click();
   await expect(jobs).toBeFocused();
+  await expect(jobs).toHaveAttribute('aria-expanded', 'false');
+  await expect(jobs).toHaveAttribute('aria-pressed', 'true');
   const panelWidth = () => library.evaluate(element => Math.round(element.getBoundingClientRect().width));
   const initialWidth = await panelWidth();
   const handle = page.getByRole('separator', { name: 'Resize library panel' });
@@ -41,6 +43,30 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   await page.reload();
   await expect.poll(panelWidth).toBe(resizedWidth);
   await expect(jobs).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('the model rail expands over the workbench without shifting it', async ({ page, studioOrigin }) => {
+  await page.goto(studioOrigin);
+  const rail = page.getByRole('group', { name: 'Model tools' });
+  const job = rail.getByRole('button', { name: 'Jobs' });
+  const label = job.locator('span');
+  const viewport = page.getByRole('region', { name: 'Start a model' });
+  await expect(rail.locator('[aria-pressed=true]')).toHaveCount(1);
+  await expect(label).toHaveCSS('opacity', '0');
+  const collapsed = await rail.boundingBox();
+  const initialViewport = await viewport.boundingBox();
+  await job.hover();
+  await expect(label).toHaveCSS('opacity', '1');
+  expect((await rail.boundingBox()).width).toBeGreaterThan(collapsed.width);
+  expect(await viewport.boundingBox()).toEqual(initialViewport);
+  await expect(page.getByRole('tooltip')).toHaveCount(0);
+  await page.mouse.move(600, 20);
+  await expect(label).toHaveCSS('opacity', '0');
+  await job.focus();
+  await expect(label).toHaveCSS('opacity', '1');
+  await job.press('Enter');
+  await expect(job).toHaveAttribute('aria-pressed', 'true');
+  await expect(rail.locator('[aria-pressed=true]')).toHaveCount(1);
 });
 
 test('long model names do not overflow gallery cards at narrow panel and mobile widths', async ({ page, studioOrigin }) => {
@@ -93,15 +119,66 @@ test('workbench and settings controls keep the official Mira dimensions', async 
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
   await expect(page.getByRole('banner').getByText('meshharbor', { exact: true })).toBeVisible();
   await expect(page.getByRole('banner')).not.toContainText(/Studio|Local engine ready/);
-  await expect(page.getByRole('button', { name: 'Open GLB' })).toHaveCSS('height', '28px');
+  await expect(page.getByRole('banner').getByRole('button', { name: 'Open GLB' })).toHaveCount(0);
+  await expect(page.getByRole('complementary', { name: 'Inventory' }).getByRole('button', { name: 'Open GLB' })).toHaveCSS('height', '24px');
   const settings = page.getByRole('button', { name: 'Settings', exact: true });
   await expect(settings).toHaveCSS('height', '24px');
   await expect(settings).toHaveCSS('column-gap', '4px');
   await settings.click();
   await expect(page.getByRole('heading', { name: 'Pixal3D' })).toBeVisible();
+  await expect(page.getByRole('banner')).not.toContainText('Engine connected');
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(page.getByLabel('Backend')).toHaveCSS('height', '28px');
   expect(await page.locator('html').evaluate(element => getComputedStyle(element).getPropertyValue('--primary').trim())).toBe('#82d7b8');
+});
+
+test('preferences can switch the theme and remember it across reloads', async ({ page, studioOrigin }) => {
+  await page.route('**/api/v1/health', route => route.abort());
+  await page.goto(studioOrigin + '/settings/preferences');
+  const preferences = page.getByRole('main', { name: 'Preferences' });
+  const theme = preferences.getByLabel('Theme');
+  const html = page.locator('html');
+  const toasts = page.getByRole('region', { name: /Notifications/ });
+  await expect(theme).toHaveValue('dark');
+  await theme.selectOption('light');
+  await expect(html).toHaveCSS('color-scheme', 'light');
+  await expect(toasts.getByText('Light theme enabled.')).toBeVisible();
+  await page.reload();
+  await expect(theme).toHaveValue('light');
+  await expect(html).toHaveCSS('color-scheme', 'light');
+  await theme.selectOption('dark');
+  await expect(html).toHaveCSS('color-scheme', 'dark');
+});
+
+test('refresh results use one global toast across settings and workbench', async ({ page, studioOrigin }) => {
+  let failRefresh = false;
+  await page.route('**/api/v1/jobs?limit=20', route => failRefresh
+    ? route.fulfill({ status: 503, json: { error: 'Job list unavailable.' } })
+    : route.continue());
+  await page.goto(studioOrigin + '/settings/models');
+  const settings = page.getByRole('main', { name: 'Models' });
+  await expect(settings).toHaveAttribute('data-connection', 'connected');
+  const toasts = page.getByRole('region', { name: /Notifications/ });
+  const refresh = settings.getByRole('button', { name: 'Refresh status' });
+  await refresh.click();
+  const refreshed = toasts.getByText('Local status refreshed.');
+  await expect(refreshed).toBeVisible();
+  await expect(settings.getByText('Local status refreshed.')).toHaveCount(0);
+  await toasts.getByRole('button', { name: 'Dismiss notification' }).click();
+  await expect(refreshed).toHaveCount(0);
+  failRefresh = true;
+  await refresh.click();
+  const failed = toasts.getByText('Could not refresh recent job records. Job list unavailable.');
+  await expect(failed).toBeVisible();
+  await expect(refreshed).toHaveCount(0);
+  await page.getByRole('button', { name: 'Workbench', exact: true }).click();
+  await expect(failed).toBeVisible();
+  await page.getByRole('button', { name: 'Refresh assets' }).click();
+  await expect(toasts.getByText('Asset library refreshed.')).toBeVisible();
+  failRefresh = false;
+  await page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs' }).click();
+  await page.getByRole('complementary', { name: 'Jobs' }).getByRole('button', { name: 'Refresh' }).click();
+  await expect(toasts.getByText('Job history refreshed.')).toBeVisible();
 });
 
 test('on a narrow viewport setup is accessible without an asset and never starts a model download', async ({ page, studioOrigin }) => {
@@ -183,6 +260,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(main.getByText('Download required')).toBeVisible();
   await main.getByRole('button', { name: 'View downloads' }).click();
   const storage = page.getByRole('main', { name: 'Downloads & storage' });
+  const toasts = page.getByRole('region', { name: /Notifications/ });
   const download = storage.getByRole('button', { name: 'Download model files' });
   const consent = storage.getByRole('checkbox', { name: 'I reviewed the model terms and approve this download.' });
   await expect(storage.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
@@ -193,7 +271,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(connections).not.toContainText('DINOv3');
   await expect(connections.getByRole('button', { name: 'Sign in with browser' })).toBeEnabled();
   await connections.getByRole('button', { name: 'Check sign-in' }).click();
-  await expect(connections.getByText('No token is saved', { exact: false })).toBeVisible();
+  await expect(toasts.getByText('No token is saved', { exact: false })).toBeVisible();
   await connections.getByText('Use an access token instead').click();
   await expect(connections.getByRole('link', { name: 'Create a Hugging Face token' })).toHaveAttribute('href', 'https://huggingface.co/settings/tokens');
   const token = connections.getByLabel('Hugging Face access token');
@@ -201,16 +279,16 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(token).toHaveAttribute('type', 'password');
   await token.fill('hf_testdenied');
   await connect.click();
-  await expect(connections.getByText('Hugging Face did not accept this token', { exact: false })).toBeVisible();
+  await expect(toasts.getByText('Hugging Face did not accept this token', { exact: false })).toBeVisible();
   await expect(token).toHaveValue('');
   await token.fill('hf_testapproved');
   await connect.click();
-  await expect(connections.getByText('Hugging Face account verified.')).toBeVisible();
+  await expect(toasts.getByText('Hugging Face account verified.')).toBeVisible();
   await expect(token).toHaveValue('');
   await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
   await expect(consent).toBeDisabled();
   await storage.getByRole('button', { name: 'Check DINOv3 access' }).click();
-  await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
+  await expect(toasts.getByText('DINOv3 file access verified.')).toBeVisible();
   await expect(download).toBeDisabled();
   await consent.check();
   await expect(download).toBeEnabled();
@@ -262,19 +340,20 @@ test('browser sign-in handles cancellation and verifies DINOv3 separately', asyn
   });
   await page.goto(studioOrigin + '/settings/connections');
   const connections = page.getByRole('main', { name: 'Connections' });
+  const toasts = page.getByRole('region', { name: /Notifications/ });
   const signIn = connections.getByRole('button', { name: 'Sign in with browser' });
   await expect(connections.getByLabel('Hugging Face access token')).toBeHidden();
   await signIn.click();
   await expect(connections.getByText('TEST-CODE')).toBeVisible();
   await expect(connections.getByRole('link', { name: 'Open Hugging Face' })).toHaveAttribute('href', 'https://huggingface.co/oauth/device');
   await connections.getByRole('button', { name: 'Cancel sign-in' }).click();
-  await expect(connections.getByText('Hugging Face sign-in cancelled.')).toBeVisible();
+  await expect(toasts.getByText('Hugging Face sign-in cancelled.')).toBeVisible();
   await signIn.click();
   await expect(connections.getByText('TEST-CODE')).toBeVisible();
   approved = true;
-  await expect(connections.getByText('Signed in to Hugging Face for Apple MLX.')).toBeVisible();
+  await expect(toasts.getByText('Signed in to Hugging Face for Apple MLX.')).toBeVisible();
   await connections.getByRole('button', { name: 'Check sign-in' }).click();
-  await expect(connections.getByText('Hugging Face account verified.')).toBeVisible();
+  await expect(toasts.getByText('Hugging Face account verified.')).toBeVisible();
   expect(modelAccessChecks).toBe(0);
   await expect(connections).not.toContainText('DINOv3');
   await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
@@ -282,13 +361,13 @@ test('browser sign-in handles cancellation and verifies DINOv3 separately', asyn
   const check = storage.getByRole('button', { name: 'Check DINOv3 access' });
   const download = storage.getByRole('button', { name: 'Download model files' });
   await check.click();
-  await expect(storage.getByText('DINOv3 access denied', { exact: false })).toBeVisible();
+  await expect(toasts.getByText('DINOv3 access denied', { exact: false })).toBeVisible();
   await expect(download).toBeDisabled();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(connections).not.toContainText('DINOv3');
   await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
   await check.click();
-  await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
+  await expect(toasts.getByText('DINOv3 file access verified.')).toBeVisible();
   await expect(download).toBeDisabled();
 });
 
@@ -319,6 +398,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   }
   await page.goto(studioOrigin + '/settings/storage');
   const storage = page.getByRole('main', { name: 'Downloads & storage' });
+  const toasts = page.getByRole('region', { name: /Notifications/ });
   const uninstall = storage.getByRole('button', { name: 'Uninstall model files' });
   await expect(storage.getByText('Installed', { exact: true })).toBeVisible();
   await uninstall.click();
@@ -329,6 +409,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   expect(calls).toEqual([]);
   await uninstall.click();
   await remove.getByRole('button', { name: 'Remove files' }).click();
+  await expect(toasts.getByText('Pixal3D model files removed for Apple MLX.')).toBeVisible();
   await expect(storage.getByText('Not installed', { exact: true })).toBeVisible();
   await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toBeEnabled();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
@@ -341,6 +422,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   const disconnect = page.getByRole('dialog', { name: 'Disconnect Hugging Face?' });
   await expect(disconnect).toContainText('does not revoke the token');
   await disconnect.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(toasts.getByText('Hugging Face disconnected for Apple MLX on this computer.')).toBeVisible();
   await expect(connections.getByText('Not connected', { exact: true })).toBeVisible();
   expect(calls).toEqual(['model-files', 'huggingface']);
   await page.goBack();

@@ -1,5 +1,6 @@
-import { ArrowsClockwiseIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GearSixIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WarningCircleIcon, WrenchIcon, XIcon } from '@phosphor-icons/react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowsClockwiseIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GearSixIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WrenchIcon } from '@phosphor-icons/react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Tabs } from 'radix-ui';
 import {
   assetComparisonPairForSelection,
   assetComparisonPairFromJob,
@@ -22,11 +23,11 @@ import {
   quadTopologyArtifact,
   type AssetComparisonPair,
   type AssetComparisonSide,
+  type AssetImportProgress,
   type AssetPageFilters,
   type JobReportCardModel,
 } from './api';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
-import { Alert, AlertAction, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty';
@@ -38,42 +39,42 @@ import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Slider } from '@/components/ui/slider';
 import { Spinner } from '@/components/ui/spinner';
+import { useToast } from '@/components/ui/toast';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ModelPreview } from './ModelPreview';
 import { AssetGalleryCard } from './AssetGalleryCard';
 import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
 import { SettingsPage, settingsSectionFromPath, type RuntimeAction, type SettingsSection } from './SettingsPage';
+import { applyStudioTheme, loadStudioTheme } from './theme';
 import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
 import { formatVersionSizes, inspectorForAsset, shouldHighlightExport, WORKBENCH_INSPECTOR_SHEET_QUERY, type Inspector } from './workbench-state';
 import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeBackendId, RuntimeInfo } from './types';
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
-type AssetKindFilter = AssetKind | 'all';
 type AssetOriginFilter = 'all' | 'original' | 'derived';
 interface AssetBrowserFilters {
   query: string;
-  kind: AssetKindFilter;
+  kind: AssetKind;
   origin: AssetOriginFilter;
 }
 
 const ASSET_PAGE_SIZE = 50;
 const ASSET_GALLERY_GRID = 'grid min-w-0 grid-cols-2 gap-2 @min-[380px]:grid-cols-3';
-const EMPTY_ASSET_BROWSER_FILTERS: AssetBrowserFilters = { query: '', kind: 'all', origin: 'all' };
+const EMPTY_ASSET_BROWSER_FILTERS: AssetBrowserFilters = { query: '', kind: 'mesh', origin: 'all' };
 
 function toAssetPageFilters(filters: AssetBrowserFilters): AssetPageFilters {
   const query = filters.query.trim();
   return {
     ...(query ? { query } : {}),
-    ...(filters.kind === 'all' ? {} : { kind: filters.kind }),
+    kind: filters.kind,
     ...(filters.origin === 'all' ? {} : { derived: filters.origin === 'derived' }),
   };
 }
 
 function matchesAssetBrowserFilters(asset: Asset, filters: AssetBrowserFilters): boolean {
   return (!filters.query || asset.name.toLowerCase().includes(filters.query.toLowerCase()))
-    && (filters.kind === 'all' || asset.kind === filters.kind)
+    && asset.kind === filters.kind
     && (filters.origin === 'all' || Boolean(asset.source_asset_id) === (filters.origin === 'derived'));
 }
 
@@ -127,6 +128,9 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; descript
 ];
 
 export function App() {
+  const notify = useToast();
+  const [theme, setTheme] = useState(loadStudioTheme);
+  useLayoutEffect(() => { applyStudioTheme(theme); }, [theme]);
   const [connection, setConnection] = useState<Connection>('disconnected');
   const [settingsSection, setSettingsSection] = useState(() => settingsSectionFromPath(window.location.pathname));
   const [settingsBackend, setSettingsBackend] = useState<RuntimeBackendId | null>(null);
@@ -181,6 +185,7 @@ export function App() {
   const [downloading, setDownloading] = useState(false);
   const downloadInFlight = useRef(false);
   const [inspector, setInspector] = useState<Inspector | null>(null);
+  const [selectedTool, setSelectedTool] = useState<Inspector>('generation');
   const inspectorTrigger = useRef<HTMLButtonElement | null>(null);
   const [inspectorIsSheet, setInspectorIsSheet] = useState(() => window.matchMedia(WORKBENCH_INSPECTOR_SHEET_QUERY).matches);
   useEffect(() => {
@@ -193,8 +198,8 @@ export function App() {
   const sidebar = useWorkbenchSidebar();
   const workbenchRef = useRef<HTMLElement>(null);
   const [dragging, setDragging] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [importProgress, setImportProgress] = useState<AssetImportProgress | null>(null);
+  const [jobPollingIssue, setJobPollingIssue] = useState<{ jobId: string; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const inventoryInputRef = useRef<HTMLInputElement>(null);
@@ -221,9 +226,8 @@ export function App() {
   ].filter((id): id is string => id !== null && id !== undefined));
   const matchingAssets = assets.filter(asset => matchesAssetBrowserFilters(asset, assetFilters));
   const matchingAssetIds = new Set(matchingAssets.map(asset => asset.id));
-  const pinnedAssets = assets.filter(asset => pinnedAssetIds.has(asset.id) && !matchingAssetIds.has(asset.id));
+  const pinnedAssets = assets.filter(asset => asset.kind === assetFilters.kind && pinnedAssetIds.has(asset.id) && !matchingAssetIds.has(asset.id));
   const hasActiveAssetFilters = assetFilters.query !== ''
-    || assetFilters.kind !== 'all'
     || assetFilters.origin !== 'all';
   const showLibraryFilters = assets.length > 0 || hasActiveAssetFilters;
   const quadArtifact = quadTopologyArtifact(selectedAsset);
@@ -253,23 +257,21 @@ export function App() {
   }
 
   async function requestAssetPage(
-    client: MeshHarborApi,
     filters: AssetBrowserFilters,
     append: boolean,
-  ): Promise<string | null> {
-    if (connection !== 'connected') return null;
+  ): Promise<string | null | undefined> {
+    if (connection !== 'connected') return;
     const cursor = append ? assetNextCursor : null;
-    if (append && !cursor) return null;
+    if (append && !cursor) return;
 
     const requestId = assetPageRequestGuard.current.begin();
     assetFiltersRef.current = filters;
     setAssetFilters(filters);
     setAssetPageLoading(true);
-    setError(null);
     if (!append) setAssetNextCursor(null);
     try {
-      const page = await client.assetPage(ASSET_PAGE_SIZE, cursor, toAssetPageFilters(filters));
-      if (!assetPageRequestGuard.current.isCurrent(requestId)) return null;
+      const page = await api.assetPage(ASSET_PAGE_SIZE, cursor, toAssetPageFilters(filters));
+      if (!assetPageRequestGuard.current.isCurrent(requestId)) return;
       setAssets((current) => {
         const selectedPair = comparisonPairRef.current
           ?? assetComparisonPairForSelection(current, selectedIdRef.current, null);
@@ -286,19 +288,19 @@ export function App() {
       setAssetNextCursor(page.next_cursor);
       return null;
     } catch (cause) {
-      if (!assetPageRequestGuard.current.isCurrent(requestId)) return null;
-      const message = cause instanceof Error
+      if (!assetPageRequestGuard.current.isCurrent(requestId)) return;
+      return cause instanceof Error
         ? 'Could not load the asset library. ' + cause.message
         : 'Could not load the asset library.';
-      setError(message);
-      return message;
     } finally {
       if (assetPageRequestGuard.current.isCurrent(requestId)) setAssetPageLoading(false);
     }
   }
 
-  async function refreshAssets(client: MeshHarborApi) {
-    await requestAssetPage(client, assetFilters, false);
+  async function refreshAssets(append = false) {
+    const result = await requestAssetPage(assetFilters, append);
+    if (result === null) notify('success', append ? 'More assets loaded.' : 'Asset library refreshed.');
+    else if (result) notify('error', result);
   }
 
   function applyAssetBrowserFilters(filters: AssetBrowserFilters) {
@@ -306,7 +308,12 @@ export function App() {
     assetBrowserInteractionRevision.current += 1;
     assetSearchInputRef.current = normalized.query;
     setAssetSearchInput(normalized.query);
-    void requestAssetPage(api, normalized, false);
+    if (connection !== 'connected') {
+      assetFiltersRef.current = normalized;
+      setAssetFilters(normalized);
+      return;
+    }
+    void requestAssetPage(normalized, false).then(problem => { if (problem) notify('error', problem); });
   }
 
   function invalidateHistoryRequests() {
@@ -319,10 +326,20 @@ export function App() {
     const requestId = recentJobsRequestGuard.current.begin();
     try {
       const jobs = await api.jobs(20);
-      if (recentJobsRequestGuard.current.isCurrent(requestId)) setRecentJobs(jobs);
+      if (!recentJobsRequestGuard.current.isCurrent(requestId)) return false;
+      setRecentJobs(jobs);
+      return true;
     } catch (cause) {
-      if (!recentJobsRequestGuard.current.isCurrent(requestId)) return;
-      setError(cause instanceof Error ? cause.message : 'Could not refresh recent job records.');
+      if (!recentJobsRequestGuard.current.isCurrent(requestId)) return false;
+      throw new Error(cause instanceof Error ? `Could not refresh recent job records. ${cause.message}` : 'Could not refresh recent job records.');
+    }
+  }
+
+  async function refreshJobHistory() {
+    try {
+      if (await refreshRecentJobs()) notify('success', 'Job history refreshed.');
+    } catch (cause) {
+      notify('error', cause instanceof Error ? cause.message : 'Could not refresh job history.');
     }
   }
 
@@ -330,8 +347,6 @@ export function App() {
     const requestId = historySelectionGuard.current.begin();
     setComparisonLoadingSide(null);
     setReportJob(null);
-    setError(null);
-    setNotice(null);
     try {
       const response = await api.job(jobId);
       if (!historySelectionGuard.current.isCurrent(requestId)) return;
@@ -341,12 +356,12 @@ export function App() {
           .sort((left, right) => Number(right.updated_at) - Number(left.updated_at)
             || right.id.localeCompare(left.id))
           .slice(0, 20));
-        setNotice('The live status monitor will apply this result and refresh runtime readiness. No status tracking was stopped.');
+        notify('info', 'The live status monitor will apply this result.');
         return;
       }
       const latest = preferTrackedTerminalJob(jobRef.current, response);
       if (!canInspectJobHistoryRecord(jobRef.current, latest)) {
-        setNotice('Wait for the active job to finish before opening a different saved result. Its progress and cancellation controls will remain attached.');
+        notify('warning', 'Wait for the active job to finish before opening a different saved result.');
         return;
       }
 
@@ -366,7 +381,7 @@ export function App() {
         derived = await api.derivedAsset(latest.result.asset_id);
         if (!historySelectionGuard.current.isCurrent(requestId)) return;
         if (!canInspectJobHistoryRecord(jobRef.current, latest)) {
-          setNotice('A new job is active. Its progress and cancellation controls remain attached; try viewing saved results after it finishes.');
+          notify('warning', 'A new job is active. Try viewing the saved result after it finishes.');
           return;
         }
       }
@@ -386,9 +401,9 @@ export function App() {
         if (latest.input_asset_id) {
           selectAssetId(latest.input_asset_id);
         }
-        setNotice(jobRef.current?.id === latest.id
-          ? `The live monitor remains attached to the current ${latest.operation} job; this check did not replace its tracking.`
-          : `Last saved state: ${latest.state} (${latest.progress}%). This read-only check did not resume work. Refresh to check again. A saved active state may be stale after an unexpected engine exit; stop every REST/MCP process using this data directory and run meshharbor jobs recover-interrupted --confirm-no-running-meshharbor before retrying.`);
+        notify('info', jobRef.current?.id === latest.id
+          ? 'The current job is still being monitored.'
+          : `Last saved state: ${latest.state} (${latest.progress}%). No work was resumed.`);
         return;
       }
 
@@ -410,41 +425,38 @@ export function App() {
         selectAssetId(resultAsset.id);
       }
       if (latest.state === 'failed') {
-        setError(latest.error?.message ?? 'This saved job failed.');
+        notify('error', latest.error?.message ?? 'This saved job failed.');
       } else {
-        setNotice(`Loaded the saved ${latest.operation} record. No work was restarted.`);
+        notify('info', `Loaded the saved ${studioOperationLabel(latest.operation)} record.`);
       }
     } catch (cause) {
       if (!historySelectionGuard.current.isCurrent(requestId)) return;
-      setError(cause instanceof Error ? cause.message : 'Could not load this saved job.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not load this saved job.');
     }
   }
 
   const installQuadriflowBackend = useCallback(async () => {
     if (!quadriflowBackend?.install_available || installingBackend) return;
-    setError(null);
-    setNotice(null);
     setInstallingBackend(true);
     try {
       await api.installQuadriflowBackend();
       const [runtimeInfo, operationList] = await Promise.all([api.runtime(), api.operations()]);
       setRuntime(runtimeInfo);
       setOperations(operationList);
-      setNotice('QuadriFlow backend installation completed.');
+      notify('success', 'QuadriFlow backend installation completed.');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'QuadriFlow backend installation failed.');
+      notify('error', cause instanceof Error ? cause.message : 'QuadriFlow backend installation failed.');
     } finally {
       setInstallingBackend(false);
     }
-  }, [api, installingBackend, quadriflowBackend?.install_available]);
+  }, [api, installingBackend, notify, quadriflowBackend?.install_available]);
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (announce = false) => {
     historySelectionGuard.current.invalidate();
     assetPageRequestGuard.current.invalidate();
     setAssetPageLoading(true);
     setComparisonLoadingSide(null);
     setComparisonPair(null);
-    setError(null);
     setConnectionError(null);
     setConnection('connecting');
     try {
@@ -481,13 +493,15 @@ export function App() {
       });
       setAssetPageLoading(false);
       setConnection('connected');
+      if (announce) notify('success', 'Connected to the local engine.');
     } catch (cause) {
       setAssetPageLoading(false);
       setConnection('disconnected');
       const message = cause instanceof Error ? cause.message : 'Could not connect to MeshHarbor.';
       setConnectionError(message);
+      if (announce) notify('error', `Could not connect to the local engine. ${message}`);
     }
-  }, [api]);
+  }, [api, notify]);
 
   useEffect(() => { void connect(); }, [connect]);
 
@@ -523,7 +537,7 @@ export function App() {
         const latest = await api.job(job.id);
         if (stopped) return;
         consecutiveFailures = 0;
-        setError((current) => current?.startsWith('Could not check job status.') ? null : current);
+        setJobPollingIssue(null);
         if (latest.state === 'succeeded') {
           if (latest.operation.startsWith('runtime.')) {
             let refreshed: [RuntimeInfo, Operation[]] | null = null;
@@ -532,7 +546,7 @@ export function App() {
             } catch (cause) {
               if (!stopped) {
                 setJob(latest);
-                setError(cause instanceof Error ? cause.message : 'Runtime setup finished, but status could not be refreshed.');
+                notify('warning', cause instanceof Error ? `Runtime setup finished, but status could not be refreshed. ${cause.message}` : 'Runtime setup finished, but status could not be refreshed.');
               }
               return;
             }
@@ -542,7 +556,7 @@ export function App() {
             setReportJob(null);
             setRuntime(runtimeInfo);
             setOperations(operationList);
-            setNotice(latest.operation === 'runtime.pixal3d.setup'
+            notify('success', latest.operation === 'runtime.pixal3d.setup'
               ? 'The isolated Python environment is ready. Connect Hugging Face in Settings before downloading model files.'
               : latest.operation === 'runtime.pixal3d.install_models'
                 ? 'Pinned model files are ready. MeshHarbor completed the one-time NAF conversion in an isolated tool environment.'
@@ -588,21 +602,21 @@ export function App() {
               0,
               Number(resultReport.triangles_before ?? 0) - Number(resultReport.triangles_after ?? 0),
             );
-            setNotice(removed > 0
+            notify('success', removed > 0
               ? `Cleanup complete. Removed ${removed.toLocaleString()} invalid or duplicate triangles.`
               : 'Cleanup complete. No removable triangles were found.');
           } else if (latest.operation === 'render.optimize') {
             const before = Number(resultReport.vertex_cache_misses_before ?? 0);
             const after = Number(resultReport.vertex_cache_misses_after ?? 0);
-            setNotice(`Render optimization complete. Estimated vertex-cache misses: ${before.toLocaleString()} → ${after.toLocaleString()}.`);
+            notify('success', `Render optimization complete. Estimated vertex-cache misses: ${before.toLocaleString()} → ${after.toLocaleString()}.`);
           } else if (latest.operation === 'mesh.compress') {
             const saved = Number(resultReport.bytes_saved ?? 0);
-            setNotice(`Compression complete. Saved ${formatSize(saved)}. This GLB requires KHR_meshopt_compression support; the original remains unchanged.`);
+            notify('success', `Compression complete. Saved ${formatSize(saved)}. The exported GLB requires KHR_meshopt_compression support.`);
           } else if (latest.operation === 'mesh.separate_parts') {
             const parts = Number(resultReport.connected_parts ?? 0);
             const grouped = Number(resultReport.grouped_components ?? 0);
             const primitives = Number(resultReport.output_primitives ?? parts);
-            setNotice(grouped > 0
+            notify('success', grouped > 0
               ? `Part separation complete. Found ${parts.toLocaleString()} connected components. ${grouped.toLocaleString()} small components share the last of ${primitives.toLocaleString()} output primitives; no triangles were discarded.`
               : `Part separation complete. Found ${parts.toLocaleString()} connected component${parts === 1 ? '' : 's'}, emitted as primitives in the same mesh.`);
           } else if (latest.operation === 'mesh.retopology') {
@@ -613,14 +627,14 @@ export function App() {
             const projectionNotice = Number.isFinite(coverage)
               ? ` Supported base-color and metallic-roughness maps passed ${(coverage * 100).toFixed(1)}% projection coverage in the preview.`
               : ' No appearance maps were projected.';
-            setNotice(`Experimental retopology complete.${projectionNotice} The GLB preview is triangulated; the separate quad OBJ contains geometry only.`);
+            notify('success', `Experimental retopology complete.${projectionNotice}`);
           } else if (latest.operation === 'uv.unwrap') {
             const width = Number(resultReport.atlas_width ?? 0);
             const height = Number(resultReport.atlas_height ?? 0);
             const size = width && height ? ` at ${width}×${height}px` : '';
-            setNotice(`Atlas UV unwrap and same-mesh texture rebake complete${size}. This is not a high-to-low bake; the source remains unchanged.`);
+            notify('success', `Atlas UV unwrap and same-mesh texture rebake complete${size}.`);
           } else {
-            setNotice(latest.operation === 'image.generate'
+            notify('success', latest.operation === 'image.generate'
               ? 'Image-to-3D generation complete. Your source image is unchanged.'
               : 'Mesh simplification complete. Your original file is unchanged.');
           }
@@ -641,7 +655,7 @@ export function App() {
             setRuntime(refreshed[0]);
             setOperations(refreshed[1]);
           }
-          setError(latest.error?.message ?? (latest.operation === 'image.generate'
+          notify('error', latest.error?.message ?? (latest.operation === 'image.generate'
             ? 'This image generation job failed.'
             : latest.operation === 'mesh.simplify'
               ? 'This simplification job failed.'
@@ -650,7 +664,7 @@ export function App() {
         }
         if (latest.state === 'cancelled') {
           setJob(latest);
-          setNotice('The queued job was cancelled.');
+          notify('success', 'The queued job was cancelled.');
           return;
         }
         setJob(latest);
@@ -660,7 +674,7 @@ export function App() {
           consecutiveFailures += 1;
           const delay = jobPollRetryDelay(consecutiveFailures);
           const detail = cause instanceof Error ? cause.message : 'The local engine could not be reached.';
-          setError(`Could not check job status. ${detail} Retrying in ${Math.ceil(delay / 1000)}s.`);
+          setJobPollingIssue({ jobId: job.id, message: `Could not check job status. ${detail} Retrying in ${Math.ceil(delay / 1000)}s.` });
           timer = window.setTimeout(poll, delay);
         }
       }
@@ -670,7 +684,7 @@ export function App() {
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [api, job?.id, job?.state]);
+  }, [api, job?.id, job?.state, notify]);
 
   useEffect(() => {
     if (!job) return;
@@ -721,7 +735,7 @@ export function App() {
     if (connection !== 'connected') return Promise.reject(new Error('The local MeshHarbor engine is offline.'));
     return api.artifact(asset, signal);
   }, [api, connection]);
-  const reportPreviewError = useCallback((message: string) => setError(`Preview: ${message}`), []);
+  const reportPreviewError = useCallback((message: string) => notify('error', `Preview: ${message}`), [notify]);
 
   function selectAsset(asset: Asset) {
     if (asset.kind !== 'mesh') setInspector(current => inspectorForAsset(current, asset.kind));
@@ -738,7 +752,6 @@ export function App() {
     const requestId = historySelectionGuard.current.begin();
     setComparisonPair(pair);
     setComparisonLoadingSide(side);
-    setError(null);
     try {
       const asset = await resolveComparisonAsset(pair, side, assets, (assetId) => api.derivedAsset(assetId));
       if (!historySelectionGuard.current.isCurrent(requestId)) return;
@@ -747,7 +760,7 @@ export function App() {
     } catch (cause) {
       if (!historySelectionGuard.current.isCurrent(requestId)) return;
       const label = side === 'source' ? 'original' : 'result';
-      setError(cause instanceof Error ? `Could not load the comparison ${label}. ${cause.message}` : `Could not load the comparison ${label}.`);
+      notify('error', cause instanceof Error ? `Could not load the comparison ${label}. ${cause.message}` : `Could not load the comparison ${label}.`);
     } finally {
       if (historySelectionGuard.current.isCurrent(requestId)) setComparisonLoadingSide(null);
     }
@@ -756,16 +769,16 @@ export function App() {
   async function importFiles(files: FileList | File[], purpose: 'library' | 'reference' = 'library') {
     if (files.length === 0) return;
     if (importBatchInFlight.current) {
-      setNotice('An import batch is already running. These additional files were not queued.');
+      notify('warning', 'An import batch is already running. These additional files were not queued.');
       return;
     }
     if (busy) {
-      setError('Wait for the current Studio operation to finish before importing files.');
+      notify('warning', 'Wait for the current Studio operation to finish before importing files.');
       return;
     }
     if (connection !== 'connected') {
       openSettings('models');
-      setConnectionError('The engine must be running before Studio can import files.');
+      notify('warning', 'Start the local engine before importing files.');
       return;
     }
 
@@ -777,15 +790,10 @@ export function App() {
       browserInteractionRevision: assetBrowserInteractionRevision.current,
       selectionInteractionRevision: assetSelectionInteractionRevision.current,
     };
-    setError(null);
-    setNotice(null);
     setBusy(true);
     try {
       const result = await importAssetBatch(files, async (file, kind) =>
-        kind === 'image' ? api.importImage(file) : api.importGlb(file),
-      (progress) => {
-        setNotice(`Importing ${progress.current} of ${progress.total}: ${progress.fileName}`);
-      });
+        kind === 'image' ? api.importImage(file) : api.importGlb(file), setImportProgress);
       let refreshError: string | null = null;
       let filtersToRefresh = assetFiltersRef.current;
       if (result.assets.length > 0) {
@@ -815,7 +823,7 @@ export function App() {
         }
 
         if (purpose === 'library' && plan.resetFilters) {
-          filtersToRefresh = EMPTY_ASSET_BROWSER_FILTERS;
+          filtersToRefresh = { ...EMPTY_ASSET_BROWSER_FILTERS, kind: current.filters.kind };
           assetSearchInputRef.current = '';
           setAssetSearchInput('');
         }
@@ -823,7 +831,7 @@ export function App() {
       if (result.attemptedCount > 0) {
         // Reconcile ambiguous failures where the server may have stored an asset
         // before the response was lost, without ever replaying the upload.
-        refreshError = await requestAssetPage(api, filtersToRefresh, false);
+        refreshError = await requestAssetPage(filtersToRefresh, false) ?? null;
       }
 
       const consideredCount = Math.min(files.length, MAX_ASSET_IMPORT_FILES);
@@ -845,15 +853,15 @@ export function App() {
       if (refreshError) summaryParts.push(refreshError);
       const summary = summaryParts.join(' ');
       if (result.failures.length > 0 || result.skippedCount > 0 || refreshError) {
-        setError(summary);
+        notify(result.assets.length > 0 ? 'warning' : 'error', summary);
       } else {
-        // The active file already confirms a single successful import.
-        setNotice(result.assets.length > 1 ? summary : null);
+        if (summary) notify('success', summary);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not import these files.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not import these files.');
     } finally {
       importBatchInFlight.current = false;
+      setImportProgress(null);
       setBusy(false);
     }
   }
@@ -861,8 +869,6 @@ export function App() {
   async function simplify() {
     if (!selectedAsset) return;
     invalidateHistoryRequests();
-    setError(null);
-    setNotice(null);
     setBusy(true);
     setReportJob(null);
     setComparisonPair(null);
@@ -870,7 +876,7 @@ export function App() {
       const nextJob = await api.createSimplifyJob(selectedAsset.id, Math.max(1, Math.floor(targetTriangles)), maxError);
       setJob(nextJob);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not start simplification.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not start simplification.');
     } finally {
       setBusy(false);
     }
@@ -886,8 +892,10 @@ export function App() {
       const input = report.appearance_projection_required ? 'Textured input' : 'Geometry-only input';
       const seams = report.coincident_boundary_vertices_joined ? ' Exact seams can be joined for the solver without changing the source.' : '';
       setRetopologyCheck({ assetId, message: `${input} passed the input checks (${report.input_triangles.toLocaleString()} triangles).${seams} The solver was not run.` });
+      notify('success', 'Retopology input checks passed.');
     } catch (cause) {
       setRetopologyCheck({ assetId, message: cause instanceof Error ? cause.message : 'Could not check the retopology input.' });
+      notify('error', 'Retopology input checks failed.');
     } finally {
       setCheckingRetopology(false);
     }
@@ -896,8 +904,6 @@ export function App() {
   async function runMeshOperation(operation: MeshOperationId) {
     if (!selectedAsset || selectedAsset.kind !== 'mesh' || (operation === 'mesh.retopology' && !validQuadTarget)) return;
     invalidateHistoryRequests();
-    setError(null);
-    setNotice(null);
     setBusy(true);
     setReportJob(null);
     setComparisonPair(null);
@@ -908,7 +914,7 @@ export function App() {
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
       setJob(nextJob);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not start mesh processing.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not start mesh processing.');
     } finally {
       setBusy(false);
     }
@@ -917,15 +923,13 @@ export function App() {
   async function generate() {
     if (!generationSource || !selectedGenerationProfile || !generationPayload || !canGenerate || busy || isRunning || connection !== 'connected') return;
     invalidateHistoryRequests();
-    setError(null);
-    setNotice(null);
     setBusy(true);
     try {
       const nextJob = await api.createImageGenerationJob(generationSource.id, selectedGenerationProfile.id, generationPayload);
       setGenerationResult(null);
       setJob(nextJob);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not start image generation.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not start image generation.');
     } finally {
       setBusy(false);
     }
@@ -934,8 +938,6 @@ export function App() {
   async function runRuntimeAction(backend: RuntimeBackendId, action: RuntimeAction) {
     if (busy || isRunning || connection !== 'connected') return;
     invalidateHistoryRequests();
-    setError(null);
-    setNotice(null);
     setBusy(true);
     try {
       const cuda = backend === 'pixal3d-cuda';
@@ -946,7 +948,7 @@ export function App() {
           : await api.convertPixal3dNaf();
       setJob(nextJob);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not start the runtime operation.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not start the runtime operation.');
     } finally {
       setBusy(false);
     }
@@ -956,7 +958,6 @@ export function App() {
     if (!selectedAsset || downloadInFlight.current || connection !== 'connected') return;
     downloadInFlight.current = true;
     setDownloading(true);
-    setError(null);
     try {
       const blob = artifact ? await api.downloadArtifact(artifact) : await api.artifact(selectedAsset);
       const url = URL.createObjectURL(blob);
@@ -964,9 +965,10 @@ export function App() {
       anchor.href = url;
       anchor.download = artifact ? `${selectedAsset.name.replace(/\.[^.]+$/, '')}-quads.obj` : selectedAsset.name;
       anchor.click();
+      notify('success', `Export started: ${anchor.download}`);
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not download this asset.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not download this asset.');
     } finally {
       downloadInFlight.current = false;
       setDownloading(false);
@@ -979,13 +981,11 @@ export function App() {
     try {
       const updated = await api.cancelJob(job.id);
       setJob(updated);
-      setNotice(cancelJobNotice(updated));
+      notify(updated.state === 'cancelled' ? 'success' : 'warning', cancelJobNotice(updated));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not cancel this job.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not cancel this job.');
     }
   }
-
-  function closeNotice() { setNotice(null); }
 
   const triangleCount = Number(selectedAsset?.metadata.triangles ?? 0);
   const canSimplify = !!selectedAsset && selectedAsset.kind === 'mesh' && !!operations.find((operation) => operation.id === 'mesh.simplify')?.implemented;
@@ -1006,8 +1006,10 @@ export function App() {
     : null;
   const showVersionStats = previewComparison && comparisonResult
     && (typeof beforeTriangles === 'number' || comparisonSizes);
+  const activeTool = inspectorForAsset(selectedTool, selectedAsset?.kind) ?? 'generation';
   function toggleInspector(next: Inspector, trigger: HTMLButtonElement) {
     inspectorTrigger.current = trigger;
+    setSelectedTool(next);
     setInspector(current => current === next ? null : next);
   }
   const inspectorTitle = openInspector === 'generation' ? 'Generate model' : openInspector === 'optimize' ? 'Optimize mesh' : openInspector === 'jobs' ? 'Jobs' : 'Mesh tools';
@@ -1034,19 +1036,18 @@ export function App() {
         <span>{studioOperationLabel(job.operation)}{jobShowsProgress && ` · ${job.progress}%`}</span>
       </div>
       {jobShowsProgress && <Progress value={job.progress} aria-label="Job progress" />}
+      {jobPollingIssue?.jobId === job.id && <p className="wrap-anywhere text-muted-foreground">{jobPollingIssue.message}</p>}
       {job.operation === 'image.generate' && job.state === 'running' && <p className="text-muted-foreground">Running locally. Generation can take several minutes.</p>}
       {isQueuedJobCancellable(job) && <Button variant="outline" size="sm" className="justify-self-start" onClick={() => void cancelJob()}>Cancel queued job</Button>}
     </div>
   ) : null;
-  const feedback = !error && reportCard && exportIsPrimary && notice ? (
-    <span className="sr-only" role="status">{notice}</span>
-  ) : (error || notice) ? (
-    <Alert variant={error ? 'destructive' : 'default'} role={error ? 'alert' : 'status'}>
-      {error && <WarningCircleIcon aria-hidden="true" />}
-      <AlertDescription className="min-w-0 wrap-anywhere">{error ?? notice}</AlertDescription>
-      <AlertAction><Button variant="ghost" size="icon-sm" onClick={() => { setError(null); closeNotice(); }} aria-label="Dismiss"><XIcon /></Button></AlertAction>
-    </Alert>
-  ) : null;
+  const workbenchActivity = jobFeedback || importProgress ? <>
+    {jobFeedback}
+    {importProgress && <div className="flex items-start gap-2 rounded-lg border bg-card p-3 text-xs" role="status">
+      <Spinner aria-hidden="true" className="shrink-0" />
+      <span className="min-w-0 wrap-anywhere">Importing {importProgress.current} of {importProgress.total}: {importProgress.fileName}</span>
+    </div>}
+  </> : null;
 
   function renderAssetCard(asset: Asset) {
     return <AssetGalleryCard key={asset.id} asset={asset} loadPreview={loadPreview} selected={asset.id === selectedId}
@@ -1058,7 +1059,7 @@ export function App() {
         <section className="grid min-w-0 grid-cols-1 gap-3 p-3 text-xs" aria-label="Recent jobs">
           <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
             <span>Recent activity</span>
-            <Button variant="ghost" size="sm" onClick={() => void refreshRecentJobs()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
+            <Button variant="ghost" size="sm" onClick={() => void refreshJobHistory()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
           </div>
           {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
             <details className="rounded-lg border p-2 wrap-anywhere text-muted-foreground [&>summary]:cursor-pointer"><summary>Recover an interrupted job</summary>
@@ -1214,29 +1215,26 @@ export function App() {
   }
 
   const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools"
-    className={sidebar.narrow ? 'flex gap-1 p-2' : 'flex flex-col gap-2 p-2'}>
-    <TooltipProvider delayDuration={180} disableHoverableContent>
+    className={sidebar.narrow
+      ? 'flex gap-1 p-2'
+      : 'group absolute top-0 left-0 grid w-full gap-1 overflow-hidden bg-sidebar p-2 transition-[width] duration-150 hover:w-40 hover:rounded-br-lg hover:shadow-lg has-[:focus-visible]:w-40 has-[:focus-visible]:rounded-br-lg has-[:focus-visible]:shadow-lg motion-reduce:transition-none'}>
       {([
         { key: 'generation', label: 'New model', icon: ImageSquareIcon },
         { key: 'optimize', label: 'Optimize', icon: SlidersHorizontalIcon },
         { key: 'tools', label: 'More tools', icon: WrenchIcon },
         { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
       ] as const).map(({ key, label, icon: Icon }) => (
-        <Tooltip key={key}>
-          <TooltipTrigger asChild>
-            <Button type="button" size="icon" variant={openInspector === key ? 'secondary' : 'ghost'}
-              aria-label={label} aria-expanded={openInspector === key}
-              aria-controls={openInspector === key ? 'workbench-inspector' : undefined}
-              aria-haspopup={inspectorIsSheet ? 'dialog' : undefined}
-              disabled={(key === 'optimize' || key === 'tools') && selectedAsset?.kind !== 'mesh'}
-              onClick={event => toggleInspector(key, event.currentTarget)}>
-              <Icon aria-hidden="true" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side={sidebar.narrow ? 'top' : 'right'} sideOffset={8}>{label}</TooltipContent>
-        </Tooltip>
+        <Button key={key} type="button" size="sm" variant={activeTool === key ? 'secondary' : 'ghost'}
+          className={sidebar.narrow ? 'h-auto min-w-0 flex-1 flex-col gap-1 px-1 py-1.5' : 'w-full justify-start gap-2 overflow-hidden px-1.5'}
+          aria-label={label} aria-pressed={activeTool === key} aria-expanded={openInspector === key}
+          aria-controls={openInspector === key ? 'workbench-inspector' : undefined}
+          aria-haspopup={inspectorIsSheet ? 'dialog' : undefined}
+          disabled={(key === 'optimize' || key === 'tools') && selectedAsset?.kind !== 'mesh'}
+          onClick={event => toggleInspector(key, event.currentTarget)}>
+          <Icon aria-hidden="true" className="shrink-0" />
+          <span aria-hidden="true" className={sidebar.narrow ? 'text-[0.625rem]' : 'opacity-0 transition-opacity group-hover:opacity-100 group-has-[:focus-visible]:opacity-100 motion-reduce:transition-none'}>{label}</span>
+        </Button>
       ))}
-    </TooltipProvider>
   </div>;
   const desktopInspector = openInspector && !inspectorIsSheet ? (
     <aside className="h-full min-w-0 overflow-auto overscroll-contain" id="workbench-inspector" data-tool={openInspector}
@@ -1253,12 +1251,13 @@ export function App() {
 
   return (
     <>
-      {settingsSection && <SettingsPage api={api} section={settingsSection} backendId={settingsBackend} runtime={runtime}
+      <SettingsPage api={api} section={settingsSection} backendId={settingsBackend} runtime={runtime}
         connection={connection} connectionError={connectionError} busy={busy || isRunning || installingBackend}
-        feedback={feedback} jobFeedback={jobFeedback} jobs={recentJobs} operationLabel={studioOperationLabel}
+        jobFeedback={jobFeedback} jobs={recentJobs} operationLabel={studioOperationLabel}
+        theme={theme} onThemeChange={setTheme}
         onVisit={openSettings} onProfileChange={setSettingsBackend} onClose={closeSettings}
-        onReconnect={() => void connect()} onRefreshJobs={refreshRecentJobs} onRuntimeChange={setRuntime}
-        onRuntimeAction={(backend, action) => void runRuntimeAction(backend, action)} />}
+        onReconnect={() => void connect(true)} onRefreshJobs={refreshRecentJobs} onRuntimeChange={setRuntime}
+        onRuntimeAction={(backend, action) => void runRuntimeAction(backend, action)} />
       <div className={`${settingsSection ? 'hidden' : 'flex'} min-h-dvh min-w-0 flex-col bg-background min-[881px]:h-dvh min-[881px]:overflow-hidden`} onDragOver={(event) => {
       if (!event.dataTransfer.types.includes('Files')) return;
       event.preventDefault();
@@ -1273,12 +1272,11 @@ export function App() {
     }}>
       <header className="z-10 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b bg-background px-4 py-2">
         <span className="font-heading text-sm font-medium">meshharbor</span>
-          {selectedAsset && <div className="order-last flex w-full flex-wrap items-center gap-2 md:order-0 md:ml-auto md:w-auto" role="group" aria-label="File actions">
-            <Button variant="secondary" size="sm" aria-label="Open GLB" title="Open GLB" onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon aria-hidden="true" /> <span>Open GLB</span></Button>
+          {selectedAsset?.kind === 'mesh' && <div className="order-last flex w-full flex-wrap items-center gap-2 md:order-0 md:ml-auto md:w-auto" role="group" aria-label="File actions">
             {quadArtifact && <Button variant="secondary" size="sm" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
             {selectedAsset.kind === 'mesh' && <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> <span>Export GLB</span></Button>}
           </div>}
-        <div className={selectedAsset ? 'ml-auto flex items-center gap-2 md:ml-0' : 'ml-auto flex items-center gap-2'}>
+        <div className={selectedAsset?.kind === 'mesh' ? 'ml-auto flex items-center gap-2 md:ml-0' : 'ml-auto flex items-center gap-2'}>
           <Button variant={sidebar.open ? 'secondary' : 'ghost'} size="sm" ref={sidebar.triggerRef}
             aria-expanded={sidebar.open} aria-haspopup={sidebar.narrow ? 'dialog' : undefined}
             aria-controls={sidebar.open ? (sidebar.narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
@@ -1290,22 +1288,30 @@ export function App() {
       <main className="relative flex min-h-0 min-w-0 flex-1 flex-col" ref={workbenchRef} data-connection={connection}>
           <h1 className="sr-only">MeshHarbor Studio</h1>
           <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" tabIndex={-1} type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-          <input ref={inventoryInputRef} className="sr-only" aria-label="Choose inventory files" tabIndex={-1} type="file" multiple accept=".glb,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
+          <input ref={inventoryInputRef} className="sr-only" aria-label="Choose image files" tabIndex={-1} type="file" multiple accept=".png,.jpg,.jpeg,image/png,image/jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={imageInputRef} className="sr-only" aria-label="Choose reference file" tabIndex={-1} type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files, 'reference'); event.currentTarget.value = ''; }} />
-          {!showInspectorSheet && !settingsSection && <div className={`pointer-events-none fixed inset-x-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto ${sidebar.narrow ? 'bottom-16' : 'bottom-3'}`}>
-            {feedback}
-            {jobFeedback}
+          {!showInspectorSheet && !settingsSection && workbenchActivity && <div className={`pointer-events-none fixed inset-x-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto ${sidebar.narrow ? 'bottom-16' : 'bottom-3'}`}>
+            {workbenchActivity}
           </div>}
 
             <WorkbenchLayout state={settingsSection && sidebar.narrow ? { ...sidebar, open: false } : sidebar} inspector={desktopInspector} tools={toolRail}
               assets={
-              <div className="@container min-w-0 text-xs" id="asset-library">
+              <Tabs.Root value={assetFilters.kind} onValueChange={kind => {
+                if (kind === 'mesh' || kind === 'image') applyAssetBrowserFilters({ ...EMPTY_ASSET_BROWSER_FILTERS, kind });
+              }} className="@container min-w-0 text-xs" id="asset-library">
+                <Tabs.List aria-label="Asset types" className="grid grid-cols-2 gap-1 border-b px-3 py-2">
+                  <Tabs.Trigger value="mesh" asChild><Button variant={assetFilters.kind === 'mesh' ? 'secondary' : 'ghost'}>3D models</Button></Tabs.Trigger>
+                  <Tabs.Trigger value="image" asChild><Button variant={assetFilters.kind === 'image' ? 'secondary' : 'ghost'}>Images</Button></Tabs.Trigger>
+                </Tabs.List>
+                <Tabs.Content value={assetFilters.kind} className="outline-none focus-visible:outline-ring">
                 <div className="grid min-w-0 gap-2 border-b px-3 py-3">
                   <div className="flex min-w-0 items-center gap-2">
                     <Button variant="outline" size="sm" className="min-w-0 flex-1 justify-center" disabled={busy || connection !== 'connected'}
-                      onClick={() => inventoryInputRef.current?.click()}><PlusIcon aria-hidden="true" /> Import assets</Button>
+                      onClick={() => (assetFilters.kind === 'mesh' ? fileInputRef : inventoryInputRef).current?.click()}>
+                      {assetFilters.kind === 'mesh' ? <><CubeIcon aria-hidden="true" /> Open GLB</> : <><PlusIcon aria-hidden="true" /> Import images</>}
+                    </Button>
                     <Button variant="ghost" size="icon-sm" aria-label="Refresh assets" title="Refresh assets"
-                      onClick={() => void refreshAssets(api)} disabled={connection !== 'connected'}><ArrowsClockwiseIcon aria-hidden="true" /></Button>
+                      onClick={() => void refreshAssets()} disabled={connection !== 'connected'}><ArrowsClockwiseIcon aria-hidden="true" /></Button>
                   </div>
                 {showLibraryFilters && <><form role="search" aria-label="Asset inventory" className="relative" onSubmit={(event) => {
                   event.preventDefault();
@@ -1330,26 +1336,7 @@ export function App() {
                 </form>
                 <details className="min-w-0">
                   <summary className="w-fit cursor-pointer rounded-sm px-0.5 text-muted-foreground hover:text-foreground">Filters{hasActiveAssetFilters ? ' · Active' : ''}</summary>
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                  <Field className="min-w-0">
-                    <FieldLabel htmlFor="asset-kind">Type</FieldLabel>
-                    <NativeSelect
-                      className="w-full"
-                      id="asset-kind"
-                      aria-label="Filter assets by type"
-                      value={assetFilters.kind}
-                      disabled={connection !== 'connected'}
-                      onChange={(event) => applyAssetBrowserFilters({
-                        ...assetFilters,
-                        query: assetSearchInput.trim(),
-                        kind: event.currentTarget.value as AssetKindFilter,
-                      })}
-                    >
-                      <NativeSelectOption value="all">All types</NativeSelectOption>
-                      <NativeSelectOption value="mesh">3D models</NativeSelectOption>
-                      <NativeSelectOption value="image">Images</NativeSelectOption>
-                    </NativeSelect>
-                  </Field>
+                  <div className="mt-2 grid gap-2">
                   <Field className="min-w-0">
                     <FieldLabel htmlFor="asset-origin">Origin</FieldLabel>
                     <NativeSelect
@@ -1370,7 +1357,7 @@ export function App() {
                     </NativeSelect>
                   </Field>
                   {hasActiveAssetFilters && (
-                    <Button type="button" variant="ghost" size="sm" className="col-span-2 justify-self-start" onClick={() => applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS)}>
+                    <Button type="button" variant="ghost" size="sm" className="justify-self-start" onClick={() => applyAssetBrowserFilters({ ...EMPTY_ASSET_BROWSER_FILTERS, kind: assetFilters.kind })}>
                       Clear filters
                     </Button>
                   )}
@@ -1384,7 +1371,7 @@ export function App() {
                 {matchingAssets.length === 0
                   ? <Empty role="status"><EmptyHeader><EmptyDescription>
                       {assetPageLoading ? 'Loading assets…' : hasActiveAssetFilters
-                        ? 'No matching assets' : 'Imported files and results appear here'}
+                        ? 'No matching assets' : assetFilters.kind === 'mesh' ? 'Opened GLBs and 3D results appear here' : 'Imported images appear here'}
                     </EmptyDescription></EmptyHeader></Empty>
                   : <div className={ASSET_GALLERY_GRID}>{matchingAssets.map(renderAssetCard)}</div>}
                 {pinnedAssets.length > 0 && <section className="grid grid-cols-1 gap-2 border-t pt-3" aria-label="Current selection and comparison">
@@ -1393,24 +1380,28 @@ export function App() {
                 </section>}
                 {assetNextCursor && (
                   <div className="flex justify-center">
-                    <Button type="button" variant="outline" size="sm" onClick={() => void requestAssetPage(api, assetFilters, true)} disabled={assetPageLoading || connection !== 'connected'}>
+                    <Button type="button" variant="outline" size="sm" onClick={() => void refreshAssets(true)} disabled={assetPageLoading || connection !== 'connected'}>
                       {assetPageLoading ? 'Loading…' : 'Load more assets'}
                     </Button>
                   </div>
                 )}
                 </div>
-              </div>
+                </Tabs.Content>
+              </Tabs.Root>
               }
             >
 
-            <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-800" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
+            <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-muted dark:bg-neutral-800" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
               {!selectedAsset ? <div className="flex min-h-0 flex-1 overflow-y-auto">
                 <div className="m-auto grid w-full max-w-4xl items-center justify-center gap-4 p-6 lg:grid-cols-[minmax(0,22rem)_minmax(0,24rem)] lg:gap-8">
                 <div className="order-2 grid min-w-0 gap-4 lg:order-first">
                   <h2 className="font-heading text-2xl font-medium lg:text-3xl">Start with a model or an image</h2>
                   <p className="text-sm text-muted-foreground">Inspect and refine a GLB, or turn a reference image into a 3D model on this computer.</p>
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={() => fileInputRef.current?.click()} disabled={busy}><CubeIcon data-icon="inline-start" aria-hidden="true" /> Open GLB</Button>
+                    <Button onClick={() => {
+                      if (assetFilters.kind !== 'mesh') applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS);
+                      sidebar.setOpen(true);
+                    }}><CubeIcon data-icon="inline-start" aria-hidden="true" /> Browse inventory</Button>
                     <Button variant="outline" onClick={event => toggleInspector('generation', event.currentTarget)}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Create from image</Button>
                   </div>
                   <p className="text-xs text-muted-foreground">Drop a GLB, PNG or JPEG here</p>
@@ -1436,10 +1427,11 @@ export function App() {
                 {selectedAsset.kind === 'image' && <Button variant="secondary" size="sm" disabled={busy || isRunning} onClick={event => {
                   inspectorTrigger.current = event.currentTarget;
                   setGenerationSource(selectedAsset);
+                  setSelectedTool('generation');
                   setInspector('generation');
                 }}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Use as reference</Button>}
                 </div>
-                <ModelPreview asset={previewAsset} comparison={previewComparison} loadModel={loadPreview} onError={reportPreviewError} />
+                <ModelPreview asset={previewAsset} comparison={previewComparison} loadModel={loadPreview} onError={reportPreviewError} theme={theme} />
                 {showVersionStats && <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t bg-card px-3 py-2 text-xs tabular-nums text-muted-foreground [&_strong]:font-medium [&_strong]:text-foreground" role="group" aria-label="Original to result comparison">
                   {typeof beforeTriangles === 'number' && typeof afterTriangles === 'number' && <span>Triangles <strong>{beforeTriangles.toLocaleString()} → {afterTriangles.toLocaleString()}</strong></span>}
                   {comparisonSizes && <span>GLB size <strong>{comparisonSizes}</strong></span>}
@@ -1504,7 +1496,7 @@ export function App() {
               restoreInspectorFocus();
             }}>
               <SheetHeader><SheetTitle>{inspectorTitle}</SheetTitle></SheetHeader>
-              {(feedback || jobFeedback) && <div className="grid gap-2 px-4">{feedback}{jobFeedback}</div>}
+              {workbenchActivity && <div className="grid gap-2 px-4">{workbenchActivity}</div>}
               {inspectorBody()}
             </SheetContent>
           </Sheet>}

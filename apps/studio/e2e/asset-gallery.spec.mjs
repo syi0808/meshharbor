@@ -11,19 +11,21 @@ test('Inventory captures material thumbnails and reuses them after reload', asyn
   reference.data.fill(255);
   const [chooser] = await Promise.all([
     page.waitForEvent('filechooser'),
-    inventory.getByRole('button', { name: 'Import assets' }).click(),
+    inventory.getByRole('button', { name: 'Open GLB' }).click(),
   ]);
   await chooser.setFiles([
     { name: 'painted.glb', mimeType: 'model/gltf-binary', buffer: texturedGlb() },
     { name: 'coated.glb', mimeType: 'model/gltf-binary', buffer: texturedGlb({ singleMaterial: true }) },
-    { name: 'reference.png', mimeType: 'image/png', buffer: PNG.sync.write(reference) },
   ]);
 
+  const models = inventory.getByRole('tab', { name: '3D models' });
+  const images = inventory.getByRole('tab', { name: 'Images' });
   const painted = inventory.getByRole('button', { name: /^painted\.glb/ });
   const coated = inventory.getByRole('button', { name: /^coated\.glb/ });
   const photo = inventory.getByRole('button', { name: /^reference\.png/ });
   const thumbnail = card => card.locator('img[data-asset-thumbnail]');
-  for (const card of [painted, coated, photo]) {
+  await expect(models).toHaveAttribute('aria-selected', 'true');
+  for (const card of [painted, coated]) {
     await expect(thumbnail(card)).toHaveJSProperty('naturalWidth', 320, { timeout: 15_000 });
   }
   const colors = await thumbnail(painted).evaluate(image => {
@@ -44,17 +46,33 @@ test('Inventory captures material thumbnails and reuses them after reload', asyn
   });
   for (const pixels of Object.values(colors)) expect(pixels).toBeGreaterThan(100);
 
-  const bounds = await Promise.all([painted.boundingBox(), coated.boundingBox(), photo.boundingBox()]);
+  const bounds = await Promise.all([painted.boundingBox(), coated.boundingBox()]);
   expect(new Set(bounds.map(card => Math.round(card.x))).size).toBe(2);
+  await images.click();
+  await expect(painted).toHaveCount(0);
+  await expect(inventory.getByRole('button', { name: 'Open GLB' })).toHaveCount(0);
+  const [imageChooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    inventory.getByRole('button', { name: 'Import images' }).click(),
+  ]);
+  await imageChooser.setFiles({ name: 'reference.png', mimeType: 'image/png', buffer: PNG.sync.write(reference) });
+  await expect(thumbnail(photo)).toHaveJSProperty('naturalWidth', 320);
+  await models.click();
+  await expect(photo).toHaveCount(0);
   await painted.click();
   await expect(painted).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('region', { name: 'Selected asset' }).getByTitle('painted.glb')).toBeVisible();
 
   await page.route('**/api/v1/artifacts/**', route => route.abort());
   await page.reload();
-  for (const card of [painted, coated, photo]) {
+  await expect(models).toHaveAttribute('aria-selected', 'true');
+  for (const card of [painted, coated]) {
     await expect(thumbnail(card)).toHaveJSProperty('naturalWidth', 320);
   }
+  await expect(photo).toHaveCount(0);
+  await images.click();
+  await expect(thumbnail(photo)).toHaveJSProperty('naturalWidth', 320);
+  await models.click();
   await page.unroute('**/api/v1/artifacts/**');
   await painted.click();
   await expect(painted).toHaveAttribute('aria-pressed', 'true');

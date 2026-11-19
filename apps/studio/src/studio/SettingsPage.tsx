@@ -1,4 +1,4 @@
-import { ArrowLeftIcon, ArrowsClockwiseIcon, CubeIcon, HardDrivesIcon, KeyIcon } from '@phosphor-icons/react';
+import { ArrowLeftIcon, ArrowsClockwiseIcon, CubeIcon, HardDrivesIcon, KeyIcon, PaintBrushIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -9,20 +9,23 @@ import { Field, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { useToast } from '@/components/ui/toast';
 import type { MeshHarborApi } from './api';
 import type { HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, RuntimeBackendId, RuntimeInfo } from './types';
 import { runtimeSetupStage } from './workbench-state';
+import type { StudioTheme } from './theme';
 
 const sections = {
   models: { title: 'Models', icon: CubeIcon, description: 'Browse the generation models supported by MeshHarbor and prepare them for this computer.' },
   connections: { title: 'Connections', icon: KeyIcon, description: 'Manage local sign-in for external services.' },
   storage: { title: 'Downloads & storage', icon: HardDrivesIcon, description: 'Install or remove local model files and review recent setup and download activity.' },
+  preferences: { title: 'Preferences', icon: PaintBrushIcon, description: 'Choose how Studio looks on this device.' },
 };
 
 export type SettingsSection = keyof typeof sections;
 export type RuntimeAction = 'setup' | 'download' | 'convert';
 
-const sectionIds: SettingsSection[] = ['models', 'connections', 'storage'];
+const sectionIds: SettingsSection[] = ['models', 'connections', 'storage', 'preferences'];
 const profiles = {
   'pixal3d-mlx': { title: 'Apple MLX', platform: 'macOS · Apple Silicon', download: '~24 GB', free: '25 GB' },
   'pixal3d-cuda': { title: 'NVIDIA CUDA', platform: 'Linux x86-64 · NVIDIA GPU', download: '25–30 GB', free: '40 GiB' },
@@ -43,34 +46,34 @@ export function settingsSectionFromPath(path: string): SettingsSection | null {
 
 interface Props {
   api: MeshHarborApi;
-  section: SettingsSection;
+  section: SettingsSection | null;
   backendId: RuntimeBackendId | null;
   runtime: RuntimeInfo | null;
   connection: 'disconnected' | 'connecting' | 'connected';
   connectionError: string | null;
   busy: boolean;
-  feedback: ReactNode;
   jobFeedback: ReactNode;
+  theme: StudioTheme;
   jobs: Job[];
   operationLabel: (operation: string) => string;
   onVisit: VisitSettings;
   onProfileChange: (backend: RuntimeBackendId) => void;
   onClose: () => void;
   onReconnect: () => void;
-  onRefreshJobs: () => Promise<void>;
+  onRefreshJobs: () => Promise<boolean>;
+  onThemeChange: (theme: StudioTheme) => void;
   onRuntimeChange: (runtime: RuntimeInfo) => void;
   onRuntimeAction: (backend: RuntimeBackendId, action: RuntimeAction) => void;
 }
 
-export function SettingsPage({ api, section, backendId, runtime, connection, connectionError, busy, feedback, jobFeedback, jobs, operationLabel, onVisit, onProfileChange, onClose, onReconnect, onRefreshJobs, onRuntimeChange, onRuntimeAction }: Props) {
+export function SettingsPage({ api, section, backendId, runtime, connection, connectionError, busy, jobFeedback, theme, jobs, operationLabel, onVisit, onProfileChange, onClose, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
+  const notify = useToast();
   const heading = useRef<HTMLHeadingElement>(null);
   const cancelRemoval = useRef<HTMLButtonElement>(null);
   const removalTrigger = useRef<HTMLElement | null>(null);
   const [access, setAccess] = useState<Partial<Record<RuntimeBackendId, AccessStatus>>>({});
   const [accounts, setAccounts] = useState<Partial<Record<RuntimeBackendId, AccountStatus>>>({});
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const [removal, setRemoval] = useState<{ backend: RuntimeBackendId; scope: RemovalScope } | null>(null);
   const [browserLogin, setBrowserLogin] = useState<{ backend: RuntimeBackendId; session: HuggingFaceBrowserLogin } | null>(null);
   const selectedId = backendId ?? (runtime?.platform === 'linux' ? 'pixal3d-cuda' : 'pixal3d-mlx');
@@ -79,9 +82,11 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
   const browserSessionId = browserLogin?.session.id;
   const browserActive = browserLogin && browserLoginIsActive(browserLogin.session);
   const disabled = pending || busy || Boolean(browserActive);
-  const sectionInfo = sections[section];
   const runtimeJobs = jobs.filter(job => job.operation.startsWith('runtime.')).slice(0, 6);
-  useEffect(() => { heading.current?.focus(); }, [section]);
+  useEffect(() => {
+    if (section) heading.current?.focus();
+    else setRemoval(null);
+  }, [section]);
   useEffect(() => {
     if (!browserBackend || !browserSessionId) return;
     let stopped = false;
@@ -100,17 +105,18 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
         if (session.state === 'signed_in') {
           setAccounts(current => ({ ...current, [backend]: 'connected' }));
           setAccess(current => ({ ...current, [backend]: undefined }));
-          setNotice(`Signed in to Hugging Face for ${profiles[backend].title}.`);
           try {
             const nextRuntime = await api.runtime();
-            if (!stopped) onRuntimeChange(nextRuntime);
+            if (stopped) return;
+            onRuntimeChange(nextRuntime);
+            notify('success', `Signed in to Hugging Face for ${profiles[backend].title}.`);
           } catch {
-            if (!stopped) setError('Signed in, but the local status could not be refreshed. Select Refresh status to retry.');
+            if (!stopped) notify('warning', 'Signed in, but the local status could not be refreshed. Select Refresh status to retry.');
           }
         } else if (session.state === 'failed' || session.state === 'expired') {
-          setError(session.state === 'failed' ? session.message : 'The Hugging Face code expired. Start browser sign-in again.');
+          notify('error', session.state === 'failed' ? session.message : 'The Hugging Face code expired. Start browser sign-in again.');
         } else if (session.state === 'cancelled') {
-          setNotice('Hugging Face sign-in cancelled.');
+          notify('info', 'Hugging Face sign-in cancelled.');
         }
       } catch {
         if (stopped) return;
@@ -118,22 +124,20 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           timer = window.setTimeout(() => void poll(backend, id), 1000);
         } else {
           setBrowserLogin(null);
-          setError('Could not check browser sign-in. Select browser sign-in again to reconnect.');
+          notify('error', 'Could not check browser sign-in. Select browser sign-in again to reconnect.');
         }
       }
     }
     void poll(browserBackend, browserSessionId);
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [api, browserBackend, browserSessionId, onRuntimeChange]);
+  }, [api, browserBackend, browserSessionId, notify, onRuntimeChange]);
 
   async function perform(action: () => Promise<void>) {
     setPending(true);
-    setError('');
-    setNotice('');
     try {
       await action();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not update local settings.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not update local settings.');
     } finally {
       setPending(false);
     }
@@ -142,8 +146,9 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
   function verifyConnection(backend: RuntimeBackendId, token?: string) {
     void perform(async () => {
       setAccounts(current => ({ ...current, [backend]: 'checking' }));
+      let result: HuggingFaceConnectionStatus;
       try {
-        const result = await api.checkHuggingFaceConnection(backend, token);
+        result = await api.checkHuggingFaceConnection(backend, token);
         setAccounts(current => ({ ...current, [backend]: result }));
         if ((token !== undefined && result === 'connected') || (token === undefined && result !== 'connected')) {
           setAccess(current => ({ ...current, [backend]: undefined }));
@@ -152,7 +157,15 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
         setAccounts(current => ({ ...current, [backend]: undefined }));
         throw cause;
       }
-      onRuntimeChange(await api.runtime());
+      if (token !== undefined && result === 'connected') {
+        try {
+          onRuntimeChange(await api.runtime());
+        } catch {
+          notify('warning', 'Token connected, but the local status could not be refreshed.');
+          return;
+        }
+      }
+      notify(result === 'connected' ? 'success' : result === 'invalid_token' ? 'error' : 'warning', accountMessages[result]);
     });
   }
 
@@ -161,6 +174,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
       setAccess(current => ({ ...current, [backend]: 'checking' }));
       const result = await api.checkModelAccess(backend).catch(() => 'unavailable' as const);
       setAccess(current => ({ ...current, [backend]: result }));
+      notify(result === 'verified' ? 'success' : result === 'unavailable' ? 'error' : 'warning', accessMessages[result]);
     });
   }
 
@@ -188,7 +202,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           setAccounts(current => ({ ...current, [backend]: 'not_connected' }));
           setAccess(current => ({ ...current, [backend]: undefined }));
         }
-        setNotice(scope === 'huggingface'
+        notify('success', scope === 'huggingface'
           ? `Hugging Face disconnected for ${profiles[backend].title} on this computer.`
           : `Pixal3D model files removed for ${profiles[backend].title}.`);
       } finally {
@@ -202,12 +216,14 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
     setRemoval({ backend, scope });
   }
 
+  if (!section) return null;
+  const sectionInfo = sections[section];
+
   return <div className="min-h-dvh bg-background text-foreground">
     <header className="border-b bg-background">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-4 py-2 sm:px-6">
         <Button variant="ghost" size="sm" onClick={onClose}><ArrowLeftIcon aria-hidden="true" /> Workbench</Button>
         <span className="border-l pl-3 font-heading text-sm font-medium">Settings</span>
-        <Badge className="ml-auto" variant="outline">{connection === 'connected' ? 'Engine connected' : connection === 'connecting' ? 'Connecting…' : 'Engine offline'}</Badge>
       </div>
     </header>
     <div className="mx-auto grid max-w-6xl gap-6 px-4 py-5 sm:px-6 md:grid-cols-[12rem_minmax(0,1fr)] md:gap-8 md:py-8">
@@ -226,22 +242,35 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
             <h1 ref={heading} tabIndex={-1} id="settings-heading" className="font-heading text-2xl font-semibold outline-none">{sectionInfo.title}</h1>
             <p className="text-muted-foreground">{sectionInfo.description}</p>
           </div>
-          {connection === 'connected' && <Button variant="outline" onClick={() => void perform(async () => {
+          {section !== 'preferences' && connection === 'connected' && <Button variant="outline" onClick={() => void perform(async () => {
             onRuntimeChange(await api.runtime());
             setAccess({});
             setAccounts({});
             await onRefreshJobs();
+            notify('success', 'Local status refreshed.');
           })} disabled={disabled}><ArrowsClockwiseIcon aria-hidden="true" /> Refresh status</Button>}
         </div>
-        {section !== 'connections' && feedback}
-        {section !== 'connections' && jobFeedback}
+        {section !== 'connections' && section !== 'preferences' && jobFeedback}
         {section !== 'connections' && browserActive && <Alert role="status">
           <AlertDescription>Hugging Face sign-in is in progress.</AlertDescription>
           <Button variant="outline" onClick={() => onVisit('connections', browserBackend)}>Return to sign-in</Button>
         </Alert>}
-        {notice && <Alert role="status"><AlertDescription>{notice}</AlertDescription></Alert>}
-        {error && <Alert variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>}
-        {connection !== 'connected' ? <section className="grid justify-items-start gap-2 rounded-lg border bg-card p-4">
+        {section === 'preferences' ? <section className="grid gap-4 rounded-lg border bg-card p-4 sm:p-5">
+          <h2 className="font-heading text-base font-medium">Appearance</h2>
+          <Field className="max-w-xs">
+            <FieldLabel htmlFor="studio-theme">Theme</FieldLabel>
+            <NativeSelect id="studio-theme" className="w-full" value={theme} onChange={event => {
+              const choice = event.target.value;
+              if (choice === 'dark' || choice === 'light') {
+                onThemeChange(choice);
+                notify('success', choice === 'dark' ? 'Dark theme enabled.' : 'Light theme enabled.');
+              }
+            }}>
+              <NativeSelectOption value="dark">Dark</NativeSelectOption>
+              <NativeSelectOption value="light">Light</NativeSelectOption>
+            </NativeSelect>
+          </Field>
+        </section> : connection !== 'connected' ? <section className="grid justify-items-start gap-2 rounded-lg border bg-card p-4">
           <h2 className="font-medium">{connection === 'connecting' ? 'Connecting to the local engine' : 'Local engine is offline'}</h2>
           <p className="text-muted-foreground">Start <code>meshharbor serve</code> to view and manage local models.</p>
           {connectionError && <p className="wrap-anywhere text-muted-foreground">{connectionError}</p>}
@@ -409,7 +438,7 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
         </form>
       </details>
     </> : <p className="text-muted-foreground">{backend.installable ? 'Set up the Python environment in Models before connecting a token.' : 'This backend cannot verify a token on this computer.'}</p>}
-    {account && <p role="status" className="text-muted-foreground">{accountMessages[account]}</p>}
+    {account === 'checking' && <p role="status" className="text-muted-foreground">{accountMessages.checking}</p>}
     {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={onDisconnect}>Disconnect locally</Button></div>}
     {local?.credentials_managed === false && <p className="text-muted-foreground">Browser sign-in and local disconnect require the default managed credential directory. For this profile, use an access token instead.</p>}
   </section>;
@@ -440,7 +469,8 @@ function ModelStorage({ backend, id, access, disabled, onDownload, onConvert, on
             onClick={() => { setConsent(false); onCheck(); }}>Check DINOv3 access</Button>
         </div>
       </div>
-      {access && <p role="status" className="text-muted-foreground">{accessMessages[access]}</p>}
+      {access === 'checking' && <p role="status" className="text-muted-foreground">{accessMessages.checking}</p>}
+      {access === 'verified' && <Badge variant="secondary">File access verified</Badge>}
       <div className="flex items-start gap-2">
         <Checkbox id="model-download-consent" checked={consent && !verificationRequired}
           disabled={disabled || verificationRequired || !backend.downloads_enabled} onCheckedChange={value => setConsent(value === true)} />
