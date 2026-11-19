@@ -2,12 +2,13 @@ import { Button } from '@/components/ui/button';
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Spinner } from '@/components/ui/spinner';
+import { Toggle } from '@/components/ui/toggle';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { CornersOutIcon } from '@phosphor-icons/react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type PointerEvent } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { applyPreviewMaterial, applyPreviewPartMaterials, restorePreviewMaterials, separatedPartInfo } from './preview-display';
+import { applyPreviewMaterial, applyPreviewPartIsolation, applyPreviewPartMaterials, restorePreviewMaterials, separatedPartInfo } from './preview-display';
 import { configurePreviewRenderer, createPreviewScene, disposePreviewModel, frameFromObject, loadPreviewModel, previewPrimitiveIndex } from './preview-model';
 import {
   shouldPreserveComparisonCamera,
@@ -18,6 +19,7 @@ import type { Asset } from './types';
 import type { StudioTheme } from './theme';
 
 const MAX_CANONICAL_SOURCE_FRAMES = 64;
+const PART_CLICK_RADIUS = 4;
 const canonicalSourceFrameCache = new Map<string, PreviewFrame>();
 const viewportLayout = 'relative isolate min-h-0 min-w-0 flex-1 overflow-hidden bg-muted dark:bg-neutral-800';
 type PreviewMode = 'material' | 'solid' | 'wireframe' | 'parts';
@@ -31,6 +33,7 @@ interface PreviewDisplay {
     meshParts: Map<THREE.Mesh, number>;
     palette: THREE.MeshStandardMaterial[];
     dimmed: THREE.MeshStandardMaterial;
+    originalVisibility: Map<THREE.Mesh, boolean>;
   };
 }
 
@@ -38,8 +41,33 @@ function disposeDisplay(preview: PreviewDisplay) {
   restorePreviewMaterials(preview.originalMaterials);
   preview.wireframe.dispose();
   preview.solid.dispose();
-  preview.parts?.dimmed.dispose();
-  preview.parts?.palette.forEach(material => material.dispose());
+  if (preview.parts) {
+    applyPreviewPartIsolation(preview.parts.meshParts, null, preview.parts.originalVisibility);
+    preview.parts.dimmed.dispose();
+    preview.parts.palette.forEach(material => material.dispose());
+  }
+}
+
+interface PartPress {
+  pointerId: number;
+  assetId: string;
+  clientX: number;
+  clientY: number;
+}
+
+function movedBeyondPartClick(press: PartPress, event: PointerEvent) {
+  return (press.clientX - event.clientX) ** 2 + (press.clientY - event.clientY) ** 2 > PART_CLICK_RADIUS ** 2;
+}
+
+function canPickWithPointer(event: PointerEvent) {
+  return event.isPrimary && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey;
+}
+
+function isVisibleInPreview(mesh: THREE.Object3D) {
+  for (let node: THREE.Object3D | null = mesh; node; node = node.parent) {
+    if (!node.visible) return false;
+  }
+  return true;
 }
 
 export interface PreviewComparison {
@@ -120,14 +148,18 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
   const activeComparisonGroupRef = useRef<string | null>(null);
   const onErrorRef = useRef(onError);
   const displayRef = useRef<PreviewDisplay | null>(null);
+  const partPress = useRef<PartPress | null>(null);
   const [loading, setLoading] = useState(false);
   const [modelReady, setModelReady] = useState(false);
   const [display, setDisplay] = useState<PreviewMode>('material');
   const [parts, setParts] = useState<{ assetId: string; count: number; grouped: boolean } | null>(null);
-  const [partSelection, setPartSelection] = useState<{ assetId: string; index: number } | null>(null);
+  const [partSelection, setPartSelection] = useState<{ assetId: string; index: number; isolated: boolean } | null>(null);
   const visibleParts = parts && parts.assetId === asset?.id ? parts : null;
-  const focusedPart = partSelection && partSelection.assetId === asset?.id ? partSelection.index : null;
+  const activePartSelection = partSelection?.assetId === visibleParts?.assetId ? partSelection : null;
+  const focusedPart = activePartSelection?.index ?? null;
   const visibleDisplay = display === 'parts' && !visibleParts ? 'material' : display;
+  const partsMode = visibleDisplay === 'parts';
+  const isolatedPart = partsMode && activePartSelection?.isolated ? focusedPart : null;
   const [rendererUnavailable, setRendererUnavailable] = useState(false);
 
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
@@ -222,6 +254,7 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     const preview = displayRef.current;
+    partPress.current = null;
     if (preview) {
       disposeDisplay(preview);
       displayRef.current = null;
@@ -305,14 +338,17 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
             if (index !== undefined && index >= 0 && index < partInfo.count) meshParts.set(mesh, index);
           }
           if (meshParts.size === meshes.length && new Set(meshParts.values()).size === partInfo.count) {
+            const flatShading = meshes.some(mesh => !mesh.geometry.hasAttribute('normal'));
             nextPreview.parts = {
               meshParts,
               palette: Array.from({ length: partInfo.count }, (_, index) => new THREE.MeshStandardMaterial({
                 color: new THREE.Color().setHSL((0.035 + index * 0.61803398875) % 1, 0.72, 0.49, THREE.SRGBColorSpace),
                 roughness: 0.8,
                 side: THREE.DoubleSide,
+                flatShading,
               })),
-              dimmed: new THREE.MeshStandardMaterial({ color: '#494d53', roughness: 0.85, side: THREE.DoubleSide }),
+              dimmed: new THREE.MeshStandardMaterial({ color: '#494d53', roughness: 0.85, side: THREE.DoubleSide, flatShading }),
+              originalVisibility: new Map(),
             };
             setParts({ assetId: asset.id, ...partInfo });
           }
@@ -352,12 +388,57 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
     const preview = displayRef.current;
     if (!preview) return;
     restorePreviewMaterials(preview.originalMaterials);
-    if (visibleDisplay === 'parts' && preview.parts) {
+    if (preview.parts) {
+      applyPreviewPartIsolation(preview.parts.meshParts, isolatedPart, preview.parts.originalVisibility);
+    }
+    if (partsMode && preview.parts) {
       applyPreviewPartMaterials(preview.parts.meshParts, preview.parts.palette, preview.parts.dimmed, focusedPart, preview.originalMaterials);
     } else if (visibleDisplay === 'solid' || visibleDisplay === 'wireframe') {
       applyPreviewMaterial(preview.meshes, preview[visibleDisplay], preview.originalMaterials);
     }
-  }, [asset?.id, visibleDisplay, focusedPart, modelReady]);
+  }, [asset?.id, visibleDisplay, partsMode, focusedPart, isolatedPart, modelReady]);
+
+  function selectPart(assetId: string, index: number | null) {
+    setPartSelection(previous => index === null ? null : {
+      assetId,
+      index,
+      isolated: previous?.assetId === assetId && previous.isolated,
+    });
+  }
+
+  function beginPartPress(event: PointerEvent<HTMLDivElement>) {
+    partPress.current = partsMode && visibleParts && canPickWithPointer(event)
+      ? { assetId: visibleParts.assetId, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY }
+      : null;
+  }
+
+  function trackPartPress(event: PointerEvent<HTMLDivElement>) {
+    const press = partPress.current;
+    if (press?.pointerId === event.pointerId && movedBeyondPartClick(press, event)) partPress.current = null;
+  }
+
+  function finishPartPress(event: PointerEvent<HTMLDivElement>) {
+    const press = partPress.current;
+    if (!press || press.pointerId !== event.pointerId) return;
+    partPress.current = null;
+    const camera = cameraRef.current;
+    const preview = displayRef.current?.parts;
+    if (!partsMode || press.assetId !== visibleParts?.assetId || !preview || !camera
+      || !canPickWithPointer(event) || movedBeyondPartClick(press, event)) return;
+
+    const { left, top, width, height } = event.currentTarget.getBoundingClientRect();
+    const x = (event.clientX - left) / width;
+    const y = (event.clientY - top) / height;
+    if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return;
+
+    const raycaster = new THREE.Raycaster();
+    currentModelRef.current?.updateWorldMatrix(true, true);
+    camera.updateMatrixWorld();
+    raycaster.setFromCamera(new THREE.Vector2(2 * x - 1, 1 - 2 * y), camera);
+    const meshes = Array.from(preview.meshParts.keys()).filter(isVisibleInPreview);
+    const hit = raycaster.intersectObjects(meshes, false)[0];
+    selectPart(press.assetId, hit?.object instanceof THREE.Mesh ? preview.meshParts.get(hit.object) ?? null : null);
+  }
 
   function fitView() {
     if (cameraRef.current && controlsRef.current && frameRef.current) {
@@ -367,7 +448,11 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
 
   return (
     <div className={viewportLayout}>
-      <div className="absolute inset-0 [&>canvas]:block [&>canvas]:size-full" ref={hostRef} aria-label="Interactive 3D model preview" />
+      <div className="absolute inset-0 [&>canvas]:block [&>canvas]:size-full data-[picking=true]:cursor-crosshair active:cursor-grabbing"
+        ref={hostRef} aria-label="Interactive 3D model preview" data-picking={partsMode}
+        onPointerDown={beginPartPress} onPointerMove={trackPartPress} onPointerUpCapture={finishPartPress}
+        onPointerCancel={() => { partPress.current = null; }}
+        onLostPointerCapture={event => { if (partPress.current?.pointerId === event.pointerId) partPress.current = null; }} />
       {modelReady && (
         <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] flex-wrap items-center gap-1 rounded-lg border bg-popover p-1 sm:bottom-4 sm:left-4" role="group" aria-label="Viewport controls">
           <ToggleGroup type="single" orientation="horizontal" size="sm" spacing={1} value={visibleDisplay} aria-label="Display mode"
@@ -380,14 +465,21 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
             {visibleParts && <ToggleGroupItem value="parts" aria-label="Part highlighting">Parts</ToggleGroupItem>}
           </ToggleGroup>
           <Button type="button" variant="ghost" size="icon-sm" aria-label="Fit view" title="Fit view" onClick={fitView}><CornersOutIcon aria-hidden="true" /></Button>
-          {visibleDisplay === 'parts' && visibleParts && <NativeSelect aria-label="Highlight part" size="sm" value={focusedPart ?? 'all'}
-            onChange={event => setPartSelection(event.target.value === 'all' ? null : { assetId: visibleParts.assetId, index: Number(event.target.value) })}>
-            <NativeSelectOption value="all">All parts</NativeSelectOption>
-            {Array.from({ length: visibleParts.count }, (_, index) =>
-              <NativeSelectOption key={index} value={index}>
-                {visibleParts.grouped && index === visibleParts.count - 1 ? 'Grouped fragments' : `Part ${index + 1}`}
-              </NativeSelectOption>)}
-          </NativeSelect>}
+          {partsMode && visibleParts && <>
+            <NativeSelect aria-label="Highlight part" size="sm" value={focusedPart ?? 'all'}
+              onChange={event => selectPart(visibleParts.assetId, event.target.value === 'all' ? null : Number(event.target.value))}>
+              <NativeSelectOption value="all">All parts</NativeSelectOption>
+              {Array.from({ length: visibleParts.count }, (_, index) =>
+                <NativeSelectOption key={index} value={index}>
+                  {visibleParts.grouped && index === visibleParts.count - 1 ? 'Grouped fragments' : `Part ${index + 1}`}
+                </NativeSelectOption>)}
+            </NativeSelect>
+            <Toggle variant="outline" size="sm" aria-label="Isolate selected part" disabled={focusedPart === null}
+              pressed={isolatedPart !== null} onPressedChange={isolated =>
+                setPartSelection(previous => previous?.assetId === visibleParts.assetId ? { ...previous, isolated } : previous)}>
+              Isolate
+            </Toggle>
+          </>}
         </div>
       )}
       {rendererUnavailable && asset && (
@@ -399,7 +491,9 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
         </Empty>
       )}
       {loading && <PreviewLoading>Loading preview…</PreviewLoading>}
-      {modelReady && <p className="absolute right-4 bottom-4 hidden text-xs text-muted-foreground lg:block">Drag to orbit · Scroll to zoom</p>}
+      {modelReady && <p className="pointer-events-none absolute right-4 bottom-4 hidden text-xs text-muted-foreground lg:block">
+        {partsMode ? 'Click a part · Drag to orbit' : 'Drag to orbit · Scroll to zoom'}
+      </p>}
     </div>
   );
 }

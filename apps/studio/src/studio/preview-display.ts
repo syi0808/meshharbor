@@ -53,6 +53,22 @@ export function applyPreviewPartMaterials<Mesh extends PreviewMaterialTarget, Ma
   }
 }
 
+export function applyPreviewPartIsolation<Mesh extends { visible: boolean }>(
+  meshParts: ReadonlyMap<Mesh, number>,
+  focused: number | null,
+  originalVisibility: Map<Mesh, boolean>,
+) {
+  for (const [mesh, visible] of originalVisibility) mesh.visible = visible;
+  originalVisibility.clear();
+  if (focused === null) return;
+
+  for (const [mesh, index] of meshParts) {
+    if (index === focused || !mesh.visible) continue;
+    originalVisibility.set(mesh, mesh.visible);
+    mesh.visible = false;
+  }
+}
+
 
 // Model JSON rejects explicit external buffer/image URLs before this check.
 // Three.js exposes image bufferViews through same-origin browser object URLs.

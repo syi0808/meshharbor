@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyPreviewMaterial, applyPreviewPartMaterials, isLocalPreviewResource, restorePreviewMaterials, separatedPartInfo } from './preview-display.ts';
+import { applyPreviewMaterial, applyPreviewPartIsolation, applyPreviewPartMaterials, isLocalPreviewResource, restorePreviewMaterials, separatedPartInfo } from './preview-display.ts';
 
 test('triangle wireframe swaps preview materials and restores original references without changing geometry', () => {
   const sharedMaterial = { name: 'shared material', wireframe: false };
@@ -88,4 +88,21 @@ test('only a part separation result with a bounded primitive count can enable pa
   }), { count: 256, grouped: true });
   assert.equal(separatedPartInfo({ operation: 'mesh.cleanup', report: { output_primitives: 2 } }), null);
   assert.equal(separatedPartInfo({ operation: 'mesh.separate_parts', report: { output_primitives: 257 } }), null);
+});
+
+test('part isolation follows the selection and restores only visibility it changed', () => {
+  const firstPart = { visible: true };
+  const secondPart = { visible: true };
+  const anotherInstance = { visible: true };
+  const alreadyHidden = { visible: false };
+  const meshParts = new Map([[firstPart, 0], [secondPart, 1], [anotherInstance, 0], [alreadyHidden, 1]]);
+  const originalVisibility = new Map();
+
+  applyPreviewPartIsolation(meshParts, 0, originalVisibility);
+  assert.deepEqual([...meshParts.keys()].map(mesh => mesh.visible), [true, false, true, false]);
+  applyPreviewPartIsolation(meshParts, 1, originalVisibility);
+  assert.deepEqual([...meshParts.keys()].map(mesh => mesh.visible), [false, true, false, false]);
+  applyPreviewPartIsolation(meshParts, null, originalVisibility);
+  assert.deepEqual([...meshParts.keys()].map(mesh => mesh.visible), [true, true, true, false]);
+  assert.equal(originalVisibility.size, 0);
 });
