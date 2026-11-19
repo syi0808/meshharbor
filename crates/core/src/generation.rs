@@ -1,4 +1,4 @@
-//! Optional Pixal3D MLX process integration and local readiness checks.
+//! Local image generation and Pixal3D MLX process integration.
 //!
 //! Runtime setup and model downloads are explicit user-triggered actions in
 //! `runtime.rs`; inference itself remains offline and never authenticates.
@@ -19,7 +19,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    Asset, AssetKind, CoreError, CoreResult, MAX_IMAGE_BYTES, OperationCore, generation_tuning,
+    Asset, AssetKind, CoreError, CoreResult, MAX_IMAGE_BYTES, OperationCore,
+    external_generation::ExternalProfile,
+    generation_tuning,
     generation_views::PosedGenerationInput,
     huggingface_download::{PIXAL_CHECKPOINTS, PIXAL_REPOSITORY, PIXAL_REVISION},
     inspect_asset,
@@ -34,11 +36,11 @@ const MAX_GENERATED_GLB_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GenerationOptions {
-    /// Backend selector: `auto`, `pixal3d-mlx`, or `pixal3d-cuda`.
+    /// Backend selector from the runtime catalog, or `auto` for platform Pixal3D.
     pub backend_id: String,
     /// Reproducible sampler seed.
     pub seed: u64,
-    /// Both vendored backends currently expose only the 512 geometry cascade.
+    /// The initial profiles use a fixed geometry resolution of 512.
     pub resolution: u16,
     /// Output PBR texture resolution.
     pub texture_size: u16,
@@ -83,7 +85,8 @@ pub struct GenerationResult {
     pub backend_id: String,
     pub seed: u64,
     pub resolution: u16,
-    pub texture_size: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub texture_size: Option<u16>,
     pub target_faces: u32,
     pub elapsed_ms: u128,
 }
@@ -620,19 +623,22 @@ fn generation_worker_stage(line: &str) -> Option<&'static str> {
         "Stage 3: Decode Shape" | "shape_decode" => "shape_decode",
         "Stage 4: Texture SLat (proj, 1024)" | "texture_flow" => "texture_flow",
         "Stage 5: Texture Decode" | "texture_decode" => "texture_decode",
+        "generate_mesh" => "generate_mesh",
+        "mesh_export" => "mesh_export",
         "Stage 6: Texture Bake + GLB" | "pbr_export" => "pbr_export",
         _ => return None,
     })
 }
 
-pub(crate) fn generate_pixal3d_image(
+pub(crate) fn generate_image(
     core: &OperationCore,
     input_asset_id: &str,
     options: GenerationOptions,
     execution: JobExecution<'_>,
 ) -> CoreResult<GenerationResult> {
     execution.stage("prepare_references")?;
-    let selected_backend_id = options.validated_profile()?.id;
+    let profile = options.validated_profile()?;
+    let selected_backend_id = profile.id;
     options.validate_primary_image(input_asset_id)?;
     let source = core
         .store()
@@ -677,14 +683,44 @@ pub(crate) fn generate_pixal3d_image(
             let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());
             runtime.generate_from_references(&input_paths, &work_dir, &options, execution)?
         }
-        _ => unreachable!("backend selector was validated above"),
+        backend_id => ExternalProfile::find(backend_id)
+            .expect("generation profile has a local runtime")
+            .generate(
+                core.store().root(),
+                &input_paths[0],
+                &output_path,
+                &options,
+                execution,
+            )?,
     };
     execution.stage("validate_output")?;
-    let output = std::fs::read(&output_path)?;
-    let descriptor = inspect_asset("result.glb", &output)?;
-    if descriptor.kind != AssetKind::Mesh {
+    let metadata = output_path.symlink_metadata().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CoreError::InvalidInput(format!("{selected_backend_id} did not produce a GLB."))
+        } else {
+            error.into()
+        }
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_GENERATED_GLB_BYTES {
         return Err(CoreError::InvalidInput(
-            "Pixal3D output did not validate as a GLB mesh.".into(),
+            "Generation must produce a regular, nonempty GLB up to 512 MiB.".into(),
+        ));
+    }
+    let mut output = Vec::new();
+    std::fs::File::open(&output_path)?
+        .take(MAX_GENERATED_GLB_BYTES + 1)
+        .read_to_end(&mut output)?;
+    if output.len() as u64 > MAX_GENERATED_GLB_BYTES {
+        return Err(CoreError::InvalidInput(
+            "Generated GLB exceeds 512 MiB.".into(),
+        ));
+    }
+    let descriptor = inspect_asset("result.glb", &output)?;
+    if descriptor.kind != AssetKind::Mesh
+        || descriptor.metadata["triangles"].as_u64().unwrap_or(0) == 0
+    {
+        return Err(CoreError::InvalidInput(
+            "Generation output did not validate as a triangle GLB mesh.".into(),
         ));
     }
     let output_name = source
@@ -694,6 +730,7 @@ pub(crate) fn generate_pixal3d_image(
         .unwrap_or_else(|| "generated.glb".into());
     execution.stage("save_model")?;
     execution.begin_commit()?;
+    let texture_size = profile.has_textures().then_some(options.texture_size);
     let asset = core.store().import_derived_asset(
         &output_name,
         &output,
@@ -703,7 +740,7 @@ pub(crate) fn generate_pixal3d_image(
             "backend": selected_backend_id,
             "seed": options.seed,
             "resolution": options.resolution,
-            "texture_size": options.texture_size,
+            "texture_size": texture_size,
             "target_faces": options.target_faces,
             "elapsed_ms": elapsed_ms,
             "validation": descriptor.metadata,
@@ -715,7 +752,7 @@ pub(crate) fn generate_pixal3d_image(
         backend_id: selected_backend_id.into(),
         seed: options.seed,
         resolution: options.resolution,
-        texture_size: options.texture_size,
+        texture_size,
         target_faces: options.target_faces,
         elapsed_ms,
     })
@@ -781,7 +818,7 @@ mod tests {
         std::fs::write(path, changed).unwrap();
 
         for backend_id in ["pixal3d-mlx", "pixal3d-cuda"] {
-            let result = generate_pixal3d_image(
+            let result = generate_image(
                 &core,
                 &asset.id,
                 GenerationOptions {
@@ -864,7 +901,7 @@ mod tests {
             .unwrap();
 
         for backend_id in ["pixal3d-mlx", "pixal3d-cuda"] {
-            let result = generate_pixal3d_image(
+            let result = generate_image(
                 &core,
                 &asset.id,
                 GenerationOptions {

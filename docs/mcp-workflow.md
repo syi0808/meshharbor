@@ -1,7 +1,10 @@
 # MeshHarbor MCP workflow
 
 MeshHarbor's stdio MCP server uses the same `OperationCore`, asset store, job
-queue, and Pixal3D MLX/CUDA runtimes as the CLI and localhost REST API.
+queue, and generation runtimes as the CLI and localhost REST API. The
+managed setup below is for Pixal3D. For TRELLIS.2 or TripoSG, follow the
+[manual runtime guide](external-generation-runtimes.md) locally, then pass
+its explicit backend ID to `start_image_generation`.
 
 ## Prepare and generate
 

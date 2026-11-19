@@ -298,12 +298,29 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
                 <Badge variant="outline">Image to 3D</Badge>
                 {model.status === 'experimental_opt_in' && <Badge variant="outline">Experimental</Badge>}
               </CardTitle>
-              <CardDescription>Generate a textured GLB from a reference image. Once installed, generation runs locally.</CardDescription>
+              <CardDescription>Generate {model.output === 'geometry_glb' ? 'a geometry-only GLB' : 'a textured GLB'} from a reference image. Generation runs locally.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 lg:grid-cols-2">
-              {profileIds.filter(id => model.backend_ids.includes(id)).map(id => {
-                const backend = runtime?.model_backends.find(item => item.id === id);
+              {model.backend_ids.map(backendId => {
+                const backend = runtime?.model_backends.find(item => item.id === backendId);
                 if (!backend) return null;
+                if (backend.manual_setup) return <Card key={backendId} role="article" size="sm" className="bg-background">
+                  <CardHeader>
+                    <CardTitle className="min-w-0"><h3>{backend.accelerator ?? backendId}</h3></CardTitle>
+                    <CardDescription>Operator-installed runtime</CardDescription>
+                    <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend)}</Badge></CardAction>
+                  </CardHeader>
+                  <CardContent className="grid gap-2 text-sm text-muted-foreground">
+                    {backend.license_notice && <p>{backend.license_notice}</p>}
+                    {backend.host_supported && <>
+                      <p>Follow <code>docs/external-generation-runtimes.md</code> in the MeshHarbor repository.</p>
+                      <code className="wrap-anywhere">{backend.runtime_root}</code>
+                      {!backend.ready && backend.missing?.[0] && <p className="wrap-anywhere">{backend.missing[0]}</p>}
+                    </>}
+                  </CardContent>
+                </Card>;
+                const id = profileIds.find(candidate => candidate === backendId);
+                if (!id) return null;
                 return <Card key={id} role="article" size="sm" className="bg-background">
                   <CardHeader>
                     <CardTitle className="min-w-0"><h3>{profiles[id].title}</h3></CardTitle>
@@ -381,6 +398,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
 
 function profileStatus(backend: Backend) {
   if (backend.ready) return 'Ready';
+  if (backend.manual_setup && backend.host_supported) return 'Manual setup required';
   if (!backend.installable) return 'Not supported here';
   if (!backend.environment_ready) return 'Setup required';
   if (backend.models_downloaded) return 'Files present';

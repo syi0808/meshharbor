@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    CoreError, CoreResult, GenerationOptions, generation_tuning,
+    CoreError, CoreResult, GenerationOptions, external_generation, generation_tuning,
     generation_views::{GenerationViewMode, MAX_CUSTOM_VIEWS},
 };
 
@@ -95,18 +95,21 @@ const TARGET_FACES: Parameter = Parameter {
     },
 };
 
-const PIXAL3D_PARAMETERS: &[Parameter] = &[RESOLUTION, TEXTURE_SIZE, TARGET_FACES, SEED];
+const TEXTURED_PARAMETERS: &[Parameter] = &[RESOLUTION, TEXTURE_SIZE, TARGET_FACES, SEED];
+const GEOMETRY_PARAMETERS: &[Parameter] = &[RESOLUTION, TARGET_FACES, SEED];
 
 #[derive(Serialize)]
 pub(crate) struct GenerationProfile {
     pub id: &'static str,
     label: &'static str,
     parameters: Vec<Value>,
+    #[serde(skip)]
+    core_parameters: &'static [Parameter],
     view_modes: &'static [GenerationViewMode],
     max_views: usize,
 }
 
-static PROFILES: LazyLock<[GenerationProfile; 2]> = LazyLock::new(|| {
+static PROFILES: LazyLock<Vec<GenerationProfile>> = LazyLock::new(|| {
     use GenerationViewMode::{Custom, Four, Single, Six};
     [
         ("pixal3d-mlx", "Apple MLX", &[Single][..], 1),
@@ -117,18 +120,53 @@ static PROFILES: LazyLock<[GenerationProfile; 2]> = LazyLock::new(|| {
             MAX_CUSTOM_VIEWS,
         ),
     ]
-    .map(|(id, label, view_modes, max_views)| GenerationProfile {
+    .into_iter()
+    .map(|(id, label, views, max_views)| profile(id, label, views, max_views, true))
+    .chain(external_generation::PROFILES.iter().map(|backend| {
+        profile(
+            backend.id,
+            backend.accelerator,
+            &[Single],
+            1,
+            backend.textured,
+        )
+    }))
+    .collect()
+});
+
+fn profile(
+    id: &'static str,
+    label: &'static str,
+    view_modes: &'static [GenerationViewMode],
+    max_views: usize,
+    textured: bool,
+) -> GenerationProfile {
+    let core_parameters = if textured {
+        TEXTURED_PARAMETERS
+    } else {
+        GEOMETRY_PARAMETERS
+    };
+    GenerationProfile {
         id,
         label,
-        parameters: PIXAL3D_PARAMETERS
+        parameters: core_parameters
             .iter()
             .map(|parameter| serde_json::to_value(parameter).expect("bundled parameter"))
             .chain(generation_tuning::definitions(id))
             .collect(),
+        core_parameters,
         view_modes,
         max_views,
-    })
-});
+    }
+}
+
+impl GenerationProfile {
+    pub fn has_textures(&self) -> bool {
+        self.core_parameters
+            .iter()
+            .any(|parameter| matches!(parameter.id, ParameterId::TextureSize))
+    }
+}
 
 pub(crate) fn generation_profile(backend_id: &str) -> Option<&'static GenerationProfile> {
     PROFILES.iter().find(|profile| profile.id == backend_id)
@@ -171,7 +209,12 @@ impl GenerationOptions {
         let profile = generation_profile(backend_id).ok_or_else(|| {
             CoreError::InvalidInput(format!("Unknown generation backend '{backend_id}'."))
         })?;
-        for parameter in PIXAL3D_PARAMETERS {
+        if !profile.has_textures() && u64::from(self.texture_size) != TEXTURE_SIZE.default {
+            return Err(CoreError::InvalidInput(format!(
+                "{backend_id} generates geometry only and does not support texture_size."
+            )));
+        }
+        for parameter in profile.core_parameters {
             let value = parameter.id.value(self);
             let key = parameter.id.key();
             let problem = match parameter.constraint {
@@ -242,7 +285,7 @@ mod tests {
                 );
             }
             explicit.validate_for_backend(profile.id).unwrap();
-            for parameter in PIXAL3D_PARAMETERS {
+            for parameter in profile.core_parameters {
                 assert_eq!(parameter.id.value(&defaults), parameter.default);
             }
             for invalid in [

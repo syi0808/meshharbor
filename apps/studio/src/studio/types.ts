@@ -108,7 +108,7 @@ export interface RuntimeInfo {
   status: string;
   platform: string;
   operations: string[];
-  model_catalog: Array<{ id: string; title: string; status: string; backend_ids: string[] }>;
+  model_catalog: Array<{ id: string; title: string; status: string; backend_ids: string[]; output?: 'textured_glb' | 'geometry_glb' }>;
   quadriflow_backend: {
     backend_id: string;
     status: string;
@@ -125,6 +125,9 @@ export interface RuntimeInfo {
     multiview_ready?: boolean;
     ready?: boolean;
     status: string;
+    accelerator?: string;
+    manual_setup?: boolean;
+    host_supported?: boolean;
     validation_level?: string;
     missing?: string[];
     installable: boolean;

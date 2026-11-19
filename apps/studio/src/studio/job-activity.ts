@@ -18,6 +18,8 @@ const generationStages: Partial<Record<string, string>> = {
   texture_conditioning: 'Preparing textures',
   texture_flow: 'Generating textures',
   texture_decode: 'Decoding textures',
+  generate_mesh: 'Generating mesh',
+  mesh_export: 'Exporting geometry GLB',
   pbr_export: 'Baking textures and exporting GLB',
   validate_output: 'Validating generated GLB',
   save_model: 'Saving model to inventory',

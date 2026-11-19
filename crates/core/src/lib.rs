@@ -3,6 +3,7 @@ mod runtime_bundle {
 }
 
 mod cuda_runtime;
+mod external_generation;
 mod generation;
 mod generation_catalog;
 mod generation_tuning;

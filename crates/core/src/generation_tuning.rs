@@ -139,9 +139,10 @@ static TUNING: LazyLock<BTreeMap<String, Catalog>> = LazyLock::new(|| {
 });
 
 pub(crate) fn definitions(backend_id: &str) -> impl Iterator<Item = Value> + '_ {
-    TUNING[backend_id]
-        .definitions
-        .iter()
+    TUNING
+        .get(backend_id)
+        .into_iter()
+        .flat_map(|catalog| &catalog.definitions)
         .cloned()
         .map(|mut definition| {
             let object = definition.as_object_mut().expect("catalog parameter");
@@ -161,7 +162,14 @@ fn default_number(backend_id: &str, id: &str) -> f64 {
 }
 
 pub(crate) fn validate(options: &GenerationOptions, backend_id: &str) -> CoreResult<()> {
-    let catalog = &TUNING[backend_id];
+    let Some(catalog) = TUNING.get(backend_id) else {
+        return match options.tuning.keys().next() {
+            Some(setting) => Err(CoreError::InvalidInput(format!(
+                "Unknown generation setting '{setting}' for {backend_id}."
+            ))),
+            None => Ok(()),
+        };
+    };
     for (id, value) in &options.tuning {
         let parameter = catalog
             .parameters

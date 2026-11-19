@@ -111,10 +111,10 @@ enum Command {
         #[arg(long)]
         quad_output: Option<PathBuf>,
     },
-    /// Generate a textured GLB from a previously imported image using a ready local Pixal3D backend.
+    /// Generate a GLB from a previously imported image using a ready local backend.
     Generate {
         asset_id: String,
-        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda"])]
+        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda"])]
         backend_id: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
@@ -488,7 +488,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start an asynchronous image.generate job using the selected, already prepared local Pixal3D backend (MLX on Apple Silicon or CUDA on Linux/NVIDIA). The `backend_id` can select `auto`, `pixal3d-mlx`, or `pixal3d-cuda`. This tool never downloads models or installs packages; model downloads and gated access are separate user-controlled steps."
+        description = "Start a local image.generate job with a ready backend listed in runtime_doctor. Choose pixal3d-mlx, pixal3d-cuda, trellis2-mlx, trellis2-cuda, triposg-mlx, or triposg-cuda. The default auto selects platform Pixal3D. This tool never downloads models or installs packages."
     )]
     async fn start_image_generation(&self, params: Parameters<GenerateArgs>) -> String {
         let args = params.0;
@@ -862,7 +862,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             preflight_cli_output_paths(output.as_deref(), None)?;
             let _runtime_lock = acquire_generation_runtime_lock(&root)?;
             let core = OperationCore::open(&root)?;
-            let result = core.generate_pixal3d_image(
+            let result = core.generate_image(
                 &asset_id,
                 GenerationOptions {
                     backend_id,
@@ -1931,7 +1931,7 @@ async fn start_generation_job(
             "image.generate requires a previously imported PNG or JPEG image asset.".into(),
         ));
     }
-    options.validate()?;
+    core.check_image_generation(&options)?;
     options.validate_primary_image(asset_id)?;
     if let Some(input) = &options.view_input {
         for reference in input.references.iter().skip(1) {
@@ -1983,20 +1983,20 @@ async fn start_generation_job(
                 .store()
                 .update_running_job_stage(&worker_job_id, "check_runtime")?;
             let _runtime_lock = acquire_generation_runtime_lock(&worker_data_dir)?;
-            let result = worker_core.generate_pixal3d_image_for_job(
-                &worker_asset_id,
-                options,
-                &worker_job_id,
-            )?;
-            Ok(json!({
+            let result =
+                worker_core.generate_image_for_job(&worker_asset_id, options, &worker_job_id)?;
+            let mut payload = json!({
                 "asset_id": result.asset.id,
                 "backend_id": result.backend_id,
                 "seed": result.seed,
                 "resolution": result.resolution,
-                "texture_size": result.texture_size,
                 "target_faces": result.target_faces,
                 "elapsed_ms": result.elapsed_ms,
-            }))
+            });
+            if let Some(size) = result.texture_size {
+                payload["texture_size"] = json!(size);
+            }
+            Ok(payload)
         })
         .await;
         finish_asset_job(&core, &job_id, result);

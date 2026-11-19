@@ -7,9 +7,9 @@ use crate::{
     Asset, AtlasBakeError, AtlasBakeOptions, CoreError, CoreResult, GenerationOptions,
     GenerationResult, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dProfile,
     Pixal3dRuntimeManager, QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport,
-    SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb, inspect_asset,
-    install_bundled_quadriflow_sidecar, job_execution::JobExecution, optimize_render_glb,
-    separate_components, simplify_glb,
+    SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb, external_generation,
+    inspect_asset, install_bundled_quadriflow_sidecar, job_execution::JobExecution,
+    optimize_render_glb, separate_components, simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,26 +322,29 @@ impl OperationCore {
         Ok(MeshOperationResult { asset, report })
     }
 
-    pub fn generate_pixal3d_image(
+    pub fn check_image_generation(&self, options: &GenerationOptions) -> CoreResult<()> {
+        let profile = options.validated_profile()?;
+        if let Some(external) = external_generation::ExternalProfile::find(profile.id) {
+            external.require_ready(self.store.root())?;
+        }
+        Ok(())
+    }
+
+    pub fn generate_image(
         &self,
         input_asset_id: &str,
         options: GenerationOptions,
     ) -> CoreResult<GenerationResult> {
-        crate::generation::generate_pixal3d_image(
-            self,
-            input_asset_id,
-            options,
-            JobExecution::default(),
-        )
+        crate::generation::generate_image(self, input_asset_id, options, JobExecution::default())
     }
 
-    pub fn generate_pixal3d_image_for_job(
+    pub fn generate_image_for_job(
         &self,
         input_asset_id: &str,
         options: GenerationOptions,
         job_id: &str,
     ) -> CoreResult<GenerationResult> {
-        crate::generation::generate_pixal3d_image(
+        crate::generation::generate_image(
             self,
             input_asset_id,
             options,
@@ -393,13 +396,16 @@ impl OperationCore {
             .ready
             || Pixal3dCudaRuntimeManager::new(self.store.root())
                 .readiness()
-                .ready;
+                .ready
+            || external_generation::PROFILES
+                .iter()
+                .any(|profile| profile.is_ready(self.store.root()));
         let quadriflow_ready =
             crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root());
         vec![
             OperationDescriptor { id: "asset.import".into(), title: "Import asset".into(), category: "asset".into(), summary: "Import PNG, JPEG, or GLB files while retaining an immutable content-addressed source artifact.".into(), implemented: true },
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
-            OperationDescriptor { id: "image.generate".into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Run a local Pixal3D 512 profile using the ready platform backend (MLX on Apple Silicon or CUDA on Linux/NVIDIA). Environment setup and model downloads are explicit; gated terms remain user-controlled.".into(), implemented: generation_ready },
+            OperationDescriptor { id: "image.generate".into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Generate a local GLB with a ready Pixal3D, TRELLIS.2, or TripoSG backend. Inference does not install packages or download weights.".into(), implemented: generation_ready },
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangle primitives with meshoptimizer while retaining original vertex streams, materials, and textures.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces while preserving seams, vertex streams, materials, and the source asset.".into(), implemented: true },
             OperationDescriptor { id: "mesh.separate_parts".into(), title: "Separate connected parts".into(), category: "mesh".into(), summary: "Find components in one static indexed TRIANGLES primitive by shared indices and exact unambiguous edges. Emit up to 256 primitives, grouping excess fragments without discarding triangles. No vertex welding or scene-node split.".into(), implemented: true },
@@ -486,6 +492,11 @@ impl OperationCore {
                 "missing": readiness.missing,
             }));
         }
+        model_backends.extend(
+            external_generation::PROFILES
+                .iter()
+                .map(|profile| profile.status(self.store.root())),
+        );
         let pixal3d: Value =
             serde_json::from_str(include_str!("../../../registry/models/pixal3d.json"))
                 .expect("bundled Pixal3D registry must be valid JSON");
@@ -501,12 +512,22 @@ impl OperationCore {
             platform: std::env::consts::OS.to_string(),
             operations: supported,
             model_backends,
-            model_catalog: vec![json!({
-                "id": pixal3d["id"],
-                "title": pixal3d["title"],
-                "status": pixal3d["status"],
-                "backend_ids": pixal3d_backends,
-            })],
+            model_catalog: vec![
+                json!({
+                    "id": pixal3d["id"],
+                    "title": pixal3d["title"],
+                    "status": pixal3d["status"],
+                    "backend_ids": pixal3d_backends,
+                }),
+                json!({
+                    "id": "trellis2", "title": "TRELLIS.2", "status": "experimental_opt_in",
+                    "backend_ids": ["trellis2-mlx", "trellis2-cuda"], "output": "textured_glb",
+                }),
+                json!({
+                    "id": "triposg", "title": "TripoSG", "status": "experimental_opt_in",
+                    "backend_ids": ["triposg-mlx", "triposg-cuda"], "output": "geometry_glb",
+                }),
+            ],
             quadriflow_backend: self.quadriflow_backend_status(),
             notes: vec![
                 "The Rust core includes CPU mesh simplification, conservative cleanup, shared-index connected-part splitting, xatlas UV atlas rebaking, render cache/overdraw optimization, and required KHR_meshopt_compression output; this does not yet constitute a full cross-platform Studio or one-file distribution.".into(),
@@ -514,6 +535,7 @@ impl OperationCore {
                 "QuadriFlow retopology is unavailable in this build: adjacent executables are ignored, and the in-process signature/provenance verifier has no approved sidecar to accept because the trusted manifest is empty. Backend status and an install request are exposed, but readiness and installation stay fail-closed until a verified managed release is available. It accepts one closed static triangle mesh; textured input needs POSITION, TEXCOORD_0, optional NORMAL, and the supported embedded base-color/metallic-roughness PNG maps. Supported maps are projected with distance, facing-normal, coverage, and opposing-shell ambiguity gates into the triangulated GLB preview only; the separate OBJ retains quad topology without UVs or appearance. Other maps/attributes are rejected, and self-intersection freedom or measured surface-error tolerance is not certified.".into(),
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
+                "TRELLIS.2 and TripoSG are manual opt-in runtimes. MeshHarbor does not install or bundle their sources, dependencies, or models. Readiness checks the operator activation and local file layout, not licenses, hashes, GPU compatibility, or inference quality.".into(),
                 "The MeshHarbor project license has not been selected in this repository. Upstream model weights and separate DINOv3/NAF terms remain independent; gated access is user-controlled, and generated user inputs stay local to the worker.".into(),
             ],
         }

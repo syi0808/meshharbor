@@ -165,6 +165,141 @@ fn run_cli(runtime: &MockRuntime, data_dir: &Path, args: &[&str]) -> std::proces
     command.output().expect("launch meshharbor CLI")
 }
 
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+#[test]
+fn external_triposg_requires_activation_and_runs_an_offline_worker() {
+    let tree = TempTree::new("external-triposg");
+    let data_dir = tree.0.join("store");
+    let image = tree.0.join("input.png");
+    fs::write(&image, IMAGE_PNG).unwrap();
+    let execute = |args: &[&str]| {
+        meshharbor()
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .env("HF_TOKEN", "must-not-reach-the-worker")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let imported = execute(&["import", image.to_str().unwrap()]);
+    assert!(imported.status.success());
+    let source: Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let (backend_id, revision, entry, files): (&str, &str, &str, &[&str]) =
+        if cfg!(target_os = "macos") {
+            (
+                "triposg-mlx",
+                "c4c04b4cbbdf563fa3ae931f9a584bb7f0b240d5",
+                "src/mlx_agent/resources/ports/mlx-3d/triposg/pipeline.py",
+                &[
+                    "config.json",
+                    "image_encoder_dinov2.safetensors",
+                    "transformer.safetensors",
+                    "vae.safetensors",
+                ],
+            )
+        } else {
+            (
+                "triposg-cuda",
+                "fc5c40990181e2a756c4e0b1c2f4d6b5202faf8c",
+                "triposg/pipelines/pipeline_triposg.py",
+                &[
+                    "model_index.json",
+                    "feature_extractor_dinov2/preprocessor_config.json",
+                    "image_encoder_dinov2/config.json",
+                    "image_encoder_dinov2/model.safetensors",
+                    "scheduler/scheduler_config.json",
+                    "transformer/config.json",
+                    "transformer/diffusion_pytorch_model.safetensors",
+                    "vae/config.json",
+                    "vae/diffusion_pytorch_model.safetensors",
+                ],
+            )
+        };
+    let root = data_dir.join("runtimes").join(backend_id);
+    let generation = [
+        "generate",
+        source["id"].as_str().unwrap(),
+        "--backend-id",
+        backend_id,
+    ];
+    let declined = execute(&generation);
+    assert!(!declined.status.success());
+    assert!(String::from_utf8_lossy(&declined.stderr).contains("activate.json"));
+    assert!(!root.exists());
+
+    let write = |path: &Path, bytes: &[u8]| {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    };
+    write(&root.join("source").join(entry), b"stub module");
+    let glb = minimal_triangle_glb();
+    write(&root.join("source/fixture.glb"), &glb);
+    for file in files {
+        write(&root.join("weights/model").join(file), b"stub checkpoint");
+    }
+    let worker = root.join(".venv/bin/python");
+    write(
+        &worker,
+        br#"#!/bin/sh
+set -eu
+[ "$1 $2 $3" = '-I -B -u' ]
+[ -s "$4" ]
+case "$5" in triposg-mlx|triposg-cuda) ;; *) exit 1 ;; esac
+[ -d "$6" ] && [ -d "$7/model" ] && [ -s "$8" ]
+[ "$HF_HUB_OFFLINE" = 1 ] && [ "$TRANSFORMERS_OFFLINE" = 1 ]
+[ -z "${HF_TOKEN-}" ]
+[ "${10} ${11} ${12} ${13}" = '42 512 1024 100000' ]
+cp "$6/fixture.glb" "$9"
+"#,
+    );
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+    for (pin, authorized) in [("wrong", true), (revision, false), (revision, true)] {
+        write(
+            &root.join("activate.json"),
+            &serde_json::to_vec(&json!({"source_revision":pin,"authorized_local_use":authorized}))
+                .unwrap(),
+        );
+        let result = execute(&generation);
+        if pin != revision || !authorized {
+            assert!(!result.status.success());
+            continue;
+        }
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let output: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(output["backend_id"], backend_id);
+        assert_eq!(output["asset"]["kind"], "mesh");
+        assert!(output.get("texture_size").is_none());
+    }
+
+    let doctor: Value = serde_json::from_slice(&execute(&["doctor"]).stdout).unwrap();
+    let backends = doctor["model_backends"].as_array().unwrap();
+    for id in [
+        "trellis2-mlx",
+        "trellis2-cuda",
+        "triposg-mlx",
+        "triposg-cuda",
+    ] {
+        let backend = backends.iter().find(|backend| backend["id"] == id).unwrap();
+        assert_eq!(backend["generation"]["view_modes"], json!(["single"]));
+        assert_eq!(backend["manual_setup"], true);
+        assert_eq!(backend["downloads_enabled"], false);
+        assert_eq!(backend["ready"], id == backend_id);
+    }
+    assert!(
+        fs::read_dir(data_dir.join("staging"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
 #[test]
 fn cli_import_generate_and_export_uses_mock_runtime_without_models() {
     let runtime = MockRuntime::new("cli-generation");
