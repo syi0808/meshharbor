@@ -5,6 +5,7 @@ mod runtime_bundle {
 mod cuda_runtime;
 mod generation;
 mod glb;
+mod huggingface_access;
 mod operation;
 mod parts;
 mod quadriflow;
@@ -23,6 +24,7 @@ pub use glb::{
     MeshCleanupReport, RenderOptimizationReport, SimplificationReport, cleanup_glb,
     compress_mesh_glb, inspect_asset, optimize_render_glb, retopology_glb, simplify_glb,
 };
+pub use huggingface_access::HuggingFaceAccess;
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
 pub use operation::{
     MeshOperationResult, OperationCore, OperationDescriptor, RuntimeDoctor, SimplificationResult,

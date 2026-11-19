@@ -46,10 +46,11 @@ successful retry; model files in the isolated Hugging Face cache are not
 removed. Readiness accepts only a bounded JSON marker matching the reviewed
 CUDA profile. It does not re-run the doctor or re-check the current driver.
 
-Hugging Face login is the official interactive `hf auth login` command inside
-MeshHarbor's isolated `HF_HOME`. Neither REST nor MCP accepts credentials. The
-large model action first queries gated DINOv3 metadata through that isolated
-account; it fails before checkpoint transfer if access is absent. Once the
+Connect a Hugging Face token through the local Studio setup panel, or use the
+official interactive `hf auth login` command inside MeshHarbor's isolated
+`HF_HOME`. The Studio endpoint requires the exact same local origin and MCP
+does not accept credentials. The large model action first sends a HEAD request
+for the pinned DINOv3 checkpoint file and fails before transfer if access is absent. Once the
 pinned files are present, inference sets Hugging Face offline mode and does not
 inherit ambient tokens or user Python packages.
 

@@ -148,6 +148,13 @@ test('on a narrow viewport setup is accessible without an asset and never starts
     downloads += 1;
     return route.abort();
   });
+  await page.route('**/api/v1/runtime/pixal3d-mlx/huggingface', route => {
+    const { token } = route.request().postDataJSON();
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().headers()['x-meshharbor-dashboard']).toBe('local-ui-v1');
+    return route.fulfill({ json: token === 'hf_testapproved'
+      ? 'verified' : token ? 'access_denied' : 'not_connected' });
+  });
 
   await page.goto(studioOrigin);
   const inventory = page.getByRole('button', { name: 'Inventory', exact: true });
@@ -172,7 +179,29 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(setup).toBeDisabled();
   finishSetup = true;
   await expect(dialog.getByText('Installed', { exact: true })).toBeVisible();
-  await expect(dialog.getByRole('button', { name: 'Download model files' })).toBeDisabled();
+  await expect(dialog.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
+  await expect(dialog.getByRole('link', { name: 'Create a Hugging Face token' })).toHaveAttribute('href', 'https://huggingface.co/settings/tokens');
+  const download = dialog.getByRole('button', { name: 'Download model files' });
+  const consent = dialog.getByRole('checkbox', { name: 'I reviewed the model terms and approve this download.' });
+  await expect(download).toBeDisabled();
+  await expect(consent).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Check saved token' }).click();
+  await expect(dialog.getByText('No token is saved', { exact: false })).toBeVisible();
+  const token = dialog.getByLabel('Hugging Face access token');
+  const connect = dialog.getByRole('button', { name: 'Connect token' });
+  await expect(token).toHaveAttribute('type', 'password');
+  await token.fill('hf_testdenied');
+  await connect.click();
+  await expect(dialog.getByText('DINOv3 access denied', { exact: false })).toBeVisible();
+  await expect(token).toHaveValue('');
+  await expect(download).toBeDisabled();
+  await token.fill('hf_testapproved');
+  await connect.click();
+  await expect(dialog.getByText('DINOv3 file access verified.')).toBeVisible();
+  await expect(token).toHaveValue('');
+  await expect(download).toBeDisabled();
+  await consent.check();
+  await expect(download).toBeEnabled();
   expect(downloads).toBe(0);
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();

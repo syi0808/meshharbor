@@ -15,13 +15,15 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    CoreError, CoreResult, generation::RuntimeReadiness, runtime::RuntimeSetupReport,
+    CoreError, CoreResult, HuggingFaceAccess,
+    generation::RuntimeReadiness,
+    huggingface_access::{DINO_REVISION, check_access, require_access},
+    runtime::RuntimeSetupReport,
     uv_bootstrap::ensure_uv,
 };
 
 const PYTHON_REQUEST: &str = "3.12";
 const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
-const DINO_REVISION: &str = "ea8dc2863c51be0a264bab82070e3e8836b02d51";
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
 const PIXAL_REPOSITORY: &str = "models--TencentARC--Pixal3D";
 const PIXAL_CHECKPOINTS: &[&str] = &[
@@ -68,6 +70,17 @@ impl Pixal3dCudaRuntimeManager {
 
     pub fn home_path(&self) -> PathBuf {
         self.runtime_root.join("home")
+    }
+
+    pub fn huggingface_access(&self, token: Option<&str>) -> CoreResult<HuggingFaceAccess> {
+        self.ensure_supported_host()?;
+        let python = self.python_path();
+        if !python.is_file() {
+            return Err(CoreError::OperationUnavailable(
+                "Set up the CUDA Python environment before connecting Hugging Face.".into(),
+            ));
+        }
+        check_access(self.python_command(&python), token)
     }
 
     fn hf_home(&self) -> PathBuf {
@@ -319,21 +332,10 @@ impl Pixal3dCudaRuntimeManager {
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(self.hf_home())?;
 
-        // Query model metadata only. This verifies that the user's private HF
-        // login can access the gated revision before the large checkpoint set
-        // is fetched. It does not accept terms or download any weights.
         eprintln!("[1/2] Checking the user's existing DINOv3 access before large model downloads…");
-        let access_check = format!(
-            "from huggingface_hub import HfApi; HfApi().model_info(repo_id='facebook/dinov3-vitl16-pretrain-lvd1689m', revision='{DINO_REVISION}'); print('DINOv3 gated access verified')"
-        );
-        let mut preflight = self.python_command(python);
-        preflight
-            .args(["-c", access_check.as_str()])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        run_visible(
-            preflight,
-            "DINOv3 access check failed; accept the model terms in Hugging Face and run `meshharbor runtime cuda-hf-login` first",
+        require_access(
+            self.python_command(python),
+            "meshharbor runtime cuda-hf-login",
         )?;
 
         eprintln!(
@@ -1048,7 +1050,7 @@ esac
         let mut python_script = String::from(
             r#"#!/bin/sh
 printf '%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOME" >> "$HOME/python-env.log"
-if [ "$1" = "-c" ]; then exit 0; fi
+if [ "$1" = "-I" ]; then echo verified; exit 0; fi
 if [ "$1" = "-m" ] && [ "$2" = "pixalcuda.cli" ] && [ "$3" = "download" ]; then
   count_file="$HOME/download-attempts"
   if [ -f "$count_file" ]; then count=$(cat "$count_file"); else count=0; fi

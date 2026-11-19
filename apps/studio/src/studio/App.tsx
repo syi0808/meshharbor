@@ -1583,9 +1583,10 @@ export function App() {
           </Field>
           {feedback}
           {jobFeedback}
-          <RuntimeSetup backend={dialogBackend} disabled={busy || isRunning}
+          <RuntimeSetup key={dialogBackend.id} backend={dialogBackend} disabled={busy || isRunning}
             acknowledged={dialogUsesCuda ? cudaModelDownloadAcknowledged : modelDownloadAcknowledged}
             onAcknowledge={dialogUsesCuda ? setCudaModelDownloadAcknowledged : setModelDownloadAcknowledged}
+            onCheckAccess={token => api.checkHuggingFaceAccess(dialogUsesCuda ? 'pixal3d-cuda' : 'pixal3d-mlx', token)}
             onSetup={() => void (dialogUsesCuda ? setupPixal3dCudaRuntime : setupPixal3dRuntime)()}
             onDownload={() => void (dialogUsesCuda ? installPixal3dCudaModels : installPixal3dModels)()}
             onConvert={() => void convertPixal3dNaf()} />

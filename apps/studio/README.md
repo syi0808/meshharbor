@@ -41,11 +41,17 @@ There is one live progress and cancellation surface, inside an open tool drawer 
    npm run dev
    ```
 
-3. Open `http://127.0.0.1:5173`. Studio connects to the local engine automatically; there is no token prompt. The Vite development server accepts API proxy requests only from that exact local Studio origin and forwards the dashboard marker to the Rust loopback API.
+3. Open `http://127.0.0.1:5173`. Studio connects to the local engine automatically without an engine API token. The Vite development server accepts API proxy requests only from that exact local Studio origin and forwards the dashboard marker to the Rust loopback API.
 
 Dashboard API calls use an explicit non-simple header plus an exact same-origin check, not a bearer token. Safe reads may use browser Fetch Metadata when a same-origin browser omits `Origin`; tokenless dashboard writes require an exact `Origin`. The dev server enforces that browser boundary and rejects cross-origin preflights and untrusted Host headers before proxying. For REST compatibility, a valid bearer-authenticated non-browser client may omit `Origin` on writes; when a bearer request does include `Origin`, it must match the loopback `Host`, so cross-origin requests remain rejected. Production and development HTML responses set `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY` to prevent clickjacking.
 
 The marker is not a secret or local-process authentication: another process running as the same OS user can forge browser headers and is within this single-user local trust boundary. These checks are for hostile websites, cross-origin forms, and other local web origins. They do not defend against malicious code already running as the user. Non-dashboard clients can continue using the bearer token printed by the Rust server. The Rust API and Vite server must remain bound to loopback.
+
+## Image-to-3D model access
+
+In **Runtime**, set up the Python environment for the selected backend. Use the Studio links to request DINOv3 access and create a read-only Hugging Face token in the same account. Terms, access requests, and token creation stay on Hugging Face. Back in Studio, use **Connect token**, or **Check saved token** if you previously signed in with the CLI. Studio enables the download consent only after a metadata-only request for the pinned DINOv3 checkpoint file confirms access, without transferring weights.
+
+The loopback endpoint accepts only same-origin Studio requests. A verified token is stored in the selected backend's isolated Hugging Face cache, not in browser storage or job history. MLX and CUDA keep separate credentials. Revoke the token in Hugging Face settings if you no longer need it.
 
 ## Build
 

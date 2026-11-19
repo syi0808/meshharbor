@@ -13,7 +13,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{CoreError, CoreResult, uv_bootstrap::ensure_uv};
+use crate::{
+    CoreError, CoreResult, HuggingFaceAccess,
+    huggingface_access::{check_access, require_access},
+    uv_bootstrap::ensure_uv,
+};
 
 const PYTHON_REQUEST: &str = "3.12";
 const NAF_SHA256: &str = "c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f";
@@ -86,6 +90,17 @@ impl Pixal3dRuntimeManager {
 
     pub fn home_path(&self) -> PathBuf {
         self.runtime_root.join("home")
+    }
+
+    pub fn huggingface_access(&self, token: Option<&str>) -> CoreResult<HuggingFaceAccess> {
+        self.ensure_apple_silicon()?;
+        let python = self.python_path();
+        if !python.is_file() {
+            return Err(CoreError::OperationUnavailable(
+                "Set up the MLX Python environment before connecting Hugging Face.".into(),
+            ));
+        }
+        check_access(self.python_command(&python), token)
     }
 
     /// Provision a managed Python 3.12 and the source-pinned, locked MLX
@@ -221,27 +236,7 @@ impl Pixal3dRuntimeManager {
         eprintln!(
             "[1/3] Checking access to the gated DINOv3 model before downloading large checkpoints…"
         );
-        let mut preflight = self.python_command(python);
-        preflight
-            .current_dir(&self.source_root)
-            .env_clear()
-            .env("HOME", &home)
-            .env("HF_HOME", home.join(".cache/huggingface"))
-            .env("PATH", managed_path(&self.runtime_root))
-            .env("HF_HUB_DISABLE_TELEMETRY", "1")
-            .env("PYTHONNOUSERSITE", "1")
-            .arg(scripts.join("download_models.py"))
-            .arg("--source-root")
-            .arg(&self.source_root)
-            .arg("--weights-dir")
-            .arg(&weights)
-            .arg("--preflight-only")
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        run_visible(
-            preflight,
-            "Hugging Face model access is not ready. Accept DINOv3 access terms in your own account and log in to the isolated MeshHarbor HF cache, then retry.",
-        )?;
+        require_access(self.python_command(python), "meshharbor runtime hf-login")?;
 
         eprintln!(
             "[2/3] Downloading pinned model files. Large files can take time; progress is shown below…"
@@ -806,10 +801,7 @@ esac
             r#"#!/bin/sh
 printf '%s|%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOME" "$PYTHONNOUSERSITE" >> "$HOME/python-env.log"
 case "$1" in
-  -c) echo "fake access check passed"; exit 0 ;;
-esac
-case " $* " in
-  *" --preflight-only "*) exit 0 ;;
+  -I) echo "verified"; exit 0 ;;
 esac
 weights=""
 while [ "$#" -gt 0 ]; do

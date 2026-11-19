@@ -37,18 +37,6 @@ def upstream_api(source_root: Path):
     return runpy.run_path(str(script), run_name="meshharbor_upstream_downloader")
 
 
-def check_dino_access(api):
-    try:
-        api["HfApi"]().model_info(api["DINO_REPO"], revision=api["DINO_REVISION"])
-    except Exception:
-        # Keep request details private: this may involve the user's gated-model credential.
-        raise SystemExit(
-            "Cannot access pinned gated DINOv3. Review/request access in Hugging Face, "
-            "then use `meshharbor runtime hf-login` with the isolated MeshHarbor cache."
-        ) from None
-    print("Gated DINOv3 access check passed; no files were downloaded.", flush=True)
-
-
 def download_models(api, weights: Path):
     weights.mkdir(parents=True, exist_ok=True)
     manifest_path = weights / "download-manifest.json"
@@ -131,13 +119,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--weights-dir", type=Path, required=True)
-    parser.add_argument("--preflight-only", action="store_true")
     args = parser.parse_args()
     api = upstream_api(args.source_root.resolve())
-    if args.preflight_only:
-        check_dino_access(api)
-        return
-    check_dino_access(api)
     download_models(api, args.weights_dir.resolve())
 
 

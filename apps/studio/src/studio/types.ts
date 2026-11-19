@@ -35,6 +35,8 @@ export interface Operation {
   implemented: boolean;
 }
 
+export type HuggingFaceAccess = 'not_connected' | 'access_denied' | 'verified';
+
 export interface RuntimeInfo {
   status: string;
   platform: string;

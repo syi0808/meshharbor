@@ -5,6 +5,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::DefaultBodyLimit,
+    extract::rejection::JsonRejection,
     extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
@@ -12,7 +13,10 @@ use axum::{
     routing::{get, post},
 };
 use clap::{Parser, Subcommand};
-use meshharbor_core::{CoreError, GenerationOptions, MAX_ASSET_BYTES, OperationCore};
+use meshharbor_core::{
+    CoreError, GenerationOptions, MAX_ASSET_BYTES, OperationCore, Pixal3dCudaRuntimeManager,
+    Pixal3dRuntimeManager,
+};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -976,6 +980,10 @@ fn api_router(state: AppState, token: String) -> Router {
         .route("/api/v1/health", get(api_health))
         .route("/api/v1/runtime", get(api_runtime))
         .route(
+            "/api/v1/runtime/{backend}/huggingface",
+            post(api_huggingface_access).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
             "/api/v1/backends/quadriflow",
             get(api_quadriflow_backend_status),
         )
@@ -1093,14 +1101,17 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         == Some(DASHBOARD_MARKER)
         && (origin_matches_host
             || (safe_read && request.headers().get(header::ORIGIN).is_none() && same_origin_fetch));
-    if authorized || dashboard_authorized {
+    let dashboard_only = path.starts_with("/api/v1/runtime/") && path.ends_with("/huggingface");
+    if dashboard_authorized || (authorized && !dashboard_only) {
         next.run(request).await
     } else {
         (
             StatusCode::UNAUTHORIZED,
-            Json(
-                json!({"error":"A valid bearer token or same-origin Studio request is required."}),
-            ),
+            Json(json!({"error": if dashboard_only {
+                "A same-origin Studio request is required."
+            } else {
+                "A valid bearer token or same-origin Studio request is required."
+            }})),
         )
             .into_response()
     }
@@ -1257,6 +1268,37 @@ async fn api_install_quadriflow_backend(
             )))
         })??;
     Ok(Json(installed))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HuggingFaceAccessRequest {
+    token: Option<String>,
+}
+
+async fn api_huggingface_access(
+    State(state): State<AppState>,
+    Path(backend): Path<String>,
+    payload: Result<Json<HuggingFaceAccessRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Json(payload) = payload
+        .map_err(|_| CoreError::InvalidInput("Invalid Hugging Face connection request.".into()))?;
+    let access = task::spawn_blocking(move || {
+        let root = state.core.store().root();
+        let _runtime_lock = acquire_runtime_write_lock(root)?;
+        match backend.as_str() {
+            "pixal3d-mlx" => {
+                Pixal3dRuntimeManager::new(root).huggingface_access(payload.token.as_deref())
+            }
+            "pixal3d-cuda" => {
+                Pixal3dCudaRuntimeManager::new(root).huggingface_access(payload.token.as_deref())
+            }
+            _ => Err(CoreError::InvalidInput("Unknown Pixal3D backend.".into())),
+        }
+    })
+    .await
+    .map_err(|_| CoreError::OperationUnavailable("Hugging Face access worker failed.".into()))??;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(access)))
 }
 
 async fn api_start_runtime_setup(
@@ -3414,6 +3456,73 @@ mod tests {
                 "unexpectedly accepted {authority:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn huggingface_token_connection_requires_same_origin_studio_and_redacts_bad_input() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-hf-access-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: Arc::new(Semaphore::new(1)),
+            },
+            "private-test-token".into(),
+        );
+        for backend in ["pixal3d-mlx", "pixal3d-cuda"] {
+            for (origin, dashboard, bearer, status) in [
+                (
+                    Some("http://127.0.0.1:5173"),
+                    true,
+                    false,
+                    StatusCode::FORBIDDEN,
+                ),
+                (None, true, false, StatusCode::FORBIDDEN),
+                (None, false, true, StatusCode::UNAUTHORIZED),
+                (
+                    Some("http://127.0.0.1:7432"),
+                    false,
+                    true,
+                    StatusCode::UNAUTHORIZED,
+                ),
+                (
+                    Some("http://127.0.0.1:7432"),
+                    true,
+                    false,
+                    StatusCode::BAD_REQUEST,
+                ),
+            ] {
+                let mut request = axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/v1/runtime/{backend}/huggingface"))
+                    .header(header::HOST, "127.0.0.1:7432")
+                    .header(header::CONTENT_TYPE, "application/json");
+                if let Some(origin) = origin {
+                    request = request.header(header::ORIGIN, origin);
+                }
+                if dashboard {
+                    request = request.header("x-meshharbor-dashboard", "local-ui-v1");
+                }
+                if bearer {
+                    request = request.header(header::AUTHORIZATION, "Bearer private-test-token");
+                }
+                let response = app
+                    .clone()
+                    .oneshot(
+                        request
+                            .body(Body::from(r#"{"hf_secret_fixture":true}"#))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                assert!(!String::from_utf8_lossy(&body).contains("hf_secret_fixture"));
+            }
+        }
+        assert!(core.store().list_jobs(20).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use std::{
 mod runtime_bundle;
 
 const EXPECTED_RUNTIME_BUNDLE_MANIFEST_SHA256: &str =
-    "4cacde8e03f4dcf31fd4a2d6d9614eda9b599b8be8f0d646c7f98f954db869a1";
+    "9bc82565a020bcb242bc29fb508a8fd549e11d759626fdf67c29c8bef61a6d42";
 const EXPECTED_RUNTIME_BUNDLE_FILE_COUNT: usize = 209;
 
 fn main() {
