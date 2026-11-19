@@ -166,7 +166,7 @@ impl HuggingFaceBrowserTool {
     }
 
     fn hf_path(&self) -> PathBuf {
-        self.runtime_root.join(TOOL_DIR).join("bin/hf")
+        browser_cli_path(&self.runtime_root)
     }
 }
 
@@ -204,6 +204,15 @@ pub(crate) fn access_python(runtime_root: &Path) -> Option<PathBuf> {
     let directory = runtime_root.join(TOOL_DIR);
     let python = directory.join("bin/python");
     (directory.join(".installed").is_file() && python.is_file()).then_some(python)
+}
+
+pub(crate) fn installed_browser_cli(runtime_root: &Path) -> Option<PathBuf> {
+    let executable = browser_cli_path(runtime_root);
+    (access_python(runtime_root).is_some() && executable.is_file()).then_some(executable)
+}
+
+fn browser_cli_path(runtime_root: &Path) -> PathBuf {
+    runtime_root.join(TOOL_DIR).join("bin/hf")
 }
 
 pub(crate) fn clear_staged_credentials(hf_home: &Path) -> CoreResult<()> {
@@ -257,6 +266,21 @@ fn install_error() -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downloads_only_reuse_a_completed_browser_tool_installation() {
+        let runtime_root =
+            std::env::temp_dir().join(format!("meshharbor-browser-tool-{}", Uuid::new_v4()));
+        let executable = browser_cli_path(&runtime_root);
+        let directory = runtime_root.join(TOOL_DIR);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"hf fixture").unwrap();
+        fs::write(directory.join("bin/python"), b"python fixture").unwrap();
+        assert_eq!(installed_browser_cli(&runtime_root), None);
+        fs::write(directory.join(".installed"), b"1.20.1").unwrap();
+        assert_eq!(installed_browser_cli(&runtime_root), Some(executable));
+        fs::remove_dir_all(runtime_root).unwrap();
+    }
 
     #[test]
     fn staged_credentials_do_not_replace_the_active_token_until_commit() {

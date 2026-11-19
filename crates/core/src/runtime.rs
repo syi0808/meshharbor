@@ -15,8 +15,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CoreError, CoreResult, HuggingFaceAccess, HuggingFaceConnection,
-    huggingface_access::{check_connection, check_model_access, require_access},
+    huggingface_access::{DINO_REVISION, check_connection, check_model_access, require_access},
     huggingface_browser::access_python,
+    huggingface_download::{self, DINO_REPO, PIXAL_REPO, PIXAL_REVISION},
     uv_bootstrap::ensure_uv,
 };
 
@@ -256,25 +257,45 @@ impl Pixal3dRuntimeManager {
         eprintln!(
             "[2/3] Downloading pinned model files. Large files can take time; progress is shown below…"
         );
-        let mut download = self.python_command(python);
-        download
+        eprintln!("Downloading pinned gated DINOv3 files with hf…");
+        huggingface_download::download(
+            &self.runtime_root,
+            &home,
+            DINO_REPO,
+            DINO_REVISION,
+            ["model.safetensors", "config.json", "--max-workers", "1"],
+        )?;
+        eprintln!("Downloading seven pinned Pixal3D checkpoints with hf (~24 GB)…");
+        huggingface_download::download(
+            &self.runtime_root,
+            &home,
+            PIXAL_REPO,
+            PIXAL_REVISION,
+            [
+                "--include",
+                "ckpts/*.safetensors",
+                "--include",
+                "ckpts/*.json",
+                "--include",
+                "pipeline.json",
+                "--max-workers",
+                "2",
+            ],
+        )?;
+        let mut verify = self.python_command(python);
+        verify
             .current_dir(&self.source_root)
-            .env_clear()
-            .env("HOME", &home)
-            .env("HF_HOME", home.join(".cache/huggingface"))
-            .env("PATH", managed_path(&self.runtime_root))
-            .env("PYTHONNOUSERSITE", "1")
             .env("HF_HUB_DISABLE_TELEMETRY", "1")
             .arg(scripts.join("download_models.py"))
             .arg("--source-root")
             .arg(&self.source_root)
             .arg("--weights-dir")
             .arg(&weights)
-            .stdout(Stdio::inherit())
+            .stdout(Stdio::from(std::io::stderr()))
             .stderr(Stdio::inherit());
         run_visible(
-            download,
-            "Model download failed; retrying is safe and resumes cached Hugging Face downloads",
+            verify,
+            "Could not verify the pinned Hugging Face snapshots or prepare the NAF checkpoint",
         )?;
         eprintln!(
             "[3/3] Preparing an isolated CPU-only conversion environment for the NAF checkpoint…"
@@ -818,31 +839,41 @@ printf '%s|%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOM
 case "$1" in
   -I) echo "verified"; exit 0 ;;
 esac
+printf '%s\n' "verifying" >> "$HOME/download-steps"
 weights=""
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--weights-dir" ]; then weights="$2"; shift 2; else shift; fi
 done
-count_file="$HOME/download-attempts"
-if [ -f "$count_file" ]; then count=$(cat "$count_file"); else count=0; fi
-count=$((count + 1))
-printf '%s' "$count" > "$count_file"
-if [ "$count" -eq 1 ]; then
-  mkdir -p "$HF_HOME/hub/.cache/download"
-  printf 'partial checkpoint bytes' > "$HF_HOME/hub/.cache/download/partial"
-  exit 23
-fi
 mkdir -p "$weights"
 printf 'invalid fixture bytes' > "$weights/naf_release.pth"
 exit 0
 "#,
         );
-        let partial = manager
-            .home_path()
-            .join(".cache/huggingface/hub/.cache/download/partial");
+        let fake_hf = runtime_root.join(".venv/bin/hf");
+        fs::create_dir_all(fake_hf.parent().unwrap()).unwrap();
+        write_test_script(
+            &fake_hf,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/download-steps"
+[ -z "${HF_TOKEN+x}${HUGGING_FACE_HUB_TOKEN+x}${HF_HUB_CACHE+x}" ] || exit 1
+[ "$HF_HOME" = "$HOME/.cache/huggingface" ] && [ "$(cat "$HF_HOME/token")" = "local-fixture" ] || exit 1
+partial="$HF_HOME/hub/.cache/download/partial"
+if [ "$2" = "TencentARC/Pixal3D" ] && [ ! -f "$partial" ]; then
+  mkdir -p "${partial%/*}"
+  printf 'partial checkpoint bytes' > "$partial"
+  exit 23
+fi
+"#,
+        );
+        let hf_home = manager.home_path().join(".cache/huggingface");
+        fs::create_dir_all(&hf_home).unwrap();
+        fs::write(hf_home.join("token"), "local-fixture").unwrap();
+        let partial = hf_home.join("hub/.cache/download/partial");
         let unused_uv = root.join("unused-uv");
 
         let first = manager.install_models_with_tools(&unused_uv, &fake_python);
-        assert!(first.is_err());
+        let error = first.expect_err("the fake Pixal3D download fails once");
+        assert!(error.to_string().contains(PIXAL_REPO));
         assert_eq!(
             fs::read_to_string(&partial).unwrap(),
             "partial checkpoint bytes"
@@ -851,6 +882,23 @@ exit 0
         let second = manager.install_models_with_tools(&unused_uv, &fake_python);
         let error = second.expect_err("fake fixture must reach the pinned checkpoint hash check");
         assert!(error.to_string().contains("checksum mismatch"));
+        let steps = fs::read_to_string(manager.home_path().join("download-steps")).unwrap();
+        let dino = format!(
+            "download {DINO_REPO} --revision {DINO_REVISION} model.safetensors config.json --max-workers 1"
+        );
+        let pixal = format!(
+            "download {PIXAL_REPO} --revision {PIXAL_REVISION} --include ckpts/*.safetensors --include ckpts/*.json --include pipeline.json --max-workers 2"
+        );
+        assert_eq!(
+            steps.lines().collect::<Vec<_>>(),
+            [
+                dino.as_str(),
+                pixal.as_str(),
+                dino.as_str(),
+                pixal.as_str(),
+                "verifying"
+            ],
+        );
         assert_eq!(
             fs::read_to_string(&partial).unwrap(),
             "partial checkpoint bytes"

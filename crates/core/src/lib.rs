@@ -8,6 +8,7 @@ mod generation_catalog;
 mod glb;
 mod huggingface_access;
 mod huggingface_browser;
+mod huggingface_download;
 mod model_storage;
 mod operation;
 mod parts;

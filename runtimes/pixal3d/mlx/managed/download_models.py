@@ -1,4 +1,4 @@
-"""MeshHarbor-managed download adapter for the pinned Pixal3D MLX snapshot.
+"""Verify the pinned Pixal3D MLX snapshots downloaded by hf and fetch NAF.
 
 This first-party adapter deliberately leaves the upstream source snapshot
 byte-identical. Repository revisions and the NAF checksum are read from the
@@ -13,6 +13,8 @@ from pathlib import Path
 import runpy
 import shutil
 import urllib.request
+
+from huggingface_hub.constants import HF_HUB_CACHE
 
 UPSTREAM_DOWNLOADER_GIT_BLOB = "7e57881be9464b57fe0c79b98d3473a79c6de580"
 EXPECTED_PIXAL_CHECKPOINTS = {
@@ -37,7 +39,15 @@ def upstream_api(source_root: Path):
     return runpy.run_path(str(script), run_name="meshharbor_upstream_downloader")
 
 
-def download_models(api, weights: Path):
+def cached_snapshot(repo, revision, required_file):
+    folder = "models--" + repo.replace("/", "--")
+    snapshot = Path(HF_HUB_CACHE) / folder / "snapshots" / revision
+    if not (snapshot / required_file).is_file():
+        raise SystemExit(f"Missing pinned {repo} file: {required_file}. Retry the model download.")
+    return str(snapshot)
+
+
+def prepare_models(api, weights: Path):
     weights.mkdir(parents=True, exist_ok=True)
     manifest_path = weights / "download-manifest.json"
     report = {"models": {}, "dino_requested": True, "moge_downloaded": False}
@@ -46,30 +56,10 @@ def download_models(api, weights: Path):
         report["models"][name] = value
         manifest_path.write_text(json.dumps(report, indent=2) + "\n")
 
-    # Fetch the gated repository first. If model-file access differs from the
-    # metadata preflight, fail before transferring the much larger Pixal3D set.
-    print("Downloading pinned gated DINOv3 files…", flush=True)
-    try:
-        dino_path = api["snapshot_download"](
-            api["DINO_REPO"],
-            revision=api["DINO_REVISION"],
-            allow_patterns=["*.safetensors", "config.json"],
-            max_workers=1,
-        )
-    except Exception:
-        raise SystemExit("DINOv3 download failed. Check gated access and the isolated HF login, then retry.") from None
+    dino_path = cached_snapshot(api["DINO_REPO"], api["DINO_REVISION"], "model.safetensors")
     record("dinov3", {"repo": api["DINO_REPO"], "revision": api["DINO_REVISION"], "path": dino_path})
 
-    print("Downloading seven pinned Pixal3D checkpoints (~24 GB)…", flush=True)
-    try:
-        pixal_path = api["snapshot_download"](
-            api["PIXAL_REPO"],
-            revision=api["PIXAL_REVISION"],
-            allow_patterns=["ckpts/*.safetensors", "ckpts/*.json", "pipeline.json"],
-            max_workers=2,
-        )
-    except Exception:
-        raise SystemExit("Pixal3D checkpoint download failed; retrying resumes the HF cache.") from None
+    pixal_path = cached_snapshot(api["PIXAL_REPO"], api["PIXAL_REVISION"], "pipeline.json")
     record("pixal3d", {"repo": api["PIXAL_REPO"], "revision": api["PIXAL_REVISION"], "path": pixal_path})
 
     metadata = api["HfApi"]().model_info(api["PIXAL_REPO"], revision=api["PIXAL_REVISION"], files_metadata=True)
@@ -121,7 +111,7 @@ def main():
     parser.add_argument("--weights-dir", type=Path, required=True)
     args = parser.parse_args()
     api = upstream_api(args.source_root.resolve())
-    download_models(api, args.weights_dir.resolve())
+    prepare_models(api, args.weights_dir.resolve())
 
 
 if __name__ == "__main__":

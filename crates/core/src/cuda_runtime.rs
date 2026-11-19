@@ -19,12 +19,12 @@ use crate::{
     generation::RuntimeReadiness,
     huggingface_access::{DINO_REVISION, check_connection, check_model_access, require_access},
     huggingface_browser::access_python,
+    huggingface_download::{self, DINO_REPO, PIXAL_REPO, PIXAL_REVISION},
     runtime::RuntimeSetupReport,
     uv_bootstrap::ensure_uv,
 };
 
 const PYTHON_REQUEST: &str = "3.12";
-const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
 const PIXAL_REPOSITORY: &str = "models--TencentARC--Pixal3D";
 const PIXAL_CHECKPOINTS: &[&str] = &[
@@ -353,16 +353,38 @@ impl Pixal3dCudaRuntimeManager {
         eprintln!(
             "[2/2] Downloading pinned Pixal3D, DINOv3 and NAF checkpoints (roughly 25–30 GB)…"
         );
-        let mut download = self.python_command(python);
-        download
-            .current_dir(&self.upstream_root)
-            .args(["-m", "pixalcuda.cli", "download", "--skip-camera"])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        run_visible(
-            download,
-            "CUDA model download failed; retrying is safe and uses the isolated HF cache",
+        huggingface_download::download(
+            &self.runtime_root,
+            &home,
+            DINO_REPO,
+            DINO_REVISION,
+            ["model.safetensors"],
         )?;
+        let pixal_files = ["pipeline.json".to_owned()]
+            .into_iter()
+            .chain(
+                PIXAL_CHECKPOINTS
+                    .iter()
+                    .map(|filename| format!("ckpts/{filename}")),
+            )
+            .chain(["--max-workers".to_owned(), "2".to_owned()]);
+        huggingface_download::download(
+            &self.runtime_root,
+            &home,
+            PIXAL_REPO,
+            PIXAL_REVISION,
+            pixal_files,
+        )?;
+
+        let mut naf = self.python_command(python);
+        naf.current_dir(&self.upstream_root)
+            .args([
+                "-c",
+                "from pixalcuda.weights import ModelStore; ModelStore().naf()",
+            ])
+            .stdout(Stdio::from(std::io::stderr()))
+            .stderr(Stdio::inherit());
+        run_visible(naf, "Could not download or verify the CUDA NAF checkpoint")?;
 
         let readiness = self.readiness();
         if !readiness.models_downloaded {
@@ -1040,26 +1062,35 @@ esac
         manager.ensure_source().unwrap();
 
         let fake_python = root.join("fake-python");
-        let mut python_script = String::from(
+        write_test_script(
+            &fake_python,
             r#"#!/bin/sh
 printf '%s|%s|%s|%s\n' "$HF_TOKEN" "$HUGGING_FACE_HUB_TOKEN" "$HOME" "$HF_HOME" >> "$HOME/python-env.log"
 if [ "$1" = "-I" ]; then echo verified; exit 0; fi
-if [ "$1" = "-m" ] && [ "$2" = "pixalcuda.cli" ] && [ "$3" = "download" ]; then
-  count_file="$HOME/download-attempts"
-  if [ -f "$count_file" ]; then count=$(cat "$count_file"); else count=0; fi
-  count=$((count + 1))
-  printf '%s' "$count" > "$count_file"
-  if [ "$count" -eq 1 ]; then
-    mkdir -p "$HF_HOME/hub/.cache/download"
-    printf 'partial checkpoint bytes' > "$HF_HOME/hub/.cache/download/partial"
-    exit 23
-  fi
-  PAYLOAD_PLACEHOLDER
-  exit 0
-fi
-exit 0
+[ "$1" = "-c" ] && [ "$2" = "from pixalcuda.weights import ModelStore; ModelStore().naf()" ] || exit 1
+mkdir -p "$HF_HOME/hub/pixal3d-cuda"
+printf 'fixture' > "$HF_HOME/hub/pixal3d-cuda/naf_release.pth"
 "#,
         );
+        let fake_hf = runtime_root.join(".venv/bin/hf");
+        std::fs::create_dir_all(fake_hf.parent().unwrap()).unwrap();
+        let hf_script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/hf.log"
+[ -z "${HF_TOKEN+x}${HUGGING_FACE_HUB_TOKEN+x}${HF_HUB_CACHE+x}" ] || exit 1
+[ "$HF_HOME" = "$HOME/.cache/huggingface" ] || exit 1
+if [ "$2" = "facebook/dinov3-vitl16-pretrain-lvd1689m" ]; then
+  DINO_PAYLOAD
+  exit 0
+fi
+[ "$2" = "TencentARC/Pixal3D" ] || exit 1
+partial="$HF_HOME/hub/.cache/download/partial"
+if [ ! -f "$partial" ]; then
+  mkdir -p "${partial%/*}"
+  printf 'partial checkpoint bytes' > "$partial"
+  exit 23
+fi
+PIXAL_PAYLOAD
+"#;
         let mut payload = String::new();
         for filename in PIXAL_CHECKPOINTS {
             payload.push_str(&format!(
@@ -1069,17 +1100,24 @@ exit 0
         payload.push_str(&format!(
             "mkdir -p \"$HF_HOME/hub/{PIXAL_REPOSITORY}/snapshots/{PIXAL_REVISION}\"\nprintf 'fixture' > \"$HF_HOME/hub/{PIXAL_REPOSITORY}/snapshots/{PIXAL_REVISION}/pipeline.json\"\n"
         ));
-        payload.push_str(&format!(
+        let dino_payload = format!(
             "mkdir -p \"$HF_HOME/hub/{DINO_REPOSITORY}/snapshots/{DINO_REVISION}\"\nprintf 'fixture' > \"$HF_HOME/hub/{DINO_REPOSITORY}/snapshots/{DINO_REVISION}/model.safetensors\"\n"
-        ));
-        payload.push_str(
-            "mkdir -p \"$HF_HOME/hub/pixal3d-cuda\"\nprintf 'fixture' > \"$HF_HOME/hub/pixal3d-cuda/naf_release.pth\"\n",
         );
-        python_script = python_script.replace("PAYLOAD_PLACEHOLDER", &payload);
-        write_test_script(&fake_python, &python_script);
+        write_test_script(
+            &fake_hf,
+            &hf_script
+                .replace("DINO_PAYLOAD", &dino_payload)
+                .replace("PIXAL_PAYLOAD", &payload),
+        );
 
         let partial = manager.hf_home().join("hub/.cache/download/partial");
         assert!(manager.install_models_with_python(&fake_python).is_err());
+        assert!(
+            !manager
+                .hf_home()
+                .join("hub/pixal3d-cuda/naf_release.pth")
+                .exists()
+        );
         assert_eq!(
             std::fs::read_to_string(&partial).unwrap(),
             "partial checkpoint bytes"
@@ -1088,6 +1126,20 @@ exit 0
         let report = manager.install_models_with_python(&fake_python).unwrap();
         assert_eq!(report.status, "model_files_ready");
         assert!(manager.readiness().models_downloaded);
+        let dino = format!("download {DINO_REPO} --revision {DINO_REVISION} model.safetensors");
+        let pixal = format!(
+            "download {PIXAL_REPO} --revision {PIXAL_REVISION} pipeline.json {} --max-workers 2",
+            PIXAL_CHECKPOINTS
+                .iter()
+                .map(|filename| format!("ckpts/{filename}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        let steps = std::fs::read_to_string(manager.home_path().join("hf.log")).unwrap();
+        assert_eq!(
+            steps.lines().collect::<Vec<_>>(),
+            [dino.as_str(), pixal.as_str(), dino.as_str(), pixal.as_str()]
+        );
         assert_eq!(
             std::fs::read_to_string(&partial).unwrap(),
             "partial checkpoint bytes"

@@ -50,8 +50,11 @@ Connect a Hugging Face token through the local Studio setup panel, or use the
 official interactive `hf auth login` command inside MeshHarbor's isolated
 `HF_HOME`. The Studio endpoint requires the exact same local origin and MCP
 does not accept credentials. The large model action first sends a HEAD request
-for the pinned DINOv3 checkpoint file and fails before transfer if access is absent. Once the
-pinned files are present, inference sets Hugging Face offline mode and does not
+for the pinned DINOv3 checkpoint file and fails before transfer if access is absent.
+MeshHarbor uses `hf download` for the pinned DINOv3 and Pixal3D files, reusing the
+same private Hub cache on retry. NAF is downloaded separately and checked against
+its pinned SHA-256. Once the pinned files are present, inference sets Hugging Face
+offline mode and does not
 inherit ambient tokens or user Python packages.
 
 ## Studio, REST, and MCP

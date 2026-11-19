@@ -353,8 +353,8 @@
     {
       "backend": "mlx",
       "path": "managed/download_models.py",
-      "sha256": "7b2271ab3894ecbad80c36414a5f8ba697ecc4d133bfad5ee2fc592a4838b5e9",
-      "size_bytes": 5784
+      "sha256": "0d7c070460b724cc774adbc1447e2ef188c677cc086beb0c359257d1bc1cc354",
+      "size_bytes": 5310
     },
     {
       "backend": "mlx",
