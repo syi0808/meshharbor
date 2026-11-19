@@ -99,6 +99,8 @@ On Linux, add `--with-deps` to the Chromium install command if system libraries 
 
 Headless Chromium imports a generated two-material GLB via the file picker, runs **Optimize**, switches between **Original** and **Result**, and downloads both. It checks that both material views render the same four color patches and that the result wireframe shows the simplified mesh. The original download must match the input byte for byte, and the result must have fewer triangles with identical material bindings, UVs, normals, and embedded base-color and metallic/roughness PNG bytes. A separate test runs **UV atlas rebake** with a supported single-material GLB and checks that both new maps decode. Browser checks cover the Mira dimensions, icon rail, panel resizing and persistence, long filenames at narrow widths, and a narrow-screen setup flow with a mocked runtime job. They do not fetch packages or weights or cover cross-browser visual QA.
 
+The **Compression** regression verifies that the Studio result and the reimported download render the same four texture patches as the source. The download must be smaller and require `KHR_meshopt_compression`.
+
 ### QuadriFlow release acceptance
 
 This test must run against a binary built with the **reviewed, signed production manifest** for the host. It uses a fresh data directory, checks that installation is available but not yet active, then clicks **Install QuadriFlow** using the normal public release downloader. It checks native retopology on geometry-only and UV-seamed textured fixtures, the exported GLB and geometry-only quad OBJ, and a byte-identical original export. It does not substitute a runner, an unsigned package, or a local manifest.

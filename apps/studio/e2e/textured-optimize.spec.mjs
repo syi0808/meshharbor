@@ -42,13 +42,17 @@ function compareMaterialFrames(originalScreenshot, resultScreenshot) {
     .toBeLessThan(0.03);
 }
 
+async function previewMaterial(page) {
+  await expect(page.getByRole('radio', { name: 'Material view' })).toBeChecked();
+  await expect(page.getByText('Loading preview…', { exact: true })).toBeHidden();
+  return page.getByLabel('Interactive 3D model preview').locator('canvas').screenshot();
+}
+
 async function previewFrames(page) {
+  const material = await previewMaterial(page);
   const materialView = page.getByRole('radio', { name: 'Material view' });
   const wireframeView = page.getByRole('radio', { name: 'Triangle wireframe' });
-  await expect(materialView).toBeChecked();
-  await expect(page.getByText('Loading preview…', { exact: true })).toBeHidden();
   const canvas = page.getByLabel('Interactive 3D model preview').locator('canvas');
-  const material = await canvas.screenshot();
   await wireframeView.click();
   const wireframe = PNG.sync.read(await canvas.screenshot());
   await materialView.click();
@@ -70,6 +74,53 @@ async function exportSelectedGlb(page, filename) {
   expect(download.suggestedFilename()).toBe(filename);
   return readFile(await download.path());
 }
+
+test('Studio renders the compressed result and reopens the exported GLB', async ({ page, studioOrigin }) => {
+  const sourceName = 'meshopt-source.glb';
+  const resultName = 'meshopt-source-compressed.glb';
+  const source = texturedGlb();
+  const selected = page.getByRole('region', { name: 'Selected asset' });
+  const originalTab = page.getByRole('tab', { name: 'Original' });
+  const resultTab = page.getByRole('tab', { name: 'Result' });
+
+  async function openGlb(name, buffer) {
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      page.getByRole('button', { name: 'Open GLB', exact: true }).click(),
+    ]);
+    await chooser.setFiles({ name, mimeType: 'model/gltf-binary', buffer });
+    await expect(selected.getByTitle(name, { exact: true })).toBeVisible();
+  }
+
+  await page.goto(studioOrigin);
+  await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  await openGlb(sourceName, source);
+  const originalPreview = await previewMaterial(page);
+
+  await test.step('Render the result immediately after compression', async () => {
+    await page.getByRole('button', { name: 'More tools' }).click();
+    await page.getByRole('button', { name: 'Compression', exact: true }).click();
+    await page.getByRole('button', { name: 'Run Compression' }).click();
+    await expect(resultTab).toHaveAttribute('aria-selected', 'true', { timeout: 20_000 });
+    await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
+    const resultPreview = await previewMaterial(page);
+    await originalTab.click();
+    await expect(selected.getByTitle(sourceName, { exact: true })).toBeVisible();
+    compareMaterialFrames(await previewMaterial(page), resultPreview);
+  });
+
+  await test.step('Reimport the compressed download and render it again', async () => {
+    await resultTab.click();
+    await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
+    const output = await exportSelectedGlb(page, resultName);
+    expect(output.length).toBeLessThan(source.length);
+    expect(output.toString('ascii', 0, 4)).toBe('glTF');
+    const document = JSON.parse(output.toString('utf8', 20, 20 + output.readUInt32LE(12)));
+    expect(document.extensionsRequired).toContain('KHR_meshopt_compression');
+    await openGlb('reopened-compressed.glb', output);
+    compareMaterialFrames(originalPreview, await previewMaterial(page));
+  });
+});
 
 test('Studio rebakes a supported GLB UV atlas and exports both PBR maps', async ({ page, studioOrigin }) => {
   const sourceName = 'atlas-source.glb';
