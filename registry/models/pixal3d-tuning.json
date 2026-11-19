@@ -1,0 +1,39 @@
+{
+  "pixal3d-mlx": [
+    {"id":"ss_steps","label":"Structure sampling steps","section":"Sampling","kind":"integer","min":1,"max":100,"default":12},
+    {"id":"lr_steps","label":"Low-resolution shape steps","section":"Sampling","kind":"integer","min":1,"max":100,"default":12},
+    {"id":"hr_steps","label":"High-resolution shape steps","section":"Sampling","kind":"integer","min":1,"max":100,"default":12},
+    {"id":"texture_steps","label":"Texture sampling steps","section":"Sampling","kind":"integer","min":1,"max":100,"default":12},
+    {"id":"fov_degrees","label":"Camera field of view (°)","section":"Camera","kind":"number","min":1,"max":179,"default":49.13,"single_view_only":true},
+    {"id":"max_faces","label":"Hard face cap","section":"Mesh","kind":"integer","min":0,"max":4000000,"default":0,"description":"0 disables the cap; otherwise use at least 4 triangles."},
+    {"id":"no_cleanup","label":"Skip mesh cleanup","section":"Mesh","kind":"boolean","default":false},
+    {"id":"keep_largest","label":"Keep only the largest component","section":"Mesh","kind":"boolean","default":false},
+    {"id":"max_tokens","label":"High-resolution token budget","section":"Performance","kind":"integer","min":1,"max":196608,"default":49152},
+    {"id":"quantize","label":"Flow quantization (bits)","section":"Performance","kind":"choice","values":[0,4,8],"default":0,"description":"0 keeps full precision."},
+    {"id":"dense_conditioning","label":"Use dense conditioning","section":"Performance","kind":"boolean","default":false},
+    {"id":"naf_backend","label":"Upsampling implementation","section":"Performance","kind":"choice","values":["auto","metal","reference"],"default":"auto"},
+    {"id":"memory_budget_gb","label":"Memory budget guideline (GB)","section":"Performance","kind":"number","min":0.25,"max":256,"default":10},
+    {"id":"model_cache_gb","label":"Model cache (GB)","section":"Performance","kind":"number","min":0,"max":128,"default":2},
+    {"id":"feature_cache_mb","label":"Feature cache (MB)","section":"Performance","kind":"number","min":0,"max":65536,"default":256},
+    {"id":"conditioning_cache_mb","label":"Conditioning cache (MB)","section":"Performance","kind":"number","min":0,"max":65536,"default":128},
+    {"id":"ffn_chunk_size","label":"Feed-forward chunk size","section":"Performance","kind":"integer","min":0,"max":65536,"default":2048},
+    {"id":"naf_tile_rows","label":"Upsampling tile rows","section":"Performance","kind":"integer","min":0,"max":4096,"default":128},
+    {"id":"naf_threads","label":"Upsampling threads","section":"Performance","kind":"choice","values":[64,128,256],"default":128},
+    {"id":"compile_step","label":"Compile sampling steps","section":"Performance","kind":"boolean","default":false},
+    {"id":"compile_transformer","label":"Compile transformer operations","section":"Performance","kind":"boolean","default":true},
+    {"id":"sparse_order","label":"Sparse coordinate order","section":"Performance","kind":"choice","values":["preserve","morton"],"default":"morton"},
+    {"id":"decoder_eval_interval","label":"Decoder evaluation interval","section":"Performance","kind":"integer","min":0,"max":256,"default":1,"description":"0 uses legacy evaluation."},
+    {"id":"slat_precision","label":"Shape and texture precision","section":"Performance","kind":"choice","values":["float32","mixed"],"default":"float32"},
+    {"id":"ss_precision","label":"Structure precision","section":"Performance","kind":"choice","values":["float32","mixed"],"default":"float32"}
+  ],
+  "pixal3d-cuda": [
+    {"id":"fov_degrees","label":"Camera field of view (°)","section":"Camera","kind":"number","min":1,"max":179,"default":49.13,"single_view_only":true},
+    {"id":"attention_queries","label":"Attention query chunk","section":"Performance","kind":"integer","min":1,"max":16384,"default":256},
+    {"id":"ffn_rows","label":"Feed-forward chunk rows","section":"Performance","kind":"integer","min":1,"max":65536,"default":1024},
+    {"id":"sparse_rows","label":"Sparse processing chunk rows","section":"Performance","kind":"integer","min":1,"max":65536,"default":4096},
+    {"id":"naf_queries","label":"Upsampling query chunk","section":"Performance","kind":"integer","min":1,"max":16384,"default":128},
+    {"id":"conditioning_cache_mb","label":"Conditioning cache (MB)","section":"Performance","kind":"integer","min":0,"max":65536,"default":128},
+    {"id":"max_tokens","label":"Token limit","section":"Performance","kind":"integer","min":1,"max":196608,"default":16384},
+    {"id":"max_voxels","label":"Voxel limit","section":"Performance","kind":"integer","min":1,"max":12000000,"default":1500000}
+  ]
+}

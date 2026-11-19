@@ -4,6 +4,7 @@
 //! `runtime.rs`; inference itself remains offline and never authenticates.
 
 use std::{
+    collections::BTreeMap,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -16,7 +17,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    Asset, AssetKind, CoreError, CoreResult, MAX_IMAGE_BYTES, OperationCore,
+    Asset, AssetKind, CoreError, CoreResult, MAX_IMAGE_BYTES, OperationCore, generation_tuning,
+    generation_views::PosedGenerationInput,
     huggingface_download::{PIXAL_CHECKPOINTS, PIXAL_REPOSITORY, PIXAL_REVISION},
     inspect_asset,
 };
@@ -39,6 +41,10 @@ pub struct GenerationOptions {
     pub texture_size: u16,
     /// Soft triangle target. The model may return more faces.
     pub target_faces: u32,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tuning: BTreeMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_input: Option<PosedGenerationInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,7 +225,10 @@ impl Pixal3dMlxRuntime {
         }
         options.validate_for_backend("pixal3d-mlx")?;
 
-        let entrypoint = self.prepare_entrypoint()?;
+        let entrypoint = self.prepare_entrypoint(generation_tuning::has_sampler_overrides(
+            options,
+            "pixal3d-mlx",
+        ))?;
         let python_bin = self.python.parent().ok_or_else(|| {
             CoreError::OperationUnavailable(
                 "Configured Python path has no parent directory.".into(),
@@ -255,7 +264,7 @@ impl Pixal3dMlxRuntime {
                 command.env(temporary_key, value);
             }
         }
-        let status = command
+        command
             .arg(entrypoint.path())
             .arg("--image")
             .arg(input)
@@ -275,7 +284,9 @@ impl Pixal3dMlxRuntime {
             .arg("--no-rembg")
             .arg("--no-moge")
             .arg("--hole-fill-backend")
-            .arg("fan")
+            .arg("fan");
+        generation_tuning::add_arguments(&mut command, options, "pixal3d-mlx");
+        let status = command
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .status()
@@ -311,7 +322,7 @@ impl Pixal3dMlxRuntime {
         })
     }
 
-    fn prepare_entrypoint(&self) -> CoreResult<PreparedEntrypoint> {
+    fn prepare_entrypoint(&self, tune_samplers: bool) -> CoreResult<PreparedEntrypoint> {
         const UPSTREAM_NAF_PATH: &str = "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")";
         const MANAGED_NAF_PATH: &str = concat!(
             "    naf_weights_dir = os.environ.get(\"MESHHARBOR_PIXAL3D_WEIGHTS_DIR\", ",
@@ -326,6 +337,11 @@ impl Pixal3dMlxRuntime {
             ));
         }
         let managed = source.replace(UPSTREAM_NAF_PATH, MANAGED_NAF_PATH);
+        let managed = if tune_samplers {
+            patch_mlx_samplers(&managed)?
+        } else {
+            managed
+        };
         let runtime_root = self.home.parent().unwrap_or(self.home.as_path());
         let directory = runtime_root.join("entrypoint");
         std::fs::create_dir_all(&directory)?;
@@ -346,6 +362,42 @@ impl Pixal3dMlxRuntime {
         drop(file);
         Ok(PreparedEntrypoint(target))
     }
+}
+
+fn patch_mlx_samplers(source: &str) -> CoreResult<String> {
+    let mismatch = || {
+        CoreError::OperationUnavailable(
+            "Pinned Pixal3D entrypoint does not match the reviewed sampler configuration.".into(),
+        )
+    };
+    let main = "def main(argv=None, runtime=None):";
+    if source.matches(main).count() != 1 {
+        return Err(mismatch());
+    }
+    let mut patched = source.replace(
+        main,
+        &format!("{}\n\n{main}", include_str!("sampler_overrides.py")),
+    );
+    for (variable, stage) in [
+        ("SS_SAMPLER", "sparse_structure_sampler"),
+        ("SHAPE_SAMPLER", "shape_slat_sampler"),
+        ("TEX_SAMPLER", "tex_slat_sampler"),
+    ] {
+        let marker = format!("    {variable} = dict(");
+        if patched.matches(&marker).count() != 1 {
+            return Err(mismatch());
+        }
+        let start = patched.find(&marker).ok_or_else(mismatch)?;
+        let end = start + patched[start..].find(")\n\n").ok_or_else(mismatch)? + 2;
+        if patched[start..end].lines().count() != 2 {
+            return Err(mismatch());
+        }
+        patched.insert_str(
+            end,
+            &format!("    {variable} = _meshharbor_tune_sampler(\"{stage}\", {variable})\n"),
+        );
+    }
+    Ok(patched)
 }
 
 struct PreparedEntrypoint(PathBuf);
@@ -443,6 +495,39 @@ fn read_bounded_source_image(path: &Path) -> CoreResult<Vec<u8>> {
     Ok(bytes)
 }
 
+fn stage_reference(
+    core: &OperationCore,
+    source: &Asset,
+    work_dir: &Path,
+    index: usize,
+) -> CoreResult<PathBuf> {
+    let extension = match (source.kind, source.mime_type.as_str()) {
+        (AssetKind::Image, "image/png") => "png",
+        (AssetKind::Image, "image/jpeg") => "jpg",
+        _ => {
+            return Err(CoreError::InvalidInput(
+                "Generation references must be imported PNG or JPEG images.".into(),
+            ));
+        }
+    };
+    let artifact = source
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "source")
+        .ok_or_else(|| CoreError::NotFound("Image source artifact is missing.".into()))?;
+    let bytes = read_bounded_source_image(&core.store().artifact_path(&artifact.id)?)?;
+    validate_stored_source_image(
+        &source.name,
+        &source.mime_type,
+        &source.sha256,
+        &artifact.sha256,
+        &bytes,
+    )?;
+    let input_path = work_dir.join(format!("source-{index:02}.{extension}"));
+    std::fs::write(&input_path, bytes)?;
+    Ok(input_path)
+}
+
 /// Generates a textured GLB from a previously imported local image using the
 /// explicitly selected, already prepared Pixal3D backend.
 pub(crate) fn generate_pixal3d_image(
@@ -450,50 +535,31 @@ pub(crate) fn generate_pixal3d_image(
     input_asset_id: &str,
     options: GenerationOptions,
 ) -> CoreResult<GenerationResult> {
+    let selected_backend_id = options.validated_profile()?.id;
+    options.validate_primary_image(input_asset_id)?;
     let source = core
         .store()
         .get_asset(input_asset_id)?
         .ok_or_else(|| CoreError::NotFound(format!("Asset '{input_asset_id}' was not found.")))?;
-    if source.kind != AssetKind::Image {
-        return Err(CoreError::InvalidInput(
-            "Image-to-3D generation requires an imported PNG or JPEG asset.".into(),
-        ));
-    }
-    let source_artifact = source
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "source")
-        .ok_or_else(|| CoreError::NotFound("Image source artifact is missing.".into()))?;
-    let artifact_path = core.store().artifact_path(&source_artifact.id)?;
-    let input_bytes = read_bounded_source_image(&artifact_path)?;
-    validate_stored_source_image(
-        &source.name,
-        &source.mime_type,
-        &source.sha256,
-        &source_artifact.sha256,
-        &input_bytes,
-    )?;
-
-    let selected_backend_id = options.validated_profile()?.id;
-
     let work_dir = core
         .store()
         .staging_root()
         .join(format!("generate-{}", Uuid::new_v4()));
     std::fs::create_dir(&work_dir)?;
     let cleanup = WorkDir(work_dir.clone());
-    let input_filename = match source.mime_type.as_str() {
-        "image/png" => "input.png",
-        "image/jpeg" => "input.jpg",
-        _ => {
-            return Err(CoreError::InvalidInput(
-                "Pixal3D accepts PNG or JPEG source images.".into(),
-            ));
+    let mut input_paths = vec![stage_reference(core, &source, &work_dir, 0)?];
+    if let Some(input) = &options.view_input {
+        for (index, reference) in input.references.iter().enumerate().skip(1) {
+            let image = core
+                .store()
+                .get_asset(&reference.asset_id)?
+                .ok_or_else(|| {
+                    CoreError::NotFound(format!("View {} image was not found.", index + 1))
+                })?;
+            input_paths.push(stage_reference(core, &image, &work_dir, index)?);
         }
-    };
-    let input_path = work_dir.join(format!("source-{input_filename}"));
+    }
     let output_path = work_dir.join("result.glb");
-    std::fs::write(&input_path, input_bytes)?;
 
     let elapsed_ms = match selected_backend_id {
         "pixal3d-mlx" => {
@@ -505,12 +571,12 @@ pub(crate) fn generate_pixal3d_image(
                 )));
             }
             runtime
-                .generate(&input_path, &output_path, &options)?
+                .generate(&input_paths[0], &output_path, &options)?
                 .elapsed_ms
         }
         "pixal3d-cuda" => {
             let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());
-            runtime.generate(&input_path, &work_dir, &options)?
+            runtime.generate_from_references(&input_paths, &work_dir, &options)?
         }
         _ => unreachable!("backend selector was validated above"),
     };
@@ -725,6 +791,23 @@ mod tests {
     }
 
     #[test]
+    fn managed_mlx_sampling_overlays_only_the_reviewed_pinned_sampler_assignments() {
+        let upstream = include_str!("../../../runtimes/pixal3d/mlx/upstream/generate_pixal3d.py");
+        let patched = patch_mlx_samplers(upstream).unwrap();
+        assert!(
+            patched.contains("_meshharbor_tune_sampler(\"sparse_structure_sampler\", SS_SAMPLER)")
+        );
+        assert!(
+            patched.contains("_meshharbor_tune_sampler(\"shape_slat_sampler\", SHAPE_SAMPLER)")
+        );
+        assert!(patched.contains("_meshharbor_tune_sampler(\"tex_slat_sampler\", TEX_SAMPLER)"));
+        assert!(
+            patch_mlx_samplers(&upstream.replace("SS_SAMPLER = dict(", "SS_SAMPLER = something("))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn managed_entrypoint_uses_app_data_weights_without_mutating_pinned_source() {
         let root = std::env::temp_dir().join(format!("meshharbor-mlx-overlay-{}", Uuid::new_v4()));
         let source_root = root.join("source");
@@ -740,7 +823,7 @@ mod tests {
             weights: runtime_root.join("weights"),
         };
 
-        let entrypoint = runtime.prepare_entrypoint().unwrap();
+        let entrypoint = runtime.prepare_entrypoint(false).unwrap();
         let entrypoint_path = entrypoint.path().to_path_buf();
         let patched = std::fs::read_to_string(entrypoint.path()).unwrap();
         assert_eq!(patched, expected_managed_source(source));
@@ -780,9 +863,9 @@ mod tests {
             ..runtime_one.clone()
         };
 
-        let entrypoint_one = runtime_one.prepare_entrypoint().unwrap();
+        let entrypoint_one = runtime_one.prepare_entrypoint(false).unwrap();
         let path_one = entrypoint_one.path().to_path_buf();
-        let entrypoint_two = runtime_two.prepare_entrypoint().unwrap();
+        let entrypoint_two = runtime_two.prepare_entrypoint(false).unwrap();
         let path_two = entrypoint_two.path().to_path_buf();
 
         assert_ne!(path_one, path_two);
@@ -834,7 +917,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    runtime.prepare_entrypoint().unwrap()
+                    runtime.prepare_entrypoint(false).unwrap()
                 })
             })
             .collect();

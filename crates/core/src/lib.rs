@@ -5,6 +5,8 @@ mod runtime_bundle {
 mod cuda_runtime;
 mod generation;
 mod generation_catalog;
+mod generation_tuning;
+mod generation_views;
 mod glb;
 mod huggingface_access;
 mod huggingface_browser;
@@ -23,6 +25,9 @@ mod uv_bootstrap;
 
 pub use cuda_runtime::Pixal3dCudaRuntimeManager;
 pub use generation::{GenerationOptions, GenerationResult, Pixal3dMlxRuntime, RuntimeReadiness};
+pub use generation_views::{
+    GenerationReference, GenerationViewMode, OrbitCamera, PosedGenerationInput,
+};
 pub use glb::{
     AssetDescriptor, CompressionReport, MAX_ASSET_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS,
     MeshCleanupReport, RenderOptimizationReport, SimplificationReport, cleanup_glb,

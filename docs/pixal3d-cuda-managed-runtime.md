@@ -34,8 +34,8 @@ On first explicit setup, uv resolves the pinned profile and upstream ranges and
 stores an app-private per-install lock under the local data directory. That
 provides repeatable installs for that data directory, but is **not** a
 repository-committed, cross-machine dependency lock. The optional `preprocess`
-and `camera` extras are omitted: inference uses `--no-rembg` and a fixed camera,
-so it does not install the extra MoGe model.
+and `camera` extras are omitted: inference uses `--no-rembg` and either a fixed
+single-view camera or explicit cameras for posed inputs. MoGe is not installed.
 
 After host validation, each setup attempt removes any previous CUDA
 preflight marker before changing the managed runtime. A new marker is
@@ -61,8 +61,8 @@ inherit ambient tokens or user Python packages.
 ## Studio, REST, and MCP
 
 Studio **Settings** shows MLX and CUDA as Pixal3D execution profiles and has
-separate Connections and Downloads & storage sections. The workbench has an
-automatic/platform backend selector. The same
+separate Connections and Downloads & storage sections. The workbench shows model
+names and automatically selects a locally ready runtime. The same
 generation option (`backend_id: "auto" | "pixal3d-mlx" | "pixal3d-cuda"`) is
 accepted by the CLI, `POST /api/v1/jobs` `image.generate`, and MCP
 `start_image_generation`. Runtime setup/model installation are asynchronous:
@@ -70,6 +70,7 @@ accepted by the CLI, `POST /api/v1/jobs` `image.generate`, and MCP
 - `POST /api/v1/runtime/pixal3d-cuda/setup`
 - `POST /api/v1/runtime/pixal3d-cuda/models` with both
   `confirm_large_download` and `confirm_gated_access` set to `true`
+- `POST /api/v1/runtime/pixal3d-cuda/multiview` with `confirm_large_download: true`
 - MCP `setup_pixal3d_cuda_runtime` and `install_pixal3d_cuda_models` with the
   same confirmation fields
 
@@ -77,6 +78,12 @@ The result is validated as a GLB and imported as a derived local asset. Studio
 can preview it; CLI can write it with `--output`; REST exposes the artifact;
 MCP's `export_glb` writes only inside its configured export directory and never
 overwrites an existing file.
+
+## Posed generation in Studio
+
+After the base model is ready, open **Settings → Downloads & storage** and approve **Install multiview weights**. The engine prepares the separate pinned Pixal3D multiview snapshot `b0cb2e1b794cab9aa0ac38a95d794a4d9337437f`, reusing matching local Hub files. The base model and the gated DINOv3/NAF files are not reinstalled. No weights are fetched during generation.
+
+Select **Pixal3D** in **Generate model**, then choose 4 views (front, right, back, left), 6 views (adds top and bottom), or Custom views. Presets use an assumed 20° FOV and a shared camera distance; use 2–8 custom views to enter an actual camera orientation, distance, and FOV for each. The first image defines the front frame and job lineage. Use masked, consistently framed inputs.
 
 ## Limits and licensing
 

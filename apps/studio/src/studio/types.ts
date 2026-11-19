@@ -44,16 +44,43 @@ export type HuggingFaceBrowserLogin = { id: string } & (
   | { state: 'failed'; message: string }
 );
 
-export type GenerationParameter = { id: string; label: string; description: string; default: number } & (
-  | { kind: 'fixed' }
-  | { kind: 'choice'; values: number[] }
-  | { kind: 'integer'; min: number; max?: number }
+export type GenerationParameter = { id: string; label: string; description?: string; section?: string; tuning?: boolean; single_view_only?: boolean } & (
+  | { kind: 'fixed'; default: number }
+  | { kind: 'choice'; values: (number | string)[]; default: number | string }
+  | { kind: 'integer' | 'number'; min: number; max?: number; default: number }
+  | { kind: 'boolean'; default: boolean }
 );
+
+export type GenerationViewMode = 'single' | 'four' | 'six' | 'custom';
+export type PosedViewMode = Exclude<GenerationViewMode, 'single'>;
+export type OrbitCamera = { azimuth_degrees: number; elevation_degrees: number; distance: number; fov_degrees: number };
+export type PosedGenerationInput = {
+  mode: PosedViewMode;
+  references: { asset_id: string; camera?: OrbitCamera }[];
+};
+export type GenerationTuning = Record<string, number | string | boolean>;
+export type GenerationParameters = {
+  seed?: number;
+  resolution?: number;
+  texture_size?: number;
+  target_faces?: number;
+  tuning?: GenerationTuning;
+  view_input?: PosedGenerationInput;
+};
 
 export interface GenerationProfile {
   id: string;
-  label: string;
   parameters: GenerationParameter[];
+  view_modes?: GenerationViewMode[];
+  max_views?: number;
+}
+
+export interface GenerationModel extends GenerationProfile {
+  modelId: string;
+  label: string;
+  multiviewReady: boolean;
+  view_modes: GenerationViewMode[];
+  max_views: number;
 }
 
 export interface RuntimeInfo {
@@ -74,6 +101,7 @@ export interface RuntimeInfo {
   model_backends: Array<{
     id: string;
     generation?: GenerationProfile | null;
+    multiview_ready?: boolean;
     ready?: boolean;
     status: string;
     validation_level?: string;

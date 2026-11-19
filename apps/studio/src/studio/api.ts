@@ -1,4 +1,4 @@
-import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, GenerationParameters, HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
 
 export const MAX_ASSET_IMPORT_FILES = 10;
 export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
@@ -797,7 +797,14 @@ export class MeshHarborApi {
     });
   }
 
-  createImageGenerationJob(assetId: string, backendId: string, parameters: Record<string, number>): Promise<Job> {
+  installPixal3dMultiview(): Promise<Job> {
+    return this.request('/api/v1/runtime/pixal3d-cuda/multiview', {
+      method: 'POST',
+      body: JSON.stringify({ confirm_large_download: true }),
+    });
+  }
+
+  createImageGenerationJob(assetId: string, backendId: string, parameters: GenerationParameters): Promise<Job> {
     return this.request('/api/v1/jobs', {
       method: 'POST',
       body: JSON.stringify({

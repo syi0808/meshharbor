@@ -498,6 +498,7 @@ impl McpServer {
             resolution: args.resolution,
             texture_size: args.texture_size,
             target_faces: args.target_faces,
+            ..GenerationOptions::default()
         };
         match start_generation_job(
             self.core.clone(),
@@ -869,6 +870,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     resolution,
                     texture_size,
                     target_faces,
+                    ..GenerationOptions::default()
                 },
             )?;
             if let Some(path) = output {
@@ -1029,6 +1031,10 @@ fn api_router(state: AppState, token: String) -> Router {
         .route(
             "/api/v1/runtime/pixal3d-cuda/models",
             post(api_start_cuda_runtime_models),
+        )
+        .route(
+            "/api/v1/runtime/pixal3d-cuda/multiview",
+            post(api_start_cuda_multiview_models),
         )
         .route("/api/v1/operations", get(api_operations))
         .route(
@@ -1458,6 +1464,30 @@ async fn api_start_cuda_runtime_models(
     .await?;
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultiviewInstallConfirmation {
+    confirm_large_download: bool,
+}
+
+async fn api_start_cuda_multiview_models(
+    State(state): State<AppState>,
+    Json(confirmation): Json<MultiviewInstallConfirmation>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    if !confirmation.confirm_large_download {
+        return Err(ApiError(CoreError::InvalidInput(
+            "Explicit confirmation is required to install the multiview weights.".into(),
+        )));
+    }
+    let job = start_runtime_job(
+        state.core,
+        state.scheduler,
+        RuntimeJobKind::CudaInstallMultiview,
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
 async fn api_operations(
     State(state): State<AppState>,
 ) -> Json<Vec<meshharbor_core::OperationDescriptor>> {
@@ -1883,6 +1913,25 @@ async fn start_generation_job(
         ));
     }
     options.validate()?;
+    options.validate_primary_image(asset_id)?;
+    if let Some(input) = &options.view_input {
+        for reference in input.references.iter().skip(1) {
+            let image = core
+                .store()
+                .get_asset(&reference.asset_id)?
+                .ok_or_else(|| {
+                    CoreError::NotFound(format!(
+                        "View image '{}' was not found.",
+                        reference.asset_id
+                    ))
+                })?;
+            if image.kind != meshharbor_core::AssetKind::Image {
+                return Err(CoreError::InvalidInput(
+                    "Generation references must be imported images.".into(),
+                ));
+            }
+        }
+    }
 
     let parameters = serde_json::to_value(&options)?;
     let job = core
@@ -1976,6 +2025,7 @@ enum RuntimeJobKind {
     ConvertNaf,
     CudaSetup,
     CudaInstallModels,
+    CudaInstallMultiview,
 }
 
 impl RuntimeJobKind {
@@ -1986,13 +2036,16 @@ impl RuntimeJobKind {
             Self::ConvertNaf => "runtime.pixal3d.convert_naf",
             Self::CudaSetup => "runtime.pixal3d.cuda_setup",
             Self::CudaInstallModels => "runtime.pixal3d.cuda_install_models",
+            Self::CudaInstallMultiview => "runtime.pixal3d.cuda_install_multiview",
         }
     }
 
     fn backend_id(self) -> &'static str {
         match self {
             Self::Setup | Self::InstallModels | Self::ConvertNaf => "pixal3d-mlx",
-            Self::CudaSetup | Self::CudaInstallModels => "pixal3d-cuda",
+            Self::CudaSetup | Self::CudaInstallModels | Self::CudaInstallMultiview => {
+                "pixal3d-cuda"
+            }
         }
     }
 }
@@ -2075,6 +2128,11 @@ async fn start_runtime_job(
                 RuntimeJobKind::CudaInstallModels => worker_core
                     .install_pixal3d_cuda_models(true, true)
                     .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
+                RuntimeJobKind::CudaInstallMultiview => {
+                    Pixal3dCudaRuntimeManager::new(worker_core.store().root())
+                        .install_multiview_models(true)
+                        .and_then(|report| serde_json::to_value(report).map_err(CoreError::from))
+                }
             }
         })
         .await;

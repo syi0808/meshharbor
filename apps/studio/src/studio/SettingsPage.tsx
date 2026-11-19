@@ -9,6 +9,7 @@ import { Field, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { Sidebar, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider } from '@/components/ui/sidebar';
 import { Disclosure } from './Disclosure';
 import { notify } from './notify';
 import type { MeshHarborApi } from './api';
@@ -24,7 +25,7 @@ const sections = {
 };
 
 export type SettingsSection = keyof typeof sections;
-export type RuntimeAction = 'setup' | 'download' | 'convert';
+export type RuntimeAction = 'setup' | 'download' | 'convert' | 'multiview';
 
 const sectionIds: SettingsSection[] = ['models', 'connections', 'storage', 'preferences'];
 const profiles = {
@@ -212,15 +213,23 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
       </div>
     </header>
     <div className="mx-auto grid max-w-6xl gap-6 px-4 py-5 sm:px-6 md:grid-cols-[12rem_minmax(0,1fr)] md:gap-8 md:py-8">
-      <nav aria-label="Settings sections" className="flex flex-wrap content-start gap-1 md:flex-col">
-        {sectionIds.map(id => {
-          const { title, icon: Icon } = sections[id];
-          return <Button key={id} size="lg" className="justify-start" variant={section === id ? 'secondary' : 'ghost'}
-            aria-current={section === id ? 'page' : undefined} onClick={() => onVisit(id)}>
-            <Icon data-icon="inline-start" aria-hidden="true" />{title}
-          </Button>;
-        })}
-      </nav>
+      <SidebarProvider className="contents" keyboardShortcut={false}>
+        <Sidebar collapsible="none" className="h-auto w-full bg-transparent">
+          <nav aria-label="Settings sections">
+            <SidebarMenu className="flex-row flex-wrap md:flex-col">
+              {sectionIds.map(id => {
+                const { title, icon: Icon } = sections[id];
+                return <SidebarMenuItem key={id}>
+                  <SidebarMenuButton type="button" isActive={section === id}
+                    aria-current={section === id ? 'page' : undefined} onClick={() => onVisit(id)}>
+                    <Icon aria-hidden="true" />{title}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>;
+              })}
+            </SidebarMenu>
+          </nav>
+        </Sidebar>
+      </SidebarProvider>
       <main className="grid min-w-0 content-start gap-5 text-sm" aria-labelledby="settings-heading" data-connection={connection}>
         <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
           <div className="grid gap-1">
@@ -306,6 +315,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           {section === 'storage' && selected && <ModelStorage key={selectedId} api={api} backend={selected} id={selectedId}
             disabled={disabled}
             onDownload={() => onRuntimeAction(selectedId, 'download')} onConvert={() => onRuntimeAction(selectedId, 'convert')}
+            onMultiview={() => onRuntimeAction(selectedId, 'multiview')}
             onSettings={onVisit}
             onRemove={() => openRemoval(selectedId, 'model-files')} />}
           {section === 'storage' && <section className="grid gap-2" aria-labelledby="runtime-activity-heading">
@@ -427,11 +437,12 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
   </section>;
 }
 
-function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onSettings, onRemove }: {
+function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMultiview, onSettings, onRemove }: {
   api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
-  onDownload: () => void; onConvert: () => void; onSettings: VisitSettings; onRemove: () => void;
+  onDownload: () => void; onConvert: () => void; onMultiview: () => void; onSettings: VisitSettings; onRemove: () => void;
 }) {
   const [consent, setConsent] = useState(false);
+  const [multiviewConsent, setMultiviewConsent] = useState(false);
   const [access, setAccess] = useState<AccessStatus>('checking');
   const stage = runtimeSetupStage(backend);
   const local = backend.local_files;
@@ -494,6 +505,20 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onSet
     </div>}
     {stage === 'incomplete' && <p className="text-muted-foreground">The files are present, but runtime checks have not passed. Run <code>meshharbor doctor</code> for details.</p>}
     {stage === 'ready' && <p className="text-muted-foreground">Ready for offline generation in the workbench.</p>}
+    {stage === 'ready' && backend.generation?.view_modes?.some(mode => mode !== 'single') &&
+      <section className="grid justify-items-start gap-2 border-t pt-3" aria-label="Multiview model files">
+        <h3 className="font-medium">Multiview weights</h3>
+        {backend.multiview_ready ? <p className="text-muted-foreground">Installed. Multiple reference views are available in Generate model.</p>
+          : <>
+            <p className="text-muted-foreground">Uses a separate model snapshot. This may transfer several large files; compatible cached files are reused.</p>
+            <div className="flex items-start gap-2">
+              <Checkbox id="multiview-consent" checked={multiviewConsent} disabled={disabled} onCheckedChange={value => setMultiviewConsent(value === true)} />
+              <Label htmlFor="multiview-consent">I approve installing the additional model files.</Label>
+            </div>
+            <Button variant="outline" disabled={disabled || !multiviewConsent}
+              onClick={() => { setMultiviewConsent(false); onMultiview(); }}>Install multiview weights</Button>
+          </>}
+      </section>}
     {local?.remove_models_available && <div className="grid justify-items-start gap-2 border-t pt-3">
       <p className="text-muted-foreground">Removing model files does not remove the Python environment, saved credentials, or assets.</p>
       <Button variant="destructive" disabled={disabled} onClick={onRemove}>{backend.models_downloaded ? 'Uninstall model files' : 'Clear cached model files'}</Button>

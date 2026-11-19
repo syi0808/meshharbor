@@ -36,6 +36,7 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
 import { Slider } from '@/components/ui/slider';
 import { Spinner } from '@/components/ui/spinner';
 import { Toaster } from '@/components/ui/sonner';
@@ -46,15 +47,18 @@ import { AssetGalleryCard } from './AssetGalleryCard';
 import { Disclosure } from './Disclosure';
 import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
+import { buildPosedInput, defaultViews, newView, PosedReferences, SingleReference, type ViewDraft } from './GenerationReferences';
 import { notify } from './notify';
 import { SettingsPage, settingsSectionFromPath, type RuntimeAction, type SettingsSection } from './SettingsPage';
 import { applyStudioTheme, loadStudioTheme } from './theme';
 import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
 import { formatVersionSizes, inspectorForAsset, shouldHighlightExport, WORKBENCH_INSPECTOR_SHEET_QUERY, type Inspector } from './workbench-state';
-import type { Artifact, Asset, AssetKind, Job, MeshOperationId, Operation, RuntimeBackendId, RuntimeInfo } from './types';
+import type { Artifact, Asset, AssetKind, GenerationViewMode, Job, MeshOperationId, Operation, PosedViewMode, RuntimeBackendId, RuntimeInfo } from './types';
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
 type AssetOriginFilter = 'all' | 'original' | 'derived';
+type AssetImportPurpose = 'library' | 'reference' | { mode: PosedViewMode; maxViews: number; index?: number };
+const viewLabels: Record<GenerationViewMode, string> = { single: '1 view', four: '4 views', six: '6 views', custom: 'Custom views' };
 interface AssetBrowserFilters {
   query: string;
   kind: AssetKind;
@@ -167,9 +171,11 @@ export function App() {
   const requestedQuads = Number(targetQuads);
   const validQuadTarget = Number.isInteger(requestedQuads) && requestedQuads >= 4 && requestedQuads <= 50000;
   const [maxError, setMaxError] = useState(0.02);
-  const [generationBackend, setGenerationBackend] = useState('');
+  const [generationModelId, setGenerationModelId] = useState('');
   const [generationDrafts, setGenerationDrafts] = useState<Record<string, Record<string, string>>>({});
   const [generationSource, setGenerationSource] = useState<Asset | null>(null);
+  const [preferredViewMode, setPreferredViewMode] = useState<GenerationViewMode>('single');
+  const [posedDrafts, setPosedDrafts] = useState<Partial<Record<PosedViewMode, ViewDraft[]>>>({});
   const [generationResult, setGenerationResult] = useState<Job | null>(null);
   const historySelectionGuard = useRef(new LatestRequestGuard());
   const recentJobsRequestGuard = useRef(new LatestRequestGuard());
@@ -202,7 +208,6 @@ export function App() {
   const [importProgress, setImportProgress] = useState<AssetImportProgress | null>(null);
   const [jobPollingIssue, setJobPollingIssue] = useState<{ jobId: string; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const imageInputRef = useRef<HTMLInputElement>(null);
   const inventoryInputRef = useRef<HTMLInputElement>(null);
   const importBatchInFlight = useRef(false);
   const api = useMemo(() => new MeshHarborApi(), []);
@@ -239,9 +244,15 @@ export function App() {
   const isRunning = isActiveJob(job);
   const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
   const generationProfiles = useMemo(() => readyGenerationProfiles(runtime), [runtime]);
-  const selectedGenerationProfile = generationProfiles.find(profile => profile.id === generationBackend) ?? generationProfiles[0];
+  const selectedGenerationProfile = generationProfiles.find(profile => profile.modelId === generationModelId) ?? generationProfiles[0];
+  const viewMode = selectedGenerationProfile?.multiviewReady && selectedGenerationProfile.view_modes.includes(preferredViewMode)
+    ? preferredViewMode : 'single';
+  const posedViews = viewMode === 'single' ? [] : posedDrafts[viewMode] ?? defaultViews(viewMode);
+  const posedInput = viewMode === 'single' ? null : buildPosedInput(viewMode, posedViews, selectedGenerationProfile?.max_views ?? 1);
+  const generationAssetId = viewMode === 'single' ? generationSource?.id : posedInput?.references[0].asset_id;
   const generationDraft = selectedGenerationProfile ? generationDrafts[selectedGenerationProfile.id] ?? {} : {};
-  const generationPayload = selectedGenerationProfile ? generationParameters(selectedGenerationProfile, generationDraft) : null;
+  const generationPayload = selectedGenerationProfile
+    ? generationParameters(selectedGenerationProfile, generationDraft, viewMode !== 'single') : null;
   function openSettings(section: SettingsSection, backendId?: RuntimeBackendId) {
     if (backendId) setSettingsBackend(backendId);
     if (inspectorIsSheet) setInspector(null);
@@ -563,6 +574,8 @@ export function App() {
                 ? 'Pinned model files are ready. MeshHarbor completed the one-time NAF conversion in an isolated tool environment.'
                 : latest.operation === 'runtime.pixal3d.cuda_setup'
                   ? 'The isolated CUDA environment and GPU preflight are ready. Connect Hugging Face in Settings before downloading model files.'
+                  : latest.operation === 'runtime.pixal3d.cuda_install_multiview'
+                    ? 'Pixal3D multiview weights are ready.'
                   : latest.operation === 'runtime.pixal3d.cuda_install_models'
                     ? 'Pinned CUDA model files are ready. Generation can now run offline on this NVIDIA host.'
                     : 'The NAF checkpoint is converted and the Pixal3D runtime is ready.');
@@ -767,7 +780,7 @@ export function App() {
     }
   }
 
-  async function importFiles(files: FileList | File[], purpose: 'library' | 'reference' = 'library') {
+  async function importFiles(files: FileList | File[], purpose: AssetImportPurpose = 'library') {
     if (files.length === 0) return;
     if (importBatchInFlight.current) {
       notify('warning', 'An import batch is already running. These additional files were not queued.');
@@ -780,6 +793,14 @@ export function App() {
     if (connection !== 'connected') {
       openSettings('models');
       notify('warning', 'Start the local engine before importing files.');
+      return;
+    }
+    if (purpose !== 'library' && Array.from(files).some(file => !/\.(png|jpe?g)$/i.test(file.name))) {
+      notify('warning', 'Generation references must be PNG or JPEG images.');
+      return;
+    }
+    if (typeof purpose === 'object' && (purpose.index !== undefined ? files.length !== 1 : files.length < 2 || files.length > purpose.maxViews)) {
+      notify('warning', purpose.index === undefined ? `Choose 2–${purpose.maxViews} images.` : 'Choose one image for this view.');
       return;
     }
 
@@ -814,6 +835,19 @@ export function App() {
         if (purpose === 'reference') {
           const reference = result.assets.find(asset => asset.kind === 'image');
           if (reference) setGenerationSource(reference);
+        } else if (typeof purpose === 'object') {
+          const images = result.assets.filter(asset => asset.kind === 'image');
+          if (images.length === result.attemptedCount && result.failures.length === 0) {
+            setPosedDrafts(previous => {
+              const drafts = previous[purpose.mode] ?? defaultViews(purpose.mode);
+              const next = purpose.index === undefined
+                ? images.map((image, index) => ({ ...(drafts[index] ?? newView(index)), image }))
+                : drafts.map((view, index) => index === purpose.index ? { ...view, image: images[0] } : view);
+              return { ...previous, [purpose.mode]: next };
+            });
+          } else {
+            notify('warning', 'The reference mapping was kept unchanged because not every image imported successfully.');
+          }
         } else if (plan.selectFirstImportedAsset) {
           invalidateHistoryRequests();
           comparisonPairRef.current = null;
@@ -922,11 +956,14 @@ export function App() {
   }
 
   async function generate() {
-    if (!generationSource || !selectedGenerationProfile || !generationPayload || !canGenerate || busy || isRunning || connection !== 'connected') return;
+    if (!generationAssetId || !selectedGenerationProfile || !generationPayload || !canGenerate || busy || isRunning || connection !== 'connected') return;
     invalidateHistoryRequests();
     setBusy(true);
     try {
-      const nextJob = await api.createImageGenerationJob(generationSource.id, selectedGenerationProfile.id, generationPayload);
+      const nextJob = await api.createImageGenerationJob(generationAssetId, selectedGenerationProfile.id, {
+        ...generationPayload,
+        ...(posedInput ? { view_input: posedInput } : {}),
+      });
       setGenerationResult(null);
       setJob(nextJob);
     } catch (cause) {
@@ -942,7 +979,7 @@ export function App() {
     setBusy(true);
     try {
       const cuda = backend === 'pixal3d-cuda';
-      const nextJob = action === 'setup'
+      const nextJob = action === 'multiview' ? await api.installPixal3dMultiview() : action === 'setup'
         ? await (cuda ? api.setupPixal3dCudaRuntime() : api.setupPixal3dRuntime())
         : action === 'download'
           ? await (cuda ? api.installPixal3dCudaModels() : api.installPixal3dModels())
@@ -1114,41 +1151,49 @@ export function App() {
       </div>}
 
       {openInspector === 'generation' && <section className="grid gap-4 p-4 text-xs/relaxed" id="image-generation">
-          <div className="grid min-w-0 gap-2 rounded-md border p-3">
-            <p className="font-medium">Reference image</p>
-            {generationSource
-              ? <p className="min-w-0 truncate text-muted-foreground" title={generationSource.name}>{generationSource.name}</p>
-              : <p className="text-muted-foreground">Choose a PNG or JPEG to create a new model. Your current selection stays in the viewport.</p>}
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" size="sm" onClick={() => imageInputRef.current?.click()} disabled={busy || isRunning}>
-                <ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> {generationSource ? 'Replace reference' : 'Choose reference'}
-              </Button>
-              {generationSource && <Button variant="ghost" size="sm" onClick={() => setGenerationSource(null)} disabled={busy || isRunning}>Clear</Button>}
-            </div>
-          </div>
           {selectedGenerationProfile && <>
             <Field>
-              <FieldLabel htmlFor="generation-backend">Generation model</FieldLabel>
-              <NativeSelect className="w-full" id="generation-backend" value={selectedGenerationProfile.id}
-                onChange={event => setGenerationBackend(event.target.value)} disabled={busy || isRunning}>
-                {generationProfiles.map(profile => <NativeSelectOption key={profile.id} value={profile.id}>{profile.label}</NativeSelectOption>)}
+              <FieldLabel htmlFor="generation-model">Generation model</FieldLabel>
+              <NativeSelect className="w-full" id="generation-model" value={selectedGenerationProfile.modelId}
+                onChange={event => { setGenerationModelId(event.target.value); setPreferredViewMode('single'); }} disabled={busy || isRunning}>
+                {generationProfiles.map(profile => <NativeSelectOption key={profile.modelId} value={profile.modelId}>{profile.label}</NativeSelectOption>)}
               </NativeSelect>
               <FieldDescription>Only ready local models are listed.</FieldDescription>
             </Field>
-          <Accordion type="single" collapsible>
-            <AccordionItem value="model-settings">
-              <AccordionTrigger>Model settings</AccordionTrigger>
-              <AccordionContent>
-                <GenerationParameterFields profile={selectedGenerationProfile} draft={generationDraft} disabled={busy || isRunning}
-                  onChange={(id, value) => setGenerationDrafts(current => ({
-                    ...current,
-                    [selectedGenerationProfile.id]: { ...current[selectedGenerationProfile.id], [id]: value },
-                  }))} />
-              </AccordionContent>
-            </AccordionItem>
-          </Accordion>
+            {selectedGenerationProfile.view_modes.length > 1 && <Field>
+              <FieldLabel htmlFor="generation-view-mode">View mode</FieldLabel>
+              <NativeSelect className="w-full" id="generation-view-mode" value={viewMode} disabled={busy || isRunning}
+                onChange={event => {
+                  const next = selectedGenerationProfile.view_modes.find(mode => mode === event.target.value);
+                  if (next) setPreferredViewMode(next);
+                }}>
+                {selectedGenerationProfile.view_modes.map(mode => <NativeSelectOption key={mode} value={mode}
+                  disabled={mode !== 'single' && !selectedGenerationProfile.multiviewReady}>{viewLabels[mode]}</NativeSelectOption>)}
+              </NativeSelect>
+              {!selectedGenerationProfile.multiviewReady && <>
+                <FieldDescription>Install the additional weights to use multiple reference views.</FieldDescription>
+                <Button variant="outline" size="sm" className="self-start" onClick={() => openSettings('storage', 'pixal3d-cuda')}>Set up multiview</Button>
+              </>}
+            </Field>}
+            {viewMode === 'single'
+              ? <SingleReference image={generationSource} load={loadPreview} disabled={busy || isRunning}
+                onPick={files => void importFiles(files, 'reference')} onClear={() => setGenerationSource(null)} />
+              : <PosedReferences mode={viewMode} views={posedViews} maxViews={selectedGenerationProfile.max_views} load={loadPreview} disabled={busy || isRunning}
+                onPick={(files, index) => void importFiles(files, { mode: viewMode, maxViews: selectedGenerationProfile.max_views, index })}
+                onChange={views => setPosedDrafts(previous => ({ ...previous, [viewMode]: views }))} />}
+            <section className="grid gap-3" aria-label="Model settings">
+              <h3 className="font-medium">Model settings</h3>
+              <GenerationParameterFields profile={selectedGenerationProfile} draft={generationDraft} posed={viewMode !== 'single'} disabled={busy || isRunning}
+                onChange={(id, value) => setGenerationDrafts(current => ({
+                  ...current,
+                  [selectedGenerationProfile.id]: { ...current[selectedGenerationProfile.id], [id]: value },
+                }))} />
+            </section>
           </>}
-          {canGenerate && !(isRunning && job.operation === 'image.generate') && <Button className="w-full" disabled={!generationSource || !generationPayload || busy || connection !== 'connected' || isRunning} onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
+          {canGenerate && !(isRunning && job.operation === 'image.generate') && <div className="sticky bottom-0 -mx-4 -mb-4 border-t bg-sidebar p-4">
+            <Button className="w-full" disabled={!generationAssetId || !generationPayload || busy || connection !== 'connected' || isRunning}
+              onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>
+          </div>}
           {!canGenerate && <div className="grid gap-2 text-muted-foreground">
             <p>No generation model is ready. You can still open and edit existing GLBs.</p>
             <Button variant="secondary" onClick={() => openSettings('models')}>Open model setup</Button>
@@ -1224,38 +1269,41 @@ export function App() {
     </>;
   }
 
-  const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools"
-    className={sidebar.narrow ? 'grid grid-cols-4 gap-1 p-1.5' : 'flex h-full flex-col gap-1 p-1.5'}>
+  const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools" className={sidebar.narrow ? '' : 'h-full'}>
+    <SidebarMenu className={sidebar.narrow ? 'grid grid-cols-4 p-1.5' : 'p-1.5'}>
       {([
         { key: 'generation', label: 'New model', icon: ImageSquareIcon },
         { key: 'optimize', label: 'Optimize', icon: SlidersHorizontalIcon },
         { key: 'tools', label: 'More tools', icon: WrenchIcon },
         { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
       ] as const).map(({ key, label, icon: Icon }) => (
-        <Button key={key} type="button" size="sm" variant="ghost"
-          className="h-auto min-w-0 flex-col gap-0.5 border-0 px-1 py-1 hover:bg-transparent aria-expanded:bg-transparent dark:hover:bg-transparent"
-          aria-current={activeTool === key ? true : undefined} aria-expanded={openInspector === key}
-          aria-controls={openInspector === key ? 'workbench-inspector' : undefined}
-          aria-haspopup={inspectorIsSheet ? 'dialog' : undefined}
-          disabled={(key === 'optimize' || key === 'tools') && selectedAsset?.kind !== 'mesh'}
-          onClick={event => selectInspector(key, event.currentTarget)}>
-          <span data-slot="tool-icon" aria-hidden="true"
-            className="grid size-8 shrink-0 place-items-center rounded-md transition-colors group-hover/button:bg-sidebar-accent group-aria-[current=true]/button:bg-sidebar-accent group-aria-[current=true]/button:text-primary motion-reduce:transition-none">
-            <Icon className="size-5" />
-          </span>
-          <span data-slot="tool-label" className="text-[0.6875rem] leading-tight text-muted-foreground group-hover/button:text-foreground group-aria-[current=true]/button:text-foreground">{label}</span>
-        </Button>
+        <SidebarMenuItem key={key}>
+          <SidebarMenuButton type="button" isActive={activeTool === key}
+            className="h-auto min-w-0 flex-col gap-0.5 px-1 py-1 active:bg-transparent hover:bg-transparent data-open:hover:bg-transparent data-active:bg-transparent [&_svg]:size-5"
+            aria-current={activeTool === key ? true : undefined} aria-expanded={openInspector === key}
+            aria-controls={openInspector === key ? 'workbench-inspector' : undefined}
+            aria-haspopup={inspectorIsSheet ? 'dialog' : undefined}
+            disabled={(key === 'optimize' || key === 'tools') && selectedAsset?.kind !== 'mesh'}
+            onClick={event => selectInspector(key, event.currentTarget)}>
+            <span data-slot="tool-icon" aria-hidden="true"
+              className="grid size-8 shrink-0 place-items-center rounded-md transition-colors group-hover/menu-button:bg-sidebar-accent group-aria-[current=true]/menu-button:bg-sidebar-accent group-aria-[current=true]/menu-button:text-primary motion-reduce:transition-none">
+              <Icon className="size-5" />
+            </span>
+            <span data-slot="tool-label" className="text-[0.6875rem] leading-tight text-muted-foreground group-hover/menu-button:text-foreground group-aria-[current=true]/menu-button:text-foreground">{label}</span>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
       ))}
+    </SidebarMenu>
   </div>;
   const desktopInspector = openInspector && !inspectorIsSheet ? (
     <aside className="h-full min-w-0 overflow-auto overscroll-contain" id="workbench-inspector" data-tool={openInspector}
       aria-labelledby="workbench-inspector-title" onKeyDown={event => {
         if (event.key === 'Escape') { event.stopPropagation(); closeInspector(); }
       }}>
-      <div className="flex items-center justify-between gap-2 border-b px-4 py-2 font-heading text-sm font-medium">
+      <SidebarHeader className="flex-row items-center justify-between border-b px-4 py-2 font-heading text-sm font-medium">
         <h2 id="workbench-inspector-title">{inspectorTitle}</h2>
         <Button variant="ghost" size="icon-sm" title={closeInspectorLabel} aria-label={closeInspectorLabel} onClick={closeInspector}><SidebarSimpleIcon aria-hidden="true" /></Button>
-      </div>
+      </SidebarHeader>
       {inspectorBody()}
     </aside>
   ) : null;
@@ -1303,7 +1351,6 @@ export function App() {
           <h1 className="sr-only">MeshHarbor Studio</h1>
           <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" tabIndex={-1} type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={inventoryInputRef} className="sr-only" aria-label="Choose image files" tabIndex={-1} type="file" multiple accept=".png,.jpg,.jpeg,image/png,image/jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-          <input ref={imageInputRef} className="sr-only" aria-label="Choose reference file" tabIndex={-1} type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files, 'reference'); event.currentTarget.value = ''; }} />
           {!showInspectorSheet && !settingsSection && workbenchActivity && <div className={`pointer-events-none fixed inset-x-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto ${sidebar.narrow ? 'bottom-20' : 'bottom-3'}`}>
             {workbenchActivity}
           </div>}
@@ -1440,6 +1487,7 @@ export function App() {
                 {selectedAsset.kind === 'image' && <Button variant="secondary" size="sm" disabled={busy || isRunning} onClick={event => {
                   inspectorTrigger.current = event.currentTarget;
                   setGenerationSource(selectedAsset);
+                  setPreferredViewMode('single');
                   setSelectedTool('generation');
                   setInspector('generation');
                 }}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Use as reference</Button>}
@@ -1537,6 +1585,7 @@ function studioOperationLabel(operation: string): string {
     case 'runtime.pixal3d.install_models': return 'Download MLX models';
     case 'runtime.pixal3d.cuda_setup': return 'Set up CUDA';
     case 'runtime.pixal3d.cuda_install_models': return 'Download CUDA models';
+    case 'runtime.pixal3d.cuda_install_multiview': return 'Install multiview weights';
     case 'runtime.pixal3d.convert_naf': return 'Convert NAF checkpoint';
     default: return meshOperationOptions.find(tool => tool.id === operation)?.title ?? operation;
   }

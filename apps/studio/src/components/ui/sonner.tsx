@@ -33,7 +33,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
       toastOptions={{
         closeButtonAriaLabel: "Dismiss notification",
         classNames: {
-          toast: "cn-toast",
+          toast: "cn-toast max-[760px]:pointer-events-none max-[760px]:data-[front=true]:data-[visible=true]:[&_[data-close-button]]:pointer-events-auto",
         },
       }}
       {...props}

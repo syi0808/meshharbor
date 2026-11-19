@@ -17,9 +17,13 @@ use uuid::Uuid;
 use crate::{
     CoreError, CoreResult, HuggingFaceAccess, HuggingFaceConnection,
     generation::RuntimeReadiness,
+    generation_tuning,
     huggingface_access::{DINO_REVISION, check_connection, check_model_access, require_access},
     huggingface_browser::access_python,
-    huggingface_download::{self, DINO_REPO, PIXAL_CHECKPOINTS, PIXAL_REPOSITORY, PIXAL_REVISION},
+    huggingface_download::{
+        self, DINO_REPO, PIXAL_CHECKPOINTS, PIXAL_MULTIVIEW_REVISION, PIXAL_REPOSITORY,
+        PIXAL_REVISION,
+    },
     runtime::RuntimeSetupReport,
     uv_bootstrap::ensure_uv,
 };
@@ -466,9 +470,45 @@ impl Pixal3dCudaRuntimeManager {
         is_supported_target(env::consts::OS, env::consts::ARCH) && self.detect_gpu().is_ok()
     }
 
+    pub fn install_multiview_models(&self, confirmed: bool) -> CoreResult<RuntimeSetupReport> {
+        if !confirmed {
+            return Err(CoreError::InvalidInput(
+                "Confirm the additional model files before downloading multiview weights.".into(),
+            ));
+        }
+        if !self.readiness().ready {
+            return Err(CoreError::OperationUnavailable(
+                "Set up the base Pixal3D model before adding multiview weights.".into(),
+            ));
+        }
+        huggingface_download::download_pixal3d_multiview(&self.runtime_root, &self.home_path())?;
+        if !huggingface_download::multiview_files_present(&self.home_path()) {
+            return Err(CoreError::OperationUnavailable(
+                "The pinned multiview snapshot is incomplete.".into(),
+            ));
+        }
+        Ok(RuntimeSetupReport {
+            backend_id: "pixal3d-cuda".into(),
+            status: "multiview_files_ready".into(),
+            runtime_root: self.runtime_root.clone(),
+            python: self.python_path(),
+            lockfile: self.managed_root.join("uv.lock"),
+            message: "Pinned Pixal3D multiview weights are ready for offline generation.".into(),
+        })
+    }
+
     pub fn generate(
         &self,
         input: &Path,
+        output_dir: &Path,
+        options: &crate::GenerationOptions,
+    ) -> CoreResult<u128> {
+        self.generate_from_references(&[input.to_path_buf()], output_dir, options)
+    }
+
+    pub(crate) fn generate_from_references(
+        &self,
+        inputs: &[PathBuf],
         output_dir: &Path,
         options: &crate::GenerationOptions,
     ) -> CoreResult<u128> {
@@ -480,6 +520,19 @@ impl Pixal3dCudaRuntimeManager {
             )));
         }
         options.validate_for_backend("pixal3d-cuda")?;
+        let expected_inputs = options
+            .view_input
+            .as_ref()
+            .map_or(1, |input| input.references.len());
+        if inputs.len() != expected_inputs {
+            return Err(CoreError::InvalidInput(
+                "The staged images do not match the selected view mode.".into(),
+            ));
+        }
+        let multiview = options.view_input.is_some();
+        if multiview && !huggingface_download::multiview_files_present(&self.home_path()) {
+            return Err(CoreError::OperationUnavailable("Install the optional Pixal3D multiview weights before generating from posed views.".into()));
+        }
         let python = self.python_path();
         self.verify_cuda_environment(&python)?;
         std::fs::create_dir_all(output_dir)?;
@@ -488,7 +541,11 @@ impl Pixal3dCudaRuntimeManager {
             .join("hub")
             .join(PIXAL_REPOSITORY)
             .join("snapshots")
-            .join(PIXAL_REVISION);
+            .join(if multiview {
+                PIXAL_MULTIVIEW_REVISION
+            } else {
+                PIXAL_REVISION
+            });
         let started = std::time::Instant::now();
         let mut command = self.python_command(&python);
         command
@@ -497,13 +554,15 @@ impl Pixal3dCudaRuntimeManager {
             // the model worker. The already-installed local files are enough.
             .env("HF_HUB_OFFLINE", "1")
             .env("TRANSFORMERS_OFFLINE", "1")
-            .arg("-m")
-            .arg("pixalcuda.cli")
+            .arg("-c")
+            .arg(concat!(
+                include_str!("sampler_overrides.py"),
+                "\n",
+                include_str!("cuda_generation.py")
+            ))
             .arg("generate")
             .arg("--device")
             .arg("cuda")
-            .arg("--image")
-            .arg(input)
             .arg("--output-dir")
             .arg(output_dir)
             .arg("--model-dir")
@@ -514,9 +573,24 @@ impl Pixal3dCudaRuntimeManager {
             .arg(options.texture_size.to_string())
             .arg("--target-faces")
             .arg(options.target_faces.to_string())
-            .args(["--camera", "fixed", "--fov-degrees", "49.13", "--no-rembg"])
+            .arg("--no-rembg")
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
+        if let Some(input) = &options.view_input {
+            let transforms = output_dir.join("transforms.json");
+            std::fs::write(&transforms, serde_json::to_vec(&input.camera_metadata())?)?;
+            command
+                .arg("--images")
+                .args(inputs)
+                .arg("--transforms")
+                .arg(transforms);
+        } else {
+            command
+                .arg("--image")
+                .arg(&inputs[0])
+                .args(["--camera", "fixed"]);
+        }
+        generation_tuning::add_arguments(&mut command, options, "pixal3d-cuda");
         run_visible(command, "Pixal3D CUDA inference failed")?;
 
         let output = output_dir.join("result.glb");

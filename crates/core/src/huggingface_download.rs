@@ -14,6 +14,17 @@ use crate::{CoreError, CoreResult, huggingface_browser::installed_browser_cli};
 pub(crate) const DINO_REPO: &str = "facebook/dinov3-vitl16-pretrain-lvd1689m";
 pub(crate) const PIXAL_REPO: &str = "TencentARC/Pixal3D";
 pub(crate) const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
+pub(crate) const PIXAL_MULTIVIEW_REVISION: &str = "b0cb2e1b794cab9aa0ac38a95d794a4d9337437f";
+const PIXAL_MULTIVIEW_FILES: &[&str] = &[
+    "pipeline_mv.json",
+    "ckpts/ss_flow_img_dit_1_3B_64_bf16_mv.safetensors",
+    "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+    "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16_mv.safetensors",
+    "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+    "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16_mv.safetensors",
+    "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_mv.safetensors",
+    "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+];
 pub(crate) const PIXAL_REPOSITORY: &str = "models--TencentARC--Pixal3D";
 pub(crate) const PIXAL_CHECKPOINTS: &[&str] = &[
     "ss_flow_img_dit_1_3B_64_bf16.safetensors",
@@ -44,10 +55,8 @@ pub(crate) fn shared_hub_cache() -> Option<PathBuf> {
         })
 }
 
-fn pixal_snapshot(hub: &Path) -> PathBuf {
-    hub.join(PIXAL_REPOSITORY)
-        .join("snapshots")
-        .join(PIXAL_REVISION)
+fn pixal_snapshot(hub: &Path, revision: &str) -> PathBuf {
+    hub.join(PIXAL_REPOSITORY).join("snapshots").join(revision)
 }
 
 fn present(path: &Path) -> bool {
@@ -55,8 +64,11 @@ fn present(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
-fn shared_file(hub: &Path, relative: &str) -> Option<PathBuf> {
-    let source = pixal_snapshot(hub).join(relative).canonicalize().ok()?;
+fn shared_file(hub: &Path, revision: &str, relative: &str) -> Option<PathBuf> {
+    let source = pixal_snapshot(hub, revision)
+        .join(relative)
+        .canonicalize()
+        .ok()?;
     (present(&source)
         && (source.starts_with(hub.join(PIXAL_REPOSITORY))
             || source.starts_with(hub.join("blobs"))))
@@ -71,7 +83,7 @@ pub(crate) struct PixalCacheStatus {
 }
 
 pub(crate) fn pixal_cache_status(home: &Path, shared_cache: Option<&Path>) -> PixalCacheStatus {
-    let local = pixal_snapshot(&home.join(".cache/huggingface/hub"));
+    let local = pixal_snapshot(&home.join(".cache/huggingface/hub"), PIXAL_REVISION);
     let shared = shared_cache.and_then(|path| path.canonicalize().ok());
     let mut status = PixalCacheStatus {
         local_checkpoints: 0,
@@ -84,7 +96,7 @@ pub(crate) fn pixal_cache_status(home: &Path, shared_cache: Option<&Path>) -> Pi
             status.local_checkpoints += 1;
         } else if shared
             .as_deref()
-            .and_then(|hub| shared_file(hub, &relative))
+            .and_then(|hub| shared_file(hub, PIXAL_REVISION, &relative))
             .is_some()
         {
             status.reusable_checkpoints += 1;
@@ -113,18 +125,57 @@ pub(crate) fn download_pixal3d(
     shared_cache: Option<&Path>,
     include_configs: bool,
 ) -> CoreResult<()> {
-    let local = pixal_snapshot(&home.join(".cache/huggingface/hub"));
+    download_pixal_snapshot(
+        runtime_root,
+        home,
+        shared_cache,
+        PIXAL_REVISION,
+        pixal_files(include_configs),
+    )
+}
+
+pub(crate) fn multiview_files_present(home: &Path) -> bool {
+    let local = pixal_snapshot(
+        &home.join(".cache/huggingface/hub"),
+        PIXAL_MULTIVIEW_REVISION,
+    );
+    PIXAL_MULTIVIEW_FILES
+        .iter()
+        .all(|file| present(&local.join(file)))
+}
+
+pub(crate) fn download_pixal3d_multiview(runtime_root: &Path, home: &Path) -> CoreResult<()> {
+    download_pixal_snapshot(
+        runtime_root,
+        home,
+        shared_hub_cache().as_deref(),
+        PIXAL_MULTIVIEW_REVISION,
+        PIXAL_MULTIVIEW_FILES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    )
+}
+
+fn download_pixal_snapshot(
+    runtime_root: &Path,
+    home: &Path,
+    shared_cache: Option<&Path>,
+    revision: &str,
+    files: Vec<String>,
+) -> CoreResult<()> {
+    let local = pixal_snapshot(&home.join(".cache/huggingface/hub"), revision);
     let shared = shared_cache.and_then(|path| path.canonicalize().ok());
     let mut missing = Vec::new();
     let mut reused = 0;
-    for relative in pixal_files(include_configs) {
+    for relative in files {
         let target = local.join(&relative);
         if present(&target) {
             continue;
         }
         if let Some(source) = shared
             .as_deref()
-            .and_then(|hub| shared_file(hub, &relative))
+            .and_then(|hub| shared_file(hub, revision, &relative))
         {
             if reuse_file(home, &source, &target)? {
                 reused += 1;
@@ -148,7 +199,7 @@ pub(crate) fn download_pixal3d(
         runtime_root,
         home,
         PIXAL_REPO,
-        PIXAL_REVISION,
+        revision,
         missing
             .iter()
             .map(String::as_str)
@@ -235,7 +286,7 @@ mod tests {
         let root = env::temp_dir().join(format!("meshharbor-cache-reuse-{}", Uuid::new_v4()));
         let home = root.join("runtime/home");
         let shared = root.join("shared");
-        let snapshot = pixal_snapshot(&shared);
+        let snapshot = pixal_snapshot(&shared, PIXAL_REVISION);
         let blob = shared.join(PIXAL_REPOSITORY).join("blobs/test-blob");
         fs::create_dir_all(blob.parent().unwrap()).unwrap();
         fs::create_dir_all(snapshot.join("ckpts")).unwrap();
@@ -266,7 +317,7 @@ mod tests {
         let runtime = root.join("runtime");
         let home = runtime.join("home");
         let shared = root.join("shared");
-        let snapshot = pixal_snapshot(&shared);
+        let snapshot = pixal_snapshot(&shared, PIXAL_REVISION);
         let broken = format!("ckpts/{}", PIXAL_CHECKPOINTS[0]);
         let unreadable = root.join("outside-cache");
         fs::create_dir_all(snapshot.join("ckpts")).unwrap();

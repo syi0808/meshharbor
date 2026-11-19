@@ -111,7 +111,9 @@ When `MESHHARBOR_API_TOKEN` is unset, a per-run temporary bearer token is genera
 - `GET /api/v1/jobs?limit=20` (recent persisted jobs; read-only), `POST /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`, `POST /api/v1/jobs/{job_id}/cancel`
 - `GET /api/v1/artifacts/{artifact_id}`
 
-For `image.generate`, `GET /api/v1/runtime` exposes each backend's generation parameter catalog under `model_backends[].generation`. Use a ready backend's ID and the catalog's parameter IDs, defaults, and constraints when submitting a job. The engine validates the selected profile before queuing it.
+For `image.generate`, `GET /api/v1/runtime` exposes `model_backends[].generation.parameters`, `view_modes`, and `max_views`. Keep base fields such as `seed` at the top level of job parameters and put catalog fields marked `tuning: true` under `parameters.tuning`. The engine validates values against the selected backend before queuing the job.
+
+An ordinary single-image job uses `input.asset_id` only. For a ready multiview backend, send `parameters.view_input` with `mode` (`four`, `six`, or `custom`) and an ordered `references` array. Each entry contains an imported image's `asset_id`; the first must match `input.asset_id`. Presets use front/right/back/left order (then top/bottom for six). Custom entries each add a `camera` object with `azimuth_degrees`, `elevation_degrees`, `distance`, and `fov_degrees`. No client filesystem paths are accepted. The CUDA profile exposes `multiview_ready` once the separately approved snapshot is installed.
 
 `GET /api/v1/jobs?limit=20` lists the newest updated persisted job records (default 50, capped at 200). The CLI exposes the same history through `jobs list` and `jobs show <job_id>`; MCP exposes `list_jobs` and `get_job`. These queries are read-only: listing or checking a saved job never resumes or restarts work. Studio loads the latest 20 records on connection; manually checking an old active record only reads its last saved state. After an unexpected engine exit, a saved active state may be stale; use the explicit recovery command only after stopping every REST/MCP process that uses that data directory.
 

@@ -343,6 +343,7 @@ impl OperationCore {
                 "generation": crate::generation_catalog::generation_profile(&readiness.backend_id),
                 "local_files": Pixal3dProfile::Cuda.local_files(self.store.root()),
                 "pixal3d_cache": crate::huggingface_download::pixal_cache_status(&cuda_manager.home_path(), shared_cache.as_deref()),
+                "multiview_ready": readiness.ready && crate::huggingface_download::multiview_files_present(&cuda_manager.home_path()),
                 "ready": readiness.ready,
                 "status": if readiness.ready { "ready_paths_unverified" }
                     else if !cuda_manager.host_supported() { "unsupported_host_or_nvidia_gpu_missing" }

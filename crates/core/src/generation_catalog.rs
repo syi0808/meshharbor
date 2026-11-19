@@ -1,6 +1,12 @@
-use serde::Serialize;
+use std::sync::LazyLock;
 
-use crate::{CoreError, CoreResult, GenerationOptions};
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::{
+    CoreError, CoreResult, GenerationOptions, generation_tuning,
+    generation_views::{GenerationViewMode, MAX_CUSTOM_VIEWS},
+};
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,21 +101,34 @@ const PIXAL3D_PARAMETERS: &[Parameter] = &[RESOLUTION, TEXTURE_SIZE, TARGET_FACE
 pub(crate) struct GenerationProfile {
     pub id: &'static str,
     label: &'static str,
-    parameters: &'static [Parameter],
+    parameters: Vec<Value>,
+    view_modes: &'static [GenerationViewMode],
+    max_views: usize,
 }
 
-const PROFILES: &[GenerationProfile] = &[
-    GenerationProfile {
-        id: "pixal3d-mlx",
-        label: "Apple MLX",
-        parameters: PIXAL3D_PARAMETERS,
-    },
-    GenerationProfile {
-        id: "pixal3d-cuda",
-        label: "NVIDIA CUDA",
-        parameters: PIXAL3D_PARAMETERS,
-    },
-];
+static PROFILES: LazyLock<[GenerationProfile; 2]> = LazyLock::new(|| {
+    use GenerationViewMode::{Custom, Four, Single, Six};
+    [
+        ("pixal3d-mlx", "Apple MLX", &[Single][..], 1),
+        (
+            "pixal3d-cuda",
+            "NVIDIA CUDA",
+            &[Single, Four, Six, Custom][..],
+            MAX_CUSTOM_VIEWS,
+        ),
+    ]
+    .map(|(id, label, view_modes, max_views)| GenerationProfile {
+        id,
+        label,
+        parameters: PIXAL3D_PARAMETERS
+            .iter()
+            .map(|parameter| serde_json::to_value(parameter).expect("bundled parameter"))
+            .chain(generation_tuning::definitions(id))
+            .collect(),
+        view_modes,
+        max_views,
+    })
+});
 
 pub(crate) fn generation_profile(backend_id: &str) -> Option<&'static GenerationProfile> {
     PROFILES.iter().find(|profile| profile.id == backend_id)
@@ -123,6 +142,8 @@ impl Default for GenerationOptions {
             resolution: RESOLUTION.default as u16,
             texture_size: TEXTURE_SIZE.default as u16,
             target_faces: TARGET_FACES.default as u32,
+            tuning: Default::default(),
+            view_input: None,
         }
     }
 }
@@ -150,7 +171,7 @@ impl GenerationOptions {
         let profile = generation_profile(backend_id).ok_or_else(|| {
             CoreError::InvalidInput(format!("Unknown generation backend '{backend_id}'."))
         })?;
-        for parameter in profile.parameters {
+        for parameter in PIXAL3D_PARAMETERS {
             let value = parameter.id.value(self);
             let key = parameter.id.key();
             let problem = match parameter.constraint {
@@ -170,20 +191,58 @@ impl GenerationOptions {
             };
             return Err(CoreError::InvalidInput(problem));
         }
+        if let Some(input) = &self.view_input {
+            if !profile.view_modes.contains(&input.mode) {
+                return Err(CoreError::InvalidInput(format!(
+                    "{backend_id} does not support the requested view mode."
+                )));
+            }
+            input.validate()?;
+        }
+        generation_tuning::validate(self, backend_id)?;
         Ok(profile)
+    }
+
+    pub fn validate_primary_image(&self, asset_id: &str) -> CoreResult<()> {
+        if let Some(input) = &self.view_input {
+            if input
+                .references
+                .first()
+                .is_none_or(|reference| reference.asset_id != asset_id)
+            {
+                return Err(CoreError::InvalidInput(
+                    "The first view must match the job’s primary image.".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generation_views::{GenerationReference, OrbitCamera, PosedGenerationInput};
+    use serde_json::json;
 
     #[test]
     fn catalog_defaults_are_accepted_by_each_profile() {
         let defaults = GenerationOptions::default();
-        for profile in PROFILES {
+        for profile in PROFILES.iter() {
             assert!(defaults.validate_for_backend(profile.id).is_ok());
-            for parameter in profile.parameters {
+            let mut explicit = defaults.clone();
+            for setting in profile
+                .parameters
+                .iter()
+                .filter(|setting| setting["tuning"] == true)
+            {
+                explicit.tuning.insert(
+                    setting["id"].as_str().unwrap().into(),
+                    setting["default"].clone(),
+                );
+            }
+            explicit.validate_for_backend(profile.id).unwrap();
+            for parameter in PIXAL3D_PARAMETERS {
                 assert_eq!(parameter.id.value(&defaults), parameter.default);
             }
             for invalid in [
@@ -206,5 +265,49 @@ mod tests {
         assert!(
             serde_json::from_value::<GenerationOptions>(serde_json::json!({"unknown": 1})).is_err()
         );
+    }
+
+    #[test]
+    fn posed_view_contract_rejects_unsupported_modes_and_ambiguous_camera_mapping() {
+        let mut options = GenerationOptions {
+            backend_id: "pixal3d-cuda".into(),
+            view_input: Some(PosedGenerationInput {
+                mode: GenerationViewMode::Six,
+                references: (0..6)
+                    .map(|index| GenerationReference {
+                        asset_id: format!("asset-{index}"),
+                        camera: None,
+                    })
+                    .collect(),
+            }),
+            ..GenerationOptions::default()
+        };
+        assert!(options.validate().is_ok());
+        assert!(options.validate_for_backend("pixal3d-mlx").is_err());
+        assert!(options.validate_primary_image("asset-1").is_err());
+        let input = options.view_input.as_mut().unwrap();
+        let frames = input.camera_metadata();
+        assert_eq!(frames["frames"][1]["azimuth_degrees"], json!(90.0));
+        assert_eq!(frames["frames"][4]["elevation_degrees"], json!(90.0));
+        assert_eq!(frames["frames"][5]["elevation_degrees"], json!(-90.0));
+        input.references.truncate(2);
+        assert!(input.validate().is_err());
+        input.mode = GenerationViewMode::Custom;
+        assert!(input.validate().is_err());
+        for (index, view) in input.references.iter_mut().enumerate() {
+            view.camera = Some(OrbitCamera {
+                azimuth_degrees: index as f64 * 30.0,
+                elevation_degrees: 10.0,
+                distance: 3.0,
+                fov_degrees: 20.0,
+            });
+        }
+        assert_eq!(
+            input.camera_metadata()["frames"][1]["azimuth_degrees"],
+            json!(30.0)
+        );
+        assert!(options.validate().is_ok());
+        options.tuning.insert("fov_degrees".into(), json!(49.13));
+        assert!(options.validate().is_err());
     }
 }
