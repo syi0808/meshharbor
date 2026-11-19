@@ -5,9 +5,9 @@
 
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     time::Instant,
 };
 
@@ -215,6 +215,7 @@ impl Pixal3dMlxRuntime {
         input: &Path,
         output: &Path,
         options: &GenerationOptions,
+        on_stage: &mut impl FnMut(&str),
     ) -> CoreResult<GenerationCommandReport> {
         let readiness = self.readiness();
         if !readiness.ready {
@@ -286,15 +287,11 @@ impl Pixal3dMlxRuntime {
             .arg("--hole-fill-backend")
             .arg("fan");
         generation_tuning::add_arguments(&mut command, options, "pixal3d-mlx");
-        let status = command
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()
-            .map_err(|error| {
-                CoreError::OperationUnavailable(format!(
-                    "Could not start the configured Pixal3D MLX Python runtime: {error}"
-                ))
-            })?;
+        let status = run_generation_command(&mut command, on_stage).map_err(|error| {
+            CoreError::OperationUnavailable(format!(
+                "Could not start the configured Pixal3D MLX Python runtime: {error}"
+            ))
+        })?;
 
         if !status.success() {
             let message = format!(
@@ -530,11 +527,60 @@ fn stage_reference(
 
 /// Generates a textured GLB from a previously imported local image using the
 /// explicitly selected, already prepared Pixal3D backend.
+pub(crate) fn run_generation_command(
+    command: &mut Command,
+    on_stage: &mut impl FnMut(&str),
+) -> std::io::Result<ExitStatus> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    if let Some(stdout) = child.stdout.take() {
+        let mut reader = BufReader::new(stdout);
+        let mut line = Vec::new();
+        while reader
+            .read_until(b'\n', &mut line)
+            .is_ok_and(|len| len != 0)
+        {
+            if let Ok(line) = std::str::from_utf8(&line) {
+                if let Some(stage) = generation_worker_stage(line.trim()) {
+                    on_stage(stage);
+                }
+            }
+            line.clear();
+        }
+    }
+    child.wait()
+}
+
+fn generation_worker_stage(line: &str) -> Option<&'static str> {
+    let marker = line.strip_prefix("=== ")?.strip_suffix(" ===")?;
+    Some(match marker {
+        "preprocess_camera" => "preprocess_camera",
+        "dino_features" => "dino_features",
+        "Stage 1: Sparse Structure (proj)" | "sparse_structure" => "sparse_structure",
+        "Stage 2a: LR Shape Latent (proj, 512)" | "shape_lr" => "shape_lr",
+        "Stage 2b: Upsample → HR coordinates" | "coordinate_subdivision" => {
+            "coordinate_subdivision"
+        }
+        "hr_conditioning" => "hr_conditioning",
+        "texture_conditioning" => "texture_conditioning",
+        "Stage 2c: HR Shape Latent (proj, 1024)" | "shape_hr" => "shape_hr",
+        "Stage 3: Decode Shape" | "shape_decode" => "shape_decode",
+        "Stage 4: Texture SLat (proj, 1024)" | "texture_flow" => "texture_flow",
+        "Stage 5: Texture Decode" | "texture_decode" => "texture_decode",
+        "Stage 6: Texture Bake + GLB" | "pbr_export" => "pbr_export",
+        _ => return None,
+    })
+}
+
 pub(crate) fn generate_pixal3d_image(
     core: &OperationCore,
     input_asset_id: &str,
     options: GenerationOptions,
+    mut on_stage: impl FnMut(&str),
 ) -> CoreResult<GenerationResult> {
+    on_stage("prepare_references");
     let selected_backend_id = options.validated_profile()?.id;
     options.validate_primary_image(input_asset_id)?;
     let source = core
@@ -560,6 +606,7 @@ pub(crate) fn generate_pixal3d_image(
         }
     }
     let output_path = work_dir.join("result.glb");
+    on_stage("initialize_model");
 
     let elapsed_ms = match selected_backend_id {
         "pixal3d-mlx" => {
@@ -571,15 +618,16 @@ pub(crate) fn generate_pixal3d_image(
                 )));
             }
             runtime
-                .generate(&input_paths[0], &output_path, &options)?
+                .generate(&input_paths[0], &output_path, &options, &mut on_stage)?
                 .elapsed_ms
         }
         "pixal3d-cuda" => {
             let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());
-            runtime.generate_from_references(&input_paths, &work_dir, &options)?
+            runtime.generate_from_references(&input_paths, &work_dir, &options, &mut on_stage)?
         }
         _ => unreachable!("backend selector was validated above"),
     };
+    on_stage("validate_output");
     let output = std::fs::read(&output_path)?;
     let descriptor = inspect_asset("result.glb", &output)?;
     if descriptor.kind != AssetKind::Mesh {
@@ -592,6 +640,7 @@ pub(crate) fn generate_pixal3d_image(
         .rsplit_once('.')
         .map(|(stem, _)| format!("{stem}-generated.glb"))
         .unwrap_or_else(|| "generated.glb".into());
+    on_stage("save_model");
     let asset = core.store().import_derived_asset(
         &output_name,
         &output,
@@ -654,6 +703,20 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_only_known_stage_markers_from_both_workers() {
+        assert_eq!(
+            generation_worker_stage("=== Stage 2b: Upsample → HR coordinates ==="),
+            Some("coordinate_subdivision")
+        );
+        assert_eq!(
+            generation_worker_stage("=== texture_flow ==="),
+            Some("texture_flow")
+        );
+        assert_eq!(generation_worker_stage("=== model log ==="), None);
+        assert_eq!(generation_worker_stage("printed === pbr_export ==="), None);
+    }
+
+    #[test]
     fn generation_rejects_changed_stored_images_before_either_backend() {
         let root = std::env::temp_dir().join(format!(
             "meshharbor-legacy-image-validation-{}",
@@ -672,6 +735,7 @@ mod tests {
                     backend_id: backend_id.into(),
                     ..GenerationOptions::default()
                 },
+                |_| {},
             );
             assert!(
                 matches!(result, Err(CoreError::Conflict(_))),
@@ -754,6 +818,7 @@ mod tests {
                     backend_id: backend_id.into(),
                     ..GenerationOptions::default()
                 },
+                |_| {},
             );
             assert!(
                 matches!(result, Err(CoreError::InvalidInput(_))),

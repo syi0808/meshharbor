@@ -86,7 +86,30 @@ impl MockRuntime {
         // only behavior under test is the CLI contract and GLB validation.
         fs::write(
             &python,
-            "#!/bin/sh\nset -eu\ninput= output= resolution= texture_size= target_faces=\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --image) shift; input=$1 ;;\n    --output) shift; output=$1 ;;\n    --resolution) shift; resolution=$1 ;;\n    --texture-size) shift; texture_size=$1 ;;\n    --target-faces) shift; target_faces=$1 ;;\n  esac\n  shift\ndone\n[ -n \"$input\" ] && [ -s \"$input\" ]\n[ -n \"$output\" ]\n[ \"$resolution\" = 512 ]\n[ \"$texture_size\" = 512 ] || [ \"$texture_size\" = 1024 ] || [ \"$texture_size\" = 2048 ]\n[ \"$target_faces\" -ge 4 ]\n[ \"$HF_HUB_OFFLINE\" = 1 ] && [ \"$TRANSFORMERS_OFFLINE\" = 1 ]\n[ -z \"${HF_TOKEN-}\" ]\ncp \"fixture.glb\" \"$output\"\n",
+            r#"#!/bin/sh
+set -eu
+input= output= resolution= texture_size= target_faces=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --image) shift; input=$1 ;;
+    --output) shift; output=$1 ;;
+    --resolution) shift; resolution=$1 ;;
+    --texture-size) shift; texture_size=$1 ;;
+    --target-faces) shift; target_faces=$1 ;;
+  esac
+  shift
+done
+[ -n "$input" ] && [ -s "$input" ]
+[ -n "$output" ]
+[ "$resolution" = 512 ]
+[ "$texture_size" = 512 ] || [ "$texture_size" = 1024 ] || [ "$texture_size" = 2048 ]
+[ "$target_faces" -ge 4 ]
+[ "$HF_HUB_OFFLINE" = 1 ] && [ "$TRANSFORMERS_OFFLINE" = 1 ]
+[ -z "${HF_TOKEN-}" ]
+printf '%s\n' '=== Stage 3: Decode Shape ==='
+while [ -f hold-generation ]; do sleep 0.1; done
+cp "fixture.glb" "$output"
+"#,
         )
         .unwrap();
         let mut permissions = fs::metadata(&python).unwrap().permissions();
@@ -222,6 +245,8 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
     let source: Value = serde_json::from_slice(&body).unwrap();
     let source_id = source["id"].as_str().unwrap();
+    let hold_generation = runtime.source_root.join("hold-generation");
+    fs::write(&hold_generation, []).unwrap();
 
     let job_body = json!({
         "operation": "image.generate",
@@ -249,6 +274,33 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
     let submitted: Value = serde_json::from_slice(&body).unwrap();
     let job_id = submitted["id"].as_str().unwrap();
+    assert!(submitted["started_at"].is_null());
+    assert_eq!(submitted["input_asset_name"], "source.png");
+
+    let live = (0..200)
+        .find_map(|_| {
+            let (status, body) = http_request(
+                address,
+                "GET",
+                "/api/v1/jobs?limit=1&include_active=true",
+                &[("Authorization", authorization.as_str())],
+                &[],
+            )
+            .unwrap();
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+            let jobs: Vec<Value> = serde_json::from_slice(&body).unwrap();
+            let job = jobs.into_iter().find(|job| job["id"] == job_id).unwrap();
+            if job["stage"] == "shape_decode" || job["state"] == "failed" {
+                return Some(job);
+            }
+            thread::sleep(Duration::from_millis(50));
+            None
+        })
+        .expect("the worker stage should be visible before generation finishes");
+    fs::remove_file(hold_generation).unwrap();
+    assert_eq!(live["state"], "running", "job: {live}");
+    assert_eq!(live["stage"], "shape_decode");
+    assert!(live["started_at"].as_str().is_some());
 
     let mut completed = None;
     for _ in 0..200 {
@@ -270,6 +322,8 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     }
     let completed = completed.expect("generation job should reach a terminal state");
     assert_eq!(completed["state"], "succeeded", "job: {completed}");
+    assert_eq!(completed["started_at"], live["started_at"]);
+    assert_eq!(completed["stage"], "save_model");
     assert_eq!(completed["result"]["backend_id"], "pixal3d-mlx");
     let generated_asset_id = completed["result"]["asset_id"].as_str().unwrap();
 

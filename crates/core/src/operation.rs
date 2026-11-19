@@ -259,7 +259,16 @@ impl OperationCore {
         input_asset_id: &str,
         options: GenerationOptions,
     ) -> CoreResult<GenerationResult> {
-        crate::generation::generate_pixal3d_image(self, input_asset_id, options)
+        self.generate_pixal3d_image_with_stages(input_asset_id, options, |_| {})
+    }
+
+    pub fn generate_pixal3d_image_with_stages(
+        &self,
+        input_asset_id: &str,
+        options: GenerationOptions,
+        on_stage: impl FnMut(&str),
+    ) -> CoreResult<GenerationResult> {
+        crate::generation::generate_pixal3d_image(self, input_asset_id, options, on_stage)
     }
 
     pub fn setup_pixal3d_mlx_environment(&self) -> CoreResult<RuntimeSetupReport> {

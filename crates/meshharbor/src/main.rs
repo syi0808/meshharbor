@@ -1668,14 +1668,27 @@ fn read_job_record(core: &OperationCore, job_id: &str) -> Result<meshharbor_core
         .ok_or_else(|| CoreError::NotFound(format!("Job '{job_id}' was not found.")))
 }
 
+#[derive(Debug, Deserialize)]
+struct JobHistoryQuery {
+    limit: Option<usize>,
+    include_active: Option<bool>,
+    before: Option<String>,
+}
+
 async fn api_list_jobs(
     State(state): State<AppState>,
-    Query(query): Query<LimitQuery>,
+    Query(query): Query<JobHistoryQuery>,
 ) -> Result<Json<Vec<meshharbor_core::Job>>, ApiError> {
-    Ok(Json(read_job_history(
-        &state.core,
-        query.limit.unwrap_or(50),
-    )?))
+    let limit = query.limit.unwrap_or(50);
+    let jobs = if query.include_active.unwrap_or(false) || query.before.is_some() {
+        state
+            .core
+            .store()
+            .list_dashboard_jobs(limit, query.before.as_deref())?
+    } else {
+        read_job_history(&state.core, limit)?
+    };
+    Ok(Json(jobs))
 }
 
 async fn api_get_job(
@@ -1958,9 +1971,19 @@ async fn start_generation_job(
         let worker_core = core.clone();
         let worker_data_dir = core.store().root().to_path_buf();
         let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
+        let worker_job_id = job_id.clone();
         let result = task::spawn_blocking(move || {
+            let update_stage = |stage: &str| {
+                if let Err(error) = worker_core
+                    .store()
+                    .update_running_job_stage(&worker_job_id, stage)
+                {
+                    eprintln!("Could not record generation stage for {worker_job_id}: {error}");
+                }
+            };
+            update_stage("check_runtime");
             let _runtime_lock = acquire_generation_runtime_lock(&worker_data_dir)?;
-            worker_core.generate_pixal3d_image(&worker_asset_id, options)
+            worker_core.generate_pixal3d_image_with_stages(&worker_asset_id, options, update_stage)
         })
         .await;
         match result {

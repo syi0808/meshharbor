@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -147,12 +147,18 @@ pub struct Job {
     pub operation: String,
     pub state: JobState,
     pub input_asset_id: Option<String>,
+    #[serde(default)]
+    pub input_asset_name: Option<String>,
     pub parameters: Value,
     pub progress: u8,
     pub result: Option<Value>,
     pub error: Option<Value>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,7 +185,7 @@ impl Store {
         let staging_root = root.join("staging");
         fs::create_dir_all(&artifact_root)?;
         fs::create_dir_all(&staging_root)?;
-        let connection = Connection::open(root.join("meshharbor.sqlite3"))?;
+        let mut connection = Connection::open(root.join("meshharbor.sqlite3"))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.execute_batch(
@@ -216,11 +222,29 @@ impl Store {
                 result_json TEXT,
                 error_json TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                started_at TEXT,
+                stage TEXT
             );
             CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs(created_at DESC);
-            CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at DESC, id DESC);",
+            CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS jobs_active_idx ON jobs(updated_at DESC, id DESC)
+                WHERE state NOT IN ('succeeded','failed','cancelled');",
         )?;
+        let migration = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let columns = {
+            let mut statement = migration.prepare("PRAGMA table_info(jobs)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if !columns.iter().any(|column| column == "started_at") {
+            migration.execute("ALTER TABLE jobs ADD COLUMN started_at TEXT", [])?;
+        }
+        if !columns.iter().any(|column| column == "stage") {
+            migration.execute("ALTER TABLE jobs ADD COLUMN stage TEXT", [])?;
+        }
+        migration.commit()?;
         Ok(Self {
             root,
             artifact_root,
@@ -594,19 +618,57 @@ impl Store {
 
     /// List persisted job records, newest update first. This does not resume or modify jobs.
     pub fn list_jobs(&self, limit: usize) -> CoreResult<Vec<Job>> {
+        self.read_jobs(limit, false, None)
+    }
+
+    pub fn list_dashboard_jobs(&self, limit: usize, before: Option<&str>) -> CoreResult<Vec<Job>> {
+        self.read_jobs(limit, true, before)
+    }
+
+    fn read_jobs(
+        &self,
+        limit: usize,
+        dashboard: bool,
+        before: Option<&str>,
+    ) -> CoreResult<Vec<Job>> {
         let ids = {
             let conn = self.connection.lock().expect("SQLite mutex poisoned");
-            let mut statement =
-                conn.prepare("SELECT id FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?1")?;
-            let rows =
-                statement.query_map([limit.clamp(1, 200) as i64], |row| row.get::<_, String>(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
+            let sql = match (dashboard, before) {
+                (false, _) => "SELECT id FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?1",
+                (true, None) => "SELECT id FROM jobs WHERE state NOT IN ('succeeded','failed','cancelled')
+                    UNION ALL SELECT id FROM (SELECT id FROM jobs WHERE state IN ('succeeded','failed','cancelled')
+                    ORDER BY updated_at DESC, id DESC LIMIT ?1)",
+                (true, Some(_)) => "SELECT id FROM jobs WHERE state IN ('succeeded','failed','cancelled')
+                    AND (updated_at, id) < (SELECT updated_at, id FROM jobs WHERE id=?2 AND state IN ('succeeded','failed','cancelled'))
+                    ORDER BY updated_at DESC, id DESC LIMIT ?1",
+            };
+            let mut statement = conn.prepare(sql)?;
+            let limit = limit.clamp(1, 200) as i64;
+            let mut rows = if let Some(before) = before {
+                statement.query(params![limit, before])?
+            } else {
+                statement.query([limit])?
+            };
+            let mut ids = Vec::new();
+            while let Some(row) = rows.next()? {
+                ids.push(row.get::<_, String>(0)?);
+            }
+            ids
         };
         let mut jobs = Vec::with_capacity(ids.len());
         for id in ids {
             if let Some(job) = self.get_job(&id)? {
                 jobs.push(job);
             }
+        }
+        if dashboard && before.is_none() {
+            jobs.sort_by(|left, right| {
+                left.state
+                    .is_terminal()
+                    .cmp(&right.state.is_terminal())
+                    .then_with(|| right.updated_at.cmp(&left.updated_at))
+                    .then_with(|| right.id.cmp(&left.id))
+            });
         }
         Ok(jobs)
     }
@@ -678,7 +740,8 @@ impl Store {
         let conn = self.connection.lock().expect("SQLite mutex poisoned");
         let row = conn
             .query_row(
-                "SELECT id,operation,state,input_asset_id,parameters_json,progress,result_json,error_json,created_at,updated_at
+                "SELECT id,operation,state,input_asset_id,parameters_json,progress,result_json,error_json,created_at,updated_at,started_at,stage,
+                        (SELECT name FROM assets WHERE id=jobs.input_asset_id)
                  FROM jobs WHERE id=?1",
                 [id],
                 |row| {
@@ -693,6 +756,9 @@ impl Store {
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, String>(8)?,
                         row.get::<_, String>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
                     ))
                 },
             )
@@ -708,6 +774,9 @@ impl Store {
             error_json,
             created_at,
             updated_at,
+            started_at,
+            stage,
+            input_asset_name,
         )) = row
         else {
             return Ok(None);
@@ -717,12 +786,15 @@ impl Store {
             operation,
             state: JobState::parse(&state)?,
             input_asset_id,
+            input_asset_name,
             parameters: serde_json::from_str(&parameters_json)?,
             progress: progress as u8,
             result: result_json.map(|v| serde_json::from_str(&v)).transpose()?,
             error: error_json.map(|v| serde_json::from_str(&v)).transpose()?,
             created_at,
             updated_at,
+            started_at,
+            stage,
         }))
     }
 
@@ -753,13 +825,23 @@ impl Store {
             )));
         }
         transaction.execute(
-            "UPDATE jobs SET state=?2,progress=?3,result_json=COALESCE(?4,result_json),error_json=COALESCE(?5,error_json),updated_at=?6 WHERE id=?1",
+            "UPDATE jobs SET state=?2,progress=?3,result_json=COALESCE(?4,result_json),error_json=COALESCE(?5,error_json),updated_at=?6,
+             started_at=CASE WHEN ?2='running' AND started_at IS NULL THEN ?6 ELSE started_at END WHERE id=?1",
             params![id, next_state.as_str(), progress, result_json, error_json, now],
         )?;
         transaction.commit()?;
         drop(conn);
         self.get_job(id)?
             .ok_or_else(|| CoreError::NotFound(format!("Job '{id}' was not found.")))
+    }
+
+    pub fn update_running_job_stage(&self, id: &str, stage: &str) -> CoreResult<()> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        conn.execute(
+            "UPDATE jobs SET stage=?2,updated_at=?3 WHERE id=?1 AND state='running' AND stage IS NOT ?2",
+            params![id, stage, timestamp()?],
+        )?;
+        Ok(())
     }
 
     pub fn cancel_job(&self, id: &str) -> CoreResult<Job> {
@@ -1327,6 +1409,86 @@ mod tests {
         assert!(store.list_assets(10).unwrap().is_empty());
         assert!(fs::read_dir(&store.artifact_root).unwrap().next().is_none());
 
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dashboard_keeps_active_jobs_outside_the_paginated_history_limit() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let active = store
+            .create_job("image.generate", None, &json!({}))
+            .unwrap();
+        let mut completed = Vec::new();
+        for _ in 0..3 {
+            let job = store.create_job("mesh.cleanup", None, &json!({})).unwrap();
+            store.cancel_job(&job.id).unwrap();
+            completed.push(job.id);
+        }
+        completed.sort_by(|left, right| right.cmp(left));
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE jobs SET updated_at = '2000' WHERE state = 'cancelled'",
+                [],
+            )
+            .unwrap();
+
+        let first = store.list_dashboard_jobs(2, None).unwrap();
+        assert_eq!(first.len(), 3);
+        assert_eq!(first[0].id, active.id);
+        assert_eq!(first[1].id, completed[0]);
+        assert_eq!(first[2].id, completed[1]);
+        let older = store.list_dashboard_jobs(2, Some(&first[2].id)).unwrap();
+        assert_eq!(older.len(), 1);
+        assert_eq!(older[0].id, completed[2]);
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_older_jobs_and_preserves_start_time_and_last_running_stage() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let queued = store
+            .create_job("image.generate", None, &json!({}))
+            .unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "ALTER TABLE jobs DROP COLUMN started_at; ALTER TABLE jobs DROP COLUMN stage;",
+            )
+            .unwrap();
+        drop(store);
+
+        let store = Store::open(&dir).unwrap();
+        let migrated = store.get_job(&queued.id).unwrap().unwrap();
+        assert_eq!(migrated.created_at, queued.created_at);
+        assert!(migrated.started_at.is_none() && migrated.stage.is_none());
+        let running = store
+            .update_job(&queued.id, JobState::Running, 5, None, None)
+            .unwrap();
+        assert_eq!(running.started_at.as_ref(), Some(&running.updated_at));
+        store
+            .update_running_job_stage(&queued.id, "texture_flow")
+            .unwrap();
+        let failed = store
+            .update_job(&queued.id, JobState::Failed, 100, None, None)
+            .unwrap();
+        assert_eq!(failed.stage.as_deref(), Some("texture_flow"));
+        assert_eq!(failed.started_at, running.started_at);
+
+        store
+            .update_running_job_stage(&queued.id, "save_model")
+            .unwrap();
+        let persisted = store.get_job(&queued.id).unwrap().unwrap();
+        assert_eq!(persisted.stage, failed.stage);
+        assert_eq!(persisted.updated_at, failed.updated_at);
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
