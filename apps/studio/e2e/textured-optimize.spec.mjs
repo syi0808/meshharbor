@@ -43,9 +43,9 @@ function compareMaterialFrames(originalScreenshot, resultScreenshot) {
 }
 
 async function previewFrames(page) {
-  const materialView = page.getByRole('button', { name: 'Material view' });
-  const wireframeView = page.getByRole('button', { name: 'Triangle wireframe' });
-  await expect(materialView).toHaveAttribute('aria-pressed', 'true');
+  const materialView = page.getByRole('radio', { name: 'Material view' });
+  const wireframeView = page.getByRole('radio', { name: 'Triangle wireframe' });
+  await expect(materialView).toBeChecked();
   await expect(page.getByText('Loading preview…', { exact: true })).toBeHidden();
   const canvas = page.getByLabel('Interactive 3D model preview').locator('canvas');
   const material = await canvas.screenshot();
@@ -88,6 +88,14 @@ test('Studio rebakes a supported GLB UV atlas and exports both PBR maps', async 
   await page.getByRole('button', { name: 'UV atlas rebake', exact: true }).click();
   await page.getByRole('button', { name: 'Run UV atlas rebake' }).click();
   await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
+  await selected.getByRole('button', { name: 'Operation report' }).click();
+  const report = selected.getByRole('region', { name: 'Report details' });
+  await expect(report.getByText('UV unwrap complete')).toBeVisible();
+  await expect(report.getByRole('list', { name: 'Operation metrics' }).getByRole('listitem').first()).toBeVisible();
+  await expect.poll(() => report.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+  await report.focus();
+  await report.press('End');
+  await expect.poll(() => report.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
 
   const before = inspectTexturedGlb(source);
   const after = inspectTexturedGlb(await exportSelectedGlb(page, resultName));
@@ -117,14 +125,19 @@ test('Studio optimizes a textured GLB without changing its materials or textures
     ]);
     await chooser.setFiles({ name: sourceName, mimeType: 'model/gltf-binary', buffer: source });
     await expect(selected.getByTitle(sourceName, { exact: true })).toBeVisible();
-    const material = page.getByRole('button', { name: 'Material view' });
-    const solid = page.getByRole('button', { name: 'Solid view' });
-    await expect(material).toHaveAttribute('aria-pressed', 'true');
+    const material = page.getByRole('radio', { name: 'Material view' });
+    const solid = page.getByRole('radio', { name: 'Solid view' });
+    await expect(material).toBeChecked();
+    await material.focus();
+    await material.press('ArrowRight');
+    await expect(solid).toBeFocused();
+    await solid.press('Space');
+    await expect(solid).toBeChecked();
     await solid.click();
-    await expect(solid).toHaveAttribute('aria-pressed', 'true');
+    await expect(solid).toBeChecked();
     await page.getByRole('button', { name: 'Fit view' }).click();
     await material.click();
-    await expect(material).toHaveAttribute('aria-pressed', 'true');
+    await expect(material).toBeChecked();
   });
 
   const original = page.getByRole('radio', { name: 'Original' });

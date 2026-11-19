@@ -77,9 +77,30 @@ test('Inventory captures material thumbnails and reuses them after reload', asyn
   await painted.click();
   await expect(painted).toHaveAttribute('aria-pressed', 'true');
   const search = inventory.getByRole('searchbox', { name: 'Search assets by filename' });
+  const searchGroup = inventory.locator('[data-slot="input-group"]');
+  await expect(searchGroup.getByRole('searchbox')).toHaveCount(1);
   await search.fill('painted');
-  await search.press('Enter');
+  await searchGroup.getByRole('button', { name: 'Search', exact: true }).click();
   await expect(painted).toBeVisible();
   await expect(coated).toHaveCount(0);
   await expect(photo).toHaveCount(0);
+});
+
+test('the Empty drop surface accepts images through the workbench', async ({ page, studioOrigin }) => {
+  const image = new PNG({ width: 2, height: 2 });
+  image.data.fill(255);
+  await page.goto(studioOrigin);
+  const workbench = page.locator('main');
+  await expect(workbench).toHaveAttribute('data-connection', 'connected');
+  const transfer = await page.evaluateHandle(bytes => {
+    const data = new DataTransfer();
+    data.items.add(new File([new Uint8Array(bytes)], 'dropped.png', { type: 'image/png' }));
+    return data;
+  }, Array.from(PNG.sync.write(image)));
+  await workbench.dispatchEvent('dragover', { dataTransfer: transfer });
+  const overlay = page.locator('[data-slot="empty"]').filter({ hasText: 'Drop a GLB or source image here' });
+  await expect(overlay).toBeVisible();
+  await workbench.dispatchEvent('drop', { dataTransfer: transfer });
+  await expect(overlay).toHaveCount(0);
+  await expect(workbench.getByRole('region', { name: 'Selected asset' }).getByTitle('dropped.png')).toBeVisible();
 });

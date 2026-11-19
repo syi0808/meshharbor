@@ -1,5 +1,7 @@
 import { Button } from '@/components/ui/button';
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
 import { Spinner } from '@/components/ui/spinner';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { CornersOutIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
@@ -326,17 +328,24 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
       <div className="absolute inset-0 [&>canvas]:block [&>canvas]:size-full" ref={hostRef} aria-label="Interactive 3D model preview" />
       {modelReady && (
         <div className="absolute bottom-2 left-2 flex flex-wrap items-center gap-1 rounded-lg border bg-popover p-1 sm:bottom-4 sm:left-4" role="group" aria-label="Viewport controls">
-          <Button type="button" variant={display === 'material' ? 'secondary' : 'ghost'} size="sm" aria-label="Material view" aria-pressed={display === 'material'} onClick={() => setDisplay('material')}>Material</Button>
-          <Button type="button" variant={display === 'solid' ? 'secondary' : 'ghost'} size="sm" aria-label="Solid view" aria-pressed={display === 'solid'} onClick={() => setDisplay('solid')}>Solid</Button>
-          <Button type="button" variant={display === 'wireframe' ? 'secondary' : 'ghost'} size="sm" aria-label="Triangle wireframe" aria-pressed={display === 'wireframe'} onClick={() => setDisplay('wireframe')}>Wireframe</Button>
+          <ToggleGroup type="single" orientation="horizontal" size="sm" spacing={1} value={display} aria-label="Display mode"
+            onValueChange={value => {
+              if (value === 'material' || value === 'solid' || value === 'wireframe') setDisplay(value);
+            }}>
+            <ToggleGroupItem value="material" aria-label="Material view">Material</ToggleGroupItem>
+            <ToggleGroupItem value="solid" aria-label="Solid view">Solid</ToggleGroupItem>
+            <ToggleGroupItem value="wireframe" aria-label="Triangle wireframe">Wireframe</ToggleGroupItem>
+          </ToggleGroup>
           <Button type="button" variant="ghost" size="icon-sm" aria-label="Fit view" title="Fit view" onClick={fitView}><CornersOutIcon aria-hidden="true" /></Button>
         </div>
       )}
       {rendererUnavailable && asset && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-6 text-center text-sm" role="status">
-          <p className="font-medium">3D preview unavailable</p>
-          <p className="text-muted-foreground">WebGL could not start in this browser. Local optimize and export are still available.</p>
-        </div>
+        <Empty className="absolute inset-0" role="status">
+          <EmptyHeader>
+            <EmptyTitle>3D preview unavailable</EmptyTitle>
+            <EmptyDescription>WebGL could not start in this browser. Local optimize and export are still available.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       )}
       {loading && <PreviewLoading>Loading preview…</PreviewLoading>}
       {modelReady && <p className="absolute right-4 bottom-4 hidden text-xs text-muted-foreground lg:block">Drag to orbit · Scroll to zoom</p>}

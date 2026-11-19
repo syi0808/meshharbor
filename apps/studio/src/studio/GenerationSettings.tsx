@@ -1,5 +1,5 @@
 import { Checkbox } from '@/components/ui/checkbox';
-import { Field, FieldDescription, FieldError, FieldLabel } from '@/components/ui/field';
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import type { GenerationModel, GenerationParameter, GenerationParameters, GenerationTuning, RuntimeInfo } from './types';
@@ -72,40 +72,42 @@ export function GenerationParameterFields({ profile, draft, posed, disabled, onC
     const group = parameter.section ?? 'Output';
     sections.set(group, [...(sections.get(group) ?? []), parameter]);
   }
-  return <div className="grid gap-5">
-    {[...sections].map(([section, parameters]) => <fieldset key={section} className="grid min-w-0 gap-3 border-t pt-3">
-      <legend className="pr-2 font-medium text-muted-foreground">{section}</legend>
-      {parameters.map(parameter => {
-        const id = `generation-parameter-${parameter.id}`;
-        const value = parameterValue(parameter, draft);
-        const invalid = parseParameter(parameter, value) === null;
-        const end = profile.parameters.find(candidate => candidate.id === parameter.id.replace(/guidance_start$/, 'guidance_end'));
-        const invalidInterval = parameter.id.endsWith('guidance_start') && end !== undefined
-          && Number(value) > Number(parameterValue(end, draft));
-        const describedBy = [parameter.description && `${id}-description`, (invalid || invalidInterval) && `${id}-error`].filter(Boolean).join(' ') || undefined;
-        return <Field key={parameter.id} data-invalid={invalid || invalidInterval || undefined}>
-          {parameter.kind === 'boolean' ? <div className="flex items-center gap-2">
-            <Checkbox id={id} checked={value === 'true'} disabled={disabled} aria-describedby={describedBy}
-              onCheckedChange={checked => onChange(parameter.id, String(checked === true))} />
-            <FieldLabel htmlFor={id}>{parameter.label}</FieldLabel>
-          </div> : <>
-            <FieldLabel htmlFor={id}>{parameter.label}</FieldLabel>
-            {parameter.kind === 'choice' ? <NativeSelect id={id} className="w-full" value={value} disabled={disabled}
-              aria-invalid={invalid} aria-describedby={describedBy} onChange={event => onChange(parameter.id, event.target.value)}>
-              {parameter.values.map(option => <NativeSelectOption key={option} value={option}>{option}</NativeSelectOption>)}
-            </NativeSelect> : <Input id={id} type="number" value={value} disabled={disabled}
-              readOnly={parameter.kind === 'fixed'} min={parameter.kind === 'fixed' ? undefined : parameter.min}
-              max={parameter.kind === 'fixed' ? undefined : parameter.max ?? Number.MAX_SAFE_INTEGER}
-              step={parameter.kind === 'number' ? 'any' : 1}
-              aria-invalid={invalid || invalidInterval} aria-describedby={describedBy} onChange={event => onChange(parameter.id, event.target.value)} />}
-          </>}
-          {parameter.description && <FieldDescription id={`${id}-description`}>{parameter.description}</FieldDescription>}
-          {(invalid || invalidInterval) && <FieldError id={`${id}-error`}>{invalidInterval ? 'Start must not exceed end.'
-            : parameter.kind === 'integer' || parameter.kind === 'number'
-              ? `Enter ${parameter.kind === 'integer' ? 'a whole number' : 'a number'} from ${parameter.min.toLocaleString()} to ${(parameter.max ?? Number.MAX_SAFE_INTEGER).toLocaleString()}.`
-              : 'Choose a supported value.'}</FieldError>}
-        </Field>;
-      })}
-    </fieldset>)}
-  </div>;
+  return <FieldGroup className="gap-5">
+    {[...sections].map(([section, parameters]) => <FieldSet key={section} className="min-w-0 border-t pt-3">
+      <FieldLegend variant="label" className="mb-0 pr-2 text-muted-foreground">{section}</FieldLegend>
+      <FieldGroup className="gap-3">
+        {parameters.map(parameter => {
+          const id = `generation-parameter-${parameter.id}`;
+          const value = parameterValue(parameter, draft);
+          const invalid = parseParameter(parameter, value) === null;
+          const end = profile.parameters.find(candidate => candidate.id === parameter.id.replace(/guidance_start$/, 'guidance_end'));
+          const invalidInterval = parameter.id.endsWith('guidance_start') && end !== undefined
+            && Number(value) > Number(parameterValue(end, draft));
+          const describedBy = [parameter.description && `${id}-description`, (invalid || invalidInterval) && `${id}-error`].filter(Boolean).join(' ') || undefined;
+          return <Field key={parameter.id} data-invalid={invalid || invalidInterval || undefined}>
+            {parameter.kind === 'boolean' ? <div className="flex items-center gap-2">
+              <Checkbox id={id} checked={value === 'true'} disabled={disabled} aria-describedby={describedBy}
+                onCheckedChange={checked => onChange(parameter.id, String(checked === true))} />
+              <FieldLabel htmlFor={id}>{parameter.label}</FieldLabel>
+            </div> : <>
+              <FieldLabel htmlFor={id}>{parameter.label}</FieldLabel>
+              {parameter.kind === 'choice' ? <NativeSelect id={id} className="w-full" value={value} disabled={disabled}
+                aria-invalid={invalid} aria-describedby={describedBy} onChange={event => onChange(parameter.id, event.target.value)}>
+                {parameter.values.map(option => <NativeSelectOption key={option} value={option}>{option}</NativeSelectOption>)}
+              </NativeSelect> : <Input id={id} type="number" value={value} disabled={disabled}
+                readOnly={parameter.kind === 'fixed'} min={parameter.kind === 'fixed' ? undefined : parameter.min}
+                max={parameter.kind === 'fixed' ? undefined : parameter.max ?? Number.MAX_SAFE_INTEGER}
+                step={parameter.kind === 'number' ? 'any' : 1}
+                aria-invalid={invalid || invalidInterval} aria-describedby={describedBy} onChange={event => onChange(parameter.id, event.target.value)} />}
+            </>}
+            {parameter.description && <FieldDescription id={`${id}-description`}>{parameter.description}</FieldDescription>}
+            {(invalid || invalidInterval) && <FieldError id={`${id}-error`}>{invalidInterval ? 'Start must not exceed end.'
+              : parameter.kind === 'integer' || parameter.kind === 'number'
+                ? `Enter ${parameter.kind === 'integer' ? 'a whole number' : 'a number'} from ${parameter.min.toLocaleString()} to ${(parameter.max ?? Number.MAX_SAFE_INTEGER).toLocaleString()}.`
+                : 'Choose a supported value.'}</FieldError>}
+          </Field>;
+        })}
+      </FieldGroup>
+    </FieldSet>)}
+  </FieldGroup>;
 }

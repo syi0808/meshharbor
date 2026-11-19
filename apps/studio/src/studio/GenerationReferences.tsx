@@ -1,7 +1,8 @@
 import { ImageSquareIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Field, FieldError, FieldLabel } from '@/components/ui/field';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Field, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { Asset, OrbitCamera, PosedGenerationInput, PosedViewMode } from './types';
@@ -111,11 +112,13 @@ function ReferencePicker({ image, load, disabled, name, onPick, onClear }: {
 export function SingleReference({ image, load, disabled, onPick, onClear }: {
   image: Asset | null; load: LoadReference; disabled: boolean; onPick: (files: FileList) => void; onClear: () => void;
 }) {
-  return <section className="grid min-w-0 gap-2 rounded-md border p-3" aria-label="Reference image">
-    <h3 className="font-medium">Reference image</h3>
-    {!image && <p className="text-muted-foreground">Choose a PNG or JPEG. Your current selection stays in the viewport.</p>}
-    <ReferencePicker image={image} load={load} disabled={disabled} onPick={onPick} onClear={onClear} />
-  </section>;
+  return <Card size="sm" role="region" aria-label="Reference image" className="min-w-0 gap-2">
+    <CardHeader>
+      <CardTitle className="text-xs"><h3>Reference image</h3></CardTitle>
+      {!image && <CardDescription>Choose a PNG or JPEG. Your current selection stays in the viewport.</CardDescription>}
+    </CardHeader>
+    <CardContent><ReferencePicker image={image} load={load} disabled={disabled} onPick={onPick} onClear={onClear} /></CardContent>
+  </Card>;
 }
 
 export function PosedReferences({ mode, views, maxViews, load, disabled, onPick, onChange }: {
@@ -138,25 +141,27 @@ export function PosedReferences({ mode, views, maxViews, load, disabled, onPick,
       onClick={() => bulkInput.current?.click()}>Choose multiple images</Button>}
     {views.map((view, index) => {
       const label = custom ? `View ${index + 1}` : presetLabels[index];
-      return <fieldset className="grid min-w-0 gap-3 rounded-md border p-3" key={index}>
-        <legend className="px-1 font-medium">{label}</legend>
-        <ReferencePicker image={view.image} name={label} load={load} disabled={disabled}
-          onPick={files => onPick(files, index)} onClear={() => update(index, { ...view, image: null })} />
-        {custom && <div className="grid grid-cols-2 gap-2">
-          {cameraFields.map(field => {
-            const id = `reference-${index}-${field.id}`;
-            const invalid = readCameraNumber(view.camera[field.id], field.min, field.max) === null;
-            return <Field key={field.id} data-invalid={invalid || undefined}>
-              <FieldLabel htmlFor={id}>{field.label}</FieldLabel>
-              <Input id={id} type="number" step="any" min={field.min} max={field.max} value={view.camera[field.id]}
-                aria-invalid={invalid} disabled={disabled}
-                onChange={event => update(index, { ...view, camera: { ...view.camera, [field.id]: event.target.value } })} />
-            </Field>;
-          })}
-        </div>}
-        {custom && views.length > 2 && <Button variant="ghost" size="sm" className="justify-self-start" disabled={disabled}
-          onClick={() => onChange(views.filter((_, itemIndex) => itemIndex !== index))}>Remove {label.toLowerCase()}</Button>}
-      </fieldset>;
+      return <FieldSet className="min-w-0 items-start gap-3 rounded-md border p-3" key={index}>
+        <FieldLegend variant="label" className="mb-0 px-1">{label}</FieldLegend>
+        <FieldGroup className="gap-3">
+          <ReferencePicker image={view.image} name={label} load={load} disabled={disabled}
+            onPick={files => onPick(files, index)} onClear={() => update(index, { ...view, image: null })} />
+          {custom && <FieldGroup className="grid grid-cols-2 gap-2">
+            {cameraFields.map(field => {
+              const id = `reference-${index}-${field.id}`;
+              const invalid = readCameraNumber(view.camera[field.id], field.min, field.max) === null;
+              return <Field key={field.id} data-invalid={invalid || undefined}>
+                <FieldLabel htmlFor={id}>{field.label}</FieldLabel>
+                <Input id={id} type="number" step="any" min={field.min} max={field.max} value={view.camera[field.id]}
+                  aria-invalid={invalid} disabled={disabled}
+                  onChange={event => update(index, { ...view, camera: { ...view.camera, [field.id]: event.target.value } })} />
+              </Field>;
+            })}
+          </FieldGroup>}
+          {custom && views.length > 2 && <Button variant="ghost" size="sm" className="self-start" disabled={disabled}
+            onClick={() => onChange(views.filter((_, itemIndex) => itemIndex !== index))}>Remove {label.toLowerCase()}</Button>}
+        </FieldGroup>
+      </FieldSet>;
     })}
     {hasDuplicate && <FieldError>Choose a different image for each view.</FieldError>}
     {custom && views.length < maxViews && <Button variant="outline" size="sm" className="justify-self-start" disabled={disabled}

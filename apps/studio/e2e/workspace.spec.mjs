@@ -48,6 +48,26 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   await expect(jobs).toHaveAttribute('aria-expanded', 'false');
 });
 
+test('Jobs and storage activity share accessible item rows with failure details', async ({ page, studioOrigin }) => {
+  const recorded = {
+    id: 'failed-download', operation: 'runtime.pixal3d.install_models', state: 'failed', progress: 0,
+    created_at: '1', updated_at: '2', error: { message: 'Local cache is unavailable.' },
+  };
+  await page.route('**/api/v1/jobs?limit=20', route => route.fulfill({ json: [recorded] }));
+  await page.goto(studioOrigin);
+  await page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs' }).click();
+  const jobsRow = page.getByRole('complementary', { name: 'Jobs' }).getByRole('listitem');
+  await expect(jobsRow).toHaveAttribute('data-slot', 'item');
+  await expect(jobsRow.getByText('Failed', { exact: true })).toBeVisible();
+  await expect(jobsRow.getByText(recorded.error.message)).toBeVisible();
+  await expect(jobsRow.getByRole('button', { name: 'View' })).toBeVisible();
+  await page.goto(studioOrigin + '/settings/storage');
+  const activityRow = page.getByRole('region', { name: 'Recent activity' }).getByRole('listitem');
+  await expect(activityRow).toHaveAttribute('data-slot', 'item');
+  await expect(activityRow.getByText('Download MLX models')).toBeVisible();
+  await expect(activityRow.getByText(recorded.error.message)).toBeVisible();
+});
+
 test('the model rail stays fixed, shows labels below icons, and does not toggle the current panel', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   const rail = page.getByRole('group', { name: 'Model tools' });
@@ -417,6 +437,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   let tokenSaved = true;
   let modelsInstalled = true;
   const calls = [];
+  let finishModelRemoval;
   const runtime = () => ({
     platform: 'macos',
     status: 'ready_for_mesh_operations',
@@ -430,13 +451,15 @@ test('settings deep links and confirmations manage one local profile at a time',
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: runtime() }));
   await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', route => route.fulfill({ json: 'verified' }));
   for (const scope of ['model-files', 'huggingface']) {
-    await page.route(`**/api/v1/runtime/pixal3d-mlx/${scope}`, route => {
+    await page.route(`**/api/v1/runtime/pixal3d-mlx/${scope}`, async route => {
       expect(route.request().method()).toBe('DELETE');
       expect(route.request().postDataJSON()).toEqual({ confirmed: true });
       calls.push(scope);
-      if (scope === 'model-files') modelsInstalled = false;
-      else tokenSaved = false;
-      return route.fulfill({ json: runtime() });
+      if (scope === 'model-files') {
+        await new Promise(resolve => { finishModelRemoval = resolve; });
+        modelsInstalled = false;
+      } else tokenSaved = false;
+      await route.fulfill({ json: runtime() });
     });
   }
   await page.goto(studioOrigin + '/settings/storage');
@@ -445,13 +468,21 @@ test('settings deep links and confirmations manage one local profile at a time',
   const uninstall = storage.getByRole('button', { name: 'Uninstall model files' });
   await expect(storage.getByText('Installed', { exact: true })).toBeVisible();
   await uninstall.click();
-  const remove = page.getByRole('dialog', { name: 'Remove model files?' });
+  const remove = page.getByRole('alertdialog', { name: 'Remove model files?' });
   await expect(remove).toContainText('all Studio assets stay in place');
+  await expect(remove.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await page.mouse.click(8, 8);
+  await expect(remove).toBeVisible();
   await remove.getByRole('button', { name: 'Cancel' }).click();
   await expect(uninstall).toBeFocused();
   expect(calls).toEqual([]);
   await uninstall.click();
   await remove.getByRole('button', { name: 'Remove files' }).click();
+  await expect.poll(() => typeof finishModelRemoval).toBe('function');
+  await expect(remove.getByRole('button', { name: 'Removing…' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(remove).toBeVisible();
+  finishModelRemoval();
   await expect(toasts.getByText('Pixal3D model files removed for Apple MLX.')).toBeVisible();
   await expect(storage.getByText('Not installed', { exact: true })).toBeVisible();
   await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
@@ -462,7 +493,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   await expect(connections.getByRole('button', { name: 'Disconnect locally' })).toHaveCount(0);
   await connections.getByLabel('Backend').selectOption('pixal3d-mlx');
   await connections.getByRole('button', { name: 'Disconnect locally' }).click();
-  const disconnect = page.getByRole('dialog', { name: 'Disconnect Hugging Face?' });
+  const disconnect = page.getByRole('alertdialog', { name: 'Disconnect Hugging Face?' });
   await expect(disconnect).toContainText('does not revoke the token');
   await disconnect.getByRole('button', { name: 'Disconnect', exact: true }).click();
   await expect(toasts.getByText('Hugging Face disconnected for Apple MLX on this computer.')).toBeVisible();

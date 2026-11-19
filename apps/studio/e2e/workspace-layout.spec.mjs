@@ -140,6 +140,16 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   await model.selectOption('second-model');
   await expect(faces).toHaveValue('50001');
   await seed.fill('0');
+  await page.setViewportSize({ width: 1280, height: 600 });
+  const scrollBody = generate.getByRole('region', { name: 'Generate model content' });
+  const generateAction = generate.getByRole('button', { name: 'Generate 3D' });
+  await expect(generateAction).toBeInViewport({ ratio: 1 });
+  const footerPosition = await generateAction.boundingBox();
+  await scrollBody.focus();
+  await scrollBody.press('End');
+  await expect.poll(() => scrollBody.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  expect(await generateAction.boundingBox()).toEqual(footerPosition);
+  await expect(generate.getByRole('group', { name: 'Sampling' }).getByLabel('Texture sampling steps')).toHaveValue('18');
   const derived = { ...active, id: 'asset_generation_layout', name: 'new-model.glb', source_asset_id: reference.id };
   const job = {
     id: 'job_generation_layout',
@@ -159,7 +169,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
     ...job, state: 'succeeded', progress: 100, result: { asset_id: derived.id },
   } }));
   await page.route('**/api/v1/assets/asset_generation_layout', route => route.fulfill({ json: derived }));
-  await generate.getByRole('button', { name: 'Generate 3D' }).click();
+  await generateAction.click();
   await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Image-to-3D generation complete.', { exact: false })).toBeVisible();
   await expect(page.locator('#asset-library').getByTitle(derived.name)).toBeVisible();
   await expect(selected.getByTitle(active.name)).toBeVisible();
@@ -260,4 +270,16 @@ test('generation switches between posed presets and maps each custom image to it
       },
     },
   });
+  await page.setViewportSize({ width: 390, height: 640 });
+  const dialog = page.getByRole('dialog', { name: 'Generate model' });
+  const mobileForm = dialog.getByRole('region', { name: 'Generate model content' });
+  const mobileAction = dialog.getByRole('button', { name: 'Generate 3D' });
+  await expect(mobileAction).toBeInViewport({ ratio: 1 });
+  const mobileFooter = await mobileAction.boundingBox();
+  await mobileForm.focus();
+  await mobileForm.press('End');
+  await expect.poll(() => mobileForm.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  expect((await mobileAction.boundingBox()).y).toBe(mobileFooter.y);
+  expect(await mobileForm.evaluate(element => element.scrollWidth)).toBe(await mobileForm.evaluate(element => element.clientWidth));
+  await expect(dialog.getByRole('group', { name: 'View 2', exact: true }).getByLabel('Distance')).toHaveValue('3.5');
 });

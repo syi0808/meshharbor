@@ -1,16 +1,20 @@
 import { ArrowLeftIcon, ArrowsClockwiseIcon, CubeIcon, HardDrivesIcon, KeyIcon, PaintBrushIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
+import { ItemGroup } from '@/components/ui/item';
 import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Sidebar, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider } from '@/components/ui/sidebar';
 import { Disclosure } from './Disclosure';
+import { JobListItem } from './JobListItem';
 import { notify } from './notify';
 import type { MeshHarborApi } from './api';
 import type { HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, RuntimeBackendId, RuntimeInfo } from './types';
@@ -70,8 +74,7 @@ interface Props {
 
 export function SettingsPage({ api, section, backendId, runtime, connection, connectionError, busy, jobFeedback, theme, jobs, operationLabel, onVisit, onProfileChange, onClose, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
   const heading = useRef<HTMLHeadingElement>(null);
-  const cancelRemoval = useRef<HTMLButtonElement>(null);
-  const removalTrigger = useRef<HTMLElement | null>(null);
+  const removalTrigger = useRef<HTMLButtonElement | null>(null);
   const [accounts, setAccounts] = useState<Partial<Record<RuntimeBackendId, AccountStatus>>>({});
   const [pending, setPending] = useState(false);
   const [removal, setRemoval] = useState<{ backend: RuntimeBackendId; scope: RemovalScope } | null>(null);
@@ -180,7 +183,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
   }
 
   function confirmRemoval() {
-    if (!removal) return;
+    if (!removal || disabled) return;
     const { backend, scope } = removal;
     void perform(async () => {
       try {
@@ -197,8 +200,8 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
     });
   }
 
-  function openRemoval(backend: RuntimeBackendId, scope: RemovalScope) {
-    removalTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  function openRemoval(backend: RuntimeBackendId, scope: RemovalScope, trigger: HTMLButtonElement) {
+    removalTrigger.current = trigger;
     setRemoval({ backend, scope });
   }
 
@@ -248,8 +251,9 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           <AlertDescription>Hugging Face sign-in is in progress.</AlertDescription>
           <Button variant="outline" onClick={() => onVisit('connections', browserBackend)}>Return to sign-in</Button>
         </Alert>}
-        {section === 'preferences' ? <section className="grid gap-4 rounded-lg border bg-card p-4 sm:p-5">
-          <h2 className="font-heading text-base font-medium">Appearance</h2>
+        {section === 'preferences' ? <Card>
+          <CardHeader><CardTitle className="text-base"><h2>Appearance</h2></CardTitle></CardHeader>
+          <CardContent>
           <Field className="max-w-xs">
             <FieldLabel htmlFor="studio-theme">Theme</FieldLabel>
             <NativeSelect id="studio-theme" className="w-full" value={theme} onChange={event => {
@@ -263,39 +267,43 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
               <NativeSelectOption value="light">Light</NativeSelectOption>
             </NativeSelect>
           </Field>
-        </section> : connection !== 'connected' ? <section className="grid justify-items-start gap-2 rounded-lg border bg-card p-4">
-          <h2 className="font-medium">{connection === 'connecting' ? 'Connecting to the local engine' : 'Local engine is offline'}</h2>
-          <p className="text-muted-foreground">Start <code>meshharbor serve</code> to view and manage local models.</p>
-          {connectionError && <p className="wrap-anywhere text-muted-foreground">{connectionError}</p>}
+          </CardContent>
+        </Card> : connection !== 'connected' ? <Alert role={connection === 'connecting' ? 'status' : 'alert'} className="justify-items-start gap-2 p-4">
+          <AlertTitle><h2>{connection === 'connecting' ? 'Connecting to the local engine' : 'Local engine is offline'}</h2></AlertTitle>
+          <AlertDescription className="grid gap-2">
+            <p className="mb-0!">Start <code>meshharbor serve</code> to view and manage local models.</p>
+            {connectionError && <p className="wrap-anywhere">{connectionError}</p>}
+          </AlertDescription>
           <Button disabled={connection === 'connecting'} onClick={onReconnect}>Retry connection</Button>
-        </section> : <>
-          {section === 'models' && (runtime?.model_catalog ?? []).map(model => <section key={model.id} className="grid gap-4 rounded-lg border bg-card p-4 sm:p-5">
-            <div className="grid gap-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <h2 className="font-heading text-lg font-medium">{model.title}</h2>
+        </Alert> : <>
+          {section === 'models' && (runtime?.model_catalog ?? []).map(model => <Card key={model.id}>
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center gap-2 text-lg">
+                <h2>{model.title}</h2>
                 <Badge variant="outline">Image to 3D</Badge>
                 {model.status === 'experimental_opt_in' && <Badge variant="outline">Experimental</Badge>}
-              </div>
-              <p className="text-muted-foreground">Generate a textured GLB from a reference image. Once installed, generation runs locally.</p>
-            </div>
-            <div className="grid gap-3 lg:grid-cols-2">
+              </CardTitle>
+              <CardDescription>Generate a textured GLB from a reference image. Once installed, generation runs locally.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3 lg:grid-cols-2">
               {profileIds.filter(id => model.backend_ids.includes(id)).map(id => {
                 const backend = runtime?.model_backends.find(item => item.id === id);
                 if (!backend) return null;
-                return <article key={id} className="grid content-start gap-3 rounded-md border bg-background p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div><h3 className="font-medium">{profiles[id].title}</h3><p className="text-xs text-muted-foreground">{profiles[id].platform}</p></div>
-                    <Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend)}</Badge>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
+                return <Card key={id} role="article" size="sm" className="bg-background">
+                  <CardHeader>
+                    <CardTitle className="min-w-0"><h3>{profiles[id].title}</h3></CardTitle>
+                    <CardDescription>{profiles[id].platform}</CardDescription>
+                    <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend)}</Badge></CardAction>
+                  </CardHeader>
+                  <CardFooter className="flex-wrap gap-2">
                     {runtimeSetupStage(backend) === 'environment' && <Button onClick={() => onRuntimeAction(id, 'setup')} disabled={disabled}>Set up {id === 'pixal3d-cuda' ? 'CUDA' : 'Python'} environment</Button>}
                     {(backend.installable || backend.local_files?.remove_models_available) && <Button variant="outline" onClick={() => onVisit('storage', id)}>{backend.ready ? 'Manage files' : 'View downloads'}</Button>}
-                  </div>
-                </article>;
+                  </CardFooter>
+                </Card>;
               })}
-            </div>
-          </section>)}
-          {section === 'models' && !runtime?.model_catalog?.length && <p className="text-muted-foreground">No generation models reported by the local engine.</p>}
+            </CardContent>
+          </Card>)}
+          {section === 'models' && !runtime?.model_catalog?.length && <Empty><EmptyHeader><EmptyDescription>No generation models reported by the local engine.</EmptyDescription></EmptyHeader></Empty>}
           {section !== 'models' && <Field className="max-w-xs">
             <FieldLabel htmlFor="settings-backend">Backend</FieldLabel>
             <NativeSelect id="settings-backend" className="w-full" value={selectedId} onChange={event => {
@@ -305,55 +313,53 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
               {profileIds.map(id => <NativeSelectOption value={id} key={id}>{profiles[id].title}</NativeSelectOption>)}
             </NativeSelect>
           </Field>}
-          {section !== 'models' && !selected && <p className="text-muted-foreground">The local engine did not report this backend.</p>}
+          {section !== 'models' && !selected && <Empty><EmptyHeader><EmptyDescription>The local engine did not report this backend.</EmptyDescription></EmptyHeader></Empty>}
           {section === 'connections' && selected && <HuggingFaceConnection key={selectedId}
             backend={selected} account={accounts[selectedId]} disabled={disabled}
             browserSession={browserLogin?.backend === selectedId && browserActive ? browserLogin.session : null}
             cancelling={pending} onStartBrowser={() => startBrowserLogin(selectedId)} onCancelBrowser={cancelBrowserLogin}
             onCheck={token => verifyConnection(selectedId, token)}
-            onDisconnect={() => openRemoval(selectedId, 'huggingface')} />}
+            onDisconnect={trigger => openRemoval(selectedId, 'huggingface', trigger)} />}
           {section === 'storage' && selected && <ModelStorage key={selectedId} api={api} backend={selected} id={selectedId}
             disabled={disabled}
             onDownload={() => onRuntimeAction(selectedId, 'download')} onConvert={() => onRuntimeAction(selectedId, 'convert')}
             onMultiview={() => onRuntimeAction(selectedId, 'multiview')}
             onSettings={onVisit}
-            onRemove={() => openRemoval(selectedId, 'model-files')} />}
-          {section === 'storage' && <section className="grid gap-2" aria-labelledby="runtime-activity-heading">
-            <h2 id="runtime-activity-heading" className="font-heading text-base font-medium">Recent activity</h2>
-            {runtimeJobs.length ? <ul className="divide-y rounded-lg border bg-card">
-              {runtimeJobs.map(job => <li className="grid gap-1 px-3 py-2" key={job.id}>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span>{operationLabel(job.operation)}</span><Badge variant="outline">{job.state === 'succeeded' ? 'Complete' : job.state}</Badge>
-                </div>
-                {job.error?.message && <p className="wrap-anywhere text-xs text-muted-foreground">{job.error.message}</p>}
-              </li>)}
-            </ul> : <p className="text-muted-foreground">No setup or download jobs yet.</p>}
-          </section>}
+            onRemove={trigger => openRemoval(selectedId, 'model-files', trigger)} />}
+          {section === 'storage' && <Card role="region" aria-labelledby="runtime-activity-heading">
+            <CardHeader><CardTitle className="text-base"><h2 id="runtime-activity-heading">Recent activity</h2></CardTitle></CardHeader>
+            <CardContent>
+              {runtimeJobs.length ? <ItemGroup>
+                {runtimeJobs.map(job => <JobListItem key={job.id} job={job} title={operationLabel(job.operation)} />)}
+              </ItemGroup> : <Empty className="p-3"><EmptyHeader><EmptyDescription>No setup or download jobs yet.</EmptyDescription></EmptyHeader></Empty>}
+            </CardContent>
+          </Card>}
         </>}
       </main>
     </div>
-    <Dialog open={removal !== null} onOpenChange={open => { if (!open && !pending) setRemoval(null); }}>
-      <DialogContent showCloseButton={false} onOpenAutoFocus={event => {
-        event.preventDefault();
-        cancelRemoval.current?.focus();
-      }} onCloseAutoFocus={event => {
+    <AlertDialog open={removal !== null} onOpenChange={open => { if (!open && !pending) setRemoval(null); }}>
+      <AlertDialogContent className="w-[calc(100%-2rem)]"
+        onEscapeKeyDown={event => { if (pending) event.preventDefault(); }} onCloseAutoFocus={event => {
         event.preventDefault();
         const trigger = removalTrigger.current;
-        if (trigger?.isConnected) trigger.focus();
+        if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus();
         else heading.current?.focus();
       }}>
-        <DialogHeader>
-          <DialogTitle>{removal?.scope === 'huggingface' ? 'Disconnect Hugging Face?' : 'Remove model files?'}</DialogTitle>
-          <DialogDescription>{removal && (removal.scope === 'huggingface'
+        <AlertDialogHeader>
+          <AlertDialogTitle>{removal?.scope === 'huggingface' ? 'Disconnect Hugging Face?' : 'Remove model files?'}</AlertDialogTitle>
+          <AlertDialogDescription>{removal && (removal.scope === 'huggingface'
             ? `Remove the locally saved Hugging Face credentials for ${profiles[removal.backend].title}. This does not revoke the token on Hugging Face or remove downloaded models.`
-            : `Remove Pixal3D weights and transfer caches for ${profiles[removal.backend].title}. The Python environment, Hugging Face connection, and all Studio assets stay in place.`)}</DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <DialogClose asChild><Button ref={cancelRemoval} variant="outline" disabled={pending}>Cancel</Button></DialogClose>
-          <Button variant="destructive" onClick={confirmRemoval} disabled={disabled}>{pending ? 'Removing…' : removal?.scope === 'huggingface' ? 'Disconnect' : 'Remove files'}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+            : `Remove Pixal3D weights and transfer caches for ${profiles[removal.backend].title}. The Python environment, Hugging Face connection, and all Studio assets stay in place.`)}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" disabled={disabled} onClick={event => {
+            event.preventDefault();
+            confirmRemoval();
+          }}>{pending ? 'Removing…' : removal?.scope === 'huggingface' ? 'Disconnect' : 'Remove files'}</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </div>;
 }
 
@@ -388,7 +394,7 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
   backend: Backend; account?: AccountStatus; disabled: boolean;
   browserSession: HuggingFaceBrowserLogin | null; cancelling: boolean;
   onStartBrowser: () => void; onCancelBrowser: () => void;
-  onCheck: (token?: string) => void; onDisconnect: () => void;
+  onCheck: (token?: string) => void; onDisconnect: (trigger: HTMLButtonElement) => void;
 }) {
   const local = backend.local_files;
   const canConnect = backend.installable && backend.environment_ready;
@@ -398,22 +404,24 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
     event.currentTarget.reset();
     if (typeof token === 'string') onCheck(token);
   }
-  return <section className="grid gap-4 rounded-lg border bg-card p-4 sm:p-5" aria-label="Hugging Face connection">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <div><h2 className="font-heading text-base font-medium">Hugging Face</h2><p className="text-muted-foreground">Credentials are stored locally and separately for each backend.</p></div>
-      <Badge variant="outline">{account === 'connected' ? 'Signed in' : local?.token_saved ? 'Token saved' : local?.credentials_managed === false ? 'Custom storage' : 'Not connected'}</Badge>
-    </div>
+  return <Card role="region" aria-label="Hugging Face connection">
+    <CardHeader>
+      <CardTitle className="min-w-0 text-base"><h2>Hugging Face</h2></CardTitle>
+      <CardDescription>Credentials are stored locally and separately for each backend.</CardDescription>
+      <CardAction><Badge variant="outline">{account === 'connected' ? 'Signed in' : local?.token_saved ? 'Token saved' : local?.credentials_managed === false ? 'Custom storage' : 'Not connected'}</Badge></CardAction>
+    </CardHeader>
+    <CardContent className="grid gap-4">
     {canConnect ? <>
       <div className="grid gap-3">
         <p className="text-muted-foreground">Sign in through Hugging Face without creating or copying a token. The first sign-in prepares a private Hugging Face CLI.</p>
         {browserSession?.state === 'preparing' && <p role="status">Preparing browser sign-in…</p>}
         {browserSession?.state === 'awaiting_authorization' && (
-          <div className="grid justify-items-start gap-2 rounded-md border bg-background p-3">
+          <Card size="sm" className="bg-background"><CardContent className="grid justify-items-start gap-2">
             <p>Enter this one-time code on Hugging Face:</p>
             <code className="text-lg font-semibold tracking-widest select-all">{browserSession.user_code}</code>
             <p className="text-xs text-muted-foreground">The code is valid for up to {Math.ceil(browserSession.expires_in / 60)} minutes. MeshHarbor waits for approval.</p>
             <Button asChild><a href="https://huggingface.co/oauth/device" target="_blank" rel="noreferrer">Open Hugging Face</a></Button>
-          </div>
+          </CardContent></Card>
         )}
         <div className="flex flex-wrap gap-2">
           {browserSession
@@ -432,14 +440,15 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
       </Disclosure>
     </> : <p className="text-muted-foreground">{backend.installable ? 'Set up the Python environment in Models before connecting a token.' : 'This backend cannot verify a token on this computer.'}</p>}
     {account === 'checking' && <p role="status" className="text-muted-foreground">{accountMessages.checking}</p>}
-    {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={onDisconnect}>Disconnect locally</Button></div>}
+    {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={event => onDisconnect(event.currentTarget)}>Disconnect locally</Button></div>}
     {local?.credentials_managed === false && <p className="text-muted-foreground">Browser sign-in and local disconnect require the default managed credential directory. For this profile, use an access token instead.</p>}
-  </section>;
+    </CardContent>
+  </Card>;
 }
 
 function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMultiview, onSettings, onRemove }: {
   api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
-  onDownload: () => void; onConvert: () => void; onMultiview: () => void; onSettings: VisitSettings; onRemove: () => void;
+  onDownload: () => void; onConvert: () => void; onMultiview: () => void; onSettings: VisitSettings; onRemove: (trigger: HTMLButtonElement) => void;
 }) {
   const [consent, setConsent] = useState(false);
   const [multiviewConsent, setMultiviewConsent] = useState(false);
@@ -472,11 +481,13 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMul
     };
   }, [api, backend, disabled, id, needsConnection, stage]);
 
-  return <section className="grid gap-4 rounded-lg border bg-card p-4 sm:p-5" aria-label="Model files">
-    <div className="flex flex-wrap items-start justify-between gap-2">
-      <div><h2 className="font-heading text-base font-medium">Pixal3D · {profiles[id].title}</h2><p className="text-muted-foreground">Up to {profiles[id].download} without cached files</p></div>
-      <Badge variant={backend.ready ? 'secondary' : 'outline'}>{backend.ready ? 'Installed' : backend.models_downloaded ? 'Files present' : local?.remove_models_available ? 'Cached files present' : 'Not installed'}</Badge>
-    </div>
+  return <Card role="region" aria-label="Model files">
+    <CardHeader>
+      <CardTitle className="min-w-0 text-base"><h2>Pixal3D · {profiles[id].title}</h2></CardTitle>
+      <CardDescription>Up to {profiles[id].download} without cached files</CardDescription>
+      <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{backend.ready ? 'Installed' : backend.models_downloaded ? 'Files present' : local?.remove_models_available ? 'Cached files present' : 'Not installed'}</Badge></CardAction>
+    </CardHeader>
+    <CardContent className="grid gap-4">
     {stage === 'unsupported' && <p className="text-muted-foreground">This backend is not supported on this computer.</p>}
     {stage === 'environment' && <div className="flex flex-wrap items-center gap-2"><p className="text-muted-foreground">Set up the Python environment first.</p><Button variant="outline" onClick={() => onSettings('models')}>View model setup</Button></div>}
     {stage === 'models' && <div className="grid justify-items-start gap-3">
@@ -521,8 +532,9 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMul
       </section>}
     {local?.remove_models_available && <div className="grid justify-items-start gap-2 border-t pt-3">
       <p className="text-muted-foreground">Removing model files does not remove the Python environment, saved credentials, or assets.</p>
-      <Button variant="destructive" disabled={disabled} onClick={onRemove}>{backend.models_downloaded ? 'Uninstall model files' : 'Clear cached model files'}</Button>
+      <Button variant="destructive" disabled={disabled} onClick={event => onRemove(event.currentTarget)}>{backend.models_downloaded ? 'Uninstall model files' : 'Clear cached model files'}</Button>
     </div>}
     {local?.model_files_managed === false && <p className="text-muted-foreground">Studio cannot remove files from custom or linked model directories.</p>}
-  </section>;
+    </CardContent>
+  </Card>;
 }

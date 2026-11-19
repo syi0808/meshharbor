@@ -1,4 +1,4 @@
-import { ArrowsClockwiseIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GearSixIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WrenchIcon } from '@phosphor-icons/react';
+import { ArrowDownIcon, ArrowsClockwiseIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GearSixIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WrenchIcon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   assetComparisonPairForSelection,
@@ -29,14 +29,18 @@ import {
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty';
+import { Card, CardContent } from '@/components/ui/card';
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group';
+import { Item, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@/components/ui/item';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Progress } from '@/components/ui/progress';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
+import { SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
 import { Slider } from '@/components/ui/slider';
 import { Spinner } from '@/components/ui/spinner';
 import { Toaster } from '@/components/ui/sonner';
@@ -45,6 +49,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { ModelPreview } from './ModelPreview';
 import { AssetGalleryCard } from './AssetGalleryCard';
 import { Disclosure } from './Disclosure';
+import { JobListItem } from './JobListItem';
 import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
 import { buildPosedInput, defaultViews, newView, PosedReferences, SingleReference, type ViewDraft } from './GenerationReferences';
@@ -1066,7 +1071,7 @@ export function App() {
     restoreInspectorFocus();
   }
   const jobFeedback = isRunning ? (
-    <div className="grid gap-2 rounded-lg border bg-card p-3 text-xs text-card-foreground">
+    <Card size="sm"><CardContent className="grid gap-2">
       <div className="flex flex-wrap items-center gap-2" role="status">
         {jobShowsProgress
           ? <Spinner aria-hidden="true" />
@@ -1078,14 +1083,14 @@ export function App() {
       {jobPollingIssue?.jobId === job.id && <p className="wrap-anywhere text-muted-foreground">{jobPollingIssue.message}</p>}
       {job.operation === 'image.generate' && job.state === 'running' && <p className="text-muted-foreground">Running locally. Generation can take several minutes.</p>}
       {isQueuedJobCancellable(job) && <Button variant="outline" size="sm" className="justify-self-start" onClick={() => void cancelJob()}>Cancel queued job</Button>}
-    </div>
+    </CardContent></Card>
   ) : null;
   const workbenchActivity = jobFeedback || importProgress ? <>
     {jobFeedback}
-    {importProgress && <div className="flex items-start gap-2 rounded-lg border bg-card p-3 text-xs" role="status">
+    {importProgress && <Card size="sm" role="status"><CardContent className="flex items-start gap-2">
       <Spinner aria-hidden="true" className="shrink-0" />
       <span className="min-w-0 wrap-anywhere">Importing {importProgress.current} of {importProgress.total}: {importProgress.fileName}</span>
-    </div>}
+    </CardContent></Card>}
   </> : null;
 
   function renderAssetCard(asset: Asset) {
@@ -1106,13 +1111,12 @@ export function App() {
             </Disclosure>}
           {recentJobs.length === 0
             ? <Empty><EmptyHeader><EmptyDescription>No saved jobs yet.</EmptyDescription></EmptyHeader></Empty>
-            : <div className="grid gap-2">{recentJobs.slice(0, 8).map((savedJob) => (
-              <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-2 data-[selected=true]:bg-muted" data-selected={savedJob.id === job?.id} key={savedJob.id}>
-                <div className="grid min-w-0 flex-1 gap-1 wrap-anywhere [&>strong]:font-medium [&>small]:text-muted-foreground"><strong>{studioOperationLabel(savedJob.operation)}</strong><small>Updated {formatJobTime(savedJob.updated_at)}</small></div>
-                <div className="shrink-0 text-right text-xs tabular-nums text-muted-foreground data-[state=failed]:text-destructive [&>strong]:block" data-state={savedJob.state}><strong>{savedJob.state === 'succeeded' ? 'Complete' : savedJob.state[0].toUpperCase() + savedJob.state.slice(1)}</strong>{isActiveJob(savedJob) && displaysJobProgress(savedJob.operation) && <span>{savedJob.progress}%</span>}</div>
+            : <ItemGroup>{recentJobs.slice(0, 8).map((savedJob) => (
+              <JobListItem key={savedJob.id} job={savedJob} title={studioOperationLabel(savedJob.operation)} showUpdated
+                selected={savedJob.id === job?.id} progress={isActiveJob(savedJob) && displaysJobProgress(savedJob.operation) ? savedJob.progress : undefined}>
                 <Button variant="ghost" size="sm" onClick={() => { void openRecentJob(savedJob.id); if (inspectorIsSheet) setInspector(null); }} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</Button>
-              </div>
-            ))}</div>}
+              </JobListItem>
+            ))}</ItemGroup>}
         </section>
     );
     return <>
@@ -1190,18 +1194,13 @@ export function App() {
                 }))} />
             </section>
           </>}
-          {canGenerate && !(isRunning && job.operation === 'image.generate') && <div className="sticky bottom-0 -mx-4 -mb-4 border-t bg-sidebar p-4">
-            <Button className="w-full" disabled={!generationAssetId || !generationPayload || busy || connection !== 'connected' || isRunning}
-              onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>
-          </div>}
-          {!canGenerate && <div className="grid gap-2 text-muted-foreground">
-            <p>No generation model is ready. You can still open and edit existing GLBs.</p>
-            <Button variant="secondary" onClick={() => openSettings('models')}>Open model setup</Button>
-          </div>}
-          {generationResult?.result?.asset_id && <Button variant="secondary" className="w-full" disabled={busy || isRunning} onClick={() => {
-            closeInspector();
-            void openRecentJob(generationResult.id);
-          }}>View generated model</Button>}
+          {!canGenerate && <Empty className="border">
+            <EmptyHeader>
+              <EmptyTitle>No generation model is ready.</EmptyTitle>
+              <EmptyDescription>You can still open and edit existing GLBs.</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent><Button variant="secondary" onClick={() => openSettings('models')}>Open model setup</Button></EmptyContent>
+          </Empty>}
         </section>}
 
       {openInspector === 'tools' && <>
@@ -1295,16 +1294,32 @@ export function App() {
       ))}
     </SidebarMenu>
   </div>;
+  const showGenerateAction = canGenerate && !(isRunning && job.operation === 'image.generate');
+  const inspectorContent = <>
+    <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1"
+      viewportProps={{ tabIndex: 0, role: 'region', 'aria-label': `${inspectorTitle} content`, className: 'overscroll-contain [&>div]:block!' }}>
+      {inspectorIsSheet && workbenchActivity && <div className="grid gap-2 px-4">{workbenchActivity}</div>}
+      {inspectorBody()}
+    </ScrollArea>
+    {openInspector === 'generation' && (showGenerateAction || generationResult?.result?.asset_id) && <SidebarFooter className="shrink-0 border-t px-4 py-3">
+      {showGenerateAction && <Button disabled={!generationAssetId || !generationPayload || busy || connection !== 'connected' || isRunning}
+        onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
+      {generationResult?.result?.asset_id && <Button variant="secondary" disabled={busy || isRunning} onClick={() => {
+        closeInspector();
+        void openRecentJob(generationResult.id);
+      }}>View generated model</Button>}
+    </SidebarFooter>}
+  </>;
   const desktopInspector = openInspector && !inspectorIsSheet ? (
-    <aside className="h-full min-w-0 overflow-auto overscroll-contain" id="workbench-inspector" data-tool={openInspector}
+    <aside className="flex h-full min-h-0 min-w-0 flex-col" id="workbench-inspector" data-tool={openInspector}
       aria-labelledby="workbench-inspector-title" onKeyDown={event => {
         if (event.key === 'Escape') { event.stopPropagation(); closeInspector(); }
       }}>
-      <SidebarHeader className="flex-row items-center justify-between border-b px-4 py-2 font-heading text-sm font-medium">
+      <SidebarHeader className="shrink-0 flex-row items-center justify-between border-b px-4 py-2 font-heading text-sm font-medium">
         <h2 id="workbench-inspector-title">{inspectorTitle}</h2>
         <Button variant="ghost" size="icon-sm" title={closeInspectorLabel} aria-label={closeInspectorLabel} onClick={closeInspector}><SidebarSimpleIcon aria-hidden="true" /></Button>
       </SidebarHeader>
-      {inspectorBody()}
+      {inspectorContent}
     </aside>
   ) : null;
 
@@ -1374,13 +1389,13 @@ export function App() {
                     <Button variant="ghost" size="icon-sm" aria-label="Refresh assets" title="Refresh assets"
                       onClick={() => void refreshAssets()} disabled={connection !== 'connected'}><ArrowsClockwiseIcon aria-hidden="true" /></Button>
                   </div>
-                {showLibraryFilters && <><form role="search" aria-label="Asset inventory" className="relative" onSubmit={(event) => {
+                {showLibraryFilters && <><form role="search" aria-label="Asset inventory" onSubmit={(event) => {
                   event.preventDefault();
                   applyAssetBrowserFilters({ ...assetFilters, query: assetSearchInput.trim() });
                 }}>
-                    <Input
+                  <InputGroup>
+                    <InputGroupInput
                       id="asset-filename"
-                      className="pr-8"
                       aria-label="Search assets by filename"
                       type="search"
                       maxLength={256}
@@ -1392,8 +1407,11 @@ export function App() {
                       }}
                       placeholder="Search assets"
                     />
-                  <Button type="submit" aria-label="Search" title="Search" variant="ghost" size="icon-xs"
-                    className="absolute top-1/2 right-1 -translate-y-1/2" disabled={connection !== 'connected'}><MagnifyingGlassIcon aria-hidden="true" /></Button>
+                    <InputGroupAddon align="inline-end" className="py-0">
+                      <InputGroupButton type="submit" aria-label="Search" title="Search" size="icon-xs"
+                        disabled={connection !== 'connected'}><MagnifyingGlassIcon aria-hidden="true" /></InputGroupButton>
+                    </InputGroupAddon>
+                  </InputGroup>
                 </form>
                 <Disclosure className="min-w-0 text-muted-foreground" title={hasActiveAssetFilters ? 'Filters · Active' : 'Filters'}>
                   <div className="mt-2 grid gap-2">
@@ -1506,17 +1524,20 @@ export function App() {
                   </div>
                 )}
               {reportCard && (
-                <Disclosure className="max-h-60 shrink-0 overflow-auto border-t bg-card p-3 text-xs" label={`${reportCard.title} result`} title="Operation report">
+                <Disclosure className="min-w-0 shrink-0 border-t bg-card p-3 text-xs" label={`${reportCard.title} result`} title="Operation report">
+                  <ScrollArea type="auto" viewportProps={{ tabIndex: 0, role: 'region', 'aria-label': 'Report details', className: 'max-h-48 overscroll-contain pr-2 [&>div]:block!' }}>
                   <div className="mt-3 font-medium"><strong>{reportCard.title} complete</strong></div>
                   {!reportCard.reportAvailable && <p className="mt-2 text-muted-foreground">The operation completed, but its report payload is missing or unreadable.</p>}
-                  <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  <ItemGroup className="mt-3 grid grid-cols-2 sm:grid-cols-3" aria-label="Operation metrics">
                     {reportCard.metrics.map((metric) => (
-                      <div className="grid min-w-0 gap-1 rounded-md border p-2 break-words [&>span]:text-muted-foreground" key={metric.label}>
-                        <span>{metric.label}</span>
-                        <strong>{metric.value}</strong>
-                      </div>
+                      <Item key={metric.label} role="listitem" variant="outline" size="xs" className="min-w-0">
+                        <ItemContent className="min-w-0 wrap-anywhere">
+                          <ItemDescription className="line-clamp-none">{metric.label}</ItemDescription>
+                          <ItemTitle className="line-clamp-none max-w-full">{metric.value}</ItemTitle>
+                        </ItemContent>
+                      </Item>
                     ))}
-                  </div>
+                  </ItemGroup>
                   {reportCard.lists.map((list) => (
                     <div className="mt-3 grid gap-1 border-t pt-2 text-muted-foreground [&>ul]:ml-4 [&>ul]:list-disc" key={list.label}>
                       <strong>{list.label}</strong>
@@ -1541,6 +1562,7 @@ export function App() {
                       <div><dt>Result</dt><dd><code>{reportCard.resultAssetId ?? 'Not reported'}</code></dd></div>
                     </dl>
                   </Disclosure>
+                  </ScrollArea>
                 </Disclosure>
               )}
               </div>}
@@ -1550,26 +1572,28 @@ export function App() {
             </WorkbenchLayout>
           {showInspectorSheet && !settingsSection && <Sheet open={showInspectorSheet} onOpenChange={open => { if (!open) setInspector(null); }}>
             <SheetContent side="left" id="workbench-inspector" data-tool={openInspector} aria-describedby={undefined}
-              className="overflow-auto overscroll-contain max-sm:w-full" onCloseAutoFocus={event => {
+              className="min-h-0 overflow-hidden max-sm:w-full" onCloseAutoFocus={event => {
               event.preventDefault();
               restoreInspectorFocus();
             }}>
-              <SheetHeader><SheetTitle>{inspectorTitle}</SheetTitle></SheetHeader>
-              {workbenchActivity && <div className="grid gap-2 px-4">{workbenchActivity}</div>}
-              {inspectorBody()}
+              <SheetHeader className="shrink-0"><SheetTitle>{inspectorTitle}</SheetTitle></SheetHeader>
+              {inspectorContent}
             </SheetContent>
           </Sheet>}
       </main>
-      {dragging && <div className="pointer-events-none fixed inset-0 z-30 grid place-items-center bg-background/80 p-4"><div className="grid gap-2 rounded-lg border border-dashed bg-card p-6 text-center text-sm"><span className="text-lg text-primary">↓</span><strong>Drop a GLB or source image here</strong><span>Import starts locally on your computer</span></div></div>}
+      {dragging && <div className="pointer-events-none fixed inset-0 z-30 grid place-items-center bg-background/80 p-4">
+        <Empty className="w-fit border bg-card">
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><ArrowDownIcon className="text-primary" aria-hidden="true" /></EmptyMedia>
+            <EmptyTitle>Drop a GLB or source image here</EmptyTitle>
+            <EmptyDescription>Import starts locally on your computer</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      </div>}
 
       </div>
     </>
   );
-}
-
-function formatJobTime(timestamp: string): string {
-  const date = new Date(Number(timestamp));
-  return Number.isNaN(date.getTime()) ? 'time unavailable' : date.toLocaleString();
 }
 
 function displaysJobProgress(operation: string): boolean {
