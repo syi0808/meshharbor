@@ -1217,22 +1217,27 @@ export function App() {
   const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools"
     className={sidebar.narrow
       ? 'flex gap-1 p-2'
-      : 'group absolute top-0 left-0 grid w-full gap-1 overflow-hidden bg-sidebar p-2 transition-[width] duration-150 hover:w-40 hover:rounded-br-lg hover:shadow-lg has-[:focus-visible]:w-40 has-[:focus-visible]:rounded-br-lg has-[:focus-visible]:shadow-lg motion-reduce:transition-none'}>
+      : 'group absolute inset-y-0 left-0 flex w-full flex-col gap-1 overflow-hidden bg-sidebar p-2 transition-[width] duration-150 after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:border-r after:border-sidebar-border hover:w-32 has-[:focus-visible]:w-32 motion-reduce:transition-none'}>
       {([
         { key: 'generation', label: 'New model', icon: ImageSquareIcon },
         { key: 'optimize', label: 'Optimize', icon: SlidersHorizontalIcon },
         { key: 'tools', label: 'More tools', icon: WrenchIcon },
         { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
       ] as const).map(({ key, label, icon: Icon }) => (
-        <Button key={key} type="button" size="sm" variant={activeTool === key ? 'secondary' : 'ghost'}
-          className={sidebar.narrow ? 'h-auto min-w-0 flex-1 flex-col gap-1 px-1 py-1.5' : 'w-full justify-start gap-2 overflow-hidden px-1.5'}
+        <Button key={key} type="button" size="sm" variant={sidebar.narrow && activeTool === key ? 'secondary' : 'ghost'}
+          className={sidebar.narrow
+            ? 'h-auto min-w-0 flex-1 flex-col gap-1 px-1 py-1.5'
+            : 'h-8 w-full min-w-0 justify-start gap-2 overflow-hidden border-0 px-0 hover:bg-transparent aria-expanded:bg-transparent dark:hover:bg-transparent'}
           aria-label={label} aria-pressed={activeTool === key} aria-expanded={openInspector === key}
           aria-controls={openInspector === key ? 'workbench-inspector' : undefined}
           aria-haspopup={inspectorIsSheet ? 'dialog' : undefined}
           disabled={(key === 'optimize' || key === 'tools') && selectedAsset?.kind !== 'mesh'}
           onClick={event => toggleInspector(key, event.currentTarget)}>
-          <Icon aria-hidden="true" className="shrink-0" />
-          <span aria-hidden="true" className={sidebar.narrow ? 'text-[0.625rem]' : 'opacity-0 transition-opacity group-hover:opacity-100 group-has-[:focus-visible]:opacity-100 motion-reduce:transition-none'}>{label}</span>
+          <span data-slot="tool-icon" aria-hidden="true" className={sidebar.narrow ? undefined
+            : 'grid size-8 shrink-0 place-items-center rounded-md transition-colors group-hover/button:bg-sidebar-accent group-aria-pressed/button:bg-sidebar-accent group-aria-pressed/button:text-primary motion-reduce:transition-none'}>
+            <Icon className={sidebar.narrow ? 'shrink-0' : 'size-4'} />
+          </span>
+          <span data-slot="tool-label" aria-hidden="true" className={sidebar.narrow ? 'text-[0.625rem]' : 'opacity-0 transition-opacity group-hover:opacity-100 group-has-[:focus-visible]:opacity-100 motion-reduce:transition-none'}>{label}</span>
         </Button>
       ))}
   </div>;

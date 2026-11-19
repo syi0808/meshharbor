@@ -45,19 +45,32 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   await expect(jobs).toHaveAttribute('aria-expanded', 'false');
 });
 
-test('the model rail expands over the workbench without shifting it', async ({ page, studioOrigin }) => {
+test('the full-height model rail expands over the workbench and keeps square highlights', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   const rail = page.getByRole('group', { name: 'Model tools' });
   const job = rail.getByRole('button', { name: 'Jobs' });
-  const label = job.locator('span');
+  const label = job.locator('[data-slot="tool-label"]');
+  const icon = job.locator('[data-slot="tool-icon"]');
+  const selectedIcon = rail.getByRole('button', { name: 'New model' }).locator('[data-slot="tool-icon"]');
   const viewport = page.getByRole('region', { name: 'Start a model' });
   await expect(rail.locator('[aria-pressed=true]')).toHaveCount(1);
   await expect(label).toHaveCSS('opacity', '0');
   const collapsed = await rail.boundingBox();
   const initialViewport = await viewport.boundingBox();
+  const collapsedIcon = await icon.boundingBox();
+  expect(collapsedIcon.width).toBe(collapsedIcon.height);
+  expect(collapsed.height).toBe(initialViewport.height);
+  await expect(icon).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  const highlight = await selectedIcon.evaluate(element => getComputedStyle(element).backgroundColor);
+  expect(highlight).not.toBe('rgba(0, 0, 0, 0)');
   await job.hover();
   await expect(label).toHaveCSS('opacity', '1');
-  expect((await rail.boundingBox()).width).toBeGreaterThan(collapsed.width);
+  const expanded = await rail.boundingBox();
+  expect(expanded.width).toBeGreaterThan(collapsed.width);
+  expect(expanded.height).toBe(collapsed.height);
+  expect(await icon.boundingBox()).toEqual(collapsedIcon);
+  await expect(icon).toHaveCSS('background-color', highlight);
+  await expect(job).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
   expect(await viewport.boundingBox()).toEqual(initialViewport);
   await expect(page.getByRole('tooltip')).toHaveCount(0);
   await page.mouse.move(600, 20);
