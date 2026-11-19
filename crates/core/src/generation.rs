@@ -7,8 +7,10 @@ use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
-    time::Instant,
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,7 @@ use crate::{
     generation_views::PosedGenerationInput,
     huggingface_download::{PIXAL_CHECKPOINTS, PIXAL_REPOSITORY, PIXAL_REVISION},
     inspect_asset,
+    job_execution::JobExecution,
 };
 use crate::{cuda_runtime::Pixal3dCudaRuntimeManager, runtime::Pixal3dRuntimeManager};
 
@@ -215,7 +218,7 @@ impl Pixal3dMlxRuntime {
         input: &Path,
         output: &Path,
         options: &GenerationOptions,
-        on_stage: &mut impl FnMut(&str),
+        execution: JobExecution<'_>,
     ) -> CoreResult<GenerationCommandReport> {
         let readiness = self.readiness();
         if !readiness.ready {
@@ -287,11 +290,7 @@ impl Pixal3dMlxRuntime {
             .arg("--hole-fill-backend")
             .arg("fan");
         generation_tuning::add_arguments(&mut command, options, "pixal3d-mlx");
-        let status = run_generation_command(&mut command, on_stage).map_err(|error| {
-            CoreError::OperationUnavailable(format!(
-                "Could not start the configured Pixal3D MLX Python runtime: {error}"
-            ))
-        })?;
+        let status = run_generation_command(&mut command, execution)?;
 
         if !status.success() {
             let message = format!(
@@ -525,32 +524,84 @@ fn stage_reference(
     Ok(input_path)
 }
 
-/// Generates a textured GLB from a previously imported local image using the
-/// explicitly selected, already prepared Pixal3D backend.
 pub(crate) fn run_generation_command(
     command: &mut Command,
-    on_stage: &mut impl FnMut(&str),
-) -> std::io::Result<ExitStatus> {
+    execution: JobExecution<'_>,
+) -> CoreResult<ExitStatus> {
+    if !execution.is_tracked() {
+        return Ok(command
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()?);
+    }
+    execution.checkpoint()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
-    if let Some(stdout) = child.stdout.take() {
-        let mut reader = BufReader::new(stdout);
-        let mut line = Vec::new();
-        while reader
-            .read_until(b'\n', &mut line)
-            .is_ok_and(|len| len != 0)
-        {
-            if let Ok(line) = std::str::from_utf8(&line) {
-                if let Some(stage) = generation_worker_stage(line.trim()) {
-                    on_stage(stage);
+    let stdout = child
+        .stdout
+        .take()
+        .expect("generation worker stdout is piped");
+    let (stages, observed) = mpsc::channel();
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = Vec::new();
+            while reader
+                .read_until(b'\n', &mut line)
+                .is_ok_and(|len| len != 0)
+            {
+                if let Ok(line) = std::str::from_utf8(&line) {
+                    if let Some(stage) = generation_worker_stage(line.trim()) {
+                        if stages.send(stage).is_err() {
+                            break;
+                        }
+                    }
+                }
+                line.clear();
+            }
+        });
+        loop {
+            let update = execution.checkpoint().and_then(|_| {
+                if let Some(stage) = observed.try_iter().last() {
+                    execution.stage(stage)?;
+                }
+                Ok(())
+            });
+            if let Err(error) = update {
+                stop_generation_worker(&mut child)?;
+                return Err(error);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(error) => {
+                    stop_generation_worker(&mut child)?;
+                    return Err(error.into());
                 }
             }
-            line.clear();
+        }
+    })
+}
+
+fn stop_generation_worker(child: &mut Child) -> CoreResult<()> {
+    #[cfg(unix)]
+    if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+        let stopped = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        if matches!(stopped, Ok(()) | Err(rustix::io::Errno::SRCH)) {
+            child.wait()?;
+            return Ok(());
         }
     }
-    child.wait()
+    child.kill()?;
+    child.wait()?;
+    Ok(())
 }
 
 fn generation_worker_stage(line: &str) -> Option<&'static str> {
@@ -578,9 +629,9 @@ pub(crate) fn generate_pixal3d_image(
     core: &OperationCore,
     input_asset_id: &str,
     options: GenerationOptions,
-    mut on_stage: impl FnMut(&str),
+    execution: JobExecution<'_>,
 ) -> CoreResult<GenerationResult> {
-    on_stage("prepare_references");
+    execution.stage("prepare_references")?;
     let selected_backend_id = options.validated_profile()?.id;
     options.validate_primary_image(input_asset_id)?;
     let source = core
@@ -596,6 +647,7 @@ pub(crate) fn generate_pixal3d_image(
     let mut input_paths = vec![stage_reference(core, &source, &work_dir, 0)?];
     if let Some(input) = &options.view_input {
         for (index, reference) in input.references.iter().enumerate().skip(1) {
+            execution.checkpoint()?;
             let image = core
                 .store()
                 .get_asset(&reference.asset_id)?
@@ -606,7 +658,7 @@ pub(crate) fn generate_pixal3d_image(
         }
     }
     let output_path = work_dir.join("result.glb");
-    on_stage("initialize_model");
+    execution.stage("initialize_model")?;
 
     let elapsed_ms = match selected_backend_id {
         "pixal3d-mlx" => {
@@ -618,16 +670,16 @@ pub(crate) fn generate_pixal3d_image(
                 )));
             }
             runtime
-                .generate(&input_paths[0], &output_path, &options, &mut on_stage)?
+                .generate(&input_paths[0], &output_path, &options, execution)?
                 .elapsed_ms
         }
         "pixal3d-cuda" => {
             let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());
-            runtime.generate_from_references(&input_paths, &work_dir, &options, &mut on_stage)?
+            runtime.generate_from_references(&input_paths, &work_dir, &options, execution)?
         }
         _ => unreachable!("backend selector was validated above"),
     };
-    on_stage("validate_output");
+    execution.stage("validate_output")?;
     let output = std::fs::read(&output_path)?;
     let descriptor = inspect_asset("result.glb", &output)?;
     if descriptor.kind != AssetKind::Mesh {
@@ -640,7 +692,8 @@ pub(crate) fn generate_pixal3d_image(
         .rsplit_once('.')
         .map(|(stem, _)| format!("{stem}-generated.glb"))
         .unwrap_or_else(|| "generated.glb".into());
-    on_stage("save_model");
+    execution.stage("save_model")?;
+    execution.begin_commit()?;
     let asset = core.store().import_derived_asset(
         &output_name,
         &output,
@@ -735,7 +788,7 @@ mod tests {
                     backend_id: backend_id.into(),
                     ..GenerationOptions::default()
                 },
-                |_| {},
+                JobExecution::default(),
             );
             assert!(
                 matches!(result, Err(CoreError::Conflict(_))),
@@ -818,7 +871,7 @@ mod tests {
                     backend_id: backend_id.into(),
                     ..GenerationOptions::default()
                 },
-                |_| {},
+                JobExecution::default(),
             );
             assert!(
                 matches!(result, Err(CoreError::InvalidInput(_))),

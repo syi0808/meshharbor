@@ -11,6 +11,7 @@ mod glb;
 mod huggingface_access;
 mod huggingface_browser;
 mod huggingface_download;
+mod job_execution;
 mod model_storage;
 mod operation;
 mod parts;

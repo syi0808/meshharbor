@@ -503,7 +503,12 @@ impl Pixal3dCudaRuntimeManager {
         output_dir: &Path,
         options: &crate::GenerationOptions,
     ) -> CoreResult<u128> {
-        self.generate_from_references(&[input.to_path_buf()], output_dir, options, &mut |_| {})
+        self.generate_from_references(
+            &[input.to_path_buf()],
+            output_dir,
+            options,
+            Default::default(),
+        )
     }
 
     pub(crate) fn generate_from_references(
@@ -511,7 +516,7 @@ impl Pixal3dCudaRuntimeManager {
         inputs: &[PathBuf],
         output_dir: &Path,
         options: &crate::GenerationOptions,
-        on_stage: &mut impl FnMut(&str),
+        execution: crate::job_execution::JobExecution<'_>,
     ) -> CoreResult<u128> {
         let readiness = self.readiness();
         if !readiness.ready {
@@ -590,12 +595,7 @@ impl Pixal3dCudaRuntimeManager {
                 .args(["--camera", "fixed"]);
         }
         generation_tuning::add_arguments(&mut command, options, "pixal3d-cuda");
-        let status =
-            crate::generation::run_generation_command(&mut command, on_stage).map_err(|error| {
-                CoreError::OperationUnavailable(format!(
-                    "Could not start Pixal3D CUDA inference: {error}"
-                ))
-            })?;
+        let status = crate::generation::run_generation_command(&mut command, execution)?;
         if !status.success() {
             return Err(CoreError::OperationUnavailable(format!(
                 "Pixal3D CUDA inference failed ({status}); see the command output above."

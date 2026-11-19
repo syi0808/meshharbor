@@ -17,6 +17,9 @@ uuid.workspace = true
 meshharbor-atlas-baker = { path = "../atlas-baker" }
 sigstore-verify = "=0.15.1"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.6", features = ["process"] }
+
 [build-dependencies]
 serde_json.workspace = true
 sha2.workspace = true

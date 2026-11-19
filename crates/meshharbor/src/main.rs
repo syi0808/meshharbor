@@ -665,7 +665,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Cancel a queued MeshHarbor job. A running native simplification cannot currently be interrupted safely and returns an explicit conflict."
+        description = "Cancel a queued job or request a permanent stop for a running asset job before its result is saved. Mesh processing stops at a safe checkpoint. Running runtime setup and downloads cannot be stopped."
     )]
     async fn cancel_job(&self, params: Parameters<JobIdArgs>) -> String {
         match self.core.store().cancel_job(&params.0.job_id) {
@@ -1705,6 +1705,32 @@ async fn api_cancel_job(
     Ok(Json(state.core.store().cancel_job(&job_id)?))
 }
 
+fn finish_asset_job(
+    core: &OperationCore,
+    job_id: &str,
+    result: Result<Result<Value, CoreError>, task::JoinError>,
+) {
+    use meshharbor_core::JobState;
+
+    let (state, value, error) = match result {
+        Ok(Ok(value)) => (JobState::Succeeded, Some(value), None),
+        Ok(Err(CoreError::Cancelled)) => (JobState::Cancelled, None, None),
+        Ok(Err(error)) => (
+            JobState::Failed,
+            None,
+            Some(json!({"message":error.to_string()})),
+        ),
+        Err(error) => (
+            JobState::Failed,
+            None,
+            Some(json!({"message":format!("Asset worker failed: {error}")})),
+        ),
+    };
+    if let Err(error) = core.store().update_job(job_id, state, 100, value, error) {
+        eprintln!("Could not finalize job {job_id}: {error}");
+    }
+}
+
 async fn start_simplify_job(
     core: OperationCore,
     scheduler: Arc<Semaphore>,
@@ -1746,52 +1772,18 @@ async fn start_simplify_job(
         }
         let worker_core = core.clone();
         let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
+        let worker_job_id = job_id.clone();
         let result = task::spawn_blocking(move || {
-            worker_core.simplify_asset(&worker_asset_id, target_triangles, max_error)
+            let result = worker_core.simplify_asset_for_job(
+                &worker_asset_id,
+                target_triangles,
+                max_error,
+                &worker_job_id,
+            )?;
+            Ok(json!({"asset_id": result.asset.id, "report": result.report}))
         })
         .await;
-        match result {
-            Ok(Ok(result)) => {
-                if core
-                    .store()
-                    .update_job(
-                        &job_id,
-                        meshharbor_core::JobState::Validating,
-                        90,
-                        None,
-                        None,
-                    )
-                    .is_ok()
-                {
-                    let value = json!({ "asset_id": result.asset.id, "report": result.report });
-                    let _ = core.store().update_job(
-                        &job_id,
-                        meshharbor_core::JobState::Succeeded,
-                        100,
-                        Some(value),
-                        None,
-                    );
-                }
-            }
-            Ok(Err(error)) => {
-                let _ = core.store().update_job(
-                    &job_id,
-                    meshharbor_core::JobState::Failed,
-                    100,
-                    None,
-                    Some(json!({"message":error.to_string()})),
-                );
-            }
-            Err(error) => {
-                let _ = core.store().update_job(
-                    &job_id,
-                    meshharbor_core::JobState::Failed,
-                    100,
-                    None,
-                    Some(json!({"message":format!("Simplification worker failed: {error}")})),
-                );
-            }
-        }
+        finish_asset_job(&core, &job_id, result);
         drop(permit);
     });
     Ok(job)
@@ -1852,59 +1844,18 @@ async fn start_mesh_operation_job(
         let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
         let worker_parameters = parameters;
         let operation_for_worker = worker_operation.clone();
+        let worker_job_id = job_id.clone();
         let result = task::spawn_blocking(move || {
-            worker_core.process_mesh_asset(
+            let result = worker_core.process_mesh_asset_for_job(
                 &worker_asset_id,
                 &operation_for_worker,
                 worker_parameters,
-            )
+                &worker_job_id,
+            )?;
+            Ok(json!({"asset_id": result.asset.id, "report": result.report}))
         })
         .await;
-        match result {
-            Ok(Ok(result)) => {
-                if core
-                    .store()
-                    .update_job(
-                        &job_id,
-                        meshharbor_core::JobState::Validating,
-                        90,
-                        None,
-                        None,
-                    )
-                    .is_ok()
-                {
-                    let value = json!({
-                        "asset_id": result.asset.id,
-                        "report": result.report,
-                    });
-                    let _ = core.store().update_job(
-                        &job_id,
-                        meshharbor_core::JobState::Succeeded,
-                        100,
-                        Some(value),
-                        None,
-                    );
-                }
-            }
-            Ok(Err(error)) => {
-                let _ = core.store().update_job(
-                    &job_id,
-                    meshharbor_core::JobState::Failed,
-                    100,
-                    None,
-                    Some(json!({"message":error.to_string()})),
-                );
-            }
-            Err(error) => {
-                let _ = core.store().update_job(
-                    &job_id,
-                    meshharbor_core::JobState::Failed,
-                    100,
-                    None,
-                    Some(json!({"message":format!("Mesh processing worker failed: {error}")})),
-                );
-            }
-        }
+        finish_asset_job(&core, &job_id, result);
         drop(permit);
     });
     Ok(job)
@@ -1973,69 +1924,27 @@ async fn start_generation_job(
         let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
         let worker_job_id = job_id.clone();
         let result = task::spawn_blocking(move || {
-            let update_stage = |stage: &str| {
-                if let Err(error) = worker_core
-                    .store()
-                    .update_running_job_stage(&worker_job_id, stage)
-                {
-                    eprintln!("Could not record generation stage for {worker_job_id}: {error}");
-                }
-            };
-            update_stage("check_runtime");
+            worker_core
+                .store()
+                .update_running_job_stage(&worker_job_id, "check_runtime")?;
             let _runtime_lock = acquire_generation_runtime_lock(&worker_data_dir)?;
-            worker_core.generate_pixal3d_image_with_stages(&worker_asset_id, options, update_stage)
+            let result = worker_core.generate_pixal3d_image_for_job(
+                &worker_asset_id,
+                options,
+                &worker_job_id,
+            )?;
+            Ok(json!({
+                "asset_id": result.asset.id,
+                "backend_id": result.backend_id,
+                "seed": result.seed,
+                "resolution": result.resolution,
+                "texture_size": result.texture_size,
+                "target_faces": result.target_faces,
+                "elapsed_ms": result.elapsed_ms,
+            }))
         })
         .await;
-        match result {
-            Ok(Ok(result)) => {
-                if core
-                    .store()
-                    .update_job(
-                        &job_id,
-                        meshharbor_core::JobState::Validating,
-                        90,
-                        None,
-                        None,
-                    )
-                    .is_ok()
-                {
-                    let value = json!({
-                        "asset_id": result.asset.id,
-                        "backend_id": result.backend_id,
-                        "seed": result.seed,
-                        "resolution": result.resolution,
-                        "texture_size": result.texture_size,
-                        "target_faces": result.target_faces,
-                        "elapsed_ms": result.elapsed_ms,
-                    });
-                    let _ = core.store().update_job(
-                        &job_id,
-                        meshharbor_core::JobState::Succeeded,
-                        100,
-                        Some(value),
-                        None,
-                    );
-                }
-            }
-            Ok(Err(error)) => {
-                let _ = core.store().update_job(
-                    &job_id,
-                    meshharbor_core::JobState::Failed,
-                    100,
-                    None,
-                    Some(json!({"message":error.to_string()})),
-                );
-            }
-            Err(error) => {
-                let _ = core.store().update_job(
-                    &job_id,
-                    meshharbor_core::JobState::Failed,
-                    100,
-                    None,
-                    Some(json!({"message":format!("Image generation worker failed: {error}")})),
-                );
-            }
-        }
+        finish_asset_job(&core, &job_id, result);
         drop(permit);
     });
     Ok(job)

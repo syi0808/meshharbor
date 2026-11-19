@@ -8,7 +8,8 @@ use crate::{
     GenerationResult, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dProfile,
     Pixal3dRuntimeManager, QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport,
     SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb, inspect_asset,
-    install_bundled_quadriflow_sidecar, optimize_render_glb, separate_components, simplify_glb,
+    install_bundled_quadriflow_sidecar, job_execution::JobExecution, optimize_render_glb,
+    separate_components, simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +97,37 @@ impl OperationCore {
         target_triangles: u64,
         max_error: f32,
     ) -> CoreResult<SimplificationResult> {
+        self.simplify_asset_with_execution(
+            asset_id,
+            target_triangles,
+            max_error,
+            JobExecution::default(),
+        )
+    }
+
+    pub fn simplify_asset_for_job(
+        &self,
+        asset_id: &str,
+        target_triangles: u64,
+        max_error: f32,
+        job_id: &str,
+    ) -> CoreResult<SimplificationResult> {
+        self.simplify_asset_with_execution(
+            asset_id,
+            target_triangles,
+            max_error,
+            JobExecution::for_job(&self.store, job_id),
+        )
+    }
+
+    fn simplify_asset_with_execution(
+        &self,
+        asset_id: &str,
+        target_triangles: u64,
+        max_error: f32,
+        execution: JobExecution<'_>,
+    ) -> CoreResult<SimplificationResult> {
+        execution.checkpoint()?;
         let source = self
             .store
             .get_asset(asset_id)?
@@ -107,9 +139,11 @@ impl OperationCore {
         }
         let source_artifact = mesh_source_artifact(&source)?;
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
+        execution.checkpoint()?;
         let (output, report) = simplify_glb(&bytes, target_triangles, max_error)?;
         let name = derived_name(&source.name);
         let report_value = serde_json::to_value(&report)?;
+        execution.begin_commit()?;
         let asset = self.store.import_derived_asset(
             &name,
             &output,
@@ -157,6 +191,37 @@ impl OperationCore {
         operation: &str,
         parameters: Value,
     ) -> CoreResult<MeshOperationResult> {
+        self.process_mesh_asset_with_execution(
+            asset_id,
+            operation,
+            parameters,
+            JobExecution::default(),
+        )
+    }
+
+    pub fn process_mesh_asset_for_job(
+        &self,
+        asset_id: &str,
+        operation: &str,
+        parameters: Value,
+        job_id: &str,
+    ) -> CoreResult<MeshOperationResult> {
+        self.process_mesh_asset_with_execution(
+            asset_id,
+            operation,
+            parameters,
+            JobExecution::for_job(&self.store, job_id),
+        )
+    }
+
+    fn process_mesh_asset_with_execution(
+        &self,
+        asset_id: &str,
+        operation: &str,
+        parameters: Value,
+        execution: JobExecution<'_>,
+    ) -> CoreResult<MeshOperationResult> {
+        execution.checkpoint()?;
         let source = self.mesh_processing_source(asset_id)?;
         let source_artifact = mesh_source_artifact(&source)?;
         if operation == "mesh.separate_parts" {
@@ -173,6 +238,7 @@ impl OperationCore {
             validate_retopology_source_size(source_artifact.byte_size)?;
         }
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
+        execution.checkpoint()?;
         if operation == "mesh.retopology" {
             let options: crate::QuadRetopologyOptions = serde_json::from_value(parameters)
                 .map_err(|error| {
@@ -185,6 +251,7 @@ impl OperationCore {
             )?;
             let report_value = serde_json::to_value(&report)?;
             let name = derived_mesh_name(&source.name, "quad-retopologized");
+            execution.begin_commit()?;
             let asset = self.store.import_derived_asset_with_artifacts(
                 &name,
                 &preview,
@@ -242,6 +309,7 @@ impl OperationCore {
             }
         };
         let name = derived_mesh_name(&source.name, suffix);
+        execution.begin_commit()?;
         let asset = self.store.import_derived_asset(
             &name,
             &output,
@@ -259,16 +327,26 @@ impl OperationCore {
         input_asset_id: &str,
         options: GenerationOptions,
     ) -> CoreResult<GenerationResult> {
-        self.generate_pixal3d_image_with_stages(input_asset_id, options, |_| {})
+        crate::generation::generate_pixal3d_image(
+            self,
+            input_asset_id,
+            options,
+            JobExecution::default(),
+        )
     }
 
-    pub fn generate_pixal3d_image_with_stages(
+    pub fn generate_pixal3d_image_for_job(
         &self,
         input_asset_id: &str,
         options: GenerationOptions,
-        on_stage: impl FnMut(&str),
+        job_id: &str,
     ) -> CoreResult<GenerationResult> {
-        crate::generation::generate_pixal3d_image(self, input_asset_id, options, on_stage)
+        crate::generation::generate_pixal3d_image(
+            self,
+            input_asset_id,
+            options,
+            JobExecution::for_job(&self.store, job_id),
+        )
     }
 
     pub fn setup_pixal3d_mlx_environment(&self) -> CoreResult<RuntimeSetupReport> {

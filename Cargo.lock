@@ -1627,6 +1627,7 @@ dependencies = [
  "meshharbor-atlas-baker",
  "meshopt",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",

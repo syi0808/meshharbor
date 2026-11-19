@@ -814,8 +814,8 @@ impl Store {
         let now = timestamp()?;
         let result_json = result.as_ref().map(serde_json::to_string).transpose()?;
         let error_json = error.as_ref().map(serde_json::to_string).transpose()?;
-        let conn = self.connection.lock().expect("SQLite mutex poisoned");
-        let transaction = conn.unchecked_transaction()?;
+        let mut conn = self.connection.lock().expect("SQLite mutex poisoned");
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = job_state_from_transaction(&transaction, id)?;
         if !valid_transition(&current, &next_state) {
             return Err(CoreError::Conflict(format!(
@@ -844,18 +844,34 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn job_cancellation_requested(&self, id: &str) -> CoreResult<bool> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT state IN ('cancelling','cancelled') FROM jobs WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn cancel_job(&self, id: &str) -> CoreResult<Job> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        conn.execute(
+            "UPDATE jobs SET state=CASE state WHEN 'queued' THEN 'cancelled' ELSE 'cancelling' END,updated_at=?2
+             WHERE id=?1 AND (state='queued' OR (state='running' AND
+                (operation LIKE 'mesh.%' OR operation IN ('image.generate','uv.unwrap','render.optimize'))))",
+            params![id, timestamp()?],
+        )?;
+        drop(conn);
         let job = self
             .get_job(id)?
             .ok_or_else(|| CoreError::NotFound(format!("Job '{id}' was not found.")))?;
         match job.state {
-            JobState::Queued => self.update_job(id, JobState::Cancelled, job.progress, None, None),
-            JobState::Running | JobState::Validating => Err(CoreError::Conflict(
-                "This native operation cannot be interrupted safely once it has started.".into(),
-            )),
             JobState::Cancelling | JobState::Cancelled => Ok(job),
             JobState::Succeeded | JobState::Failed => Err(CoreError::Conflict(
                 "A completed job cannot be cancelled.".into(),
+            )),
+            _ => Err(CoreError::Conflict(
+                "This job cannot be stopped safely at its current stage.".into(),
             )),
         }
     }
@@ -1683,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_job_can_cancel_but_running_native_work_is_not_misreported_as_cancelled() {
+    fn cancellation_is_terminal_and_cannot_cross_the_asset_commit_boundary() {
         let dir = temp_dir();
         let store = Store::open(&dir).unwrap();
         let queued = store.create_job("mesh.simplify", None, &json!({})).unwrap();
@@ -1696,10 +1712,52 @@ mod tests {
         store
             .update_job(&active.id, JobState::Running, 10, None, None)
             .unwrap();
-        let error = store.cancel_job(&active.id).unwrap_err();
-        assert!(error.to_string().contains("cannot be interrupted safely"));
         assert_eq!(
-            store.get_job(&active.id).unwrap().unwrap().state,
+            store.cancel_job(&active.id).unwrap().state,
+            JobState::Cancelling
+        );
+        assert_eq!(
+            store.cancel_job(&active.id).unwrap().state,
+            JobState::Cancelling
+        );
+        assert!(store.job_cancellation_requested(&active.id).unwrap());
+        assert!(
+            store
+                .update_job(&active.id, JobState::Validating, 90, None, None)
+                .is_err()
+        );
+        store
+            .update_job(&active.id, JobState::Cancelled, 100, None, None)
+            .unwrap();
+        assert!(
+            store
+                .update_job(&active.id, JobState::Running, 5, None, None)
+                .is_err()
+        );
+
+        let saving = store
+            .create_job("image.generate", None, &json!({}))
+            .unwrap();
+        store
+            .update_job(&saving.id, JobState::Running, 5, None, None)
+            .unwrap();
+        store
+            .update_job(&saving.id, JobState::Validating, 90, None, None)
+            .unwrap();
+        assert!(store.cancel_job(&saving.id).is_err());
+        assert_eq!(
+            store.get_job(&saving.id).unwrap().unwrap().state,
+            JobState::Validating
+        );
+        let runtime = store
+            .create_job("runtime.pixal3d.install_models", None, &json!({}))
+            .unwrap();
+        store
+            .update_job(&runtime.id, JobState::Running, 5, None, None)
+            .unwrap();
+        assert!(store.cancel_job(&runtime.id).is_err());
+        assert_eq!(
+            store.get_job(&runtime.id).unwrap().unwrap().state,
             JobState::Running
         );
         drop(store);

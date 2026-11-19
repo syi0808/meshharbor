@@ -355,6 +355,76 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     assert_eq!(status, 200);
     assert_eq!(artifact_bytes, runtime.generated_glb);
 
+    let hold_generation = runtime.source_root.join("hold-generation");
+    fs::write(&hold_generation, []).unwrap();
+    let (status, body) = http_request(
+        address,
+        "POST",
+        "/api/v1/jobs",
+        &[
+            ("Authorization", authorization.as_str()),
+            ("Content-Type", "application/json"),
+        ],
+        &job_json,
+    )
+    .unwrap();
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let submitted: Value = serde_json::from_slice(&body).unwrap();
+    let job_path = format!("/api/v1/jobs/{}", submitted["id"].as_str().unwrap());
+    let read_job = || {
+        let (status, body) = http_request(
+            address,
+            "GET",
+            &job_path,
+            &[("Authorization", authorization.as_str())],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(status, 200);
+        serde_json::from_slice::<Value>(&body).unwrap()
+    };
+    let at_worker_stage = (0..100).any(|_| {
+        if read_job()["stage"] == "shape_decode" {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+        false
+    });
+    assert!(at_worker_stage);
+    let (status, body) = http_request(
+        address,
+        "POST",
+        &format!("{job_path}/cancel"),
+        &[("Authorization", authorization.as_str())],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let stopping: Value = serde_json::from_slice(&body).unwrap();
+    assert!(matches!(
+        stopping["state"].as_str(),
+        Some("cancelling" | "cancelled")
+    ));
+    let cancelled = (0..100)
+        .find_map(|_| {
+            let job = read_job();
+            if job["state"] == "cancelled" {
+                return Some(job);
+            }
+            assert_eq!(job["state"], "cancelling", "job: {job}");
+            thread::sleep(Duration::from_millis(50));
+            None
+        })
+        .expect("worker must exit even while its mock is blocked");
+    assert!(cancelled["result"].is_null());
+    assert!(
+        hold_generation.is_file(),
+        "the test did not release the worker"
+    );
+    let store = meshharbor_core::Store::open(&data_dir).unwrap();
+    assert_eq!(store.list_assets(10).unwrap().len(), 2);
+    assert_eq!(fs::read_dir(store.staging_root()).unwrap().count(), 0);
+
     server.terminate();
 }
 
