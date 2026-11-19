@@ -1,4 +1,4 @@
-import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, GenerationParameters, HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, MeshOperationId, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, GenerationParameters, HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, MeshOperationId, ModelVersionPage, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
 
 export const MAX_ASSET_IMPORT_FILES = 10;
 export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
@@ -130,6 +130,7 @@ export interface AssetPageFilters {
   query?: string;
   kind?: AssetKind;
   derived?: boolean;
+  modelsOnly?: boolean;
 }
 
 export function quadTopologyArtifact(asset: Asset | null): Artifact | undefined {
@@ -720,7 +721,21 @@ export class MeshHarborApi {
     if (query) params.set('q', query);
     if (filters.kind) params.set('kind', filters.kind);
     if (filters.derived !== undefined) params.set('derived', String(filters.derived));
+    if (filters.modelsOnly) params.set('models_only', 'true');
     return this.request(`/api/v1/assets/page?${params.toString()}`);
+  }
+
+  modelVersions(modelId: string, before?: number, signal?: AbortSignal): Promise<ModelVersionPage> {
+    const params = new URLSearchParams({ limit: '20' });
+    if (before !== undefined) params.set('before', String(before));
+    return this.request(`/api/v1/models/${encodeURIComponent(modelId)}/versions?${params}`, { signal });
+  }
+
+  restoreModelVersion(modelId: string, assetId: string): Promise<Asset> {
+    return this.request(`/api/v1/models/${encodeURIComponent(modelId)}/current`, {
+      method: 'PUT',
+      body: JSON.stringify({ asset_id: assetId }),
+    });
   }
 
   jobs(limit = 20, options: { includeActive?: boolean; before?: string } = {}): Promise<Job[]> {

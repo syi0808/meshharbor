@@ -125,7 +125,7 @@ test('long model names do not overflow gallery cards at narrow panel and mobile 
   const assertNoOverflow = async (library) => {
     const item = library.getByRole('button', { name: new RegExp(name.replace('.', '\\.')) });
     await expect(item).toBeVisible();
-    await expect(item.getByText(/tris · Original/)).toBeVisible();
+    await expect(item.getByText(/tris · Imported/)).toBeVisible();
     await expect(item.getByTitle(name, { exact: true })).toHaveCSS('text-overflow', 'ellipsis');
     const bounds = await item.evaluate((card) => {
       const filename = card.querySelector('[title]');

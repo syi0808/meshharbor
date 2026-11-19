@@ -129,6 +129,38 @@ export function texturedGlb({ singleMaterial = false } = {}) {
   return Buffer.concat([header, jsonChunk, binChunk]);
 }
 
+export function disconnectedPartsGlb() {
+  const positions = [-2, -1, 0, -0.25, -1, 0, -1, 1, 0, 0.25, -1, 0, 2, -1, 0, 1, 1, 0];
+  const indices = [0, 1, 2, 0, 1, 2, 3, 4, 5];
+  const positionBytes = positions.length * 4;
+  const binary = Buffer.alloc(positionBytes + indices.length * 2);
+  positions.forEach((value, index) => binary.writeFloatLE(value, index * 4));
+  indices.forEach((value, index) => binary.writeUInt16LE(value, positionBytes + index * 2));
+  const document = {
+    asset: { version: '2.0' },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0 }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1 }] }],
+    buffers: [{ byteLength: binary.length }],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: positionBytes, target: 34962 },
+      { buffer: 0, byteOffset: positionBytes, byteLength: indices.length * 2, target: 34963 },
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: positions.length / 3, type: 'VEC3', min: [-2, -1, 0], max: [2, 1, 0] },
+      { bufferView: 1, componentType: 5123, count: indices.length, type: 'SCALAR' },
+    ],
+  };
+  const json = chunk('JSON', Buffer.from(JSON.stringify(document)), 0x20);
+  const bin = chunk('BIN\0', binary, 0);
+  const header = Buffer.alloc(12);
+  header.write('glTF');
+  header.writeUInt32LE(2, 4);
+  header.writeUInt32LE(header.length + json.length + bin.length, 8);
+  return Buffer.concat([header, json, bin]);
+}
+
 export function inspectTexturedGlb(bytes) {
   assert.equal(bytes.toString('ascii', 0, 4), 'glTF');
   assert.equal(bytes.readUInt32LE(4), 2);

@@ -1,13 +1,14 @@
 import { Button } from '@/components/ui/button';
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Spinner } from '@/components/ui/spinner';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { CornersOutIcon } from '@phosphor-icons/react';
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { applyPreviewMaterial, restorePreviewMaterials } from './preview-display';
-import { configurePreviewRenderer, createPreviewScene, disposePreviewModel, frameFromObject, loadPreviewModel } from './preview-model';
+import { applyPreviewMaterial, applyPreviewPartMaterials, restorePreviewMaterials, separatedPartInfo } from './preview-display';
+import { configurePreviewRenderer, createPreviewScene, disposePreviewModel, frameFromObject, loadPreviewModel, previewPrimitiveIndex } from './preview-model';
 import {
   shouldPreserveComparisonCamera,
   shouldPreserveSourceTransition,
@@ -19,7 +20,27 @@ import type { StudioTheme } from './theme';
 const MAX_CANONICAL_SOURCE_FRAMES = 64;
 const canonicalSourceFrameCache = new Map<string, PreviewFrame>();
 const viewportLayout = 'relative isolate min-h-0 min-w-0 flex-1 overflow-hidden bg-muted dark:bg-neutral-800';
-type PreviewMode = 'material' | 'solid' | 'wireframe';
+type PreviewMode = 'material' | 'solid' | 'wireframe' | 'parts';
+
+interface PreviewDisplay {
+  meshes: THREE.Mesh[];
+  originalMaterials: Map<THREE.Mesh, THREE.Material | THREE.Material[]>;
+  wireframe: THREE.MeshBasicMaterial;
+  solid: THREE.MeshStandardMaterial;
+  parts?: {
+    meshParts: Map<THREE.Mesh, number>;
+    palette: THREE.MeshStandardMaterial[];
+    dimmed: THREE.MeshStandardMaterial;
+  };
+}
+
+function disposeDisplay(preview: PreviewDisplay) {
+  restorePreviewMaterials(preview.originalMaterials);
+  preview.wireframe.dispose();
+  preview.solid.dispose();
+  preview.parts?.dimmed.dispose();
+  preview.parts?.palette.forEach(material => material.dispose());
+}
 
 export interface PreviewComparison {
   /** Stable, pair-specific identity. Keep it unchanged when switching sides. */
@@ -98,15 +119,15 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
   const currentAssetIdRef = useRef<string | null>(null);
   const activeComparisonGroupRef = useRef<string | null>(null);
   const onErrorRef = useRef(onError);
-  const displayRef = useRef<{
-    meshes: THREE.Mesh[];
-    originalMaterials: Map<THREE.Mesh, THREE.Material | THREE.Material[]>;
-    wireframe: THREE.MeshBasicMaterial;
-    solid: THREE.MeshStandardMaterial;
-  } | null>(null);
+  const displayRef = useRef<PreviewDisplay | null>(null);
   const [loading, setLoading] = useState(false);
   const [modelReady, setModelReady] = useState(false);
   const [display, setDisplay] = useState<PreviewMode>('material');
+  const [parts, setParts] = useState<{ assetId: string; count: number; grouped: boolean } | null>(null);
+  const [partSelection, setPartSelection] = useState<{ assetId: string; index: number } | null>(null);
+  const visibleParts = parts && parts.assetId === asset?.id ? parts : null;
+  const focusedPart = partSelection && partSelection.assetId === asset?.id ? partSelection.index : null;
+  const visibleDisplay = display === 'parts' && !visibleParts ? 'material' : display;
   const [rendererUnavailable, setRendererUnavailable] = useState(false);
 
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
@@ -173,9 +194,7 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
       renderer.dispose();
       const preview = displayRef.current;
       if (preview) {
-        restorePreviewMaterials(preview.originalMaterials);
-        preview.wireframe.dispose();
-        preview.solid.dispose();
+        disposeDisplay(preview);
         displayRef.current = null;
       }
       if (currentModelRef.current) {
@@ -204,9 +223,7 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
     const controls = controlsRef.current;
     const preview = displayRef.current;
     if (preview) {
-      restorePreviewMaterials(preview.originalMaterials);
-      preview.wireframe.dispose();
-      preview.solid.dispose();
+      disposeDisplay(preview);
       displayRef.current = null;
     }
     frameRef.current = null;
@@ -216,6 +233,7 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
       currentModelRef.current = null;
     }
     setModelReady(false);
+    setParts(null);
     setLoading(false);
 
     if (!asset || asset.kind !== 'mesh' || !scene || !camera || !controls) {
@@ -273,12 +291,32 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
         model.traverse((node) => {
           if (node instanceof THREE.Mesh) meshes.push(node);
         });
-        const nextPreview = {
+        const nextPreview: PreviewDisplay = {
           meshes,
           originalMaterials: new Map<THREE.Mesh, THREE.Material | THREE.Material[]>(),
           wireframe: new THREE.MeshBasicMaterial({ color: '#a7c7ba', wireframe: true, toneMapped: false }),
           solid: new THREE.MeshStandardMaterial({ color: '#a6a6a6', roughness: 0.82 }),
         };
+        const partInfo = separatedPartInfo(asset.metadata);
+        if (partInfo) {
+          const meshParts = new Map<THREE.Mesh, number>();
+          for (const mesh of meshes) {
+            const index = previewPrimitiveIndex(mesh);
+            if (index !== undefined && index >= 0 && index < partInfo.count) meshParts.set(mesh, index);
+          }
+          if (meshParts.size === meshes.length && new Set(meshParts.values()).size === partInfo.count) {
+            nextPreview.parts = {
+              meshParts,
+              palette: Array.from({ length: partInfo.count }, (_, index) => new THREE.MeshStandardMaterial({
+                color: new THREE.Color().setHSL((0.035 + index * 0.61803398875) % 1, 0.72, 0.49, THREE.SRGBColorSpace),
+                roughness: 0.8,
+                side: THREE.DoubleSide,
+              })),
+              dimmed: new THREE.MeshStandardMaterial({ color: '#494d53', roughness: 0.85, side: THREE.DoubleSide }),
+            };
+            setParts({ assetId: asset.id, ...partInfo });
+          }
+        }
         displayRef.current = nextPreview;
         frameRef.current = frame;
         currentModelRef.current = model;
@@ -314,8 +352,12 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
     const preview = displayRef.current;
     if (!preview) return;
     restorePreviewMaterials(preview.originalMaterials);
-    if (display !== 'material') applyPreviewMaterial(preview.meshes, preview[display], preview.originalMaterials);
-  }, [display, modelReady]);
+    if (visibleDisplay === 'parts' && preview.parts) {
+      applyPreviewPartMaterials(preview.parts.meshParts, preview.parts.palette, preview.parts.dimmed, focusedPart, preview.originalMaterials);
+    } else if (visibleDisplay === 'solid' || visibleDisplay === 'wireframe') {
+      applyPreviewMaterial(preview.meshes, preview[visibleDisplay], preview.originalMaterials);
+    }
+  }, [asset?.id, visibleDisplay, focusedPart, modelReady]);
 
   function fitView() {
     if (cameraRef.current && controlsRef.current && frameRef.current) {
@@ -327,16 +369,25 @@ function MeshPreview({ asset, loadModel, onError, comparison, theme }: Props) {
     <div className={viewportLayout}>
       <div className="absolute inset-0 [&>canvas]:block [&>canvas]:size-full" ref={hostRef} aria-label="Interactive 3D model preview" />
       {modelReady && (
-        <div className="absolute bottom-2 left-2 flex flex-wrap items-center gap-1 rounded-lg border bg-popover p-1 sm:bottom-4 sm:left-4" role="group" aria-label="Viewport controls">
-          <ToggleGroup type="single" orientation="horizontal" size="sm" spacing={1} value={display} aria-label="Display mode"
+        <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] flex-wrap items-center gap-1 rounded-lg border bg-popover p-1 sm:bottom-4 sm:left-4" role="group" aria-label="Viewport controls">
+          <ToggleGroup type="single" orientation="horizontal" size="sm" spacing={1} value={visibleDisplay} aria-label="Display mode"
             onValueChange={value => {
-              if (value === 'material' || value === 'solid' || value === 'wireframe') setDisplay(value);
+              if (value === 'material' || value === 'solid' || value === 'wireframe' || value === 'parts') setDisplay(value);
             }}>
             <ToggleGroupItem value="material" aria-label="Material view">Material</ToggleGroupItem>
             <ToggleGroupItem value="solid" aria-label="Solid view">Solid</ToggleGroupItem>
             <ToggleGroupItem value="wireframe" aria-label="Triangle wireframe">Wireframe</ToggleGroupItem>
+            {visibleParts && <ToggleGroupItem value="parts" aria-label="Part highlighting">Parts</ToggleGroupItem>}
           </ToggleGroup>
           <Button type="button" variant="ghost" size="icon-sm" aria-label="Fit view" title="Fit view" onClick={fitView}><CornersOutIcon aria-hidden="true" /></Button>
+          {visibleDisplay === 'parts' && visibleParts && <NativeSelect aria-label="Highlight part" size="sm" value={focusedPart ?? 'all'}
+            onChange={event => setPartSelection(event.target.value === 'all' ? null : { assetId: visibleParts.assetId, index: Number(event.target.value) })}>
+            <NativeSelectOption value="all">All parts</NativeSelectOption>
+            {Array.from({ length: visibleParts.count }, (_, index) =>
+              <NativeSelectOption key={index} value={index}>
+                {visibleParts.grouped && index === visibleParts.count - 1 ? 'Grouped fragments' : `Part ${index + 1}`}
+              </NativeSelectOption>)}
+          </NativeSelect>}
         </div>
       )}
       {rendererUnavailable && asset && (

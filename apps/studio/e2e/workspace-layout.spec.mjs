@@ -165,7 +165,10 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   await expect.poll(() => scrollBody.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
   expect(await generateAction.boundingBox()).toEqual(footerPosition);
   await expect(generate.getByRole('group', { name: 'Sampling' }).getByLabel('Texture sampling steps')).toHaveValue('18');
-  const derived = { ...active, id: 'asset_generation_layout', name: 'new-model.glb', source_asset_id: reference.id };
+  const derived = {
+    ...active, id: 'asset_generation_layout', name: 'new-model.glb', source_asset_id: reference.id, model_version: 1,
+    model: { id: 'asset_generation_layout', name: 'new-model.glb', generated: true, current_asset_id: 'asset_generation_layout' },
+  };
   const job = {
     id: 'job_generation_layout',
     operation: 'image.generate',

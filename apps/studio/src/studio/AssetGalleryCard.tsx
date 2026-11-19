@@ -21,6 +21,7 @@ export function AssetGalleryCard({
   const [visible, setVisible] = useState(false);
   const [image, setImage] = useState<{ hash: string; url: string } | null>(null);
   const Icon = asset.kind === 'mesh' ? CubeIcon : ImageSquareIcon;
+  const name = asset.model?.name ?? asset.name;
   const triangles = Number(asset.metadata.triangles);
 
   useEffect(() => {
@@ -77,10 +78,10 @@ export function AssetGalleryCard({
         </span>}
       </span>
       <span className="grid min-w-0 gap-0.5 px-2 py-1.5">
-        <span dir="rtl" className="block min-w-0 truncate text-left text-xs font-medium" title={asset.name}><bdi>{asset.name}</bdi></span>
+        <span dir="rtl" className="block min-w-0 truncate text-left text-xs font-medium" title={name}><bdi>{name}</bdi></span>
         <span className="block min-w-0 truncate text-[10px] tabular-nums text-muted-foreground">
           {asset.kind === 'image' ? 'Image' : Number.isFinite(triangles) ? `${compactCount.format(triangles)} tris` : 'Mesh'}
-          {' · '}{asset.source_asset_id ? 'Result' : 'Original'}
+          {' · '}{asset.model ? asset.model.generated ? 'Generated' : 'Imported' : asset.source_asset_id ? 'Result' : 'Original'}
         </span>
       </span>
     </Button>

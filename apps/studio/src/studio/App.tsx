@@ -45,6 +45,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Toaster } from '@/components/ui/sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ModelPreview } from './ModelPreview';
+import { ModelVersionHistory } from './ModelVersionHistory';
 import { AssetGalleryCard } from './AssetGalleryCard';
 import { Disclosure } from './Disclosure';
 import { JobListItem } from './JobListItem';
@@ -85,14 +86,29 @@ function toAssetPageFilters(filters: AssetBrowserFilters): AssetPageFilters {
   return {
     ...(query ? { query } : {}),
     kind: filters.kind,
+    ...(filters.kind === 'mesh' ? { modelsOnly: true } : {}),
     ...(filters.origin === 'all' ? {} : { derived: filters.origin === 'derived' }),
   };
 }
 
 function matchesAssetBrowserFilters(asset: Asset, filters: AssetBrowserFilters): boolean {
-  return (!filters.query || asset.name.toLowerCase().includes(filters.query.toLowerCase()))
+  const displayName = asset.model?.name ?? asset.name;
+  return (!filters.query || displayName.toLowerCase().includes(filters.query.toLowerCase()))
     && asset.kind === filters.kind
-    && (filters.origin === 'all' || Boolean(asset.source_asset_id) === (filters.origin === 'derived'));
+    && (filters.origin === 'all' || (asset.model?.generated ?? Boolean(asset.source_asset_id)) === (filters.origin === 'derived'));
+}
+
+function inventoryAssetKey(asset: Asset): string {
+  return asset.model?.id ?? asset.id;
+}
+
+function mergeCachedAssets(incoming: Asset[], cached: Asset[]): Asset[] {
+  const ids = new Set(incoming.map(asset => asset.id));
+  const models = new Map(incoming.flatMap(asset => asset.model ? [[asset.model.id, asset.model] as const] : []));
+  return [...incoming, ...cached.filter(asset => !ids.has(asset.id)).map(asset => {
+    const model = asset.model && models.get(asset.model.id);
+    return model && model.current_asset_id !== asset.model?.current_asset_id ? { ...asset, model } : asset;
+  })];
 }
 
 function clampAssetSearchQuery(query: string): string {
@@ -165,6 +181,7 @@ export function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [operations, setOperations] = useState<Operation[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [inventoryAssets, setInventoryAssets] = useState<Asset[]>([]);
   const [assetSearchInput, setAssetSearchInput] = useState('');
   const assetSearchInputRef = useRef('');
   const [assetFilters, setAssetFilters] = useState<AssetBrowserFilters>(EMPTY_ASSET_BROWSER_FILTERS);
@@ -178,7 +195,7 @@ export function App() {
   const [jobFeedLoaded, setJobFeedLoaded] = useState(false);
   const [jobFeedError, setJobFeedError] = useState<string | null>(null);
   const jobFeedInFlight = useRef<Promise<boolean> | null>(null);
-  const observedGeneratedAssets = useRef(new Set<string>());
+  const observedJobResults = useRef(new Set<string>());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   const [comparisonPair, setComparisonPair] = useState<AssetComparisonPair | null>(null);
@@ -246,9 +263,16 @@ export function App() {
     selectedComparisonPair?.inputAssetId,
     selectedComparisonPair?.resultAssetId,
   ].filter((id): id is string => id !== null && id !== undefined));
-  const matchingAssets = assets.filter(asset => matchesAssetBrowserFilters(asset, assetFilters));
-  const matchingAssetIds = new Set(matchingAssets.map(asset => asset.id));
-  const pinnedAssets = assets.filter(asset => asset.kind === assetFilters.kind && pinnedAssetIds.has(asset.id) && !matchingAssetIds.has(asset.id));
+  const matchingAssets = inventoryAssets.filter(asset => matchesAssetBrowserFilters(asset, assetFilters));
+  const shownAssetKeys = new Set(matchingAssets.map(inventoryAssetKey));
+  const pinnedKeys = new Set(assets.filter(asset => pinnedAssetIds.has(asset.id)).map(inventoryAssetKey));
+  const pinnedAssets = assets.filter(asset => {
+    const key = inventoryAssetKey(asset);
+    if (asset.kind !== assetFilters.kind || (asset.model && asset.id !== asset.model.current_asset_id)
+      || !pinnedKeys.has(key) || shownAssetKeys.has(key)) return false;
+    shownAssetKeys.add(key);
+    return true;
+  });
   const hasActiveAssetFilters = assetFilters.query !== ''
     || assetFilters.origin !== 'all';
   const showLibraryFilters = assets.length > 0 || hasActiveAssetFilters;
@@ -320,6 +344,18 @@ export function App() {
     requestAnimationFrame(() => dashboardTrigger.current?.focus());
   }
 
+  const publishInventoryAsset = useCallback((asset: Asset) => {
+    const current = !asset.model || asset.model.current_asset_id === asset.id;
+    if (!current || !matchesAssetBrowserFilters(asset, assetFiltersRef.current)) return;
+    const key = inventoryAssetKey(asset);
+    setInventoryAssets(items => {
+      if (items.some(item => inventoryAssetKey(item) === key)) {
+        return items.map(item => inventoryAssetKey(item) === key ? asset : item);
+      }
+      return key === asset.id ? [asset, ...items] : items;
+    });
+  }, []);
+
   async function requestAssetPage(
     filters: AssetBrowserFilters,
     append: boolean,
@@ -336,6 +372,11 @@ export function App() {
     try {
       const page = await api.assetPage(ASSET_PAGE_SIZE, cursor, toAssetPageFilters(filters));
       if (!assetPageRequestGuard.current.isCurrent(requestId)) return;
+      setInventoryAssets(current => {
+        if (!append) return page.items;
+        const pageKeys = new Set(page.items.map(inventoryAssetKey));
+        return [...current.filter(asset => !pageKeys.has(inventoryAssetKey(asset))), ...page.items];
+      });
       setAssets((current) => {
         const selectedPair = comparisonPairRef.current
           ?? assetComparisonPairForSelection(current, selectedIdRef.current, null);
@@ -343,11 +384,12 @@ export function App() {
           selectedPair?.inputAssetId,
           selectedPair?.resultAssetId,
           selectedIdRef.current,
+          current.find(asset => asset.id === selectedIdRef.current)?.model?.current_asset_id,
         ];
         const pageIds = new Set(page.items.map((asset) => asset.id));
         const retained = current.filter((asset) =>
           !pageIds.has(asset.id) && (append || preservedIds.includes(asset.id)));
-        return [...page.items, ...retained];
+        return mergeCachedAssets(page.items, retained);
       });
       setAssetNextCursor(page.next_cursor);
       return null;
@@ -399,17 +441,18 @@ export function App() {
       setJobFeedError(null);
       setJobFeedLoaded(true);
       for (const saved of jobs) {
-        const assetId = saved.operation === 'image.generate' && saved.state === 'succeeded' ? saved.result?.asset_id : undefined;
-        if (!assetId || observedGeneratedAssets.current.has(assetId)) continue;
+        const assetId = saved.state === 'succeeded' ? saved.result?.asset_id : undefined;
+        if (!assetId || observedJobResults.current.has(assetId)) continue;
         if (saved.id === jobRef.current?.id || assetFiltersRef.current.kind !== 'mesh') {
-          observedGeneratedAssets.current.add(assetId);
+          observedJobResults.current.add(assetId);
           continue;
         }
-        observedGeneratedAssets.current.add(assetId);
+        observedJobResults.current.add(assetId);
         void api.derivedAsset(assetId).then(asset => {
-          if (asset.id !== assetId || !matchesAssetBrowserFilters(asset, assetFiltersRef.current)) return;
-          setAssets(current => current.some(item => item.id === asset.id) ? current : [asset, ...current]);
-        }).catch(() => { observedGeneratedAssets.current.delete(assetId); });
+          if (asset.id !== assetId) return;
+          publishInventoryAsset(asset);
+          setAssets(current => mergeCachedAssets([asset], current));
+        }).catch(() => { observedJobResults.current.delete(assetId); });
       }
       return true;
     }).catch(cause => {
@@ -422,7 +465,7 @@ export function App() {
     });
     jobFeedInFlight.current = request;
     return request;
-  }, [api]);
+  }, [api, publishInventoryAsset]);
 
   useEffect(() => {
     if (connection !== 'connected') return;
@@ -528,7 +571,8 @@ export function App() {
         const resultAsset = derived;
         const pair = assetComparisonPairFromJob(latest, resultAsset);
         setComparisonPair(pair);
-        setAssets((current) => [resultAsset, ...current.filter((item) => item.id !== resultAsset.id)]);
+        publishInventoryAsset(resultAsset);
+        setAssets(current => mergeCachedAssets([resultAsset], current));
         selectAssetId(resultAsset.id);
       }
       if (latest.state === 'failed') {
@@ -578,6 +622,7 @@ export function App() {
       ]);
       setRuntime(runtimeInfo);
       setOperations(operationList);
+      setInventoryAssets(assetPage.items);
       setAssets((current) => {
         const selectedPair = comparisonPairRef.current
           ?? assetComparisonPairForSelection(current, selectedIdRef.current, null);
@@ -587,14 +632,11 @@ export function App() {
           selectedPair?.resultAssetId,
           selectedIdRef.current,
         ]);
-        return [
-          ...assetPage.items,
-          ...current.filter((asset) => preservedIds.has(asset.id) && !pageIds.has(asset.id)),
-        ];
+        return mergeCachedAssets(assetPage.items, current.filter((asset) => preservedIds.has(asset.id) && !pageIds.has(asset.id)));
       });
       setAssetNextCursor(assetPage.next_cursor);
-      observedGeneratedAssets.current = new Set(jobList.flatMap(saved =>
-        saved.operation === 'image.generate' && saved.state === 'succeeded' && saved.result?.asset_id ? [saved.result.asset_id] : []));
+      observedJobResults.current = new Set(jobList.flatMap(saved =>
+        saved.state === 'succeeded' && saved.result?.asset_id ? [saved.result.asset_id] : []));
       setJobSnapshot(jobList);
       setJobFeedLoaded(true);
       setJobFeedError(null);
@@ -705,7 +747,9 @@ export function App() {
               setReportJob(latest);
             }
             if (isGeneration) setGenerationResult(latest);
-            setAssets((current) => [completedAsset, ...current.filter((item) => item.id !== completedAsset.id)]);
+            observedJobResults.current.add(completedAsset.id);
+            publishInventoryAsset(completedAsset);
+            setAssets(current => mergeCachedAssets([completedAsset], current));
             if (advance) {
               selectAssetId(completedAsset.id);
             }
@@ -842,10 +886,16 @@ export function App() {
 
   function selectAsset(asset: Asset) {
     invalidateHistoryRequests();
-    const pair = assetComparisonPairForSelection(assets, asset.id, comparisonPair);
+    const pair = assetComparisonPairForSelection(mergeCachedAssets([asset], assets), asset.id, comparisonPair);
     setComparisonPair(pair);
     selectAssetId(asset.id);
     setReportJob(null);
+  }
+
+  function showModelVersion(asset: Asset) {
+    publishInventoryAsset(asset);
+    setAssets(current => mergeCachedAssets([asset], current));
+    selectAsset(asset);
   }
 
   async function selectComparisonSide(side: AssetComparisonSide) {
@@ -1168,7 +1218,8 @@ export function App() {
   </> : null;
 
   function renderAssetCard(asset: Asset) {
-    return <AssetGalleryCard key={asset.id} asset={asset} loadPreview={loadPreview} selected={asset.id === selectedId}
+    return <AssetGalleryCard key={inventoryAssetKey(asset)} asset={asset} loadPreview={loadPreview}
+      selected={selectedAsset !== null && inventoryAssetKey(asset) === inventoryAssetKey(selectedAsset)}
       onDragImage={image => {
         draggedImage.current = image;
         if (image && !busy && !isRunning) setInspector('generation');
@@ -1519,8 +1570,8 @@ export function App() {
                       })}
                     >
                       <NativeSelectOption value="all">All assets</NativeSelectOption>
-                      <NativeSelectOption value="original">Originals</NativeSelectOption>
-                      <NativeSelectOption value="derived">Generated results</NativeSelectOption>
+                      <NativeSelectOption value="original">{assetFilters.kind === 'mesh' ? 'Imported models' : 'Originals'}</NativeSelectOption>
+                      <NativeSelectOption value="derived">{assetFilters.kind === 'mesh' ? 'Generated models' : 'Generated results'}</NativeSelectOption>
                     </NativeSelect>
                   </Field>
                   {hasActiveAssetFilters && (
@@ -1579,7 +1630,7 @@ export function App() {
               </div> : <div className="flex min-h-0 min-w-0 flex-1 flex-col">
                 <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-card p-2 text-card-foreground">
                 <div className="flex min-w-0 flex-1 items-center justify-between gap-2 max-sm:basis-full">
-                  <div className="flex min-w-0 items-center gap-2 text-xs">{selectedAsset.kind === 'image' ? <FileImageIcon aria-hidden="true" /> : <CubeIcon aria-hidden="true" />} <span className="truncate font-medium" title={selectedAsset.name}>{selectedAsset.name}</span></div>
+                  <div className="flex min-w-0 items-center gap-2 text-xs">{selectedAsset.kind === 'image' ? <FileImageIcon aria-hidden="true" /> : <CubeIcon aria-hidden="true" />} <span className="truncate font-medium" title={selectedAsset.name}>{selectedAsset.model?.name ?? selectedAsset.name}</span></div>
                   {selectedComparisonPair && (
                     <Tabs className="shrink-0" activationMode="manual"
                       value={activeView} onValueChange={value => {
@@ -1615,7 +1666,11 @@ export function App() {
                     <div className="flex items-center gap-2 text-muted-foreground"><Badge variant="outline">{selectedAsset.kind === 'mesh' ? 'GLB' : selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPG'}</Badge><div><span>{formatSize(selectedAsset.byte_size)} · {selectedAsset.kind === 'mesh' ? `${Number(selectedAsset.metadata.mesh_count ?? 0)} mesh${Number(selectedAsset.metadata.mesh_count ?? 0) === 1 ? '' : 'es'}` : 'Reference image'}</span></div></div>
                     <Separator orientation="vertical" className="ml-auto hidden h-4 sm:block" />
                     {selectedAsset.kind === 'mesh' ? <><div className="grid gap-1 [&>span]:text-muted-foreground [&>strong]:font-medium"><span>Triangles</span><strong>{triangleCount.toLocaleString()}</strong></div><div className="grid gap-1 [&>span]:text-muted-foreground [&>strong]:font-medium"><span>Materials</span><strong>{Number(selectedAsset.metadata.material_count ?? 0)}</strong></div></> : <div className="grid gap-1 [&>span]:text-muted-foreground [&>strong]:font-medium"><span>Input</span><strong>{selectedAsset.mime_type === 'image/png' ? 'PNG' : 'JPEG'}</strong></div>}
-                    <div className="grid gap-1 [&>span]:text-muted-foreground [&>strong]:font-medium"><span>Version</span><strong>{selectedAsset.source_asset_id ? 'Result' : 'Original'}</strong></div>
+                    <div className="grid gap-1 [&>span]:text-muted-foreground [&>strong]:font-medium">
+                      <span>{selectedAsset.model_version ? `Version ${selectedAsset.model_version}` : 'Version'}</span><strong>{selectedAsset.model
+                        ? selectedAsset.id === selectedAsset.model.current_asset_id ? 'Current' : 'Historical'
+                        : selectedAsset.source_asset_id ? 'Result' : 'Original'}</strong>
+                    </div>
                   </div>
                 )}
               {reportCard && (
@@ -1661,6 +1716,11 @@ export function App() {
                 </Disclosure>
               )}
                 {hasSelectedMesh && <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t bg-card px-3 py-2" role="group" aria-label="File actions">
+                  {selectedAsset.model && <div className="mr-auto">
+                    <ModelVersionHistory key={selectedAsset.model.id} api={api} model={selectedAsset.model} viewingId={selectedAsset.id}
+                      disabled={connection !== 'connected' || busy || comparisonLoadingSide !== null}
+                      operationLabel={studioOperationLabel} onView={showModelVersion} />
+                  </div>}
                   {quadArtifact && <Button variant="secondary" size="sm" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
                   <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> Export GLB</Button>
                 </div>}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyPreviewMaterial, isLocalPreviewResource, restorePreviewMaterials } from './preview-display.ts';
+import { applyPreviewMaterial, applyPreviewPartMaterials, isLocalPreviewResource, restorePreviewMaterials, separatedPartInfo } from './preview-display.ts';
 
 test('triangle wireframe swaps preview materials and restores original references without changing geometry', () => {
   const sharedMaterial = { name: 'shared material', wireframe: false };
@@ -57,4 +57,35 @@ test('preview can resolve embedded image bytes without allowing remote resources
     'blob:https://example.com/id', `blob:${origin}0/wrong-port`]) {
     assert.equal(isLocalPreviewResource(url, origin), false);
   }
+});
+
+test('part highlighting colors each primitive and dims unselected parts without losing original materials', () => {
+  const original = { name: 'original' };
+  const firstPart = { material: original };
+  const secondPart = { material: original };
+  const duplicate = { material: original };
+  const parts = new Map([[firstPart, 0], [secondPart, 1], [duplicate, 0]]);
+  const materials = [{ name: 'orange' }, { name: 'blue' }];
+  const dimmed = { name: 'dimmed' };
+  const originals = new Map();
+  applyPreviewPartMaterials(parts, materials, dimmed, null, originals);
+  assert.equal(firstPart.material, materials[0]);
+  assert.equal(secondPart.material, materials[1]);
+  assert.equal(duplicate.material, materials[0]);
+  restorePreviewMaterials(originals);
+  applyPreviewPartMaterials(parts, materials, dimmed, 1, originals);
+  assert.equal(firstPart.material, dimmed);
+  assert.equal(secondPart.material, materials[1]);
+  assert.equal(duplicate.material, dimmed);
+  restorePreviewMaterials(originals);
+  assert.equal(secondPart.material, original);
+  assert.equal(firstPart.material, original);
+});
+
+test('only a part separation result with a bounded primitive count can enable part display', () => {
+  assert.deepEqual(separatedPartInfo({
+    operation: 'mesh.separate_parts', report: { output_primitives: 256, grouped_components: 10 },
+  }), { count: 256, grouped: true });
+  assert.equal(separatedPartInfo({ operation: 'mesh.cleanup', report: { output_primitives: 2 } }), null);
+  assert.equal(separatedPartInfo({ operation: 'mesh.separate_parts', report: { output_primitives: 257 } }), null);
 });

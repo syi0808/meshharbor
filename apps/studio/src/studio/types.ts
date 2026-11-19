@@ -20,11 +20,32 @@ export interface Asset {
   metadata: Record<string, unknown>;
   created_at: string;
   artifacts: Artifact[];
+  model_version?: number;
+  model?: {
+    id: string;
+    name: string;
+    generated: boolean;
+    current_asset_id: string;
+  };
 }
 
 export interface AssetPage {
   items: Asset[];
   next_cursor: string | null;
+}
+
+export interface ModelVersion {
+  asset_id: string;
+  number: number;
+  parent_number: number | null;
+  operation: string | null;
+  created_at: string;
+}
+
+export interface ModelVersionPage {
+  items: ModelVersion[];
+  current_asset_id: string;
+  next_before: number | null;
 }
 
 export interface Operation {

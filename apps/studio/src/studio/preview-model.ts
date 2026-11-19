@@ -4,6 +4,12 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { previewFrameFromBounds } from './preview-camera';
 import { isLocalPreviewResource } from './preview-display';
 
+const primitiveIndices = new WeakMap<THREE.Mesh, number>();
+
+export function previewPrimitiveIndex(mesh: THREE.Mesh): number | undefined {
+  return primitiveIndices.get(mesh);
+}
+
 export async function loadPreviewModel(blob: Blob, signal: AbortSignal) {
   signal.throwIfAborted();
   const buffer = await blob.arrayBuffer();
@@ -16,11 +22,18 @@ export async function loadPreviewModel(blob: Blob, signal: AbortSignal) {
   });
   const loader = new GLTFLoader(manager);
   loader.setMeshoptDecoder(MeshoptDecoder);
-  const { scene } = await loader.parseAsync(buffer, '');
+  const { scene, parser } = await loader.parseAsync(buffer, '');
   if (signal.aborted) {
     disposePreviewModel(scene);
     signal.throwIfAborted();
   }
+  scene.traverse(node => {
+    if (!(node instanceof THREE.Mesh)) return;
+    const association = parser.associations.get(node);
+    if (association && 'primitives' in association && typeof association.primitives === 'number') {
+      primitiveIndices.set(node, association.primitives);
+    }
+  });
   return scene;
 }
 
