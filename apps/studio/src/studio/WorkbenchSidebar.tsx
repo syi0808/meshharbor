@@ -4,6 +4,7 @@ import { useDefaultLayout } from 'react-resizable-panels';
 import { Button } from '@/components/ui/button';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Sidebar, SidebarContent, SidebarHeader, SidebarProvider } from '@/components/ui/sidebar';
 import {
   decodeInventoryOpen,
   DESKTOP_SIDEBAR_KEY,
@@ -84,21 +85,24 @@ export function WorkbenchLayout({
     if (!narrow) requestAnimationFrame(restoreFocus);
   }
 
-  const body = <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
+  const body = <SidebarContent className="min-w-0 overflow-x-hidden overscroll-contain">
     {assets}
-  </div>;
+  </SidebarContent>;
 
   return (
+    <SidebarProvider className="contents" keyboardShortcut={false}>
       <div className={narrow
         ? 'grid min-h-0 min-w-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto]'
         : 'grid min-h-0 min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)]'}>
-        <div className={narrow ? 'row-start-2 border-t bg-sidebar' : 'w-18 border-r border-sidebar-border bg-sidebar'}>{tools}</div>
+        <Sidebar collapsible="none" className={narrow ? 'row-start-2 h-auto w-full border-t' : 'w-18 border-r border-sidebar-border'}>
+          {tools}
+        </Sidebar>
         <ResizablePanelGroup id="studio-panels" orientation="horizontal"
           className={narrow ? 'row-start-1 min-h-0 min-w-0' : 'min-h-0 min-w-0'}
           defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
           {inspectorOpen && <>
             <ResizablePanel id="inspector" defaultSize={288} minSize={240} maxSize={416} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
-              {inspector}
+              <Sidebar collapsible="none" className="w-full">{inspector}</Sidebar>
             </ResizablePanel>
             <ResizableHandle withHandle aria-label="Resize settings panel" />
           </>}
@@ -108,21 +112,23 @@ export function WorkbenchLayout({
           {desktopDockOpen && <>
             <ResizableHandle withHandle aria-label="Resize library panel" />
             <ResizablePanel id="library" defaultSize={304} minSize={224} maxSize={480} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
-              <aside id="workbench-sidebar-dock" aria-labelledby="workbench-inventory-title" className="flex h-full min-w-0 flex-col"
-                onKeyDown={event => {
-                  if (event.key === 'Escape') {
-                    event.stopPropagation();
-                    onCollapse();
-                  }
-                }}>
-                <div className="flex min-h-6 shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
-                  <h2 id="workbench-inventory-title" className="font-heading text-sm font-medium">Inventory</h2>
-                  <Button variant="ghost" size="icon-sm" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={onCollapse}>
-                    <SidebarSimpleIcon aria-hidden="true" />
-                  </Button>
-                </div>
-                {body}
-              </aside>
+              <Sidebar collapsible="none" side="right" className="w-full">
+                <aside id="workbench-sidebar-dock" aria-labelledby="workbench-inventory-title" className="flex h-full min-h-0 min-w-0 flex-col"
+                  onKeyDown={event => {
+                    if (event.key === 'Escape') {
+                      event.stopPropagation();
+                      onCollapse();
+                    }
+                  }}>
+                  <SidebarHeader className="min-h-6 shrink-0 flex-row items-center justify-between border-b px-3 py-2">
+                    <h2 id="workbench-inventory-title" className="font-heading text-sm font-medium">Inventory</h2>
+                    <Button variant="ghost" size="icon-sm" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={onCollapse}>
+                      <SidebarSimpleIcon aria-hidden="true" />
+                    </Button>
+                  </SidebarHeader>
+                  {body}
+                </aside>
+              </Sidebar>
             </ResizablePanel>
           </>}
         </ResizablePanelGroup>
@@ -134,5 +140,6 @@ export function WorkbenchLayout({
           </SheetContent>
         </Sheet>}
       </div>
+    </SidebarProvider>
   );
 }
