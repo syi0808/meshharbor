@@ -128,4 +128,7 @@
   html {
     @apply font-sans;
     }
+  button:enabled:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
 }
