@@ -17,8 +17,8 @@ Reviewed the free, signed-out public web workspaces on 2026-11-18 at 1440, 1024,
 
 ## MeshHarbor decisions
 
-- Above 1024px: left tool rail and resizable settings, persistent central viewport, and resizable right inventory. The right edge is the gallery itself; the header's **Inventory** button replaces the separate navigation rail.
-- 761–1024px: keep the right inventory dock and open tool settings from a left drawer. At 760px and below, the viewport spans the window above a compact tool bar; **Inventory** in the header opens the right drawer.
+- Above 760px: icon-only tool rail and an always-open resizable tool panel, central viewport, and optional resizable right inventory. The header's **Inventory** button toggles the gallery.
+- At 760px or less: keep the tool rail on the left and stack the tool panel above the viewport; **Inventory** opens a right drawer.
 - **Inventory** is a screenshot grid for browsing and selection. Captures come from the actual GLB or image and persist in the browser's local site storage. **Jobs** opens in the left tool panel, independently of the selected asset and without replacing Inventory.
 - New model owns an explicit image reference. Choosing or replacing it does not select it in the viewport. From a displayed image, **Use as reference** intentionally attaches it. A new output joins the inventory without replacing a different model the user is reviewing; **View generated model** opens it when ready.
 - Optimize and More tools use the selected GLB, keep the viewer mounted, and display the target filename in settings. They do not imply parity with competitors' text-to-3D, rigging, or generative texturing.

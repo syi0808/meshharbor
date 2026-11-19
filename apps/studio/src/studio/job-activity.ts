@@ -27,7 +27,7 @@ export function jobStage(job: Job): string {
   switch (job.state) {
     case 'queued': return 'Waiting for an engine slot';
     case 'validating': return 'Finalizing result';
-    case 'cancelling': return 'Cancelling';
+    case 'cancelling': return job.operation === 'image.generate' ? 'Stopping generation worker' : 'Stopping at a safe checkpoint';
     case 'succeeded': return 'Finished';
     case 'failed': return 'Stopped with an error';
     case 'cancelled': return 'Cancelled';
@@ -78,6 +78,11 @@ export function mergeJobRecords(primary: Job[], secondary: Job[]): Job[] {
   const jobs = new Map(primary.map(job => [job.id, job]));
   for (const job of secondary) {
     const prior = jobs.get(job.id);
+    if (prior && isActiveJob(prior) && isActiveJob(job) && prior.state !== job.state
+      && (prior.state === 'cancelling' || job.state === 'cancelling')) {
+      if (job.state === 'cancelling') jobs.set(job.id, job);
+      continue;
+    }
     if (!prior || (isActiveJob(prior) === isActiveJob(job)
       ? Number(job.updated_at) > Number(prior.updated_at)
       : !isActiveJob(job))) jobs.set(job.id, job);

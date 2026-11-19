@@ -1,4 +1,4 @@
-import { ArrowDownIcon, ArrowsClockwiseIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GearSixIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SidebarSimpleIcon, SlidersHorizontalIcon, SquaresFourIcon, WrenchIcon } from '@phosphor-icons/react';
+import { ArrowDownIcon, ArrowsClockwiseIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GearSixIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SlidersHorizontalIcon, SquaresFourIcon, WrenchIcon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   assetComparisonPairForSelection,
@@ -10,7 +10,7 @@ import {
   cancelJobNotice,
   canInspectJobHistoryRecord,
   isActiveJob,
-  isQueuedJobCancellable,
+  isJobCancellable,
   jobReportMatchesAsset,
   jobResultCardModel,
   jobPollRetryDelay,
@@ -27,6 +27,7 @@ import {
   type JobReportCardModel,
 } from './api';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -38,13 +39,11 @@ import { Item, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@/comp
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
 import { Slider } from '@/components/ui/slider';
 import { Spinner } from '@/components/ui/spinner';
 import { Toaster } from '@/components/ui/sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { ModelPreview } from './ModelPreview';
 import { AssetGalleryCard } from './AssetGalleryCard';
 import { Disclosure } from './Disclosure';
@@ -58,7 +57,7 @@ import { notify } from './notify';
 import { SettingsPage, settingsSectionFromPath, type RuntimeAction, type SettingsSection } from './SettingsPage';
 import { applyStudioTheme, loadStudioTheme } from './theme';
 import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
-import { formatVersionSizes, inspectorForAsset, shouldHighlightExport, WORKBENCH_INSPECTOR_SHEET_QUERY, type Inspector } from './workbench-state';
+import { formatVersionSizes, shouldHighlightExport, type Inspector } from './workbench-state';
 import type { Artifact, Asset, AssetKind, GenerationViewMode, Job, MeshOperationId, Operation, PosedViewMode, RuntimeBackendId, RuntimeInfo } from './types';
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
@@ -199,6 +198,9 @@ export function App() {
   const historySelectionGuard = useRef(new LatestRequestGuard());
   const recentJobsRequestGuard = useRef(new LatestRequestGuard());
   const [job, setJobState] = useState<Job | null>(null);
+  const [stopTarget, setStopTarget] = useState<Job | null>(null);
+  const [stoppingJob, setStoppingJob] = useState(false);
+  const stopTrigger = useRef<HTMLButtonElement | null>(null);
   const jobRef = useRef<Job | null>(null);
   const setJob = useCallback((next: Job | null) => {
     if (jobRef.current?.id !== next?.id) historySelectionGuard.current.invalidate();
@@ -211,19 +213,9 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const downloadInFlight = useRef(false);
-  const [inspector, setInspector] = useState<Inspector | null>(null);
-  const [selectedTool, setSelectedTool] = useState<Inspector>('generation');
-  const inspectorTrigger = useRef<HTMLButtonElement | null>(null);
-  const [inspectorIsSheet, setInspectorIsSheet] = useState(() => window.matchMedia(WORKBENCH_INSPECTOR_SHEET_QUERY).matches);
-  useEffect(() => {
-    const media = window.matchMedia(WORKBENCH_INSPECTOR_SHEET_QUERY);
-    const update = () => setInspectorIsSheet(media.matches);
-    media.addEventListener('change', update);
-    update();
-    return () => media.removeEventListener('change', update);
-  }, []);
+  const [inspector, setInspector] = useState<Inspector>('generation');
   const sidebar = useWorkbenchSidebar();
-  const workbenchRef = useRef<HTMLElement>(null);
+  const draggedImage = useRef<Asset | null>(null);
   const [dragging, setDragging] = useState(false);
   const [importProgress, setImportProgress] = useState<AssetImportProgress | null>(null);
   const [settingsActivity, setSettingsActivity] = useState<StudioActivity | null>(null);
@@ -301,7 +293,6 @@ export function App() {
     ? generationParameters(selectedGenerationProfile, generationDraft, viewMode !== 'single') : null;
   function openSettings(section: SettingsSection, backendId?: RuntimeBackendId) {
     if (backendId) setSettingsBackend(backendId);
-    if (inspectorIsSheet) setInspector(null);
     if (sidebar.narrow && sidebar.open) sidebar.setOpen(false);
     const path = `/settings/${section}`;
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
@@ -316,7 +307,6 @@ export function App() {
   }
 
   function openDashboard(jobId?: string) {
-    if (inspectorIsSheet) setInspector(null);
     if (sidebar.narrow && sidebar.open) sidebar.setOpen(false);
     const path = jobId ? `/jobs?job=${encodeURIComponent(jobId)}` : '/jobs';
     if (window.location.pathname + window.location.search !== path) window.history.pushState(null, '', path);
@@ -660,7 +650,11 @@ export function App() {
     const poll = async () => {
       try {
         const latest = await api.job(job.id);
-        if (stopped) return;
+        if (stopped || jobRef.current?.id !== job.id || !isActiveJob(jobRef.current)) return;
+        if (jobRef.current.state === 'cancelling' && isActiveJob(latest) && latest.state !== 'cancelling') {
+          timer = window.setTimeout(poll, 700);
+          return;
+        }
         consecutiveFailures = 0;
         setJobPollingIssue(null);
         if (latest.state === 'succeeded') {
@@ -714,13 +708,6 @@ export function App() {
             setAssets((current) => [completedAsset, ...current.filter((item) => item.id !== completedAsset.id)]);
             if (advance) {
               selectAssetId(completedAsset.id);
-              const completedInspector: Inspector = latest.operation === 'mesh.simplify' ? 'optimize' : latest.operation === 'image.generate' ? 'generation' : 'tools';
-              const toolPane = document.getElementById('workbench-inspector');
-              if (toolPane?.dataset.tool === completedInspector &&
-                (document.activeElement === document.body || toolPane.contains(document.activeElement))) {
-                if (inspectorTrigger.current?.isConnected) inspectorTrigger.current.focus();
-              }
-              setInspector(current => current === completedInspector ? null : current);
             }
           }
           const resultReport = latest.result?.report ?? {};
@@ -791,7 +778,7 @@ export function App() {
         }
         if (latest.state === 'cancelled') {
           setJob(latest);
-          notify('success', 'The queued job was cancelled.');
+          notify('success', cancelJobNotice(latest));
           return;
         }
         setJob(latest);
@@ -854,7 +841,6 @@ export function App() {
   const reportPreviewError = useCallback((message: string) => notify('error', `Preview: ${message}`), []);
 
   function selectAsset(asset: Asset) {
-    if (asset.kind !== 'mesh') setInspector(current => inspectorForAsset(current, asset.kind));
     invalidateHistoryRequests();
     const pair = assetComparisonPairForSelection(assets, asset.id, comparisonPair);
     setComparisonPair(pair);
@@ -955,7 +941,6 @@ export function App() {
           invalidateHistoryRequests();
           comparisonPairRef.current = null;
           setComparisonPair(null);
-          if (result.assets[0].kind !== 'mesh') setInspector(current => inspectorForAsset(current, result.assets[0].kind));
           selectAssetId(result.assets[0].id);
           setReportJob(null);
         }
@@ -1117,15 +1102,26 @@ export function App() {
     }
   }
 
-  async function cancelJob() {
-    if (!isQueuedJobCancellable(job)) return;
-    invalidateHistoryRequests();
+  function requestStop(target: Job, trigger: HTMLButtonElement) {
+    stopTrigger.current = trigger;
+    setStopTarget(target);
+  }
+
+  async function stopJob() {
+    if (!stopTarget || stoppingJob) return;
+    setStoppingJob(true);
     try {
-      const updated = await api.cancelJob(job.id);
-      setJob(updated);
-      notify(updated.state === 'cancelled' ? 'success' : 'warning', cancelJobNotice(updated));
+      const updated = await api.cancelJob(stopTarget.id);
+      if (jobRef.current?.id === updated.id && isActiveJob(jobRef.current)) {
+        if (updated.state === 'cancelled' || updated.state === 'cancelling') setJob(updated);
+      }
+      setJobSnapshot(current => mergeJobRecords([updated], current));
+      notify(updated.state === 'cancelled' ? 'success' : updated.state === 'cancelling' ? 'info' : 'warning', cancelJobNotice(updated));
     } catch (cause) {
-      notify('error', cause instanceof Error ? cause.message : 'Could not cancel this job.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not stop this job.');
+    } finally {
+      setStoppingJob(false);
+      setStopTarget(null);
     }
   }
 
@@ -1137,7 +1133,8 @@ export function App() {
     ? selectedComparisonPair.resultAssetId === selectedId
     : Boolean(selectedAsset?.source_asset_id);
   const activeView: AssetComparisonSide = isComparingResult ? 'result' : 'source';
-  const openInspector = inspectorForAsset(inspector, selectedAsset?.kind);
+  const openInspector = inspector;
+  const hasSelectedMesh = selectedAsset?.kind === 'mesh';
   const comparisonResult = previewComparison
     ? assets.find(asset => asset.id === previewComparison.resultAssetId)
     : null;
@@ -1148,36 +1145,18 @@ export function App() {
     : null;
   const showVersionStats = previewComparison && comparisonResult
     && (typeof beforeTriangles === 'number' || comparisonSizes);
-  const activeTool = inspectorForAsset(selectedTool, selectedAsset?.kind) ?? 'generation';
-  function selectInspector(next: Inspector, trigger: HTMLButtonElement) {
-    if (openInspector === next) return;
-    inspectorTrigger.current = trigger;
-    setSelectedTool(next);
-    setInspector(next);
-  }
   const inspectorTitle = openInspector === 'generation' ? 'Generate model' : openInspector === 'optimize' ? 'Optimize mesh' : openInspector === 'jobs' ? 'Jobs' : 'Mesh tools';
-  const closeInspectorLabel = openInspector === 'jobs' ? 'Close jobs' : 'Close settings';
-  const showInspectorSheet = inspectorIsSheet && !!openInspector;
-  const exportIsPrimary = shouldHighlightExport(activeView, openInspector, isRunning, connection === 'connected');
-  function restoreInspectorFocus() {
-    const trigger = inspectorTrigger.current;
-    if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus();
-    else workbenchRef.current?.querySelector<HTMLButtonElement>('[data-slot="model-tools"] button')?.focus();
-  }
-  function closeInspector() {
-    setInspector(null);
-    restoreInspectorFocus();
-  }
+  const exportIsPrimary = shouldHighlightExport(activeView, isRunning, connection === 'connected');
   const jobFeedback = isRunning ? (
     <Card size="sm"><CardContent className="grid gap-2">
       <div className="flex flex-wrap items-center gap-2" role="status">
         <Spinner role="progressbar" aria-label="Job progress" />
-        <strong>{job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating' : job.state === 'cancelling' ? 'Cancelling' : 'Working'}</strong>
+        <strong>{job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating' : job.state === 'cancelling' ? 'Stopping' : 'Working'}</strong>
         <span>{studioOperationLabel(job.operation)}</span>
       </div>
       {jobPollingIssue?.jobId === job.id && <p className="wrap-anywhere text-muted-foreground">{jobPollingIssue.message}</p>}
       <p className="text-muted-foreground">{jobStage(job)}{job.operation === 'image.generate' && job.state === 'running' ? '. Generation can take several minutes.' : ''}</p>
-      {isQueuedJobCancellable(job) && <Button variant="outline" size="sm" className="justify-self-start" onClick={() => void cancelJob()}>Cancel queued job</Button>}
+      {isJobCancellable(job) && <Button variant="outline" size="sm" className="justify-self-start" onClick={event => requestStop(job, event.currentTarget)}>Stop job</Button>}
     </CardContent></Card>
   ) : null;
   const workbenchActivity = jobFeedback || importProgress ? <>
@@ -1190,7 +1169,28 @@ export function App() {
 
   function renderAssetCard(asset: Asset) {
     return <AssetGalleryCard key={asset.id} asset={asset} loadPreview={loadPreview} selected={asset.id === selectedId}
+      onDragImage={image => {
+        draggedImage.current = image;
+        if (image && !busy && !isRunning) setInspector('generation');
+      }}
       onSelect={() => { selectAsset(asset); if (sidebar.narrow) sidebar.setOpen(false); }} />;
+  }
+
+  function attachInventoryReference(id: string, index?: number) {
+    const image = draggedImage.current;
+    if (!image || image.id !== id || image.kind !== 'image' || busy || isRunning) return;
+    draggedImage.current = null;
+    if (viewMode === 'single') setGenerationSource(image);
+    else if (index !== undefined) setPosedDrafts(current => ({
+      ...current,
+      [viewMode]: (current[viewMode] ?? defaultViews(viewMode)).map((view, currentIndex) =>
+        currentIndex === index ? { ...view, image } : view),
+    }));
+  }
+
+  function singleReferencePicker() {
+    return <SingleReference image={generationSource} load={loadPreview} disabled={busy || isRunning}
+      onPick={files => void importFiles(files, 'reference')} onDropImage={attachInventoryReference} onClear={() => setGenerationSource(null)} />;
   }
 
   function inspectorBody() {
@@ -1210,28 +1210,33 @@ export function App() {
             : <ItemGroup>{recentJobs.slice(0, 8).map((savedJob) => (
               <JobListItem key={savedJob.id} job={savedJob} title={studioOperationLabel(savedJob.operation)} showUpdated
                 selected={savedJob.id === job?.id}>
-                <Button variant="ghost" size="sm" onClick={() => { void openRecentJob(savedJob.id); if (inspectorIsSheet) setInspector(null); }} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{['queued', 'running', 'validating', 'cancelling'].includes(savedJob.state) ? 'Check' : 'View'}</Button>
+                {isJobCancellable(savedJob) && <Button variant="ghost" size="sm" disabled={connection !== 'connected'} onClick={event => requestStop(savedJob, event.currentTarget)}>Stop job</Button>}
+                <Button variant="ghost" size="sm" onClick={() => void openRecentJob(savedJob.id)} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{isActiveJob(savedJob) ? 'Check' : 'View'}</Button>
               </JobListItem>
             ))}</ItemGroup>}
         </section>
     );
     return <>
-      {(openInspector === 'optimize' || openInspector === 'tools') && selectedAsset?.kind === 'mesh' && (
+      {(openInspector === 'optimize' || openInspector === 'tools') && (
         <div className="grid min-w-0 gap-1 border-b px-4 py-3 text-xs">
           <span className="text-muted-foreground">Selected model</span>
-          <span className="truncate font-medium" title={selectedAsset.name}>{selectedAsset.name}</span>
+          {hasSelectedMesh ? <span className="truncate font-medium" title={selectedAsset.name}>{selectedAsset.name}</span>
+            : <Button variant="outline" size="sm" className="justify-self-start" onClick={() => {
+              if (assetFilters.kind !== 'mesh') applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS);
+              sidebar.setOpen(true);
+            }}>Choose a 3D model</Button>}
         </div>
       )}
       {openInspector === 'optimize' && <div className="grid gap-4 p-4 text-xs/relaxed">
         <p className="text-muted-foreground">Reduce polygon count while keeping the original file intact and preserving material references.</p>
         <Field>
           <FieldLabel htmlFor="triangle-target">Triangle target</FieldLabel>
-          <Input id="triangle-target" type="number" min="1" max="10000000" step="1" value={targetTriangles} onChange={(event) => setTargetTriangles(Number(event.target.value))} disabled={!selectedAsset || isRunning || busy} />
+          <Input id="triangle-target" type="number" min="1" max="10000000" step="1" value={targetTriangles} onChange={(event) => setTargetTriangles(Number(event.target.value))} disabled={!hasSelectedMesh || isRunning || busy} />
           <FieldDescription>Goal, not a guarantee</FieldDescription>
         </Field>
         <div className="flex items-center gap-2 text-muted-foreground [&>span]:shrink-0">
           <span>Smaller</span>
-          <Slider className="min-w-0 flex-1" aria-label="Triangle target" min={1} max={Math.max(4, triangleCount || 20000)} step={1} value={[Math.max(1, Math.min(targetTriangles, Math.max(4, triangleCount || 20000)))]} onValueChange={([value]) => setTargetTriangles(value)} disabled={!selectedAsset || isRunning || busy} />
+          <Slider className="min-w-0 flex-1" aria-label="Triangle target" min={1} max={Math.max(4, triangleCount || 20000)} step={1} value={[Math.max(1, Math.min(targetTriangles, Math.max(4, triangleCount || 20000)))]} onValueChange={([value]) => setTargetTriangles(value)} disabled={!hasSelectedMesh || isRunning || busy} />
           <span>More detail</span>
         </div>
         <Accordion type="single" collapsible>
@@ -1240,7 +1245,7 @@ export function App() {
             <AccordionContent>
               <div className="grid gap-3">
                 <div className="flex items-center justify-between gap-2"><span>Error tolerance</span><span className="font-mono tabular-nums">{maxError.toFixed(3)}</span></div>
-                <Slider aria-label="Maximum geometric error" min={0.001} max={0.08} step={0.001} value={[maxError]} onValueChange={([value]) => setMaxError(value)} disabled={!selectedAsset || isRunning || busy} />
+                <Slider aria-label="Maximum geometric error" min={0.001} max={0.08} step={0.001} value={[maxError]} onValueChange={([value]) => setMaxError(value)} disabled={!hasSelectedMesh || isRunning || busy} />
                 <p className="text-muted-foreground">A lower tolerance may stop above your target to protect shape.</p>
               </div>
             </AccordionContent>
@@ -1276,10 +1281,10 @@ export function App() {
               </>}
             </Field>}
             {viewMode === 'single'
-              ? <SingleReference image={generationSource} load={loadPreview} disabled={busy || isRunning}
-                onPick={files => void importFiles(files, 'reference')} onClear={() => setGenerationSource(null)} />
+              ? singleReferencePicker()
               : <PosedReferences mode={viewMode} views={posedViews} maxViews={selectedGenerationProfile.max_views} load={loadPreview} disabled={busy || isRunning}
                 onPick={(files, index) => void importFiles(files, { mode: viewMode, maxViews: selectedGenerationProfile.max_views, index })}
+                onDropImage={attachInventoryReference}
                 onChange={views => setPosedDrafts(previous => ({ ...previous, [viewMode]: views }))} />}
             <section className="grid gap-3" aria-label="Model settings">
               <h3 className="font-medium">Model settings</h3>
@@ -1297,6 +1302,7 @@ export function App() {
             </EmptyHeader>
             <EmptyContent><Button variant="secondary" onClick={() => openSettings('models')}>Open model setup</Button></EmptyContent>
           </Empty>}
+          {!selectedGenerationProfile && singleReferencePicker()}
         </section>}
 
       {openInspector === 'tools' && <>
@@ -1364,8 +1370,8 @@ export function App() {
     </>;
   }
 
-  const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools" className={sidebar.narrow ? '' : 'h-full'}>
-    <SidebarMenu className={sidebar.narrow ? 'grid grid-cols-4 p-1.5' : 'p-1.5'}>
+  const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools" className="h-full">
+    <SidebarMenu className="p-1.5">
       {([
         { key: 'generation', label: 'New model', icon: ImageSquareIcon },
         { key: 'optimize', label: 'Optimize', icon: SlidersHorizontalIcon },
@@ -1373,18 +1379,11 @@ export function App() {
         { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
       ] as const).map(({ key, label, icon: Icon }) => (
         <SidebarMenuItem key={key}>
-          <SidebarMenuButton type="button" isActive={activeTool === key}
-            className="h-auto min-w-0 flex-col gap-0.5 px-1 py-1 active:bg-transparent hover:bg-transparent data-open:hover:bg-transparent data-active:bg-transparent [&_svg]:size-5"
-            aria-current={activeTool === key ? true : undefined} aria-expanded={openInspector === key}
-            aria-controls={openInspector === key ? 'workbench-inspector' : undefined}
-            aria-haspopup={inspectorIsSheet ? 'dialog' : undefined}
-            disabled={(key === 'optimize' || key === 'tools') && selectedAsset?.kind !== 'mesh'}
-            onClick={event => selectInspector(key, event.currentTarget)}>
-            <span data-slot="tool-icon" aria-hidden="true"
-              className="grid size-8 shrink-0 place-items-center rounded-md transition-colors group-hover/menu-button:bg-sidebar-accent group-aria-[current=true]/menu-button:bg-sidebar-accent group-aria-[current=true]/menu-button:text-primary motion-reduce:transition-none">
-              <Icon className="size-5" />
-            </span>
-            <span data-slot="tool-label" className="text-[0.6875rem] leading-tight text-muted-foreground group-hover/menu-button:text-foreground group-aria-[current=true]/menu-button:text-foreground">{label}</span>
+          <SidebarMenuButton type="button" isActive={openInspector === key} aria-label={label}
+            className="size-9 justify-center p-0 data-active:text-primary [&_svg]:size-5"
+            aria-current={openInspector === key ? true : undefined} aria-controls="workbench-inspector"
+            onClick={() => setInspector(key)}>
+            <Icon aria-hidden="true" />
           </SidebarMenuButton>
         </SidebarMenuItem>
       ))}
@@ -1392,32 +1391,26 @@ export function App() {
   </div>;
   const showGenerateAction = canGenerate && !(isRunning && job.operation === 'image.generate');
   const inspectorContent = <>
-    <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1"
+    <ScrollArea key={openInspector} type="auto" className="min-h-0 min-w-0 flex-1"
       viewportProps={{ tabIndex: 0, role: 'region', 'aria-label': `${inspectorTitle} content`, className: 'overscroll-contain [&>div]:block!' }}>
-      {inspectorIsSheet && workbenchActivity && <div className="grid gap-2 px-4">{workbenchActivity}</div>}
+      {!settingsSection && !dashboard && workbenchActivity && <div className="grid gap-2 p-3">{workbenchActivity}</div>}
       {inspectorBody()}
     </ScrollArea>
     {openInspector === 'generation' && (showGenerateAction || generationResult?.result?.asset_id) && <SidebarFooter className="shrink-0 border-t px-4 py-3">
       {showGenerateAction && <Button disabled={!generationAssetId || !generationPayload || busy || connection !== 'connected' || isRunning}
         onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
-      {generationResult?.result?.asset_id && <Button variant="secondary" disabled={busy || isRunning} onClick={() => {
-        closeInspector();
-        void openRecentJob(generationResult.id);
-      }}>View generated model</Button>}
+      {generationResult?.result?.asset_id && <Button variant="secondary" disabled={busy || isRunning} onClick={() => void openRecentJob(generationResult.id)}>View generated model</Button>}
     </SidebarFooter>}
   </>;
-  const desktopInspector = openInspector && !inspectorIsSheet ? (
+  const toolInspector = (
     <aside className="flex h-full min-h-0 min-w-0 flex-col" id="workbench-inspector" data-tool={openInspector}
-      aria-labelledby="workbench-inspector-title" onKeyDown={event => {
-        if (event.key === 'Escape') { event.stopPropagation(); closeInspector(); }
-      }}>
-      <SidebarHeader className="shrink-0 flex-row items-center justify-between border-b px-4 py-2 font-heading text-sm font-medium">
-        <h2 id="workbench-inspector-title">{inspectorTitle}</h2>
-        <Button variant="ghost" size="icon-sm" title={closeInspectorLabel} aria-label={closeInspectorLabel} onClick={closeInspector}><SidebarSimpleIcon aria-hidden="true" /></Button>
+      aria-labelledby="workbench-inspector-title">
+      <SidebarHeader className="shrink-0 border-b px-4 py-2 font-heading text-sm font-medium">
+        <h2 id="workbench-inspector-title" tabIndex={-1}>{inspectorTitle}</h2>
       </SidebarHeader>
       {inspectorContent}
     </aside>
-  ) : null;
+  );
 
   return (
     <>
@@ -1435,9 +1428,10 @@ export function App() {
       {dashboard && <JobsDashboard jobs={recentJobs} localActivities={localActivities} focusedJobId={dashboard.jobId}
         connection={connection} problem={jobFeedError ?? connectionError} loaded={jobFeedLoaded} resultBlocked={isRunning}
         operationLabel={studioOperationLabel} onBack={closeDashboard} onRefresh={refreshJobHistory} onReconnect={() => void connect(true)}
+        onStop={requestStop}
         onLoadOlder={before => api.jobs(JOB_PAGE_SIZE, { before })}
         onViewResult={id => { closeDashboard(); void openRecentJob(id); }} />}
-      <div className={`${settingsSection || dashboard ? 'hidden' : 'flex'} min-h-dvh min-w-0 flex-col bg-background min-[881px]:h-dvh min-[881px]:overflow-hidden`} onDragOver={(event) => {
+      <div className={`${settingsSection || dashboard ? 'hidden' : 'flex'} h-dvh min-w-0 flex-col overflow-hidden bg-background`} onDragOver={(event) => {
       if (!event.dataTransfer.types.includes('Files')) return;
       event.preventDefault();
       setDragging(true);
@@ -1451,11 +1445,7 @@ export function App() {
     }}>
       <header className="z-10 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b bg-background px-4 py-2">
         <span className="font-heading text-sm font-medium">meshharbor</span>
-          {selectedAsset?.kind === 'mesh' && <div className="order-last flex w-full flex-wrap items-center gap-2 md:order-0 md:ml-auto md:w-auto" role="group" aria-label="File actions">
-            {quadArtifact && <Button variant="secondary" size="sm" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
-            {selectedAsset.kind === 'mesh' && <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> <span>Export GLB</span></Button>}
-          </div>}
-        <div className={selectedAsset?.kind === 'mesh' ? 'ml-auto flex items-center gap-2 md:ml-0' : 'ml-auto flex items-center gap-2'}>
+        <div className="ml-auto flex flex-wrap items-center gap-1 sm:gap-2">
           <Button variant={sidebar.open ? 'secondary' : 'ghost'} size="sm" ref={sidebar.triggerRef}
             aria-expanded={sidebar.open} aria-haspopup={sidebar.narrow ? 'dialog' : undefined}
             aria-controls={sidebar.open ? (sidebar.narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
@@ -1465,15 +1455,11 @@ export function App() {
         </div>
       </header>
 
-      <main className="relative flex min-h-0 min-w-0 flex-1 flex-col" ref={workbenchRef} data-connection={connection}>
+      <main className="relative flex min-h-0 min-w-0 flex-1 flex-col" data-connection={connection}>
           <h1 className="sr-only">MeshHarbor Studio</h1>
           <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" tabIndex={-1} type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={inventoryInputRef} className="sr-only" aria-label="Choose image files" tabIndex={-1} type="file" multiple accept=".png,.jpg,.jpeg,image/png,image/jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-          {!showInspectorSheet && !settingsSection && !dashboard && workbenchActivity && <div className={`pointer-events-none fixed inset-x-3 z-20 mx-auto grid max-w-sm gap-2 [&>*]:pointer-events-auto ${sidebar.narrow ? 'bottom-20' : 'bottom-3'}`}>
-            {workbenchActivity}
-          </div>}
-
-            <WorkbenchLayout state={(settingsSection || dashboard) && sidebar.narrow ? { ...sidebar, open: false } : sidebar} inspector={desktopInspector} tools={toolRail}
+            <WorkbenchLayout state={(settingsSection || dashboard) && sidebar.narrow ? { ...sidebar, open: false } : sidebar} inspector={toolInspector} tools={toolRail}
               assets={
               <Tabs value={assetFilters.kind} onValueChange={kind => {
                 if (kind === 'mesh' || kind === 'image') applyAssetBrowserFilters({ ...EMPTY_ASSET_BROWSER_FILTERS, kind });
@@ -1573,18 +1559,18 @@ export function App() {
               }
             >
 
-            <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-muted dark:bg-neutral-800" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
+            <section className="@container flex min-h-0 min-w-0 flex-1 flex-col bg-muted dark:bg-neutral-800" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
               {!selectedAsset ? <div className="flex min-h-0 flex-1 overflow-y-auto">
-                <div className="m-auto grid w-full max-w-4xl items-center justify-center gap-4 p-6 lg:grid-cols-[minmax(0,22rem)_minmax(0,24rem)] lg:gap-8">
-                <div className="order-2 grid min-w-0 gap-4 lg:order-first">
-                  <h2 className="font-heading text-2xl font-medium lg:text-3xl">Start with a model or an image</h2>
+                <div className="m-auto grid w-full max-w-4xl items-center gap-4 p-4 @min-[42rem]:grid-cols-[minmax(0,22rem)_minmax(0,24rem)] @min-[42rem]:gap-8 sm:p-6">
+                <div className="order-2 grid min-w-0 gap-4 @min-[42rem]:order-first">
+                  <h2 className="font-heading text-xl font-medium @min-[42rem]:text-3xl">Start with a model or an image</h2>
                   <p className="text-sm text-muted-foreground">Inspect and refine a GLB, or turn a reference image into a 3D model on this computer.</p>
                   <div className="flex flex-wrap gap-2">
                     <Button onClick={() => {
                       if (assetFilters.kind !== 'mesh') applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS);
                       sidebar.setOpen(true);
                     }}><CubeIcon data-icon="inline-start" aria-hidden="true" /> Browse inventory</Button>
-                    <Button variant="outline" onClick={event => selectInspector('generation', event.currentTarget)}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Create from image</Button>
+                    <Button variant="outline" onClick={() => setInspector('generation')}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Create from image</Button>
                   </div>
                   <p className="text-xs text-muted-foreground">Drop a GLB, PNG or JPEG here</p>
                 </div>
@@ -1595,26 +1581,31 @@ export function App() {
                 <div className="flex min-w-0 flex-1 items-center justify-between gap-2 max-sm:basis-full">
                   <div className="flex min-w-0 items-center gap-2 text-xs">{selectedAsset.kind === 'image' ? <FileImageIcon aria-hidden="true" /> : <CubeIcon aria-hidden="true" />} <span className="truncate font-medium" title={selectedAsset.name}>{selectedAsset.name}</span></div>
                   {selectedComparisonPair && (
-                    <ToggleGroup className="shrink-0" type="single" orientation="horizontal" size="sm" variant="outline" spacing={0}
-                      aria-label="Preview version" aria-busy={comparisonLoadingSide !== null}
-                      disabled={comparisonLoadingSide !== null || busy || connection !== 'connected'}
+                    <Tabs className="shrink-0" activationMode="manual"
                       value={activeView} onValueChange={value => {
                         if ((value === 'source' || value === 'result') && value !== activeView) void selectComparisonSide(value);
                       }}>
-                      <ToggleGroupItem value="source">Original</ToggleGroupItem>
-                      <ToggleGroupItem value="result">Result</ToggleGroupItem>
-                    </ToggleGroup>
+                      <TabsList aria-label="Preview version" aria-busy={comparisonLoadingSide !== null}>
+                        {(['source', 'result'] as const).map(side => <TabsTrigger key={side} id={`preview-tab-${side}`} value={side}
+                          aria-controls="preview-asset" disabled={comparisonLoadingSide !== null || busy || connection !== 'connected'}>
+                          {side === 'source' ? 'Original' : 'Result'}
+                        </TabsTrigger>)}
+                      </TabsList>
+                    </Tabs>
                   )}
                 </div>
-                {selectedAsset.kind === 'image' && <Button variant="secondary" size="sm" disabled={busy || isRunning} onClick={event => {
-                  inspectorTrigger.current = event.currentTarget;
+                {selectedAsset.kind === 'image' && <Button variant="secondary" size="sm" disabled={busy || isRunning} onClick={() => {
                   setGenerationSource(selectedAsset);
                   setPreferredViewMode('single');
-                  setSelectedTool('generation');
                   setInspector('generation');
                 }}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Use as reference</Button>}
                 </div>
-                <ModelPreview asset={previewAsset} comparison={previewComparison} loadModel={loadPreview} onError={reportPreviewError} theme={theme} />
+                <div id="preview-asset" role={selectedComparisonPair ? 'tabpanel' : undefined}
+                  aria-labelledby={selectedComparisonPair ? `preview-tab-${activeView}` : undefined}
+                  tabIndex={selectedComparisonPair ? 0 : undefined}
+                  className="flex min-h-0 flex-1 flex-col">
+                  <ModelPreview asset={previewAsset} comparison={previewComparison} loadModel={loadPreview} onError={reportPreviewError} theme={theme} />
+                </div>
                 {showVersionStats && <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t bg-card px-3 py-2 text-xs tabular-nums text-muted-foreground [&_strong]:font-medium [&_strong]:text-foreground" role="group" aria-label="Original to result comparison">
                   {typeof beforeTriangles === 'number' && typeof afterTriangles === 'number' && <span>Triangles <strong>{beforeTriangles.toLocaleString()} → {afterTriangles.toLocaleString()}</strong></span>}
                   {comparisonSizes && <span>GLB size <strong>{comparisonSizes}</strong></span>}
@@ -1669,21 +1660,15 @@ export function App() {
                   </ScrollArea>
                 </Disclosure>
               )}
+                {hasSelectedMesh && <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t bg-card px-3 py-2" role="group" aria-label="File actions">
+                  {quadArtifact && <Button variant="secondary" size="sm" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
+                  <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> Export GLB</Button>
+                </div>}
               </div>}
 
             </section>
 
             </WorkbenchLayout>
-          {showInspectorSheet && !settingsSection && !dashboard && <Sheet open={showInspectorSheet} onOpenChange={open => { if (!open) setInspector(null); }}>
-            <SheetContent side="left" id="workbench-inspector" data-tool={openInspector} aria-describedby={undefined}
-              className="min-h-0 overflow-hidden max-sm:w-full" onCloseAutoFocus={event => {
-              event.preventDefault();
-              if (!dashboardFromLocation()) restoreInspectorFocus();
-            }}>
-              <SheetHeader className="shrink-0"><SheetTitle>{inspectorTitle}</SheetTitle></SheetHeader>
-              {inspectorContent}
-            </SheetContent>
-          </Sheet>}
       </main>
       {dragging && <div className="pointer-events-none fixed inset-0 z-30 grid place-items-center bg-background/80 p-4">
         <Empty className="w-fit border bg-card">
@@ -1696,6 +1681,32 @@ export function App() {
       </div>}
 
       </div>
+      <AlertDialog open={stopTarget !== null} onOpenChange={open => { if (!open && !stoppingJob) setStopTarget(null); }}>
+        <AlertDialogContent onEscapeKeyDown={event => { if (stoppingJob) event.preventDefault(); }}
+          onCloseAutoFocus={event => {
+            event.preventDefault();
+            const trigger = stopTrigger.current;
+            if (trigger?.isConnected && !trigger.disabled && trigger.getClientRects().length) trigger.focus();
+            else document.getElementById(dashboard ? 'jobs-dashboard-title' : settingsSection ? 'settings-heading' : 'workbench-inspector-title')?.focus();
+          }}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Stop this job?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {stopTarget?.state === 'running' && stopTarget.operation !== 'image.generate'
+                ? 'Mesh processing stops at the next safe checkpoint. No result will be saved. '
+                : ''}
+              A stopped job cannot be resumed. Start a new job to try again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={stoppingJob}>Keep job</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" disabled={stoppingJob} onClick={event => {
+              event.preventDefault();
+              void stopJob();
+            }}>{stoppingJob ? 'Requesting stop…' : 'Stop job'}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

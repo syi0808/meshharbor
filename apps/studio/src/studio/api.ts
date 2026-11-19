@@ -211,16 +211,21 @@ export async function resolveComparisonAsset(
 }
 
 export function cancelJobNotice(job: Job): string {
-  if (job.state === 'cancelled') return 'The queued job was cancelled.';
-  if (job.state === 'queued') return 'This job is still queued. Try cancelling it again.';
-  if (job.state === 'running' || job.state === 'validating' || job.state === 'cancelling') {
-    return 'The job started before cancellation took effect. Running work cannot be interrupted safely.';
+  if (job.state === 'cancelled') return 'Job stopped. It cannot be resumed.';
+  if (job.state === 'cancelling') return 'Stop requested. Waiting for the worker to exit.';
+  if (job.state === 'queued') return 'This job is still queued. Try stopping it again.';
+  if (job.state === 'running' || job.state === 'validating') {
+    return 'This job could not be stopped at its current stage.';
   }
   return 'The job finished before cancellation took effect.';
 }
 
-export function isQueuedJobCancellable(job: Job | null): job is Job & { state: 'queued' } {
-  return job?.state === 'queued';
+export function isJobCancellable(job: Job | null): boolean {
+  if (!job) return false;
+  return job.state === 'queued' || (job.state === 'running' && (
+    job.operation === 'image.generate' || job.operation.startsWith('mesh.')
+    || job.operation === 'uv.unwrap' || job.operation === 'render.optimize'
+  ));
 }
 
 export function isActiveJob(

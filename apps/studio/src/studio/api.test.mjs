@@ -4,17 +4,17 @@ import { readFile } from 'node:fs/promises';
 
 // Use the project's TypeScript compiler when installed (Node 20+), with a
 // native type-stripping fallback for minimal Node 24 test environments.
-let MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion, jobResultCardModel, jobReportMatchesAsset;
+let MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion, jobResultCardModel, jobReportMatchesAsset;
 try {
   const ts = await import('typescript');
   const source = await readFile(new URL('./api.ts', import.meta.url), 'utf8');
   const compiled = ts.default.transpileModule(source, {
     compilerOptions: { module: ts.default.ModuleKind.ESNext, target: ts.default.ScriptTarget.ES2022 },
   }).outputText;
-  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion, jobResultCardModel, jobReportMatchesAsset } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
+  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion, jobResultCardModel, jobReportMatchesAsset } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`));
 } catch (error) {
   if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isQueuedJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion, jobResultCardModel, jobReportMatchesAsset } = await import('./api.ts'));
+  ({ MeshHarborApi, assetComparisonPairFromJob, assetComparisonPairForSelection, assetComparisonTarget, shouldAutoSelectComparisonResult, resolveComparisonAsset, quadTopologyArtifact, cancelJobNotice, isJobCancellable, isActiveJob, canInspectJobHistoryRecord, preferTrackedTerminalJob, shouldDeferTrackedJobCompletion, LatestRequestGuard, jobPollRetryDelay, importAssetBatch, MAX_ASSET_IMPORT_FILES, MAX_IMAGE_IMPORT_BYTES, MAX_GLB_IMPORT_BYTES, planAssetImportUiCompletion, jobResultCardModel, jobReportMatchesAsset } = await import('./api.ts'));
 }
 
 test('multi-file import validates mixed files, uploads sequentially, keeps going after failures, and reports progress', async () => {
@@ -142,10 +142,14 @@ test('asset import completion keeps browser filters and selection changed during
   }), { resetFilters: true, selectFirstImportedAsset: false });
 });
 
-test('Studio offers cancellation only before a job leaves the queue', () => {
-  assert.equal(isQueuedJobCancellable({ state: 'queued' }), true);
+test('Studio offers stop for queued jobs and asset jobs that are not finalizing', () => {
+  assert.equal(isJobCancellable({ state: 'queued' }), true);
   for (const state of ['running', 'validating', 'cancelling', 'cancelled', 'succeeded', 'failed']) {
-    assert.equal(isQueuedJobCancellable({ state }), false, `${state} jobs must not be cancellable from the UI`);
+    assert.equal(isJobCancellable({ state, operation: 'runtime.pixal3d.install_models' }), false);
+  }
+  for (const operation of ['image.generate', 'mesh.simplify', 'mesh.cleanup', 'uv.unwrap', 'render.optimize']) {
+    assert.equal(isJobCancellable({ state: 'running', operation }), true);
+    assert.equal(isJobCancellable({ state: 'validating', operation }), false);
   }
 });
 
@@ -335,10 +339,11 @@ test('job history uses a bounded read-only dashboard request', async () => {
 });
 
 test('cancellation notices describe queued, running, and finished outcomes', () => {
-  assert.equal(cancelJobNotice({ state: 'cancelled' }), 'The queued job was cancelled.');
-  assert.equal(cancelJobNotice({ state: 'queued' }), 'This job is still queued. Try cancelling it again.');
-  for (const state of ['running', 'validating', 'cancelling']) {
-    assert.match(cancelJobNotice({ state }), /cannot be interrupted safely/);
+  assert.equal(cancelJobNotice({ state: 'cancelled' }), 'Job stopped. It cannot be resumed.');
+  assert.match(cancelJobNotice({ state: 'queued' }), /still queued/);
+  assert.match(cancelJobNotice({ state: 'cancelling' }), /Stop requested/);
+  for (const state of ['running', 'validating']) {
+    assert.match(cancelJobNotice({ state }), /could not be stopped/);
   }
   for (const state of ['succeeded', 'failed']) {
     assert.match(cancelJobNotice({ state }), /finished before cancellation took effect/);

@@ -65,14 +65,13 @@ export function WorkbenchLayout({
 }) {
   const { open, narrow, setOpen, triggerRef } = state;
   const desktopDockOpen = !narrow && open;
-  const inspectorOpen = Boolean(inspector);
   const panelIds = useMemo(() => [
-    ...(inspectorOpen ? ['inspector'] : []),
+    'inspector',
     'viewport',
     ...(desktopDockOpen ? ['library'] : []),
-  ], [desktopDockOpen, inspectorOpen]);
+  ], [desktopDockOpen]);
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
-    id: 'meshharbor.studio.panels.v2',
+    id: narrow ? 'meshharbor.studio.stacked.v1' : 'meshharbor.studio.panels.v2',
     panelIds,
     storage: panelStorage,
     onlySaveAfterUserInteractions: true,
@@ -91,21 +90,18 @@ export function WorkbenchLayout({
 
   return (
     <SidebarProvider className="contents" keyboardShortcut={false}>
-      <div className={narrow
-        ? 'grid min-h-0 min-w-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto]'
-        : 'grid min-h-0 min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)]'}>
-        <Sidebar collapsible="none" className={narrow ? 'row-start-2 h-auto w-full border-t' : 'w-18 border-r border-sidebar-border'}>
+      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)]">
+        <Sidebar collapsible="none" className="w-12 border-r border-sidebar-border">
           {tools}
         </Sidebar>
-        <ResizablePanelGroup id="studio-panels" orientation="horizontal"
-          className={narrow ? 'row-start-1 min-h-0 min-w-0' : 'min-h-0 min-w-0'}
+        <ResizablePanelGroup key={narrow ? 'stacked' : 'docked'} id="studio-panels" orientation={narrow ? 'vertical' : 'horizontal'}
+          className="min-h-0 min-w-0"
           defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
-          {inspectorOpen && <>
-            <ResizablePanel id="inspector" defaultSize={288} minSize={240} maxSize={416} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
+            <ResizablePanel id="inspector" defaultSize={narrow ? '46%' : 284} minSize={narrow ? '32%' : 224}
+              maxSize={narrow ? '64%' : 416} groupResizeBehavior="preserve-pixel-size" className="min-h-0 bg-sidebar text-sidebar-foreground">
               <Sidebar collapsible="none" className="w-full">{inspector}</Sidebar>
             </ResizablePanel>
             <ResizableHandle withHandle aria-label="Resize settings panel" />
-          </>}
           <ResizablePanel id="viewport" minSize="28%" className="flex min-h-0 min-w-0 flex-col">
             {children}
           </ResizablePanel>

@@ -57,3 +57,38 @@ test('the dashboard polls engine activity, keeps stable completed durations, and
   await expect(history.getByText(external.input_asset_name)).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 });
+
+test('stopping a running generation requires confirmation and cannot be resumed', async ({ page, studioOrigin }) => {
+  const timestamp = Date.now();
+  const record = {
+    id: 'job_stop', operation: 'image.generate', state: 'running', progress: 5,
+    stage: 'shape_hr', created_at: String(timestamp - 3000), started_at: String(timestamp - 2000), updated_at: String(timestamp),
+  };
+  let requests = 0;
+  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [record] }));
+  await page.route('**/api/v1/jobs/job_stop/cancel', async route => {
+    expect(route.request().method()).toBe('POST');
+    requests += 1;
+    record.state = 'cancelling';
+    record.updated_at = String(timestamp + 1);
+    await route.fulfill({ json: record });
+  });
+  await page.goto(studioOrigin + '/jobs');
+  const active = page.getByRole('region', { name: /In progress/ });
+  const stop = active.getByRole('button', { name: 'Stop job' });
+  await stop.click();
+  const confirm = page.getByRole('alertdialog', { name: 'Stop this job?' });
+  await expect(confirm).toContainText('cannot be resumed');
+  await confirm.getByRole('button', { name: 'Keep job' }).click();
+  expect(requests).toBe(0);
+  await stop.click();
+  await confirm.getByRole('button', { name: 'Stop job' }).click();
+  await expect(active.getByText('Stopping generation worker')).toBeVisible();
+  await expect(stop).toHaveCount(0);
+  record.state = 'cancelled';
+  record.updated_at = String(timestamp + 2);
+  await expect(page.getByRole('region', { name: 'History' }).getByText('Cancelled', { exact: true }).first()).toBeVisible();
+  await expect(active.getByText('Nothing in progress')).toBeVisible();
+  await expect(page.getByRole('button', { name: /resume/i })).toHaveCount(0);
+  expect(requests).toBe(1);
+});

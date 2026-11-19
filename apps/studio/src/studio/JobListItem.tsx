@@ -11,7 +11,7 @@ export function JobListItem({ job, title, selected = false, showUpdated, detail,
   detail?: ReactNode;
   children?: ReactNode;
 }) {
-  const state = job.state === 'succeeded' ? 'Complete' : job.state[0].toUpperCase() + job.state.slice(1);
+  const state = job.state === 'succeeded' ? 'Complete' : job.state === 'cancelling' ? 'Stopping' : job.state[0].toUpperCase() + job.state.slice(1);
   const updatedAt = new Date(Number(job.updated_at));
   return <Item role="listitem" variant="outline" size="xs" className="min-w-0 gap-2 data-[selected=true]:bg-muted" data-selected={selected}>
     <ItemContent className="min-w-24">

@@ -3,17 +3,19 @@ import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { assetThumbnail } from './asset-thumbnails';
+import { STUDIO_IMAGE_DRAG_TYPE } from './reference-drag';
 import type { Asset } from './types';
 
 const compactCount = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
 
 export function AssetGalleryCard({
-  asset, selected, loadPreview, onSelect,
+  asset, selected, loadPreview, onSelect, onDragImage,
 }: {
   asset: Asset;
   selected: boolean;
   loadPreview: (asset: Asset, signal: AbortSignal) => Promise<Blob>;
   onSelect: () => void;
+  onDragImage: (image: Asset | null) => void;
 }) {
   const card = useRef<HTMLButtonElement>(null);
   const [visible, setVisible] = useState(false);
@@ -53,13 +55,19 @@ export function AssetGalleryCard({
 
   return (
     <Button type="button" variant="outline" ref={card} onClick={onSelect} aria-pressed={selected}
+      draggable={asset.kind === 'image'} onDragStart={event => {
+        if (asset.kind !== 'image') { event.preventDefault(); return; }
+        event.dataTransfer.setData(STUDIO_IMAGE_DRAG_TYPE, asset.id);
+        event.dataTransfer.effectAllowed = 'copy';
+        onDragImage(asset);
+      }} onDragEnd={() => onDragImage(null)}
       className={cn(
         'grid h-auto min-w-0 justify-normal gap-0 overflow-hidden rounded-lg bg-card p-0 text-left text-card-foreground transition-colors dark:bg-card',
         selected ? 'border-primary bg-accent hover:bg-accent dark:bg-accent' : 'hover:border-muted-foreground/60 hover:bg-muted',
       )}>
       <span className="relative grid aspect-square w-full min-w-0 place-items-center overflow-hidden bg-neutral-800">
         {image?.hash === asset.sha256
-          ? <img src={image.url} alt="" data-asset-thumbnail="" decoding="async" className="absolute inset-0 size-full object-contain" />
+          ? <img src={image.url} alt="" data-asset-thumbnail="" draggable={false} decoding="async" className="absolute inset-0 size-full object-contain" />
           : <Icon className="size-7 text-muted-foreground/60" aria-hidden="true" />}
         <span aria-hidden="true" className="absolute bottom-1.5 left-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] leading-none font-medium text-white">
           {asset.kind === 'mesh' ? '3D' : 'IMG'}

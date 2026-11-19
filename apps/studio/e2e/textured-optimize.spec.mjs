@@ -140,8 +140,8 @@ test('Studio optimizes a textured GLB without changing its materials or textures
     await expect(material).toBeChecked();
   });
 
-  const original = page.getByRole('radio', { name: 'Original' });
-  const result = page.getByRole('radio', { name: 'Result' });
+  const original = page.getByRole('tab', { name: 'Original' });
+  const result = page.getByRole('tab', { name: 'Result' });
   await test.step('Run Optimize against the local Rust engine', async () => {
     await page.getByRole('button', { name: 'Optimize', exact: true }).click();
     const inspector = page.getByRole('complementary', { name: 'Optimize mesh' });
@@ -161,7 +161,7 @@ test('Studio optimizes a textured GLB without changing its materials or textures
     await expect(page.getByRole('slider', { name: 'Triangle target' })).toBeVisible();
     await targetInput.fill('240');
     await page.getByRole('button', { name: 'Optimize mesh' }).click();
-    await expect(result).toBeChecked({ timeout: 20_000 });
+    await expect(result).toHaveAttribute('aria-selected', 'true', { timeout: 20_000 });
     await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
     const library = page.locator('#workbench-sidebar-dock');
     await expect.poll(() => library.evaluate(element => element.scrollWidth - element.clientWidth)).toBe(0);
@@ -169,13 +169,16 @@ test('Studio optimizes a textured GLB without changing its materials or textures
 
   await test.step('Compare rendered material views and verify the original download', async () => {
     await original.click();
-    await expect(original).toBeChecked();
+    await expect(original).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('tabpanel', { name: 'Original' })).toBeVisible();
+    await expect(page.getByRole('banner').getByRole('button', { name: 'Export selected GLB' })).toHaveCount(0);
+    await expect(selected.getByRole('group', { name: 'File actions' }).getByRole('button', { name: 'Export selected GLB' })).toBeVisible();
     await expect(selected.getByTitle(sourceName, { exact: true })).toBeVisible();
     const originalFrames = await previewFrames(page);
     expect(await exportSelectedGlb(page, sourceName)).toEqual(source);
 
     await result.click();
-    await expect(result).toBeChecked();
+    await expect(result).toHaveAttribute('aria-selected', 'true');
     await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
     const resultFrames = await previewFrames(page);
     await testInfo.attach('original-material-preview', { body: originalFrames.material, contentType: 'image/png' });

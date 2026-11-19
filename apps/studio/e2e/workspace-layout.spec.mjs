@@ -16,13 +16,13 @@ async function chooseFile(page, button, name, mimeType, buffer) {
   return response.json();
 }
 
-test('desktop docks flank the viewport, then become drawers without horizontal overflow', async ({ page, studioOrigin }) => {
+test('the tool panel stays docked on desktop and stacks on mobile while inventory uses a drawer', async ({ page, studioOrigin }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
   const tools = page.getByRole('group', { name: 'Model tools' });
   const inventory = page.getByRole('banner').getByRole('button', { name: 'Inventory', exact: true });
-  await expect(tools.getByRole('button', { name: 'Optimize' })).toBeDisabled();
+  await expect(tools.getByRole('button', { name: 'Optimize' })).toBeEnabled();
   await chooseFile(page, page.getByRole('button', { name: 'Open GLB', exact: true }), 'layout.glb',
     'model/gltf-binary', texturedGlb());
   const selected = page.getByRole('region', { name: 'Selected asset' });
@@ -35,26 +35,24 @@ test('desktop docks flank the viewport, then become drawers without horizontal o
   expect(view.x + view.width).toBeLessThanOrEqual(library.x);
 
   await page.setViewportSize({ width: 1024, height: 768 });
-  const toolSheet = page.getByRole('dialog', { name: 'Optimize mesh' });
-  await expect(toolSheet).toBeVisible();
+  await expect(inspector).toBeVisible();
   await expect(rightDock).toBeVisible();
-  await expect.poll(async () => Math.round((await toolSheet.boundingBox()).x)).toBe(0);
   expect(await page.locator('html').evaluate(element => element.scrollWidth)).toBe(1024);
   await page.keyboard.press('Escape');
-  await expect(toolSheet).toBeHidden();
-  await expect(optimize).toBeFocused();
+  await expect(inspector).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 700 });
   await expect(rightDock).toHaveCount(0);
   const jobs = tools.getByRole('button', { name: 'Jobs', exact: true });
-  await expect(jobs.locator('[data-slot="tool-label"]')).toBeVisible();
+  await expect(jobs).toHaveText('');
   await expect(jobs.locator('svg')).toHaveCSS('width', '20px');
   await jobs.click();
-  const jobsSheet = page.getByRole('dialog', { name: 'Jobs' });
-  await expect(jobsSheet.getByText('No saved jobs yet.')).toBeVisible();
-  await expect(jobsSheet).toHaveAttribute('data-side', 'left');
+  const jobsPanel = page.getByRole('complementary', { name: 'Jobs' });
+  await expect(jobsPanel.getByText('No saved jobs yet.')).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(jobs).toBeFocused();
+  await expect(jobsPanel).toBeVisible();
+  const panel = await jobsPanel.boundingBox();
+  expect(panel.y + panel.height).toBeLessThanOrEqual((await selected.boundingBox()).y);
   expect((await inventory.boundingBox()).y).toBeLessThan((await selected.boundingBox()).y);
   await inventory.click();
   const sheet = page.getByRole('dialog', { name: 'Inventory' });
@@ -120,6 +118,13 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   await expect(preview).toBeVisible();
   await expect.poll(() => preview.evaluate(image => image.naturalWidth)).toBe(2);
   await expect(selected.getByTitle(active.name)).toBeVisible();
+  const library = page.getByRole('complementary', { name: 'Inventory' });
+  await library.getByRole('tab', { name: 'Images' }).click();
+  await generate.getByRole('button', { name: 'Clear', exact: true }).click();
+  await library.getByRole('button', { name: /^reference\.png/ }).dragTo(generate.getByRole('group', { name: 'Drop a reference image' }));
+  await expect(preview).toBeVisible();
+  await expect(selected.getByTitle(active.name)).toBeVisible();
+  await library.getByRole('tab', { name: '3D models' }).click();
   const seed = generate.getByLabel('Seed', { exact: true });
   await expect(seed).toHaveValue('42');
   await seed.fill('17');
@@ -303,9 +308,9 @@ test('generation switches between posed presets and maps each custom image to it
     },
   });
   await page.setViewportSize({ width: 390, height: 640 });
-  const dialog = page.getByRole('dialog', { name: 'Generate model' });
-  const mobileForm = dialog.getByRole('region', { name: 'Generate model content' });
-  const mobileAction = dialog.getByRole('button', { name: 'Generate 3D' });
+  const mobilePanel = page.getByRole('complementary', { name: 'Generate model' });
+  const mobileForm = mobilePanel.getByRole('region', { name: 'Generate model content' });
+  const mobileAction = mobilePanel.getByRole('button', { name: 'Generate 3D' });
   await expect(mobileAction).toBeInViewport({ ratio: 1 });
   const mobileFooter = await mobileAction.boundingBox();
   await mobileForm.focus();
@@ -313,5 +318,5 @@ test('generation switches between posed presets and maps each custom image to it
   await expect.poll(() => mobileForm.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
   expect((await mobileAction.boundingBox()).y).toBe(mobileFooter.y);
   expect(await mobileForm.evaluate(element => element.scrollWidth)).toBe(await mobileForm.evaluate(element => element.clientWidth));
-  await expect(dialog.getByRole('group', { name: 'View 2', exact: true }).getByLabel('Distance')).toHaveValue('3.5');
+  await expect(mobilePanel.getByRole('group', { name: 'View 2', exact: true }).getByLabel('Distance')).toHaveValue('3.5');
 });

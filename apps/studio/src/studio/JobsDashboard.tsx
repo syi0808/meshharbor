@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@/components/ui/item';
 import { Spinner } from '@/components/ui/spinner';
-import { isActiveJob } from './api';
+import { isActiveJob, isJobCancellable } from './api';
 import { Disclosure } from './Disclosure';
 import { JOB_PAGE_SIZE, formatDuration, jobStage, jobTiming, lastGenerationStage, mergeJobRecords } from './job-activity';
 import { JobListItem } from './JobListItem';
@@ -51,7 +51,7 @@ export function PendingGenerationCards({ jobs, sources, onOpen }: {
           <div className="relative grid aspect-square w-full place-items-center overflow-hidden border-b bg-muted/60">
             <CubeIcon className="size-10 text-primary/60" weight="duotone" aria-hidden="true" />
             <Badge className="absolute inset-x-1.5 bottom-1.5 mx-auto max-w-full" variant="secondary">
-              <Spinner aria-hidden="true" /> {job.state === 'queued' ? 'Queued' : 'Generating'}
+              <Spinner aria-hidden="true" /> {job.state === 'queued' ? 'Queued' : job.state === 'cancelling' ? 'Stopping' : 'Generating'}
             </Badge>
           </div>
           <CardContent className="grid min-w-0 gap-1 p-2">
@@ -70,7 +70,7 @@ export function PendingGenerationCards({ jobs, sources, onOpen }: {
 }
 
 export function JobsDashboard({ jobs, localActivities, focusedJobId, connection, problem, loaded, resultBlocked,
-  operationLabel, onBack, onReconnect, onRefresh, onLoadOlder, onViewResult }: {
+  operationLabel, onBack, onReconnect, onRefresh, onLoadOlder, onViewResult, onStop }: {
   jobs: Job[];
   localActivities: StudioActivity[];
   focusedJobId: string | null;
@@ -84,6 +84,7 @@ export function JobsDashboard({ jobs, localActivities, focusedJobId, connection,
   onRefresh: () => Promise<void>;
   onLoadOlder: (before: string) => Promise<Job[]>;
   onViewResult: (id: string) => void;
+  onStop: (job: Job, trigger: HTMLButtonElement) => void;
 }) {
   const [historyCache, setHistoryCache] = useState<Job[]>([]);
   const [oldestReached, setOldestReached] = useState(false);
@@ -129,11 +130,13 @@ export function JobsDashboard({ jobs, localActivities, focusedJobId, connection,
         <ItemDescription className="line-clamp-none wrap-anywhere">
           {jobStage(job)}{lastStage && ` · Last stage: ${lastStage}`}
         </ItemDescription>
+        {job.state === 'running' && job.operation.startsWith('runtime.') && <ItemDescription className="line-clamp-none">This job can only be stopped while queued.</ItemDescription>}
         <p className="flex flex-wrap gap-x-2 tabular-nums text-muted-foreground">
           <span>{label}: {duration}</span>
           {queuedFor && <span>Queued for: {queuedFor}</span>}
         </p>
       </div>}>
+      {isJobCancellable(job) && <Button variant="outline" size="sm" disabled={connection !== 'connected'} onClick={event => onStop(job, event.currentTarget)}>Stop job</Button>}
       {job.state === 'succeeded' && job.result?.asset_id && <Button variant="ghost" size="sm" onClick={() => onViewResult(job.id)}
         disabled={resultBlocked || connection !== 'connected'}>View result <ArrowUpRightIcon aria-hidden="true" /></Button>}
     </JobListItem>;
@@ -147,7 +150,7 @@ export function JobsDashboard({ jobs, localActivities, focusedJobId, connection,
     <main className="mx-auto grid w-full max-w-4xl gap-5 px-4 py-6 sm:px-6 sm:py-9">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="grid gap-1">
-          <h1 ref={heading} tabIndex={-1} className="font-heading text-2xl font-medium outline-none sm:text-3xl">Jobs dashboard</h1>
+          <h1 id="jobs-dashboard-title" ref={heading} tabIndex={-1} className="font-heading text-2xl font-medium outline-none sm:text-3xl">Jobs dashboard</h1>
           <p className="text-sm text-muted-foreground">Follow local generation, mesh processing, and runtime jobs.</p>
         </div>
         <Button variant="outline" size="sm" disabled={refreshing || connection === 'connecting'} onClick={() => {

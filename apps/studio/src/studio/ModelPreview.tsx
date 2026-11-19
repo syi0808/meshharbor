@@ -18,7 +18,7 @@ import type { StudioTheme } from './theme';
 
 const MAX_CANONICAL_SOURCE_FRAMES = 64;
 const canonicalSourceFrameCache = new Map<string, PreviewFrame>();
-const viewportLayout = 'relative isolate min-h-80 min-w-0 flex-1 overflow-hidden bg-muted dark:bg-neutral-800 min-[881px]:min-h-0';
+const viewportLayout = 'relative isolate min-h-0 min-w-0 flex-1 overflow-hidden bg-muted dark:bg-neutral-800';
 type PreviewMode = 'material' | 'solid' | 'wireframe';
 
 export interface PreviewComparison {

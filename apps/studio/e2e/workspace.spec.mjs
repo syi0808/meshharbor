@@ -22,7 +22,7 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   const library = page.getByRole('complementary', { name: 'Inventory' });
   const jobs = page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs', exact: true });
   await jobs.click();
-  await expect(jobs).toHaveAttribute('aria-expanded', 'true');
+  await expect(jobs).toHaveAttribute('aria-current', 'true');
   const activity = page.getByRole('complementary', { name: 'Jobs' });
   const viewport = page.getByRole('region', { name: 'Start a model' });
   await expect(activity.getByText('No saved jobs yet.')).toBeVisible();
@@ -30,13 +30,8 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   const [left, center, right] = await Promise.all([activity.boundingBox(), viewport.boundingBox(), library.boundingBox()]);
   expect(left.x + left.width).toBeLessThanOrEqual(center.x);
   expect(Math.round(right.x + right.width)).toBe(1280);
-  await activity.getByRole('button', { name: 'Close jobs' }).click();
-  await expect(jobs).toBeFocused();
-  await expect(jobs).toHaveAttribute('aria-expanded', 'false');
-  await expect(jobs).toHaveAttribute('aria-current', 'true');
-  await jobs.click();
+  await page.keyboard.press('Escape');
   await expect(activity).toBeVisible();
-  await activity.getByRole('button', { name: 'Close jobs' }).click();
   const panelWidth = () => library.evaluate(element => Math.round(element.getBoundingClientRect().width));
   const initialWidth = await panelWidth();
   const handle = page.getByRole('separator', { name: 'Resize library panel' });
@@ -45,7 +40,7 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   const resizedWidth = await panelWidth();
   await page.reload();
   await expect.poll(panelWidth).toBe(resizedWidth);
-  await expect(jobs).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('complementary', { name: 'Generate model' })).toBeVisible();
 });
 
 test('Jobs and storage activity share accessible item rows with failure details', async ({ page, studioOrigin }) => {
@@ -68,37 +63,32 @@ test('Jobs and storage activity share accessible item rows with failure details'
   await expect(activityRow.getByText(recorded.error.message)).toBeVisible();
 });
 
-test('the model rail stays fixed, shows labels below icons, and does not toggle the current panel', async ({ page, studioOrigin }) => {
+test('the icon-only rail always shows one panel and exposes mesh tools without a model', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   const rail = page.getByRole('group', { name: 'Model tools' });
   const job = rail.getByRole('button', { name: 'Jobs' });
-  const label = job.locator('[data-slot="tool-label"]');
-  const icon = job.locator('[data-slot="tool-icon"]');
+  const icon = job.locator('svg');
   const generation = rail.getByRole('button', { name: 'New model' });
-  const selectedIcon = generation.locator('[data-slot="tool-icon"]');
   const viewport = page.getByRole('region', { name: 'Start a model' });
   await expect(generation).toHaveAttribute('aria-current', 'true');
-  await expect(label).toBeVisible();
-  await expect(icon.locator('svg')).toHaveCSS('width', '20px');
+  await expect(job).toHaveText('');
+  await expect(icon).toHaveCSS('width', '20px');
+  await expect(page.getByRole('complementary', { name: 'Generate model' })).toBeVisible();
   const initialRail = await rail.boundingBox();
   const initialViewport = await viewport.boundingBox();
-  const iconBox = await icon.boundingBox();
-  expect((await label.boundingBox()).y).toBeGreaterThanOrEqual(iconBox.y + iconBox.height);
+  const iconBox = await job.boundingBox();
   expect(iconBox.width).toBe(iconBox.height);
   expect(initialRail.height).toBe(initialViewport.height);
-  await expect(icon).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
-  const highlight = await selectedIcon.evaluate(element => getComputedStyle(element).backgroundColor);
+  const highlight = await generation.evaluate(element => getComputedStyle(element).backgroundColor);
   expect(highlight).not.toBe('rgba(0, 0, 0, 0)');
   await job.hover();
-  await expect(icon).toHaveCSS('background-color', highlight);
-  await expect(job).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await expect(job).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
   expect(await rail.boundingBox()).toEqual(initialRail);
-  expect(await icon.boundingBox()).toEqual(iconBox);
+  expect(await job.boundingBox()).toEqual(iconBox);
   expect(await viewport.boundingBox()).toEqual(initialViewport);
   await expect(page.getByRole('tooltip')).toHaveCount(0);
   await page.mouse.move(600, 20);
   await job.focus();
-  await expect(label).toBeVisible();
   expect(await rail.boundingBox()).toEqual(initialRail);
   await job.press('Enter');
   const activity = page.getByRole('complementary', { name: 'Jobs' });
@@ -106,9 +96,16 @@ test('the model rail stays fixed, shows labels below icons, and does not toggle 
   await job.click();
   await expect(activity).toBeVisible();
   await job.press('Space');
-  await expect(job).toHaveAttribute('aria-expanded', 'true');
   await expect(job).toHaveAttribute('aria-current', 'true');
   await expect(rail.locator('[aria-current=true]')).toHaveCount(1);
+  await rail.getByRole('button', { name: 'Optimize', exact: true }).click();
+  const optimize = page.getByRole('complementary', { name: 'Optimize mesh' });
+  await expect(optimize.getByRole('button', { name: 'Choose a 3D model' })).toBeVisible();
+  await expect(optimize.getByRole('button', { name: 'Optimize mesh' })).toBeDisabled();
+  await rail.getByRole('button', { name: 'More tools' }).click();
+  const meshTools = page.getByRole('complementary', { name: 'Mesh tools' });
+  await meshTools.getByRole('button', { name: 'Cleanup', exact: true }).click();
+  await expect(meshTools.getByRole('button', { name: 'Run cleanup', exact: false })).toBeDisabled();
   await generation.click();
   await expect(generation).toHaveAttribute('aria-current', 'true');
   await expect(activity).toHaveCount(0);
@@ -180,6 +177,8 @@ test('workbench and settings controls keep the official Mira dimensions', async 
   await expect(page.getByRole('heading', { name: 'Pixal3D' })).toBeVisible();
   await expect(page.getByRole('banner')).not.toContainText('Engine connected');
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(page.getByLabel('Backend', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
   await expect(page.getByLabel('Backend')).toHaveCSS('height', '28px');
   expect(await page.locator('html').evaluate(element => getComputedStyle(element).getPropertyValue('--primary').trim())).toBe('#82d7b8');
 });
@@ -337,7 +336,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(connections).not.toContainText('DINOv3');
   await expect(connections.getByRole('button', { name: 'Sign in with browser' })).toBeEnabled();
   await connections.getByRole('button', { name: 'Check sign-in' }).click();
-  await expect(toasts.getByText('No token is saved', { exact: false })).toBeVisible();
+  await expect(toasts.getByText('No local token is saved', { exact: false })).toBeVisible();
   await connections.getByText('Use an access token instead').click();
   await expect(connections.getByRole('link', { name: 'Create a Hugging Face token' })).toHaveAttribute('href', 'https://huggingface.co/settings/tokens');
   const token = connections.getByLabel('Hugging Face access token');
@@ -417,7 +416,7 @@ test('browser sign-in leaves DINOv3 to storage, which rechecks access on return'
   await signIn.click();
   await expect(connections.getByText('TEST-CODE')).toBeVisible();
   approved = true;
-  await expect(toasts.getByText('Signed in to Hugging Face for Apple MLX.')).toBeVisible();
+  await expect(toasts.getByText('Signed in to Hugging Face.')).toBeVisible();
   await connections.getByRole('button', { name: 'Check sign-in' }).click();
   await expect(toasts.getByText('Hugging Face account verified.')).toBeVisible();
   expect(modelAccessChecks).toBe(0);
@@ -489,14 +488,12 @@ test('settings deep links and confirmations manage one local profile at a time',
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
   await expect(connections.getByText('Token saved', { exact: true })).toBeVisible();
-  await connections.getByLabel('Backend').selectOption('pixal3d-cuda');
-  await expect(connections.getByRole('button', { name: 'Disconnect locally' })).toHaveCount(0);
-  await connections.getByLabel('Backend').selectOption('pixal3d-mlx');
+  await expect(connections.getByLabel('Backend', { exact: true })).toHaveCount(0);
   await connections.getByRole('button', { name: 'Disconnect locally' }).click();
   const disconnect = page.getByRole('alertdialog', { name: 'Disconnect Hugging Face?' });
   await expect(disconnect).toContainText('does not revoke the token');
   await disconnect.getByRole('button', { name: 'Disconnect', exact: true }).click();
-  await expect(toasts.getByText('Hugging Face disconnected for Apple MLX on this computer.')).toBeVisible();
+  await expect(toasts.getByText('Hugging Face disconnected on this computer.')).toBeVisible();
   await expect(connections.getByText('Not connected', { exact: true })).toBeVisible();
   expect(calls).toEqual(['model-files', 'huggingface']);
   await page.goBack();

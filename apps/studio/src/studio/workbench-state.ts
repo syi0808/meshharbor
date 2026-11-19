@@ -1,7 +1,6 @@
 export type Inspector = 'generation' | 'optimize' | 'tools' | 'jobs';
 
 export const DESKTOP_SIDEBAR_KEY = 'meshharbor.studio.sidebar.v1';
-export const WORKBENCH_INSPECTOR_SHEET_QUERY = '(max-width: 1024px)';
 export const WORKBENCH_NARROW_QUERY = '(max-width: 760px)';
 
 export function decodeInventoryOpen(value: string | null): boolean {
@@ -22,19 +21,12 @@ export function runtimeSetupStage(backend: {
   return backend.naf_conversion_required ? 'conversion' : 'incomplete';
 }
 
-export function inspectorForAsset(inspector: Inspector | null, kind: 'mesh' | 'image' | undefined): Inspector | null {
-  if (inspector === 'generation' || inspector === 'jobs') return inspector;
-  if (kind === 'mesh') return inspector === 'optimize' || inspector === 'tools' ? inspector : null;
-  return null;
-}
-
 export function shouldHighlightExport(
   activeVersion: 'source' | 'result',
-  inspector: Inspector | null,
   isRunning: boolean,
   connected: boolean,
 ): boolean {
-  return activeVersion === 'result' && (inspector === null || inspector === 'jobs') && !isRunning && connected;
+  return activeVersion === 'result' && !isRunning && connected;
 }
 
 export function formatVersionSizes(original: number, result: number): string | null {

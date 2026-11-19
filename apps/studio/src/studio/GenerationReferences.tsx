@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Field, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { STUDIO_IMAGE_DRAG_TYPE } from './reference-drag';
 import type { Asset, OrbitCamera, PosedGenerationInput, PosedViewMode } from './types';
 
 type CameraDraft = Record<keyof OrbitCamera, string>;
@@ -87,13 +88,30 @@ function ReferencePreview({ image, load }: { image: Asset; load: LoadReference }
   </figure>;
 }
 
-function ReferencePicker({ image, load, disabled, name, onPick, onClear }: {
+function ReferencePicker({ image, load, disabled, name, onPick, onDropImage, onClear }: {
   image: Asset | null; load: LoadReference; disabled: boolean; name?: string;
   onPick: (files: FileList) => void; onClear: () => void;
+  onDropImage: (id: string) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const [over, setOver] = useState(false);
   const action = image ? 'Replace reference' : 'Choose reference';
-  return <div className="grid min-w-0 gap-2">
+  return <div className="grid min-w-0 gap-2 rounded-md border border-dashed border-muted-foreground/40 p-2 data-[over=true]:border-primary data-[over=true]:bg-accent"
+    data-over={over} role="group" aria-label={name ? `Drop image for ${name}` : 'Drop a reference image'}
+    onDragOver={event => {
+      if (disabled || !event.dataTransfer.types.includes(STUDIO_IMAGE_DRAG_TYPE)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      setOver(true);
+    }} onDragLeave={event => {
+      if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setOver(false);
+    }} onDrop={event => {
+      if (!event.dataTransfer.types.includes(STUDIO_IMAGE_DRAG_TYPE)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOver(false);
+      if (!disabled) onDropImage(event.dataTransfer.getData(STUDIO_IMAGE_DRAG_TYPE));
+    }}>
     {image && <ReferencePreview image={image} load={load} />}
     <div className="flex flex-wrap gap-2">
       <Input ref={input} type="file" hidden className="hidden" accept="image/png,image/jpeg,.png,.jpg,.jpeg"
@@ -106,24 +124,27 @@ function ReferencePicker({ image, load, disabled, name, onPick, onClear }: {
       </Button>
       {image && <Button variant="ghost" size="sm" disabled={disabled} onClick={onClear}>Clear</Button>}
     </div>
+    {!image && <p className="hidden text-muted-foreground min-[761px]:block">Or drag an image here from Inventory.</p>}
   </div>;
 }
 
-export function SingleReference({ image, load, disabled, onPick, onClear }: {
+export function SingleReference({ image, load, disabled, onPick, onDropImage, onClear }: {
   image: Asset | null; load: LoadReference; disabled: boolean; onPick: (files: FileList) => void; onClear: () => void;
+  onDropImage: (id: string) => void;
 }) {
   return <Card size="sm" role="region" aria-label="Reference image" className="min-w-0 gap-2">
     <CardHeader>
       <CardTitle className="text-xs"><h3>Reference image</h3></CardTitle>
       {!image && <CardDescription>Choose a PNG or JPEG. Your current selection stays in the viewport.</CardDescription>}
     </CardHeader>
-    <CardContent><ReferencePicker image={image} load={load} disabled={disabled} onPick={onPick} onClear={onClear} /></CardContent>
+    <CardContent><ReferencePicker image={image} load={load} disabled={disabled} onPick={onPick} onDropImage={onDropImage} onClear={onClear} /></CardContent>
   </Card>;
 }
 
-export function PosedReferences({ mode, views, maxViews, load, disabled, onPick, onChange }: {
+export function PosedReferences({ mode, views, maxViews, load, disabled, onPick, onDropImage, onChange }: {
   mode: PosedViewMode; views: ViewDraft[]; maxViews: number; load: LoadReference; disabled: boolean;
   onPick: (files: FileList, index?: number) => void; onChange: (views: ViewDraft[]) => void;
+  onDropImage: (id: string, index: number) => void;
 }) {
   const bulkInput = useRef<HTMLInputElement>(null);
   const update = (index: number, view: ViewDraft) => onChange(views.map((item, itemIndex) => itemIndex === index ? view : item));
@@ -145,7 +166,7 @@ export function PosedReferences({ mode, views, maxViews, load, disabled, onPick,
         <FieldLegend variant="label" className="mb-0 px-1">{label}</FieldLegend>
         <FieldGroup className="gap-3">
           <ReferencePicker image={view.image} name={label} load={load} disabled={disabled}
-            onPick={files => onPick(files, index)} onClear={() => update(index, { ...view, image: null })} />
+            onPick={files => onPick(files, index)} onDropImage={id => onDropImage(id, index)} onClear={() => update(index, { ...view, image: null })} />
           {custom && <FieldGroup className="grid grid-cols-2 gap-2">
             {cameraFields.map(field => {
               const id = `reference-${index}-${field.id}`;

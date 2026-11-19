@@ -82,7 +82,12 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
   const [pending, setPending] = useState(false);
   const [removal, setRemoval] = useState<{ backend: RuntimeBackendId; scope: RemovalScope } | null>(null);
   const [browserLogin, setBrowserLogin] = useState<{ backend: RuntimeBackendId; session: HuggingFaceBrowserLogin } | null>(null);
-  const selectedId = backendId ?? (runtime?.platform === 'linux' ? 'pixal3d-cuda' : 'pixal3d-mlx');
+  const platformId: RuntimeBackendId = runtime?.platform === 'linux' ? 'pixal3d-cuda' : 'pixal3d-mlx';
+  const connectionChoices: RuntimeBackendId[] = [platformId, ...profileIds];
+  const connectionId = connectionChoices.find(id =>
+    runtime?.model_backends.some(backend => backend.id === id && backend.installable)) ?? platformId;
+  const connectionBackend = runtime?.model_backends.find(backend => backend.id === connectionId);
+  const selectedId = backendId ?? platformId;
   const selected = runtime?.model_backends.find(backend => backend.id === selectedId);
   const browserBackend = browserLogin?.backend;
   const browserSessionId = browserLogin?.session.id;
@@ -114,7 +119,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
             const nextRuntime = await api.runtime();
             if (stopped) return;
             onRuntimeChange(nextRuntime);
-            notify('success', `Signed in to Hugging Face for ${profiles[backend].title}.`);
+            notify('success', 'Signed in to Hugging Face.');
           } catch {
             if (!stopped) notify('warning', 'Signed in, but the local status could not be refreshed. Select Refresh status to retry.');
           }
@@ -200,7 +205,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
           setAccounts(current => ({ ...current, [backend]: 'not_connected' }));
         }
         notify('success', scope === 'huggingface'
-          ? `Hugging Face disconnected for ${profiles[backend].title} on this computer.`
+          ? 'Hugging Face disconnected on this computer.'
           : `Pixal3D model files removed for ${profiles[backend].title}.`);
       } finally {
         if (scope === 'model-files') onActivityChange(null);
@@ -314,7 +319,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
             </CardContent>
           </Card>)}
           {section === 'models' && !runtime?.model_catalog?.length && <Empty><EmptyHeader><EmptyDescription>No generation models reported by the local engine.</EmptyDescription></EmptyHeader></Empty>}
-          {section !== 'models' && <Field className="max-w-xs">
+          {section === 'storage' && <Field className="max-w-xs">
             <FieldLabel htmlFor="settings-backend">Backend</FieldLabel>
             <NativeSelect id="settings-backend" className="w-full" value={selectedId} onChange={event => {
               const choice = profileIds.find(id => id === event.target.value);
@@ -323,13 +328,14 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
               {profileIds.map(id => <NativeSelectOption value={id} key={id}>{profiles[id].title}</NativeSelectOption>)}
             </NativeSelect>
           </Field>}
-          {section !== 'models' && !selected && <Empty><EmptyHeader><EmptyDescription>The local engine did not report this backend.</EmptyDescription></EmptyHeader></Empty>}
-          {section === 'connections' && selected && <HuggingFaceConnection key={selectedId}
-            backend={selected} account={accounts[selectedId]} disabled={disabled}
-            browserSession={browserLogin?.backend === selectedId && browserActive ? browserLogin.session : null}
-            cancelling={pending} onStartBrowser={() => startBrowserLogin(selectedId)} onCancelBrowser={cancelBrowserLogin}
-            onCheck={token => verifyConnection(selectedId, token)}
-            onDisconnect={trigger => openRemoval(selectedId, 'huggingface', trigger)} />}
+          {section === 'storage' && !selected && <Empty><EmptyHeader><EmptyDescription>The local engine did not report this backend.</EmptyDescription></EmptyHeader></Empty>}
+          {section === 'connections' && (connectionBackend ? <HuggingFaceConnection key={connectionId}
+            backend={connectionBackend} account={accounts[connectionId]} disabled={disabled}
+            browserSession={browserLogin?.backend === connectionId && browserActive ? browserLogin.session : null}
+            cancelling={pending} onStartBrowser={() => startBrowserLogin(connectionId)} onCancelBrowser={cancelBrowserLogin}
+            onCheck={token => verifyConnection(connectionId, token)}
+            onDisconnect={trigger => openRemoval(connectionId, 'huggingface', trigger)} />
+            : <Empty><EmptyHeader><EmptyDescription>Hugging Face sign-in is not available on this computer.</EmptyDescription></EmptyHeader></Empty>)}
           {section === 'storage' && selected && <ModelStorage key={selectedId} api={api} backend={selected} id={selectedId}
             disabled={disabled}
             onDownload={() => onRuntimeAction(selectedId, 'download')} onConvert={() => onRuntimeAction(selectedId, 'convert')}
@@ -358,7 +364,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
         <AlertDialogHeader>
           <AlertDialogTitle>{removal?.scope === 'huggingface' ? 'Disconnect Hugging Face?' : 'Remove model files?'}</AlertDialogTitle>
           <AlertDialogDescription>{removal && (removal.scope === 'huggingface'
-            ? `Remove the locally saved Hugging Face credentials for ${profiles[removal.backend].title}. This does not revoke the token on Hugging Face or remove downloaded models.`
+            ? 'Remove the saved credentials used by this computer’s model runtime. This does not revoke the token on Hugging Face or remove downloaded models.'
             : `Remove Pixal3D weights and transfer caches for ${profiles[removal.backend].title}. The Python environment, Hugging Face connection, and all Studio assets stay in place.`)}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -392,7 +398,7 @@ const accessMessages: Record<AccessStatus, string> = {
 const accountMessages: Record<AccountStatus, string> = {
   checking: 'Checking Hugging Face sign-in…',
   connected: 'Hugging Face account verified.',
-  not_connected: 'No token is saved for this backend. Sign in or connect a token.',
+  not_connected: 'No local token is saved. Sign in or connect a token.',
   invalid_token: 'Hugging Face did not accept this token. Sign in again or use a different token.',
 };
 
@@ -417,7 +423,7 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
   return <Card role="region" aria-label="Hugging Face connection">
     <CardHeader>
       <CardTitle className="min-w-0 text-base"><h2>Hugging Face</h2></CardTitle>
-      <CardDescription>Credentials are stored locally and separately for each backend.</CardDescription>
+      <CardDescription>Sign-in is stored locally for the model runtime on this computer.</CardDescription>
       <CardAction><Badge variant="outline">{account === 'connected' ? 'Signed in' : local?.token_saved ? 'Token saved' : local?.credentials_managed === false ? 'Custom storage' : 'Not connected'}</Badge></CardAction>
     </CardHeader>
     <CardContent className="grid gap-4">
@@ -448,7 +454,7 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
           <Button type="submit" disabled={disabled}>{local?.token_saved ? 'Replace token' : 'Connect token'}</Button>
         </form>
       </Disclosure>
-    </> : <p className="text-muted-foreground">{backend.installable ? 'Set up the Python environment in Models before connecting a token.' : 'This backend cannot verify a token on this computer.'}</p>}
+    </> : <p className="text-muted-foreground">{backend.installable ? 'Set up the Python environment in Models before connecting a token.' : 'Hugging Face sign-in is not available on this computer.'}</p>}
     {account === 'checking' && <p role="status" className="text-muted-foreground">{accountMessages.checking}</p>}
     {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={event => onDisconnect(event.currentTarget)}>Disconnect locally</Button></div>}
     {local?.credentials_managed === false && <p className="text-muted-foreground">Browser sign-in and local disconnect require the default managed credential directory. For this profile, use an access token instead.</p>}

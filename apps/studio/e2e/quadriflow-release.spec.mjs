@@ -141,7 +141,7 @@ test('reviewed QuadriFlow release installs, retopologizes and exports GLB and OB
     assertPreview(glb, quadCount, textured);
     await testInfo.attach(glbName, { body: glb, contentType: 'model/gltf-binary' });
     await testInfo.attach(objName, { body: obj, contentType: 'model/obj' });
-    await selected.getByRole('radio', { name: 'Original' }).click();
+    await selected.getByRole('tab', { name: 'Original' }).click();
     await expect(selected.getByTitle(`${sourceStem}.glb`, { exact: true })).toBeVisible();
     expect(await download(page, 'Export selected GLB', `${sourceStem}.glb`)).toEqual(source);
   }
