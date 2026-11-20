@@ -9,9 +9,9 @@ MeshHarbor is a local workbench for inspecting, editing, and exporting 3D assets
 - **Prepare assets for rendering.** Reorder geometry, export meshopt-compressed GLBs, or rebuild a UV atlas and rebake supported embedded textures from the same mesh.
 - **Try local image-to-3D.** Pixal3D has opt-in Apple Silicon (MLX) and Linux/NVIDIA (CUDA) profiles. TRELLIS.2 and TripoSG require manually provisioned runtimes. Model weights are not bundled.
 
-![MeshHarbor Studio Jobs dashboard showing an active generation job, the generation queue, and recent mesh-processing results](docs/images/jobs-dashboard.png)
+![MeshHarbor Studio with the generation panel open and the Surveyor rover in the 3D viewport](docs/images/studio-workbench.png)
 
-*The Jobs dashboard with example jobs.*
+*The Studio generation screen with an imported example GLB.*
 
 **Status:** Early source build. There is no official installer or binary release. Mesh editing works without Python, model weights, or a Hugging Face account. Mesh operations support specific static GLB layouts; generic high-to-low baking is not implemented, and the experimental QuadriFlow operation is unavailable because there is no approved sidecar.
 
