@@ -5,9 +5,9 @@
 
 **Generate 3D assets locally with open-weight models.**
 
-MeshHarbor is a local-first alternative to [Tripo](https://www.tripo3d.ai/) and [Meshy](https://www.meshy.ai/) for image-to-3D. After you set up a runtime and download its weights, generation runs on your hardware without sending reference images to a hosted generation service.
+MeshHarbor is a local-first alternative to [Tripo](https://www.tripo3d.ai/) and [Meshy](https://www.meshy.ai/) for 3D asset generation. After you set up a runtime and download its weights, generation runs on your hardware instead of sending inputs to a hosted service.
 
-- **Generate from images.** Run Pixal3D on Apple Silicon (MLX) or Linux with NVIDIA (CUDA). Experimental TRELLIS.2 and TripoSG integrations require manual setup.
+- **Generate with local models.** Supported inputs depend on the model; the current integrations take images. Run Pixal3D on Apple Silicon (MLX) or Linux with NVIDIA (CUDA), or manually set up the experimental TRELLIS.2 and TripoSG integrations.
 - **Refine and export GLBs.** Inspect, simplify, clean, split connected parts, or compress meshes. Compare revisions and export without overwriting the original. Supported textured meshes can get a new UV atlas with a same-mesh rebake.
 - **Work in Studio or automate locally.** Use the browser workbench, CLI, loopback REST API, or stdio MCP through the same Rust engine.
 
@@ -43,7 +43,7 @@ For the CLI, run `cargo run --locked --bin meshharbor -- --help`.
 | Use Studio, version history, or job controls | [Studio guide](apps/studio/README.md) |
 | Process assets from a terminal | [CLI guide](docs/cli.md) |
 | Integrate with the local API or an MCP client | [REST API](docs/rest-api.md) · [MCP workflow](docs/mcp-workflow.md) |
-| Configure image-to-3D | [Pixal3D MLX](docs/pixal3d-mlx-manual-runtime.md) · [Pixal3D CUDA](docs/pixal3d-cuda-managed-runtime.md) · [TRELLIS.2 and TripoSG](docs/external-generation-runtimes.md) |
+| Set up a generation model | [Pixal3D MLX](docs/pixal3d-mlx-manual-runtime.md) · [Pixal3D CUDA](docs/pixal3d-cuda-managed-runtime.md) · [TRELLIS.2 and TripoSG](docs/external-generation-runtimes.md) |
 | Understand format limits or work on the project | [Architecture](docs/architecture.md) · [Documentation index](docs/README.md) · [Contributing](CONTRIBUTING.md) |
 
 ## Contributing
