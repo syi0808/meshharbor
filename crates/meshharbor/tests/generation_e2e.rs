@@ -75,7 +75,10 @@ impl MockRuntime {
         fs::create_dir_all(&weights).unwrap();
         fs::write(
             source_root.join("generate_pixal3d.py"),
-            "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")\n",
+            concat!(
+                "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")\n",
+                "    from generate import _cleanup_and_simplify_mesh\n",
+            ),
         )
         .unwrap();
         fs::write(source_root.join("fixture.glb"), &generated_glb).unwrap();

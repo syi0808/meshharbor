@@ -390,7 +390,7 @@ impl Pixal3dMlxRuntime {
                 "Pinned Pixal3D entrypoint does not match the reviewed NAF path contract; refusing to patch it at runtime.".into(),
             ));
         }
-        let managed = source.replace(UPSTREAM_NAF_PATH, MANAGED_NAF_PATH);
+        let managed = patch_mlx_postprocess(&source.replace(UPSTREAM_NAF_PATH, MANAGED_NAF_PATH))?;
         let managed = if tune_samplers {
             patch_mlx_samplers(&managed)?
         } else {
@@ -416,6 +416,19 @@ impl Pixal3dMlxRuntime {
         drop(file);
         Ok(PreparedEntrypoint(target))
     }
+}
+
+fn patch_mlx_postprocess(source: &str) -> CoreResult<String> {
+    const UPSTREAM_IMPORT: &str = "\n    from generate import _cleanup_and_simplify_mesh\n";
+    if source.matches(UPSTREAM_IMPORT).count() != 1 {
+        return Err(CoreError::OperationUnavailable(
+            "Pinned Pixal3D entrypoint does not match the reviewed mesh postprocessing contract."
+                .into(),
+        ));
+    }
+    let managed = include_str!("pixal3d_mlx_postprocess.py").trim_end();
+    let inline = format!("\n    {}\n", managed.replace('\n', "\n    "));
+    Ok(source.replace(UPSTREAM_IMPORT, &inline))
 }
 
 fn patch_mlx_samplers(source: &str) -> CoreResult<String> {
@@ -913,6 +926,11 @@ impl Drop for WorkDir {
 mod tests {
     use super::*;
 
+    const MLX_ENTRYPOINT_FIXTURE: &str = concat!(
+        "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")\n",
+        "    from generate import _cleanup_and_simplify_mesh\n",
+    );
+
     fn imported_image_with_source_path(core: &OperationCore) -> (Asset, PathBuf) {
         let png = crate::glb::test_png_with_dimensions(1, 1);
         let asset = core.store().import_asset("legacy.png", &png).unwrap();
@@ -932,7 +950,7 @@ mod tests {
             "os.path.join(os.path.dirname(__file__), \"weights\"))\n",
             "    naf_path = os.path.join(naf_weights_dir, \"naf_release.safetensors\")"
         );
-        source.replace(UPSTREAM_NAF_PATH, MANAGED_NAF_PATH)
+        patch_mlx_postprocess(&source.replace(UPSTREAM_NAF_PATH, MANAGED_NAF_PATH)).unwrap()
     }
 
     #[test]
@@ -1116,13 +1134,25 @@ mod tests {
     }
 
     #[test]
+    fn managed_mlx_postprocess_requires_the_unmodified_upstream_import() {
+        let upstream = include_str!("../../../runtimes/pixal3d/mlx/upstream/generate_pixal3d.py");
+        let import = "    from generate import _cleanup_and_simplify_mesh";
+        let patched = patch_mlx_postprocess(upstream).unwrap();
+        assert!(!patched.lines().any(|line| line == import));
+        assert!(patched.contains("    def _cleanup_and_simplify_mesh(vertices, faces, *"));
+        assert!(patched.contains("    vertices, faces = _cleanup_and_simplify_mesh("));
+        assert!(patch_mlx_postprocess(&upstream.replace(import, "")).is_err());
+        assert!(patch_mlx_postprocess(&format!("{upstream}\n{import}\n")).is_err());
+    }
+
+    #[test]
     fn managed_entrypoint_uses_app_data_weights_without_mutating_pinned_source() {
         let root = std::env::temp_dir().join(format!("meshharbor-mlx-overlay-{}", Uuid::new_v4()));
         let source_root = root.join("source");
         let runtime_root = root.join("runtime");
         std::fs::create_dir_all(source_root.join("pixalmlx")).unwrap();
         let upstream = source_root.join("generate_pixal3d.py");
-        let source = "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")";
+        let source = MLX_ENTRYPOINT_FIXTURE;
         std::fs::write(&upstream, source).unwrap();
         let runtime = Pixal3dMlxRuntime {
             python: runtime_root.join(".venv/bin/python"),
@@ -1152,11 +1182,10 @@ mod tests {
         std::fs::create_dir_all(&source_one).unwrap();
         std::fs::create_dir_all(&source_two).unwrap();
 
-        let naf_path = "    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")";
         let upstream_one = source_one.join("generate_pixal3d.py");
         let upstream_two = source_two.join("generate_pixal3d.py");
-        let source_one_text = format!("# source-one marker\n{naf_path}\n");
-        let source_two_text = format!("# source-two marker\n{naf_path}\n");
+        let source_one_text = format!("# source-one marker\n{MLX_ENTRYPOINT_FIXTURE}");
+        let source_two_text = format!("# source-two marker\n{MLX_ENTRYPOINT_FIXTURE}");
         std::fs::write(&upstream_one, &source_one_text).unwrap();
         std::fs::write(&upstream_two, &source_two_text).unwrap();
 
@@ -1210,7 +1239,7 @@ mod tests {
         let source_root = root.join("source");
         std::fs::create_dir_all(&runtime_root).unwrap();
         std::fs::create_dir_all(&source_root).unwrap();
-        let source = "# concurrent marker\n    naf_path = os.path.join(os.path.dirname(__file__), \"weights\", \"naf_release.safetensors\")\n";
+        let source = MLX_ENTRYPOINT_FIXTURE;
         std::fs::write(source_root.join("generate_pixal3d.py"), source).unwrap();
         let runtime = Pixal3dMlxRuntime {
             python: runtime_root.join(".venv/bin/python"),

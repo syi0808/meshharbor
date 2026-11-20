@@ -44,6 +44,12 @@ In **Settings**, set up the environment under **Models**, then select **Sign in 
 
 Generation uses the fixed reviewed 512 profile, the local pinned Pixal3D/DINOv3/NAF files, Hugging Face offline mode, no background-removal model, and the fan hole filler. The first DINOv3 cache revision must be the pinned revision `ea8dc2863c51be0a264bab82070e3e8836b02d51`. The managed HF cache is dedicated to MeshHarbor and avoids changing/deleting the user's existing HF cache.
 
+### Mesh postprocessing
+
+[Official Pixal3D export](https://github.com/TencentARC/Pixal3D/blob/master/inference.py) uses CUDA O-Voxel remeshing and simplification. The managed MLX path does not implement that CUDA remesher. It reuses the pinned MLX runtime's component filter, simplifier, edge repair, hole filling, and winding correction. The MeshHarbor overlay filters only the original disconnected components, runs simplification before splitting non-manifold edges, and then repairs the result. It does not delete newly separated parts as debris or rerun simplification on split edges. Model sampling, texture baking, and the upstream source snapshot are unchanged.
+
+The face target remains soft because final hole filling can add triangles. In a replay of the same 512-profile decoded shoe mesh at a 100,000-face target, the previous order produced 10,824 edge-connected components. The new order produced 7 (126,685 faces), counting coincident vertex positions together to avoid counting seams as disconnected. A separate end-to-end CLI run on the Apple M3 Pro produced the same face and component counts and a GLB with embedded base color and metallic/roughness textures. This verifies one input, not CUDA remeshing parity.
+
 ## Runtime source and licensing boundary
 
 - The source-port MIT notice is preserved.
