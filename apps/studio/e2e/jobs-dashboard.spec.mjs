@@ -98,3 +98,51 @@ test('stopping a running generation requires confirmation and cannot be resumed'
   await expect(page.getByRole('button', { name: /resume/i })).toHaveCount(0);
   expect(requests).toBe(1);
 });
+
+test('job details expand saved commands and update logs without closing the step', async ({ page, studioOrigin }) => {
+  const timestamp = String(Date.now());
+  const job = {
+    id: 'job_setup_logs', operation: 'runtime.pixal3d.setup', state: 'running', progress: 5,
+    stage: 'sync_dependencies', created_at: timestamp, started_at: timestamp, updated_at: timestamp,
+  };
+  const command = {
+    id: 1, argv: ['uv', 'sync', '--locked'], cwd: '/local/runtime', started_at: timestamp,
+    ended_at: null, outcome: null, stdout: 'Starting sync', stderr: '', truncated: false,
+  };
+  const steps = [
+    { id: 1, state: 'running', stage: null, at: timestamp, message: null, commands: [] },
+    { id: 2, state: 'running', stage: 'prepare_python', at: timestamp, message: 'Reusing the existing private Python 3.12 environment.', commands: [] },
+    { id: 3, state: 'running', stage: 'sync_dependencies', at: timestamp, message: null, commands: [command] },
+  ];
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [job] }));
+  await page.route('**/api/v1/jobs/job_setup_logs/steps', route => route.fulfill({ json: steps }));
+  await page.goto(studioOrigin + '/jobs');
+  const openDetails = () => page.getByRole('button', { name: 'View details for Set up MLX' }).click();
+  await openDetails();
+  const dialog = page.getByRole('dialog', { name: 'Job details' });
+  const step = text => dialog.locator('summary').filter({ hasText: text });
+  await expect(dialog.getByText('uv sync --locked')).toBeHidden();
+  await step('Checking existing Python environment').click();
+  await expect(dialog.getByText('Reusing the existing private Python 3.12 environment.')).toBeVisible();
+  await step('Synchronizing dependencies').click();
+  await expect(dialog.getByText('uv sync --locked')).toBeVisible();
+  await expect(dialog.getByText('Starting sync')).toBeVisible();
+
+  command.stderr = 'fixture dependency failure';
+  await expect(dialog.getByText(command.stderr)).toBeVisible();
+  command.outcome = 'exit status: 17';
+  command.ended_at = timestamp;
+  job.state = 'failed';
+  job.updated_at = String(Number(timestamp) + 1);
+  job.error = { message: 'Could not sync locked dependencies.' };
+  steps.push({ id: 4, state: 'failed', stage: null, at: job.updated_at, message: null, commands: [] });
+  await expect(dialog.getByText('exit status: 17', { exact: false })).toBeVisible();
+  await expect(dialog.getByText(job.error.message)).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+
+  await page.reload();
+  await openDetails();
+  await step('Synchronizing dependencies').click();
+  await expect(dialog.getByText(command.stderr)).toBeVisible();
+});

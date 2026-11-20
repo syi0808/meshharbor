@@ -24,11 +24,10 @@ use crate::{
         self, DINO_REPO, PIXAL_CHECKPOINTS, PIXAL_MULTIVIEW_REVISION, PIXAL_REPOSITORY,
         PIXAL_REVISION,
     },
+    job_execution::JobExecution,
     runtime::RuntimeSetupReport,
-    uv_bootstrap::ensure_uv,
 };
 
-const PYTHON_REQUEST: &str = "3.12";
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
 const MAX_GENERATED_GLB_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CUDA_PREFLIGHT_BYTES: u64 = 16 * 1024;
@@ -137,55 +136,45 @@ impl Pixal3dCudaRuntimeManager {
     /// model weights. Since upstream does not ship a lock file, the first
     /// explicit setup resolves and stores a per-install uv.lock in app data.
     pub fn setup_environment(&self) -> CoreResult<RuntimeSetupReport> {
-        self.ensure_supported_host()?;
+        self.setup_environment_tracked(JobExecution::default())
+    }
+
+    pub(crate) fn setup_environment_tracked(
+        &self,
+        execution: JobExecution<'_>,
+    ) -> CoreResult<RuntimeSetupReport> {
+        execution.stage("prepare_runtime")?;
+        let device = self.detect_gpu_tracked(execution)?;
         self.invalidate_preflight_marker()?;
         self.ensure_source()?;
-        let device = self.detect_gpu()?;
-        let uv = ensure_uv(&self.runtime_root)?;
-        self.setup_environment_with_tools(&uv, &device)
+        let uv = crate::uv_bootstrap::ensure_uv_tracked(&self.runtime_root, execution)?;
+        self.setup_environment_with_tools(&uv, &device, execution)
     }
 
     fn setup_environment_with_tools(
         &self,
         uv: &Path,
         device: &str,
+        execution: JobExecution<'_>,
     ) -> CoreResult<RuntimeSetupReport> {
         self.invalidate_preflight_marker()?;
         let python_dir = self.runtime_root.join("python");
         let venv_dir = self.runtime_root.join(".venv");
         let home = self.home_path();
         std::fs::create_dir_all(&python_dir)?;
-        std::fs::create_dir_all(&venv_dir)?;
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(self.cache_path())?;
 
         eprintln!("NVIDIA GPU detected: {device}");
-        eprintln!("[1/4] Installing isolated managed Python {PYTHON_REQUEST}…");
-        let mut install = self.uv_command(uv);
-        install
-            .args(["python", "install", PYTHON_REQUEST, "--install-dir"])
-            .arg(&python_dir);
-        run_visible(install, "uv could not install managed Python 3.12")?;
-
-        let managed_python = self.find_managed_python(uv)?;
-        let mut version_check = self.python_command(&managed_python);
-        version_check.arg("--version");
-        let version = run_capture(&mut version_check, "Could not verify managed Python")?;
-        if !version.starts_with("Python 3.12.") {
-            return Err(CoreError::OperationUnavailable(format!(
-                "uv returned unexpected interpreter {version}; the CUDA profile requires Python 3.12."
-            )));
-        }
-
-        eprintln!("[2/4] Creating an isolated CUDA Python environment…");
-        let mut venv = self.uv_command(uv);
-        venv.args(["venv", "--no-project", "--allow-existing", "--python"])
-            .arg(&managed_python)
-            .arg(&venv_dir);
-        run_visible(venv, "uv could not create the isolated CUDA environment")?;
-
-        let python = self.python_path();
+        let python = crate::runtime::prepare_managed_venv(
+            execution,
+            &python_dir,
+            &venv_dir,
+            || self.uv_command(uv),
+            |path| self.python_command(path),
+        )?;
         let lockfile = self.managed_root.join("uv.lock");
+        execution.stage("resolve_dependencies")?;
         if !lockfile.is_file() {
             eprintln!(
                 "[3/4] Resolving the vendored dependency ranges into a private per-install uv.lock…"
@@ -195,12 +184,12 @@ impl Pixal3dCudaRuntimeManager {
                 .arg("lock")
                 .arg("--python")
                 .arg(&python);
-            run_visible(lock, "uv could not resolve the CUDA dependency lock")?;
+            execution.visible(lock, "uv could not resolve the CUDA dependency lock")?;
         } else {
-            eprintln!("[3/4] Reusing the existing managed CUDA uv.lock…");
+            execution.note("Reusing the existing managed CUDA uv.lock.")?;
         }
 
-        eprintln!("[4/4] Installing the pinned Python 3.12 / PyTorch 2.6.0 + CUDA 12.4 profile…");
+        execution.stage("sync_dependencies")?;
         let mut sync = self.uv_command(uv);
         sync.current_dir(&self.managed_root)
             .env("UV_PROJECT_ENVIRONMENT", &venv_dir)
@@ -209,12 +198,13 @@ impl Pixal3dCudaRuntimeManager {
             .arg("--python")
             .arg(&python)
             .args(["--locked", "--no-dev", "--no-editable"]);
-        run_visible(sync, "uv could not install the locked CUDA dependencies")?;
+        execution.visible(sync, "uv could not install the locked CUDA dependencies")?;
 
         // Upstream's doctor emits non-sensitive device/runtime diagnostics and
         // executes its FP16/FP32 SDPA finite-value smoke test. Reject CPU-only
         // or incompatible driver environments before making the backend ready.
-        let report = self.verify_cuda_environment(&python)?;
+        execution.stage("verify_environment")?;
+        let report = self.verify_cuda_environment(&python, execution)?;
         self.publish_preflight_marker(&report)?;
 
         Ok(RuntimeSetupReport {
@@ -301,7 +291,7 @@ impl Pixal3dCudaRuntimeManager {
             .env("HF_HOME", self.hf_home())
             .env("HF_HUB_DISABLE_TELEMETRY", "1")
             .env("PATH", managed_path(&self.runtime_root));
-        run_visible(
+        JobExecution::default().visible(
             command,
             "Hugging Face login failed; MeshHarbor did not receive the token",
         )
@@ -315,6 +305,20 @@ impl Pixal3dCudaRuntimeManager {
         confirm_large_download: bool,
         confirm_gated_access: bool,
     ) -> CoreResult<RuntimeSetupReport> {
+        self.install_models_tracked(
+            confirm_large_download,
+            confirm_gated_access,
+            JobExecution::default(),
+        )
+    }
+
+    pub(crate) fn install_models_tracked(
+        &self,
+        confirm_large_download: bool,
+        confirm_gated_access: bool,
+        execution: JobExecution<'_>,
+    ) -> CoreResult<RuntimeSetupReport> {
+        execution.stage("prepare_runtime")?;
         if !confirm_large_download || !confirm_gated_access {
             return Err(CoreError::InvalidInput(
                 "CUDA model installation requires explicit confirmation of the 25–30 GB download and prior DINOv3 gated access.".into(),
@@ -331,6 +335,7 @@ impl Pixal3dCudaRuntimeManager {
         self.install_models_with_python(
             &python,
             huggingface_download::shared_hub_cache().as_deref(),
+            execution,
         )
     }
 
@@ -338,12 +343,13 @@ impl Pixal3dCudaRuntimeManager {
         &self,
         python: &Path,
         shared_cache: Option<&Path>,
+        execution: JobExecution<'_>,
     ) -> CoreResult<RuntimeSetupReport> {
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(self.hf_home())?;
 
-        eprintln!("[1/2] Checking the user's existing DINOv3 access before large model downloads…");
+        execution.stage("check_model_access")?;
         let access_python =
             access_python(&self.runtime_root).unwrap_or_else(|| python.to_path_buf());
         require_access(
@@ -351,18 +357,24 @@ impl Pixal3dCudaRuntimeManager {
             "meshharbor runtime cuda-hf-login",
         )?;
 
-        eprintln!(
-            "[2/2] Downloading pinned Pixal3D, DINOv3 and NAF checkpoints (roughly 25–30 GB)…"
-        );
+        execution.stage("download_weights")?;
         huggingface_download::download(
             &self.runtime_root,
             &home,
             DINO_REPO,
             DINO_REVISION,
             ["model.safetensors"],
+            execution,
         )?;
-        huggingface_download::download_pixal3d(&self.runtime_root, &home, shared_cache, false)?;
+        huggingface_download::download_pixal3d(
+            &self.runtime_root,
+            &home,
+            shared_cache,
+            false,
+            execution,
+        )?;
 
+        execution.stage("verify_weights")?;
         let mut naf = self.python_command(python);
         naf.current_dir(&self.upstream_root)
             .args([
@@ -371,7 +383,7 @@ impl Pixal3dCudaRuntimeManager {
             ])
             .stdout(Stdio::from(std::io::stderr()))
             .stderr(Stdio::inherit());
-        run_visible(naf, "Could not download or verify the CUDA NAF checkpoint")?;
+        execution.visible(naf, "Could not download or verify the CUDA NAF checkpoint")?;
 
         let readiness = self.readiness();
         if !readiness.models_downloaded {
@@ -471,6 +483,15 @@ impl Pixal3dCudaRuntimeManager {
     }
 
     pub fn install_multiview_models(&self, confirmed: bool) -> CoreResult<RuntimeSetupReport> {
+        self.install_multiview_models_tracked(confirmed, JobExecution::default())
+    }
+
+    pub(crate) fn install_multiview_models_tracked(
+        &self,
+        confirmed: bool,
+        execution: JobExecution<'_>,
+    ) -> CoreResult<RuntimeSetupReport> {
+        execution.stage("prepare_runtime")?;
         if !confirmed {
             return Err(CoreError::InvalidInput(
                 "Confirm the additional model files before downloading multiview weights.".into(),
@@ -481,7 +502,13 @@ impl Pixal3dCudaRuntimeManager {
                 "Set up the base Pixal3D model before adding multiview weights.".into(),
             ));
         }
-        huggingface_download::download_pixal3d_multiview(&self.runtime_root, &self.home_path())?;
+        execution.stage("download_weights")?;
+        huggingface_download::download_pixal3d_multiview(
+            &self.runtime_root,
+            &self.home_path(),
+            execution,
+        )?;
+        execution.stage("verify_weights")?;
         if !huggingface_download::multiview_files_present(&self.home_path()) {
             return Err(CoreError::OperationUnavailable(
                 "The pinned multiview snapshot is incomplete.".into(),
@@ -540,7 +567,7 @@ impl Pixal3dCudaRuntimeManager {
             return Err(CoreError::OperationUnavailable("Install the optional Pixal3D multiview weights before generating from posed views.".into()));
         }
         let python = self.python_path();
-        self.verify_cuda_environment(&python)?;
+        self.verify_cuda_environment(&python, execution)?;
         std::fs::create_dir_all(output_dir)?;
         let snapshot = self
             .hf_home()
@@ -598,7 +625,8 @@ impl Pixal3dCudaRuntimeManager {
         let status = crate::generation::run_generation_command(&mut command, execution)?;
         if !status.success() {
             return Err(CoreError::OperationUnavailable(format!(
-                "Pixal3D CUDA inference failed ({status}); see the command output above."
+                "Pixal3D CUDA inference failed ({status}). {}",
+                execution.output_hint()
             )));
         }
 
@@ -627,26 +655,19 @@ impl Pixal3dCudaRuntimeManager {
     }
 
     fn detect_gpu(&self) -> CoreResult<String> {
+        self.detect_gpu_tracked(JobExecution::default())
+    }
+
+    fn detect_gpu_tracked(&self, execution: JobExecution<'_>) -> CoreResult<String> {
         if !is_supported_target(env::consts::OS, env::consts::ARCH) {
             return Err(CoreError::OperationUnavailable(
                 "CUDA is available only on Linux x86_64 in this managed profile.".into(),
             ));
         }
-        let output = Command::new("nvidia-smi")
-            .args(["--query-gpu=name", "--format=csv,noheader"])
-            .output()
-            .map_err(|error| {
-                CoreError::OperationUnavailable(format!(
-                    "NVIDIA driver utility nvidia-smi is unavailable: {error}"
-                ))
-            })?;
-        if !output.status.success() {
-            return Err(CoreError::OperationUnavailable(format!(
-                "nvidia-smi could not query an NVIDIA GPU: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = execution.capture(
+            Command::new("nvidia-smi").args(["--query-gpu=name", "--format=csv,noheader"]),
+            "nvidia-smi could not query an NVIDIA GPU",
+        )?;
         let name = stdout
             .lines()
             .find(|line| !line.trim().is_empty())
@@ -678,10 +699,14 @@ impl Pixal3dCudaRuntimeManager {
         command
     }
 
-    fn verify_cuda_environment(&self, python: &Path) -> CoreResult<Value> {
+    fn verify_cuda_environment(
+        &self,
+        python: &Path,
+        execution: JobExecution<'_>,
+    ) -> CoreResult<Value> {
         let mut command = self.python_command(python);
         command.args(["-m", "pixalcuda.cli", "doctor"]);
-        let output = run_capture(&mut command, "PyTorch CUDA preflight failed")?;
+        let output = execution.capture(&mut command, "PyTorch CUDA preflight failed")?;
         let report: Value = serde_json::from_str(&output).map_err(|error| {
             CoreError::OperationUnavailable(format!(
                 "Pixal3D CUDA doctor returned invalid JSON: {error}"
@@ -696,7 +721,7 @@ impl Pixal3dCudaRuntimeManager {
         let versions = "import torch, torchvision; assert torch.__version__.startswith('2.6.0'); assert torchvision.__version__.startswith('0.21.0')";
         let mut verify_packages = self.python_command(python);
         verify_packages.args(["-c", versions]);
-        run_visible(
+        execution.visible(
             verify_packages,
             "Installed CUDA package versions do not match the reviewed PyTorch profile",
         )?;
@@ -717,32 +742,6 @@ impl Pixal3dCudaRuntimeManager {
             .env("UV_PYTHON_DOWNLOADS", "automatic")
             .env("UV_DEFAULT_INDEX", "https://pypi.org/simple");
         command
-    }
-
-    fn find_managed_python(&self, uv: &Path) -> CoreResult<PathBuf> {
-        let output = self
-            .uv_command(uv)
-            .args([
-                "python",
-                "find",
-                "--no-project",
-                "--managed-python",
-                PYTHON_REQUEST,
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(CoreError::OperationUnavailable(format!(
-                "uv could not locate its managed Python {PYTHON_REQUEST}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if path.is_empty() {
-            return Err(CoreError::OperationUnavailable(
-                "uv returned an empty path for its managed Python.".into(),
-            ));
-        }
-        Ok(PathBuf::from(path))
     }
 }
 
@@ -808,34 +807,6 @@ fn managed_path(runtime_root: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned()
-}
-
-fn run_visible(mut command: Command, failure_prefix: &str) -> CoreResult<()> {
-    let status = command
-        .status()
-        .map_err(|error| CoreError::OperationUnavailable(format!("{failure_prefix}: {error}")))?;
-    if !status.success() {
-        return Err(CoreError::OperationUnavailable(format!(
-            "{failure_prefix} (exit status {}). See the command output above.",
-            status
-                .code()
-                .map_or_else(|| "signal".into(), |code| code.to_string())
-        )));
-    }
-    Ok(())
-}
-
-fn run_capture(command: &mut Command, failure_prefix: &str) -> CoreResult<String> {
-    let output = command
-        .output()
-        .map_err(|error| CoreError::OperationUnavailable(format!("{failure_prefix}: {error}")))?;
-    if !output.status.success() {
-        return Err(CoreError::OperationUnavailable(format!(
-            "{failure_prefix}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 #[cfg(test)]
@@ -1005,6 +976,7 @@ case "$1:$2" in
     mkdir -p "$destination/bin"
     cp "$FAKE_PYTHON" "$destination/bin/python"
     chmod +x "$destination/bin/python"
+    printf '%s\n' 'include-system-site-packages = false' > "$destination/pyvenv.cfg"
     ;;
   lock:*)
     : > uv.lock
@@ -1027,7 +999,7 @@ esac
         write_test_script(&fake_uv, &uv_script);
 
         let report = manager
-            .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU")
+            .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU", Default::default())
             .unwrap();
         assert_eq!(report.backend_id, "pixal3d-cuda");
         assert_eq!(
@@ -1054,7 +1026,7 @@ esac
         std::fs::write(&fail_sync, "fail this retry").unwrap();
         assert!(
             manager
-                .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU")
+                .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU", Default::default())
                 .is_err()
         );
         assert!(!preflight_marker.exists());
@@ -1065,7 +1037,7 @@ esac
         std::fs::write(&fail_doctor, "fail the CUDA doctor").unwrap();
         assert!(
             manager
-                .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU")
+                .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU", Default::default())
                 .is_err()
         );
         assert!(!preflight_marker.exists());
@@ -1073,7 +1045,7 @@ esac
         std::fs::remove_file(&fail_doctor).unwrap();
 
         let retry = manager
-            .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU")
+            .setup_environment_with_tools(&fake_uv, "fake NVIDIA GPU", Default::default())
             .unwrap();
         assert_eq!(
             retry.status,
@@ -1179,7 +1151,7 @@ PIXAL_PAYLOAD
         let partial = manager.hf_home().join("hub/.cache/download/partial");
         assert!(
             manager
-                .install_models_with_python(&fake_python, None)
+                .install_models_with_python(&fake_python, None, Default::default())
                 .is_err()
         );
         assert!(
@@ -1194,7 +1166,7 @@ PIXAL_PAYLOAD
         );
 
         let report = manager
-            .install_models_with_python(&fake_python, None)
+            .install_models_with_python(&fake_python, None, Default::default())
             .unwrap();
         assert_eq!(report.status, "model_files_ready");
         assert!(manager.readiness().models_downloaded);

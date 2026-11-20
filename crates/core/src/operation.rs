@@ -128,7 +128,7 @@ impl OperationCore {
         max_error: f32,
         execution: JobExecution<'_>,
     ) -> CoreResult<SimplificationResult> {
-        execution.checkpoint()?;
+        execution.stage("load_mesh")?;
         let source = self
             .store
             .get_asset(asset_id)?
@@ -140,7 +140,7 @@ impl OperationCore {
         }
         let source_artifact = mesh_source_artifact(&source)?;
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
-        execution.checkpoint()?;
+        execution.stage("process_mesh")?;
         let (output, report) = simplify_glb(&bytes, target_triangles, max_error)?;
         let name = derived_name(&source.name);
         let report_value = serde_json::to_value(&report)?;
@@ -222,7 +222,7 @@ impl OperationCore {
         parameters: Value,
         execution: JobExecution<'_>,
     ) -> CoreResult<MeshOperationResult> {
-        execution.checkpoint()?;
+        execution.stage("load_mesh")?;
         let source = self.mesh_processing_source(asset_id)?;
         let source_artifact = mesh_source_artifact(&source)?;
         if operation == "mesh.separate_parts" {
@@ -239,7 +239,7 @@ impl OperationCore {
             validate_retopology_source_size(source_artifact.byte_size)?;
         }
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
-        execution.checkpoint()?;
+        execution.stage("process_mesh")?;
         if operation == "mesh.retopology" {
             let options: crate::QuadRetopologyOptions = serde_json::from_value(parameters)
                 .map_err(|error| {
@@ -430,6 +430,35 @@ impl OperationCore {
 
     pub fn setup_pixal3d_mlx_environment(&self) -> CoreResult<RuntimeSetupReport> {
         Pixal3dRuntimeManager::new(self.store.root()).setup_environment()
+    }
+
+    pub fn run_runtime_job(
+        &self,
+        kind: crate::RuntimeJobKind,
+        job_id: &str,
+    ) -> CoreResult<RuntimeSetupReport> {
+        use crate::RuntimeJobKind;
+        let root = self.store.root();
+        let execution = JobExecution::for_job(&self.store, job_id);
+        match kind {
+            RuntimeJobKind::Setup => {
+                Pixal3dRuntimeManager::new(root).setup_environment_tracked(execution)
+            }
+            RuntimeJobKind::InstallModels => {
+                Pixal3dRuntimeManager::new(root).install_models_tracked(true, true, execution)
+            }
+            RuntimeJobKind::ConvertNaf => {
+                Pixal3dRuntimeManager::new(root).convert_naf_tracked(execution)
+            }
+            RuntimeJobKind::CudaSetup => {
+                Pixal3dCudaRuntimeManager::new(root).setup_environment_tracked(execution)
+            }
+            RuntimeJobKind::CudaInstallModels => {
+                Pixal3dCudaRuntimeManager::new(root).install_models_tracked(true, true, execution)
+            }
+            RuntimeJobKind::CudaInstallMultiview => Pixal3dCudaRuntimeManager::new(root)
+                .install_multiview_models_tracked(true, execution),
+        }
     }
 
     pub fn install_pixal3d_mlx_models(

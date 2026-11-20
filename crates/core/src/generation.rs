@@ -5,10 +5,9 @@
 
 use std::{
     collections::BTreeMap,
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -351,12 +350,7 @@ impl Pixal3dMlxRuntime {
         let status = run_generation_command(&mut command, execution)?;
 
         if !status.success() {
-            let message = format!(
-                "Pixal3D MLX exited with status {}. See the local runtime stderr for details.",
-                status
-                    .code()
-                    .map_or_else(|| "signal".into(), |code| code.to_string())
-            );
+            let message = format!("Pixal3D MLX failed ({status}). {}", execution.output_hint());
             return Err(CoreError::OperationUnavailable(message));
         }
         if !output.is_file() {
@@ -622,79 +616,106 @@ pub(crate) fn run_generation_command_with_input(
     }
     if input.is_some() {
         command.stdin(Stdio::piped());
+    } else if tracked {
+        command.stdin(Stdio::null());
     }
-    let mut child = command
-        .stdout(if tracked {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    if let Some(bytes) = input {
-        let mut stdin = child
-            .stdin
-            .take()
-            .expect("generation worker stdin is piped");
-        let written = stdin.write_all(bytes);
-        drop(stdin);
-        if let Err(error) = written {
-            if tracked {
-                stop_generation_worker(&mut child)?;
+    let trace = execution.trace_command(command)?;
+    let result = (|| {
+        let mut child = command
+            .stdout(if tracked {
+                Stdio::piped()
             } else {
-                let _ = child.kill();
-                child.wait()?;
+                Stdio::null()
+            })
+            .stderr(if tracked {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
+            .spawn()?;
+        if let Some(bytes) = input {
+            let mut stdin = child
+                .stdin
+                .take()
+                .expect("generation worker stdin is piped");
+            let written = stdin.write_all(bytes);
+            drop(stdin);
+            if let Err(error) = written {
+                if tracked {
+                    stop_generation_worker(&mut child)?;
+                } else {
+                    let _ = child.kill();
+                    child.wait()?;
+                }
+                return Err(error.into());
             }
-            return Err(error.into());
         }
-    }
-    if !tracked {
-        return Ok(child.wait()?);
-    }
-    let stdout = child
-        .stdout
-        .take()
-        .expect("generation worker stdout is piped");
-    let (stages, observed) = mpsc::channel();
-    thread::scope(|scope| {
-        scope.spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut line = Vec::new();
-            while reader
-                .read_until(b'\n', &mut line)
-                .is_ok_and(|len| len != 0)
-            {
-                if let Ok(line) = std::str::from_utf8(&line) {
-                    if let Some(stage) = generation_worker_stage(line.trim()) {
-                        if stages.send(stage).is_err() {
-                            break;
+        if !tracked {
+            return Ok(child.wait()?);
+        }
+        let trace = trace.expect("tracked generation command");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("generation worker stdout is piped");
+        let stderr = child
+            .stderr
+            .take()
+            .expect("generation worker stderr is piped");
+        thread::scope(|scope| {
+            let stderr = scope.spawn(|| trace.drain(stderr, true, |_| {}));
+            let stdout = scope.spawn(|| {
+                let mut line = Vec::new();
+                let mut oversized = false;
+                let mut stage_result = Ok(());
+                trace.drain(stdout, false, |bytes| {
+                    for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
+                        if !oversized && line.len() + chunk.len() <= 512 {
+                            line.extend_from_slice(chunk);
+                        } else {
+                            oversized = true;
+                        }
+                        if chunk.ends_with(b"\n") {
+                            if !oversized
+                                && stage_result.is_ok()
+                                && let Ok(text) = std::str::from_utf8(&line)
+                                && let Some(stage) = generation_worker_stage(text.trim())
+                            {
+                                stage_result = execution.stage(stage);
+                            }
+                            line.clear();
+                            oversized = false;
                         }
                     }
-                }
-                line.clear();
-            }
-        });
-        loop {
-            let update = execution.checkpoint().and_then(|_| {
-                if let Some(stage) = observed.try_iter().last() {
-                    execution.stage(stage)?;
-                }
-                Ok(())
+                })?;
+                stage_result
             });
-            if let Err(error) = update {
-                stop_generation_worker(&mut child)?;
-                return Err(error);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => return Ok(status),
-                Ok(None) => thread::sleep(Duration::from_millis(100)),
-                Err(error) => {
+            let status = loop {
+                if let Err(error) = execution.checkpoint() {
                     stop_generation_worker(&mut child)?;
-                    return Err(error.into());
+                    break Err(error);
                 }
-            }
-        }
-    })
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) => thread::sleep(Duration::from_millis(100)),
+                    Err(error) => {
+                        stop_generation_worker(&mut child)?;
+                        break Err(error.into());
+                    }
+                }
+            };
+            let stdout_result = stdout.join().expect("generation stdout reader");
+            let stderr_result = stderr.join().expect("generation stderr reader");
+            let status = status?;
+            stdout_result?;
+            stderr_result?;
+            Ok(status)
+        })
+    })();
+    if let Some(trace) = trace {
+        trace.finish(&result.as_ref().copied());
+    }
+    result
 }
 
 fn stop_generation_worker(child: &mut Child) -> CoreResult<()> {
@@ -979,6 +1000,44 @@ mod tests {
         )
         .unwrap();
         assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_worker_persists_fast_stages_and_bounded_redacted_output() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-generation-trace-{}", Uuid::new_v4()));
+        let store = crate::Store::open(&root).unwrap();
+        let job = store
+            .create_running_job("model.generate", None, &json!({}))
+            .unwrap();
+        let execution = JobExecution::for_job(&store, &job.id);
+        execution.stage("initialize_model").unwrap();
+        let mut command = Command::new("sh");
+        command.args(["-c", "cat >/dev/null; printf '%32768s\\n' ''; printf '=== shape_hr ===\\n=== mesh_export ===\\n'; printf '%s\\n' \"$WORKER_MESSAGE\" >&2; exit 17"])
+            .env("WORKER_MESSAGE", "Invalid URL https://user:secret@example.invalid/file?sig=temporary");
+        let status =
+            run_generation_command_with_input(&mut command, execution, Some(b"private prompt"))
+                .unwrap();
+        assert_eq!(status.code(), Some(17));
+        let steps = store.job_steps(&job.id).unwrap();
+        assert_eq!(steps[2].stage.as_deref(), Some("shape_hr"));
+        assert_eq!(steps[3].stage.as_deref(), Some("mesh_export"));
+        let worker = &steps[1].commands[0];
+        assert!(worker.truncated);
+        assert!(worker.stdout.len() <= 16 * 1024);
+        assert!(
+            worker
+                .stderr
+                .contains("https://example.invalid/file?[redacted]")
+        );
+        let serialized = serde_json::to_string(&steps).unwrap();
+        assert!(!serialized.contains("temporary"));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("private prompt"));
+        assert!(worker.outcome.as_deref().unwrap().contains("17"));
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

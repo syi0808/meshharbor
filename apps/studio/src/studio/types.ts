@@ -189,6 +189,27 @@ export interface Job {
   stage?: string | null;
 }
 
+export interface JobCommand {
+  id: number;
+  argv: string[];
+  cwd: string | null;
+  started_at: string;
+  ended_at: string | null;
+  outcome: string | null;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+}
+
+export interface JobStep {
+  id: number;
+  state: Job['state'];
+  stage: string | null;
+  at: string;
+  message: string | null;
+  commands: JobCommand[];
+}
+
 export interface SimplificationReport {
   triangles_before: number;
   triangles_after: number;

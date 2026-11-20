@@ -11,20 +11,23 @@ export function generationJobName(job: Job, sources: ReadonlyMap<string, string>
   return job.input_asset_name || (job.input_asset_id && sources.get(job.input_asset_id)) || 'New model';
 }
 
-export type JobEvent = { state: Job['state']; stage: string; at: string };
-
-export function updateJobTimeline(jobs: Job[], previous: ReadonlyMap<string, JobEvent[]>): Map<string, JobEvent[]> {
-  return new Map(jobs.map(job => {
-    const events = previous.get(job.id) ?? [];
-    const stage = jobStage(job);
-    const last = events.at(-1);
-    if (last?.state === job.state && last.stage === stage) return [job.id, events];
-    return [job.id, [...events.slice(-19), { state: job.state, stage, at: job.updated_at }]];
-  }));
-}
-
-const generationStages: Partial<Record<string, string>> = {
-  check_runtime: 'Checking model runtime',
+const stageLabels: Partial<Record<string, string>> = {
+  check_runtime: 'Checking runtime availability',
+  prepare_runtime: 'Preparing local runtime',
+  prepare_uv: 'Preparing uv',
+  prepare_python: 'Checking existing Python environment',
+  install_python: 'Installing managed Python',
+  create_environment: 'Creating Python environment',
+  resolve_dependencies: 'Resolving dependency lock',
+  sync_dependencies: 'Synchronizing dependencies',
+  verify_environment: 'Verifying Python environment',
+  check_model_access: 'Checking gated model access',
+  download_weights: 'Reusing cache and downloading weights',
+  verify_weights: 'Verifying model files',
+  verify_checkpoint: 'Verifying checkpoint checksum',
+  convert_checkpoint: 'Converting checkpoint',
+  load_mesh: 'Loading source mesh',
+  process_mesh: 'Processing mesh',
   prepare_references: 'Preparing reference images',
   initialize_model: 'Initializing model',
   preprocess_camera: 'Preparing images and cameras',
@@ -47,6 +50,10 @@ const generationStages: Partial<Record<string, string>> = {
   save_model: 'Saving model to inventory',
 };
 
+export function jobStepLabel(stage: string): string {
+  return stageLabels[stage] ?? stage.replaceAll('_', ' ');
+}
+
 export function jobStage(job: Job): string {
   switch (job.state) {
     case 'queued': return 'Waiting for an engine slot';
@@ -56,7 +63,8 @@ export function jobStage(job: Job): string {
     case 'failed': return 'Stopped with an error';
     case 'cancelled': return 'Cancelled';
     case 'running':
-      if (isGenerationOperation(job.operation)) return lastGenerationStage(job) ?? 'Preparing generation';
+      if (job.stage) return jobStepLabel(job.stage);
+      if (isGenerationOperation(job.operation)) return 'Preparing generation';
       if (job.operation.includes('install_models')) return 'Checking cache and downloading weights';
       if (job.operation.endsWith('install_multiview')) return 'Checking cache and downloading multiview weights';
       if (job.operation.endsWith('_setup') || job.operation.endsWith('.setup')) return 'Setting up local runtime';
@@ -66,7 +74,7 @@ export function jobStage(job: Job): string {
 }
 
 export function lastGenerationStage(job: Job): string | undefined {
-  return isGenerationOperation(job.operation) && job.stage ? generationStages[job.stage] : undefined;
+  return isGenerationOperation(job.operation) && job.stage ? jobStepLabel(job.stage) : undefined;
 }
 
 function timestamp(value: string | null | undefined): number | null {

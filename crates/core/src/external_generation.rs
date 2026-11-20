@@ -417,8 +417,9 @@ impl ExternalProfile {
         let status = run_generation_command_with_input(&mut command, execution, stdin)?;
         if !status.success() {
             return Err(CoreError::OperationUnavailable(format!(
-                "{} worker failed ({status}). See the engine stderr for details.",
-                self.id
+                "{} worker failed ({status}). {}",
+                self.id,
+                execution.output_hint()
             )));
         }
         Ok(started.elapsed().as_millis())

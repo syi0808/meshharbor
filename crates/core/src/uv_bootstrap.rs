@@ -54,6 +54,14 @@ impl UvAsset {
 /// Find an existing explicit/system uv, or bootstrap the pinned official
 /// release into `<data-root>/tools/uv-<version>`.
 pub(crate) fn ensure_uv(data_root: &Path) -> CoreResult<PathBuf> {
+    ensure_uv_tracked(data_root, Default::default())
+}
+
+pub(crate) fn ensure_uv_tracked(
+    data_root: &Path,
+    execution: crate::job_execution::JobExecution<'_>,
+) -> CoreResult<PathBuf> {
+    execution.stage("prepare_uv")?;
     if let Some(override_path) = env::var_os("MESHHARBOR_UV") {
         let path = PathBuf::from(override_path);
         if !path.is_file() {
@@ -62,24 +70,27 @@ pub(crate) fn ensure_uv(data_root: &Path) -> CoreResult<PathBuf> {
                 path.display()
             )));
         }
+        execution.note("Using the explicitly configured uv executable.")?;
         return Ok(path);
     }
 
     let app_managed = managed_executable(data_root);
     if app_managed.is_file() {
-        verify_uv_version(&app_managed)?;
+        verify_uv_version(&app_managed, execution)?;
+        execution.note("Reusing app-managed uv.")?;
         return Ok(app_managed);
     }
 
     if let Some(system_uv) = find_on_path() {
         // Keep user-managed uv usable when already installed. uv.lock fixes
         // package versions; its presence avoids an unnecessary tool download.
-        if verify_uv_command(&system_uv).is_ok() {
+        if verify_uv_command(&system_uv, execution).is_ok() {
+            execution.note("Reusing the existing uv executable on PATH.")?;
             return Ok(system_uv);
         }
     }
 
-    install_pinned(data_root)
+    install_pinned(data_root, execution)
 }
 
 fn managed_executable(data_root: &Path) -> PathBuf {
@@ -174,7 +185,10 @@ fn select_asset(os: &str, arch: &str, abi: &str) -> Option<UvAsset> {
     })
 }
 
-fn install_pinned(data_root: &Path) -> CoreResult<PathBuf> {
+fn install_pinned(
+    data_root: &Path,
+    execution: crate::job_execution::JobExecution<'_>,
+) -> CoreResult<PathBuf> {
     let asset = current_asset()?;
     let filename = asset.filename();
     let url = format!("https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{filename}");
@@ -186,13 +200,17 @@ fn install_pinned(data_root: &Path) -> CoreResult<PathBuf> {
     restrict_directory(&stage)?;
 
     let archive = stage.join(asset.archive_name());
-    eprintln!("Downloading official uv {UV_VERSION} for {}…", asset.triple);
-    download_https(&url, &archive)?;
+    execution.note(&format!(
+        "Downloading official uv {UV_VERSION} for {}.",
+        asset.triple
+    ))?;
+    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+    download_https_with(curl, &url, &archive, execution)?;
     verify_archive(&archive, asset.sha256)?;
 
     let extract_dir = stage.join("extract");
     fs::create_dir(&extract_dir)?;
-    extract_archive(&archive, &extract_dir, asset.windows)?;
+    extract_archive(&archive, &extract_dir, asset.windows, execution)?;
 
     let candidate = extract_dir.join(asset.executable_relative());
     if !candidate.is_file() {
@@ -207,20 +225,20 @@ fn install_pinned(data_root: &Path) -> CoreResult<PathBuf> {
     let staged_executable = install_stage.join(asset.executable_name());
     fs::copy(&candidate, &staged_executable)?;
     make_executable(&staged_executable)?;
-    verify_uv_version(&staged_executable)?;
+    verify_uv_version(&staged_executable, execution)?;
 
     let destination = tools_dir.join(format!("uv-{UV_VERSION}"));
     if destination.exists() {
         // A concurrent setup may have completed while this process downloaded.
         let existing = destination.join(asset.executable_name());
-        verify_uv_version(&existing)?;
+        verify_uv_version(&existing, execution)?;
         return Ok(existing);
     }
     match fs::rename(&install_stage, &destination) {
         Ok(()) => {}
         Err(error) if destination.exists() => {
             let existing = destination.join(asset.executable_name());
-            verify_uv_version(&existing)?;
+            verify_uv_version(&existing, execution)?;
             let _ = error;
         }
         Err(error) => return Err(error.into()),
@@ -228,14 +246,12 @@ fn install_pinned(data_root: &Path) -> CoreResult<PathBuf> {
     Ok(destination.join(asset.executable_name()))
 }
 
-fn download_https(url: &str, destination: &Path) -> CoreResult<()> {
-    // URL is constructed solely from a compile-time release pin and a
-    // compile-time target mapping. curl is invoked without a shell.
-    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
-    download_https_with(curl, url, destination)
-}
-
-fn download_https_with(curl: impl AsRef<OsStr>, url: &str, destination: &Path) -> CoreResult<()> {
+fn download_https_with(
+    curl: impl AsRef<OsStr>,
+    url: &str,
+    destination: &Path,
+    execution: crate::job_execution::JobExecution<'_>,
+) -> CoreResult<()> {
     let mut command = Command::new(curl);
     command.env_clear();
     for name in [
@@ -278,7 +294,7 @@ fn download_https_with(curl: impl AsRef<OsStr>, url: &str, destination: &Path) -
         ])
         .arg(destination)
         .arg(url);
-    let status = command.status().map_err(|error| {
+    let status = execution.status(&mut command).map_err(|error| {
         CoreError::OperationUnavailable(format!(
             "Could not run curl to install uv. Install curl or provide MESHHARBOR_UV. Details: {error}"
         ))
@@ -314,7 +330,12 @@ fn verify_archive(path: &Path, expected: &str) -> CoreResult<()> {
     Ok(())
 }
 
-fn extract_archive(archive: &Path, destination: &Path, windows: bool) -> CoreResult<()> {
+fn extract_archive(
+    archive: &Path,
+    destination: &Path,
+    windows: bool,
+    execution: crate::job_execution::JobExecution<'_>,
+) -> CoreResult<()> {
     let status = if windows {
         let mut command = Command::new("powershell.exe");
         command
@@ -326,14 +347,15 @@ fn extract_archive(archive: &Path, destination: &Path, windows: bool) -> CoreRes
             ])
             .env("MESHHARBOR_UV_ARCHIVE", archive)
             .env("MESHHARBOR_UV_DESTINATION", destination);
-        command.status()?
+        execution.status(&mut command)?
     } else {
-        Command::new("tar")
-            .args(["-xzf"])
-            .arg(archive)
-            .arg("-C")
-            .arg(destination)
-            .status()?
+        execution.status(
+            Command::new("tar")
+                .args(["-xzf"])
+                .arg(archive)
+                .arg("-C")
+                .arg(destination),
+        )?
     };
     if !status.success() {
         return Err(CoreError::OperationUnavailable(format!(
@@ -346,8 +368,11 @@ fn extract_archive(archive: &Path, destination: &Path, windows: bool) -> CoreRes
     Ok(())
 }
 
-fn verify_uv_version(path: &Path) -> CoreResult<()> {
-    let version = verify_uv_command(path)?;
+fn verify_uv_version(
+    path: &Path,
+    execution: crate::job_execution::JobExecution<'_>,
+) -> CoreResult<()> {
+    let version = verify_uv_command(path, execution)?;
     let mut parts = version.split_whitespace();
     if parts.next() != Some("uv") || parts.next() != Some(UV_VERSION) {
         return Err(CoreError::OperationUnavailable(format!(
@@ -358,15 +383,14 @@ fn verify_uv_version(path: &Path) -> CoreResult<()> {
     Ok(())
 }
 
-fn verify_uv_command(path: &Path) -> CoreResult<String> {
-    let output = Command::new(path).arg("--version").output()?;
-    if !output.status.success() {
-        return Err(CoreError::OperationUnavailable(format!(
-            "uv executable {} failed its --version check.",
-            path.display()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+fn verify_uv_command(
+    path: &Path,
+    execution: crate::job_execution::JobExecution<'_>,
+) -> CoreResult<String> {
+    execution.capture(
+        Command::new(path).arg("--version"),
+        "uv failed its --version check",
+    )
 }
 
 #[cfg(unix)]
@@ -487,6 +511,7 @@ exit 28
             &fake_curl,
             "https://example.invalid/uv.tar.gz",
             &destination,
+            Default::default(),
         )
         .expect_err("the fake curl deliberately simulates a timeout");
         assert!(error.to_string().contains("curl exit 28"));

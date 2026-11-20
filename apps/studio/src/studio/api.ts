@@ -1,4 +1,4 @@
-import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, GenerationInput, GenerationParameters, HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, MeshOperationId, ModelVersionPage, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, GenerationInput, GenerationParameters, HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, JobStep, MeshOperationId, ModelVersionPage, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
 
 export const MAX_ASSET_IMPORT_FILES = 10;
 export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
@@ -852,6 +852,10 @@ export class MeshHarborApi {
 
   job(jobId: string): Promise<Job> {
     return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  jobSteps(jobId: string, signal?: AbortSignal): Promise<JobStep[]> {
+    return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/steps`, { signal, cache: 'no-store' });
   }
 
   generationQueue(signal?: AbortSignal): Promise<string[]> {

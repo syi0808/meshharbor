@@ -534,7 +534,8 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
     let submitted: Value = serde_json::from_slice(&body).unwrap();
     let job_id = submitted["id"].as_str().unwrap();
-    assert!(submitted["started_at"].is_null());
+    assert_eq!(submitted["state"], "running");
+    assert_eq!(submitted["started_at"], submitted["created_at"]);
     assert_eq!(submitted["input_asset_name"], "source.png");
 
     let live = (0..200)
@@ -585,6 +586,28 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     assert_eq!(completed["started_at"], live["started_at"]);
     assert_eq!(completed["stage"], "save_model");
     assert_eq!(completed["result"]["backend_id"], "pixal3d-mlx");
+    let (status, body) = http_request(
+        address,
+        "GET",
+        &format!("/api/v1/jobs/{job_id}/steps"),
+        &[("Authorization", authorization.as_str())],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(status, 200);
+    let steps: Vec<Value> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(steps[0]["state"], "running");
+    let worker_step = steps
+        .iter()
+        .find(|step| step["stage"] == "initialize_model")
+        .unwrap();
+    assert!(
+        worker_step["commands"][0]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("=== Stage 3: Decode Shape ===")
+    );
+    assert_eq!(steps.last().unwrap()["state"], "succeeded");
     let generated_asset_id = completed["result"]["asset_id"].as_str().unwrap();
 
     let (status, body) = http_request(

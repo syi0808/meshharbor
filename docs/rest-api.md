@@ -26,6 +26,7 @@ Selected endpoints:
 - `GET /api/v1/assets/page?models_only=true` lists each mesh model once, returning its current asset; search, origin filters, and cursors use the original model record
 - `GET /api/v1/models/{model_id}/versions?limit=20&before=<version_number>` returns numbered versions, their parent version, and the current asset ID; `PUT /api/v1/models/{model_id}/current` with `{"asset_id":"..."}` restores a version of that model
 - `GET /api/v1/jobs?limit=20` (recent persisted jobs; read-only), `POST /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`, `POST /api/v1/jobs/{job_id}/cancel`
+- `GET /api/v1/jobs/{job_id}/steps` (persisted execution history and command logs)
 - `GET /api/v1/artifacts/{artifact_id}`
 
 ## Model versions
@@ -49,6 +50,10 @@ Use `POST /api/v1/jobs` with `operation: "model.generate"` and a tagged input:
 Keep base fields such as `seed` at the top level of job parameters and put catalog fields marked `tuning: true` under `parameters.tuning`. For a ready multiview backend, send `parameters.view_input` with `mode` (`four`, `six`, or `custom`) and an ordered `references` array. Each entry contains an imported image's `asset_id`; the first must match `input.asset_id`. Presets use front/right/back/left order (then top/bottom for six). Custom entries each add a `camera` object with `azimuth_degrees`, `elevation_degrees`, `distance`, and `fov_degrees`. No client filesystem paths are accepted. The CUDA profile exposes `multiview_ready` once the separately approved snapshot is installed.
 
 ## Job history and execution
+
+Job submissions return `202 Accepted` with `state: "running"` and `started_at` set if the engine can start them immediately. Only work that waits for the engine slot starts in `queued`.
+
+`GET /api/v1/jobs/{job_id}/steps` returns state changes and execution stages in order. Each entry contains `id`, `state`, `stage`, `at`, `message`, and `commands`. Each command entry contains its argument vector (`argv`), an explicit working directory (`cwd`) when set, timestamps, an `outcome` when available, and the available `stdout`/`stderr` tails. Logs are limited to the most recent 16 KiB per stream before redaction; `truncated` indicates earlier output was dropped. Environment variables, stdin, and sign-in traffic are not recorded. The response is not cached or embedded in the job list. Jobs predating this feature can have no recorded steps. Logs can still contain local paths and other diagnostic information; review them before sharing.
 
 `GET /api/v1/jobs?limit=20` lists the newest updated persisted job records (default 50, capped at 200). Studio polls with `include_active=true` to list all active jobs plus up to the requested number of terminal records. Use `before=<terminal_job_id>` to page through older terminal records. New jobs include a `started_at` timestamp once running; generation jobs also report the latest known worker `stage` when available. The CLI exposes job history through `jobs list` and `jobs show <job_id>`; MCP exposes `list_jobs` and `get_job`. These queries are read-only: listing or checking a saved job never resumes or restarts work. After an unexpected engine exit, a saved active state may be stale; use the explicit recovery command only after stopping every REST/MCP process that uses that data directory.
 

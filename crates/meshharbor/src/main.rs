@@ -17,7 +17,7 @@ use job_scheduler::JobScheduler;
 use meshharbor_core::{
     CoreError, GenerationInput, GenerationOptions, IMAGE_GENERATION_OPERATION, MAX_ASSET_BYTES,
     MODEL_GENERATION_OPERATION, OperationCore, Pixal3dCudaRuntimeManager, Pixal3dProfile,
-    Pixal3dRuntimeManager, RuntimeDoctor,
+    Pixal3dRuntimeManager, RuntimeDoctor, RuntimeJobKind,
 };
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -1114,6 +1114,7 @@ fn api_router(state: AppState, token: String) -> Router {
                 .layer(DefaultBodyLimit::max(1024)),
         )
         .route("/api/v1/jobs/{job_id}", get(api_get_job))
+        .route("/api/v1/jobs/{job_id}/steps", get(api_job_steps))
         .route("/api/v1/jobs/{job_id}/cancel", post(api_cancel_job))
         .route("/api/v1/artifacts/{artifact_id}", get(api_read_artifact))
         .fallback(api_studio_fallback)
@@ -1829,6 +1830,16 @@ async fn api_get_job(
     Ok(Json(read_job_record(&state.core, &job_id)?))
 }
 
+async fn api_job_steps(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(state.core.store().job_steps(&job_id)?),
+    ))
+}
+
 #[derive(Deserialize)]
 struct CancelJobQuery {
     #[serde(default)]
@@ -1925,30 +1936,19 @@ async fn start_simplify_job(
             "target_triangles must be positive and max_error must be between 0 and 1.".into(),
         ));
     }
-    let job = core.store().create_job(
+    let (job, reserved) = scheduler.submit(
+        core.store(),
         "mesh.simplify",
         Some(asset_id),
         &json!({"target_triangles":target_triangles,"max_error":max_error}),
     )?;
     let job_id = job.id.clone();
-    scheduler.enqueue(&job_id, &job.operation);
+    let worker_asset_id = asset_id.to_owned();
     tokio::spawn(async move {
-        let Some(permit) = scheduler.acquire(&job_id).await else {
+        let Some(permit) = scheduler.start(core.store(), &job_id, reserved).await else {
             return;
         };
-        let current = match core.store().get_job(&job_id) {
-            Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued => job,
-            _ => return,
-        };
-        if core
-            .store()
-            .update_job(&job_id, meshharbor_core::JobState::Running, 5, None, None)
-            .is_err()
-        {
-            return;
-        }
         let worker_core = core.clone();
-        let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
         let worker_job_id = job_id.clone();
         let result = task::spawn_blocking(move || {
             let result = worker_core.simplify_asset_for_job(
@@ -1996,36 +1996,21 @@ async fn start_mesh_operation_job(
             "Mesh processing requires a previously imported GLB mesh asset.".into(),
         ));
     }
-    let job = core
-        .store()
-        .create_job(operation, Some(asset_id), &parameters)?;
+    let (job, reserved) = scheduler.submit(core.store(), operation, Some(asset_id), &parameters)?;
     let job_id = job.id.clone();
     let worker_operation = operation.to_string();
-    scheduler.enqueue(&job_id, &job.operation);
+    let worker_asset_id = asset_id.to_owned();
     tokio::spawn(async move {
-        let Some(permit) = scheduler.acquire(&job_id).await else {
+        let Some(permit) = scheduler.start(core.store(), &job_id, reserved).await else {
             return;
         };
-        let current = match core.store().get_job(&job_id) {
-            Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued => job,
-            _ => return,
-        };
-        if core
-            .store()
-            .update_job(&job_id, meshharbor_core::JobState::Running, 5, None, None)
-            .is_err()
-        {
-            return;
-        }
         let worker_core = core.clone();
-        let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
         let worker_parameters = parameters;
-        let operation_for_worker = worker_operation.clone();
         let worker_job_id = job_id.clone();
         let result = task::spawn_blocking(move || {
             let result = worker_core.process_mesh_asset_for_job(
                 &worker_asset_id,
-                &operation_for_worker,
+                &worker_operation,
                 worker_parameters,
                 &worker_job_id,
             )?;
@@ -2051,26 +2036,13 @@ async fn start_generation_job(
     if operation == MODEL_GENERATION_OPERATION {
         parameters["input_mode"] = json!(input.mode());
     }
-    let job = core
-        .store()
-        .create_job(operation, input.asset_id(), &parameters)?;
+    let (job, reserved) =
+        scheduler.submit(core.store(), operation, input.asset_id(), &parameters)?;
     let job_id = job.id.clone();
-    scheduler.enqueue(&job_id, &job.operation);
     tokio::spawn(async move {
-        let Some(permit) = scheduler.acquire(&job_id).await else {
+        let Some(permit) = scheduler.start(core.store(), &job_id, reserved).await else {
             return;
         };
-        if !matches!(core.store().get_job(&job_id), Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued)
-        {
-            return;
-        }
-        if core
-            .store()
-            .update_job(&job_id, meshharbor_core::JobState::Running, 5, None, None)
-            .is_err()
-        {
-            return;
-        }
 
         let worker_core = core.clone();
         let worker_data_dir = core.store().root().to_path_buf();
@@ -2108,38 +2080,6 @@ async fn start_generation_job(
     Ok(job)
 }
 
-#[derive(Clone, Copy)]
-enum RuntimeJobKind {
-    Setup,
-    InstallModels,
-    ConvertNaf,
-    CudaSetup,
-    CudaInstallModels,
-    CudaInstallMultiview,
-}
-
-impl RuntimeJobKind {
-    fn operation(self) -> &'static str {
-        match self {
-            Self::Setup => "runtime.pixal3d.setup",
-            Self::InstallModels => "runtime.pixal3d.install_models",
-            Self::ConvertNaf => "runtime.pixal3d.convert_naf",
-            Self::CudaSetup => "runtime.pixal3d.cuda_setup",
-            Self::CudaInstallModels => "runtime.pixal3d.cuda_install_models",
-            Self::CudaInstallMultiview => "runtime.pixal3d.cuda_install_multiview",
-        }
-    }
-
-    fn backend_id(self) -> &'static str {
-        match self {
-            Self::Setup | Self::InstallModels | Self::ConvertNaf => "pixal3d-mlx",
-            Self::CudaSetup | Self::CudaInstallModels | Self::CudaInstallMultiview => {
-                "pixal3d-cuda"
-            }
-        }
-    }
-}
-
 fn map_runtime_lock_error(error: std::io::Error, message: &str) -> CoreError {
     if error.kind() == std::io::ErrorKind::WouldBlock {
         CoreError::Conflict(message.into())
@@ -2175,55 +2115,28 @@ async fn start_runtime_job(
     scheduler: Arc<JobScheduler>,
     kind: RuntimeJobKind,
 ) -> Result<meshharbor_core::Job, CoreError> {
-    let job = core.store().create_job(
+    let (job, reserved) = scheduler.submit(
+        core.store(),
         kind.operation(),
         None,
         &json!({"backend_id":kind.backend_id()}),
     )?;
     let job_id = job.id.clone();
-    scheduler.enqueue(&job_id, &job.operation);
     tokio::spawn(async move {
-        let Some(permit) = scheduler.acquire(&job_id).await else {
+        let Some(permit) = scheduler.start(core.store(), &job_id, reserved).await else {
             return;
         };
-        if !matches!(core.store().get_job(&job_id), Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued)
-        {
-            return;
-        }
-        if core
-            .store()
-            .update_job(&job_id, meshharbor_core::JobState::Running, 5, None, None)
-            .is_err()
-        {
-            return;
-        }
 
         let worker_core = core.clone();
         let worker_data_dir = core.store().root().to_path_buf();
+        let worker_job_id = job_id.clone();
         let result = task::spawn_blocking(move || {
+            worker_core
+                .store()
+                .update_running_job_stage(&worker_job_id, "check_runtime")?;
             let _runtime_lock = acquire_runtime_write_lock(&worker_data_dir)?;
-            match kind {
-                RuntimeJobKind::Setup => worker_core
-                    .setup_pixal3d_mlx_environment()
-                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-                RuntimeJobKind::InstallModels => worker_core
-                    .install_pixal3d_mlx_models(true, true)
-                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-                RuntimeJobKind::ConvertNaf => worker_core
-                    .convert_pixal3d_mlx_naf()
-                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-                RuntimeJobKind::CudaSetup => worker_core
-                    .setup_pixal3d_cuda_environment()
-                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-                RuntimeJobKind::CudaInstallModels => worker_core
-                    .install_pixal3d_cuda_models(true, true)
-                    .and_then(|report| serde_json::to_value(report).map_err(CoreError::from)),
-                RuntimeJobKind::CudaInstallMultiview => {
-                    Pixal3dCudaRuntimeManager::new(worker_core.store().root())
-                        .install_multiview_models(true)
-                        .and_then(|report| serde_json::to_value(report).map_err(CoreError::from))
-                }
-            }
+            let report = worker_core.run_runtime_job(kind, &worker_job_id)?;
+            Ok::<_, CoreError>(serde_json::to_value(report)?)
         })
         .await;
 
@@ -4633,7 +4546,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let submitted: meshharbor_core::Job = serde_json::from_slice(&body).unwrap();
-        assert_eq!(submitted.state, meshharbor_core::JobState::Queued);
+        assert_eq!(submitted.state, meshharbor_core::JobState::Running);
+        assert_eq!(
+            submitted.started_at.as_deref(),
+            Some(submitted.created_at.as_str())
+        );
 
         let mut final_job = submitted;
         for _ in 0..100 {
@@ -4656,6 +4573,41 @@ mod tests {
                 .is_some()
         );
         assert_eq!(core.store().list_assets(10).unwrap().len(), 2);
+
+        let step_request = |authenticated| {
+            let mut request = axum::http::Request::builder()
+                .uri(format!("/api/v1/jobs/{}/steps", final_job.id))
+                .header(header::HOST, "localhost:7432");
+            if authenticated {
+                request = request.header(header::AUTHORIZATION, "Bearer token");
+            }
+            request.body(Body::empty()).unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(step_request(false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let steps_response = app.clone().oneshot(step_request(true)).await.unwrap();
+        assert_eq!(steps_response.status(), StatusCode::OK);
+        assert_eq!(steps_response.headers()[header::CACHE_CONTROL], "no-store");
+        let steps: Value = serde_json::from_slice(
+            &steps_response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        let steps = steps.as_array().unwrap();
+        assert_eq!(steps[0]["state"], "running");
+        assert!(steps.iter().all(|step| step["state"] != "queued"));
+        assert!(steps.iter().any(|step| step["stage"] == "process_mesh"));
+        assert_eq!(steps.last().unwrap()["state"], "succeeded");
 
         let listed_response = app
             .oneshot(

@@ -52,7 +52,7 @@ import { AssetGalleryCard } from './AssetGalleryCard';
 import { Disclosure } from './Disclosure';
 import { JobListItem } from './JobListItem';
 import { JobsDashboard, PendingGenerationCards, type StudioActivity } from './JobsDashboard';
-import { JOB_PAGE_SIZE, generationJobName, jobStage, mergeJobRecords, updateJobTimeline, type JobEvent } from './job-activity';
+import { JOB_PAGE_SIZE, generationJobName, jobStage, mergeJobRecords } from './job-activity';
 import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
 import { buildPosedInput, defaultViews, newView, PosedReferences, SingleReference, type ViewDraft } from './GenerationReferences';
@@ -199,7 +199,6 @@ export function App() {
   const [assetPageLoading, setAssetPageLoading] = useState(false);
   const assetPageRequestGuard = useRef(new LatestRequestGuard());
   const [jobSnapshot, setJobSnapshot] = useState<Job[]>([]);
-  const [jobEvents, setJobEvents] = useState(new Map<string, JobEvent[]>());
   const [detailsTarget, setDetailsTarget] = useState<Job | null>(null);
   const detailsTrigger = useRef<HTMLButtonElement | null>(null);
   const observedJobStates = useRef(new Map<string, Job['state']>());
@@ -384,7 +383,6 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    setJobEvents(previous => updateJobTimeline(recentJobs, previous));
     const observed = new Map<string, Job['state']>();
     let newestGenerationResult: Job | undefined;
     for (const saved of recentJobs) {
@@ -1133,7 +1131,7 @@ export function App() {
     try {
       const nextJob = await api.createSimplifyJob(selectedAsset.id, Math.max(1, Math.floor(targetTriangles)), maxError);
       setJob(nextJob);
-      notify('info', 'Mesh simplification queued.');
+      notify('info', `Mesh simplification ${nextJob.state === 'queued' ? 'queued' : 'started'}.`);
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not start simplification.');
     } finally {
@@ -1153,7 +1151,7 @@ export function App() {
       if (operation === 'mesh.retopology') parameters.target_quads = requestedQuads;
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
       setJob(nextJob);
-      notify('info', `${studioOperationLabel(operation)} queued.`);
+      notify('info', `${studioOperationLabel(operation)} ${nextJob.state === 'queued' ? 'queued' : 'started'}.`);
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not start mesh processing.');
     } finally {
@@ -1193,7 +1191,7 @@ export function App() {
           ? await (cuda ? api.installPixal3dCudaModels() : api.installPixal3dModels())
           : await api.convertPixal3dNaf();
       setJob(nextJob);
-      notify('info', `${studioOperationLabel(nextJob.operation)} queued.`);
+      notify('info', `${studioOperationLabel(nextJob.operation)} ${nextJob.state === 'queued' ? 'queued' : 'started'}.`);
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not start the runtime operation.');
     } finally {
@@ -1851,8 +1849,8 @@ export function App() {
       </div>}
 
       </div>
-      {currentDetails && <JobDetails job={currentDetails} title={studioOperationLabel(currentDetails.operation)}
-        events={jobEvents.get(currentDetails.id)} onClose={() => setDetailsTarget(null)} returnFocus={() => {
+      {currentDetails && <JobDetails key={currentDetails.id} api={api} job={currentDetails} title={studioOperationLabel(currentDetails.operation)}
+        onClose={() => setDetailsTarget(null)} returnFocus={() => {
           const trigger = detailsTrigger.current;
           if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus();
           else document.getElementById(dashboard ? 'jobs-dashboard-title' : settingsSection ? 'settings-heading' : 'workbench-inspector-title')?.focus();

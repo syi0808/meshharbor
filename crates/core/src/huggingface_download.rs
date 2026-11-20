@@ -124,6 +124,7 @@ pub(crate) fn download_pixal3d(
     home: &Path,
     shared_cache: Option<&Path>,
     include_configs: bool,
+    execution: crate::job_execution::JobExecution<'_>,
 ) -> CoreResult<()> {
     download_pixal_snapshot(
         runtime_root,
@@ -131,6 +132,7 @@ pub(crate) fn download_pixal3d(
         shared_cache,
         PIXAL_REVISION,
         pixal_files(include_configs),
+        execution,
     )
 }
 
@@ -144,7 +146,11 @@ pub(crate) fn multiview_files_present(home: &Path) -> bool {
         .all(|file| present(&local.join(file)))
 }
 
-pub(crate) fn download_pixal3d_multiview(runtime_root: &Path, home: &Path) -> CoreResult<()> {
+pub(crate) fn download_pixal3d_multiview(
+    runtime_root: &Path,
+    home: &Path,
+    execution: crate::job_execution::JobExecution<'_>,
+) -> CoreResult<()> {
     download_pixal_snapshot(
         runtime_root,
         home,
@@ -154,6 +160,7 @@ pub(crate) fn download_pixal3d_multiview(runtime_root: &Path, home: &Path) -> Co
             .iter()
             .map(ToString::to_string)
             .collect(),
+        execution,
     )
 }
 
@@ -163,6 +170,7 @@ fn download_pixal_snapshot(
     shared_cache: Option<&Path>,
     revision: &str,
     files: Vec<String>,
+    execution: crate::job_execution::JobExecution<'_>,
 ) -> CoreResult<()> {
     let local = pixal_snapshot(&home.join(".cache/huggingface/hub"), revision);
     let shared = shared_cache.and_then(|path| path.canonicalize().ok());
@@ -184,17 +192,14 @@ fn download_pixal_snapshot(
         }
         missing.push(relative);
     }
-    if reused > 0 {
-        eprintln!("Reused {reused} pinned Pixal3D files from the existing Hugging Face cache.");
-    }
     if missing.is_empty() {
-        eprintln!("All pinned Pixal3D files are cached; skipping their transfer.");
+        execution.note("All pinned Pixal3D files are cached; skipping their transfer.")?;
         return Ok(());
     }
-    eprintln!(
-        "Downloading {} missing Pixal3D files with hf…",
+    execution.note(&format!(
+        "Reused {reused} files from the shared cache; downloading {} missing Pixal3D files.",
         missing.len()
-    );
+    ))?;
     download(
         runtime_root,
         home,
@@ -204,6 +209,7 @@ fn download_pixal_snapshot(
             .iter()
             .map(String::as_str)
             .chain(["--max-workers", "2"]),
+        execution,
     )
 }
 
@@ -241,6 +247,7 @@ pub(crate) fn download(
     repo: &str,
     revision: &str,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    execution: crate::job_execution::JobExecution<'_>,
 ) -> CoreResult<()> {
     let executable =
         installed_browser_cli(runtime_root).unwrap_or_else(|| runtime_root.join(".venv/bin/hf"));
@@ -250,7 +257,8 @@ pub(crate) fn download(
                 .into(),
         ));
     }
-    let status = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .env_clear()
         .env("HOME", home)
         .env("HF_HOME", home.join(".cache/huggingface"))
@@ -261,13 +269,10 @@ pub(crate) fn download(
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(std::io::stderr()))
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|error| {
-            CoreError::OperationUnavailable(format!(
-                "Could not start hf download for {repo}: {error}"
-            ))
-        })?;
+        .stderr(Stdio::inherit());
+    let status = execution.status(&mut command).map_err(|error| {
+        CoreError::OperationUnavailable(format!("Could not start hf download for {repo}: {error}"))
+    })?;
     if !status.success() {
         return Err(CoreError::OperationUnavailable(format!(
             "Hugging Face download failed for {repo} ({status}). Check your connection and model access, then retry to reuse the local HF cache."
@@ -299,7 +304,14 @@ mod tests {
         let status = pixal_cache_status(&home, Some(&shared));
         assert_eq!(status.local_checkpoints, 0);
         assert_eq!(status.reusable_checkpoints, PIXAL_CHECKPOINTS.len());
-        download_pixal3d(&root.join("without-hf"), &home, Some(&shared), true).unwrap();
+        download_pixal3d(
+            &root.join("without-hf"),
+            &home,
+            Some(&shared),
+            true,
+            Default::default(),
+        )
+        .unwrap();
         let status = pixal_cache_status(&home, Some(&shared));
         assert_eq!(status.local_checkpoints, PIXAL_CHECKPOINTS.len());
         assert_eq!(status.reusable_checkpoints, 0);
@@ -339,7 +351,7 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        download_pixal3d(&runtime, &home, Some(&shared), false).unwrap();
+        download_pixal3d(&runtime, &home, Some(&shared), false, Default::default()).unwrap();
         let args = fs::read_to_string(home.join("hf-args")).unwrap();
         assert_eq!(
             args.lines().collect::<Vec<_>>(),

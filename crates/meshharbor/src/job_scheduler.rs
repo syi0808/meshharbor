@@ -3,7 +3,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use meshharbor_core::{CoreError, is_generation_operation};
+use meshharbor_core::{CoreError, Job, JobState, Store, is_generation_operation};
+use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, watch};
 
 struct PendingJob {
@@ -28,6 +29,48 @@ impl Default for JobScheduler {
 }
 
 impl JobScheduler {
+    pub(crate) fn submit(
+        &self,
+        store: &Store,
+        operation: &str,
+        asset_id: Option<&str>,
+        parameters: &Value,
+    ) -> Result<(Job, Option<OwnedSemaphorePermit>), CoreError> {
+        let mut pending = self.pending.lock().expect("job queue mutex poisoned");
+        if pending.is_empty()
+            && let Ok(permit) = self.slot.clone().try_acquire_owned()
+        {
+            return Ok((
+                store.create_running_job(operation, asset_id, parameters)?,
+                Some(permit),
+            ));
+        }
+        let job = store.create_job(operation, asset_id, parameters)?;
+        pending.push_back(PendingJob {
+            id: job.id.clone(),
+            generation: is_generation_operation(operation),
+        });
+        self.changes.send_replace(());
+        Ok((job, None))
+    }
+
+    pub(crate) async fn start(
+        &self,
+        store: &Store,
+        id: &str,
+        reserved: Option<OwnedSemaphorePermit>,
+    ) -> Option<OwnedSemaphorePermit> {
+        if reserved.is_some() {
+            return reserved;
+        }
+        let permit = self.acquire(id).await?;
+        store
+            .update_job(id, JobState::Running, 5, None, None)
+            .ok()?;
+        Some(permit)
+    }
+
+    #[cfg(test)]
     pub(crate) fn enqueue(&self, id: &str, operation: &str) {
         self.pending
             .lock()
@@ -121,6 +164,49 @@ fn generation_ids(pending: &VecDeque<PendingJob>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_jobs_that_wait_for_the_slot_are_queued() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-scheduler-{}", uuid::Uuid::new_v4()));
+        let store = Store::open(&root).unwrap();
+        let scheduler = JobScheduler::default();
+        let submit = || {
+            scheduler
+                .submit(&store, "model.generate", None, &serde_json::json!({}))
+                .unwrap()
+        };
+        let (first, first_slot) = submit();
+        assert_eq!(first.state, JobState::Running);
+        assert!(first_slot.is_some());
+        assert!(scheduler.generation_queue().is_empty());
+        let (second, second_slot) = submit();
+        assert_eq!(second.state, JobState::Queued);
+        assert!(second.started_at.is_none());
+        assert!(second_slot.is_none());
+        drop(first_slot);
+        let (third, third_slot) = submit();
+        assert_eq!(third.state, JobState::Queued);
+        assert!(third_slot.is_none());
+        assert_eq!(
+            scheduler.generation_queue(),
+            [second.id.clone(), third.id.clone()]
+        );
+        let second_permit = scheduler
+            .start(&store, &second.id, second_slot)
+            .await
+            .unwrap();
+        let states = store
+            .job_steps(&second.id)
+            .unwrap()
+            .into_iter()
+            .map(|step| step.state)
+            .collect::<Vec<_>>();
+        assert_eq!(states, [JobState::Queued, JobState::Running]);
+        drop(second_permit);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn reordering_changes_worker_order_without_moving_other_operations() {

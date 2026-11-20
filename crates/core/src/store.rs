@@ -189,6 +189,29 @@ pub struct Job {
     pub stage: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct JobStep {
+    pub id: i64,
+    pub state: JobState,
+    pub stage: Option<String>,
+    pub at: String,
+    pub message: Option<String>,
+    pub commands: Vec<JobCommand>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobCommand {
+    pub id: i64,
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub outcome: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ArtifactContent {
     pub artifact: Artifact,
@@ -257,7 +280,29 @@ impl Store {
             CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs(created_at DESC);
             CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS jobs_active_idx ON jobs(updated_at DESC, id DESC)
-                WHERE state NOT IN ('succeeded','failed','cancelled');",
+                WHERE state NOT IN ('succeeded','failed','cancelled');
+            CREATE TABLE IF NOT EXISTS job_steps (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                state TEXT NOT NULL,
+                stage TEXT,
+                at TEXT NOT NULL,
+                message TEXT
+            );
+            CREATE INDEX IF NOT EXISTS job_steps_job_idx ON job_steps(job_id, id);
+            CREATE TABLE IF NOT EXISTS job_commands (
+                id INTEGER PRIMARY KEY,
+                step_id INTEGER NOT NULL REFERENCES job_steps(id) ON DELETE CASCADE,
+                argv_json TEXT NOT NULL,
+                cwd TEXT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                outcome TEXT,
+                stdout TEXT NOT NULL DEFAULT '',
+                stderr TEXT NOT NULL DEFAULT '',
+                truncated INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS job_commands_step_idx ON job_commands(step_id, id);",
         )?;
         let migration = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let columns = {
@@ -272,6 +317,16 @@ impl Store {
         if !columns.iter().any(|column| column == "stage") {
             migration.execute("ALTER TABLE jobs ADD COLUMN stage TEXT", [])?;
         }
+        migration.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS job_steps_on_insert AFTER INSERT ON jobs BEGIN
+                INSERT INTO job_steps(job_id,state,stage,at) VALUES (NEW.id,NEW.state,NEW.stage,NEW.updated_at);
+             END;
+             CREATE TRIGGER IF NOT EXISTS job_steps_on_update AFTER UPDATE ON jobs
+             WHEN OLD.state IS NOT NEW.state OR OLD.stage IS NOT NEW.stage BEGIN
+                INSERT INTO job_steps(job_id,state,stage,at) VALUES
+                    (NEW.id,NEW.state,CASE WHEN NEW.state='running' THEN NEW.stage END,NEW.updated_at);
+             END;",
+        )?;
         migrate_model_versions(&migration)?;
         migration.commit()?;
         Ok(Self {
@@ -935,14 +990,35 @@ impl Store {
         input_asset_id: Option<&str>,
         parameters: &Value,
     ) -> CoreResult<Job> {
+        self.insert_job(operation, input_asset_id, parameters, JobState::Queued)
+    }
+
+    pub fn create_running_job(
+        &self,
+        operation: &str,
+        input_asset_id: Option<&str>,
+        parameters: &Value,
+    ) -> CoreResult<Job> {
+        self.insert_job(operation, input_asset_id, parameters, JobState::Running)
+    }
+
+    fn insert_job(
+        &self,
+        operation: &str,
+        input_asset_id: Option<&str>,
+        parameters: &Value,
+        state: JobState,
+    ) -> CoreResult<Job> {
         let id = format!("job_{}", Uuid::new_v4().simple());
         let now = timestamp()?;
         let parameters_json = serde_json::to_string(parameters)?;
+        let running = state == JobState::Running;
         let conn = self.connection.lock().expect("SQLite mutex poisoned");
         conn.execute(
-            "INSERT INTO jobs (id,operation,state,input_asset_id,parameters_json,progress,created_at,updated_at)
-             VALUES (?1,?2,'queued',?3,?4,0,?5,?5)",
-            params![id, operation, input_asset_id, parameters_json, now],
+            "INSERT INTO jobs (id,operation,state,input_asset_id,parameters_json,progress,created_at,updated_at,started_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8)",
+            params![id, operation, state.as_str(), input_asset_id, parameters_json,
+                if running { 5 } else { 0 }, now, running.then_some(&now)],
         )?;
         drop(conn);
         self.get_job(&id)?
@@ -1055,6 +1131,104 @@ impl Store {
             params![id, stage, timestamp()?],
         )?;
         Ok(())
+    }
+
+    pub(crate) fn note_job_step(&self, job_id: &str, message: &str) -> CoreResult<()> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        conn.execute(
+            "UPDATE job_steps SET message=?2 WHERE id=(SELECT id FROM job_steps WHERE job_id=?1 ORDER BY id DESC LIMIT 1)",
+            params![job_id, message],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn begin_job_command(
+        &self,
+        job_id: &str,
+        argv: &[String],
+        cwd: Option<&str>,
+    ) -> CoreResult<i64> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        conn.execute(
+            "INSERT INTO job_commands(step_id,argv_json,cwd,started_at)
+             VALUES ((SELECT id FROM job_steps WHERE job_id=?1 ORDER BY id DESC LIMIT 1),?2,?3,?4)",
+            params![job_id, serde_json::to_string(argv)?, cwd, timestamp()?],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub(crate) fn update_job_command_log(
+        &self,
+        id: i64,
+        stderr: bool,
+        tail: &str,
+        truncated: bool,
+    ) -> CoreResult<()> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        conn.execute(
+            if stderr {
+                "UPDATE job_commands SET stderr=?2,truncated=truncated OR ?3 WHERE id=?1"
+            } else {
+                "UPDATE job_commands SET stdout=?2,truncated=truncated OR ?3 WHERE id=?1"
+            },
+            params![id, tail, truncated],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn end_job_command(&self, id: i64, outcome: &str) -> CoreResult<()> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        conn.execute(
+            "UPDATE job_commands SET ended_at=?2,outcome=?3 WHERE id=?1",
+            params![id, timestamp()?, outcome],
+        )?;
+        Ok(())
+    }
+
+    pub fn job_steps(&self, job_id: &str) -> CoreResult<Vec<JobStep>> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        if !conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM jobs WHERE id=?1)",
+            [job_id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(CoreError::NotFound(format!(
+                "Job '{job_id}' was not found."
+            )));
+        }
+        let mut steps = conn.prepare(
+            "SELECT id,state,stage,at,message FROM job_steps WHERE job_id=?1 ORDER BY id",
+        )?;
+        let mut commands = conn.prepare("SELECT id,argv_json,cwd,started_at,ended_at,outcome,stdout,stderr,truncated FROM job_commands WHERE step_id=?1 ORDER BY id")?;
+        let mut rows = steps.query([job_id])?;
+        let mut history = Vec::new();
+        while let Some(row) = rows.next()? {
+            let step_id = row.get::<_, i64>(0)?;
+            let mut command_rows = commands.query([step_id])?;
+            let mut entries = Vec::new();
+            while let Some(command) = command_rows.next()? {
+                entries.push(JobCommand {
+                    id: command.get(0)?,
+                    argv: serde_json::from_str(&command.get::<_, String>(1)?)?,
+                    cwd: command.get(2)?,
+                    started_at: command.get(3)?,
+                    ended_at: command.get(4)?,
+                    outcome: command.get(5)?,
+                    stdout: command.get(6)?,
+                    stderr: command.get(7)?,
+                    truncated: command.get(8)?,
+                });
+            }
+            history.push(JobStep {
+                id: step_id,
+                state: JobState::parse(&row.get::<_, String>(1)?)?,
+                stage: row.get(2)?,
+                at: row.get(3)?,
+                message: row.get(4)?,
+                commands: entries,
+            });
+        }
+        Ok(history)
     }
 
     pub(crate) fn job_cancellation_requested(&self, id: &str) -> CoreResult<bool> {
@@ -1836,7 +2010,9 @@ mod tests {
             .lock()
             .unwrap()
             .execute_batch(
-                "ALTER TABLE jobs DROP COLUMN started_at; ALTER TABLE jobs DROP COLUMN stage;",
+                "DROP TRIGGER job_steps_on_insert; DROP TRIGGER job_steps_on_update;
+                 DROP TABLE job_commands; DROP TABLE job_steps;
+                 ALTER TABLE jobs DROP COLUMN started_at; ALTER TABLE jobs DROP COLUMN stage;",
             )
             .unwrap();
         drop(store);
@@ -1845,6 +2021,7 @@ mod tests {
         let migrated = store.get_job(&queued.id).unwrap().unwrap();
         assert_eq!(migrated.created_at, queued.created_at);
         assert!(migrated.started_at.is_none() && migrated.stage.is_none());
+        assert!(store.job_steps(&queued.id).unwrap().is_empty());
         let running = store
             .update_job(&queued.id, JobState::Running, 5, None, None)
             .unwrap();
@@ -1864,6 +2041,10 @@ mod tests {
         let persisted = store.get_job(&queued.id).unwrap().unwrap();
         assert_eq!(persisted.stage, failed.stage);
         assert_eq!(persisted.updated_at, failed.updated_at);
+        let steps = store.job_steps(&queued.id).unwrap();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[1].stage.as_deref(), Some("texture_flow"));
+        assert_eq!(steps[2].state, JobState::Failed);
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
