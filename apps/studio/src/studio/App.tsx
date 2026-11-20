@@ -55,6 +55,7 @@ import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
 import { buildPosedInput, defaultViews, newView, PosedReferences, SingleReference, type ViewDraft } from './GenerationReferences';
 import { HelpTip } from './HelpTip';
+import { NotificationHistory } from './NotificationHistory';
 import { notify } from './notify';
 import { SettingsPage, settingsSectionFromPath, type RuntimeAction, type SettingsSection } from './SettingsPage';
 import { applyStudioTheme, loadStudioTheme } from './theme';
@@ -1504,6 +1505,7 @@ export function App() {
             onClick={sidebar.toggleInventory}><SquaresFourIcon aria-hidden="true" /> Inventory</Button>
           <Button variant="ghost" size="sm" ref={dashboardTrigger} onClick={() => openDashboard()}><ListChecksIcon aria-hidden="true" /> Dashboard</Button>
           <Button variant="ghost" size="sm" ref={settingsTrigger} onClick={() => openSettings('models')}><GearSixIcon data-icon="inline-start" aria-hidden="true" /> Settings</Button>
+          {!settingsSection && !dashboard && <NotificationHistory />}
         </div>
       </header>
 

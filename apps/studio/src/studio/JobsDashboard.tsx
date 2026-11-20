@@ -10,6 +10,7 @@ import { isActiveJob, isJobCancellable } from './api';
 import { HelpTip } from './HelpTip';
 import { JOB_PAGE_SIZE, formatDuration, jobStage, jobTiming, lastGenerationStage, mergeJobRecords } from './job-activity';
 import { JobListItem } from './JobListItem';
+import { NotificationHistory } from './NotificationHistory';
 import { notify } from './notify';
 import type { Job } from './types';
 
@@ -145,6 +146,7 @@ export function JobsDashboard({ jobs, localActivities, focusedJobId, connection,
     <header className="flex min-h-12 items-center gap-3 border-b px-4 py-2 sm:px-6">
       <Button variant="ghost" size="sm" onClick={onBack}><ArrowLeftIcon aria-hidden="true" /> Studio</Button>
       <span className="font-heading text-sm font-medium">meshharbor</span>
+      <div className="ml-auto"><NotificationHistory /></div>
     </header>
     <main className="mx-auto grid w-full max-w-4xl gap-5 px-4 py-6 sm:px-6 sm:py-9">
       <div className="flex flex-wrap items-start justify-between gap-3">

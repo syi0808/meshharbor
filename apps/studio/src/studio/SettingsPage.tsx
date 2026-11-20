@@ -17,6 +17,7 @@ import { Disclosure } from './Disclosure';
 import { HelpTip } from './HelpTip';
 import { JobListItem } from './JobListItem';
 import type { StudioActivity } from './JobsDashboard';
+import { NotificationHistory } from './NotificationHistory';
 import { notify } from './notify';
 import type { MeshHarborApi } from './api';
 import type { HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, RuntimeBackendId, RuntimeInfo } from './types';
@@ -227,7 +228,10 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
       <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-4 py-2 sm:px-6">
         <Button variant="ghost" size="sm" onClick={onClose}><ArrowLeftIcon aria-hidden="true" /> Workbench</Button>
         <span className="border-l pl-3 font-heading text-sm font-medium">Settings</span>
-        <Button variant="ghost" size="sm" className="ml-auto" onClick={onOpenDashboard}><ListChecksIcon aria-hidden="true" /> Dashboard</Button>
+        <div className="ml-auto flex items-center gap-1">
+          <Button variant="ghost" size="sm" onClick={onOpenDashboard}><ListChecksIcon aria-hidden="true" /> Dashboard</Button>
+          <NotificationHistory />
+        </div>
       </div>
     </header>
     <div className="mx-auto grid max-w-6xl gap-6 px-4 py-5 sm:px-6 md:grid-cols-[12rem_minmax(0,1fr)] md:gap-8 md:py-8">

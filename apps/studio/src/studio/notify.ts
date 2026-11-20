@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react';
 import { toast } from 'sonner';
 
 const durations = {
@@ -7,6 +8,36 @@ const durations = {
   error: 9000,
 };
 
-export function notify(tone: keyof typeof durations, message: string, description?: string) {
+type NotificationTone = keyof typeof durations;
+type Notification = Readonly<{
+  id: number;
+  tone: NotificationTone;
+  message: string;
+  description?: string;
+  timestamp: number;
+}>;
+
+const historyLimit = 50;
+const listeners = new Set<() => void>();
+let history: readonly Notification[] = [];
+let nextId = 0;
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+function getHistory() {
+  return history;
+}
+
+export function useNotificationHistory() {
+  return useSyncExternalStore(subscribe, getHistory);
+}
+
+export function notify(tone: NotificationTone, message: string, description?: string) {
   toast[tone](message, { id: `${tone}:${message}:${description ?? ''}`, duration: durations[tone], description });
+  const entry = { id: ++nextId, tone, message, description, timestamp: Date.now() };
+  history = [entry, ...history.slice(0, historyLimit - 1)];
+  listeners.forEach(listener => listener());
 }
