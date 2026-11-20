@@ -297,7 +297,9 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
             <CardHeader>
               <CardTitle className="flex flex-wrap items-center gap-2 text-lg">
                 <h2>{model.title}</h2>
-                <Badge variant="outline">Image to 3D</Badge>
+                {(['image', 'text'] as const).filter(mode => runtime?.model_backends.some(backend =>
+                  model.backend_ids.includes(backend.id) && (backend.generation?.input_modes ?? ['image']).includes(mode)
+                )).map(mode => <Badge key={mode} variant="outline">{mode === 'image' ? 'Image to 3D' : 'Text to 3D'}</Badge>)}
                 {model.status === 'experimental_opt_in' && <Badge variant="outline">Experimental</Badge>}
               </CardTitle>
               <CardDescription>Output: {model.output === 'geometry_glb' ? 'geometry-only GLB' : 'textured GLB'}</CardDescription>

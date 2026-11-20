@@ -1,6 +1,8 @@
-# TRELLIS.2 and TripoSG external runtimes
+# External generation runtimes
 
 These are experimental, manually provisioned backends. MeshHarbor ships only its Python adapter: it does not fork, vendor, or download the upstream source, dependencies, or weights. Studio's **Settings → Models** and `meshharbor doctor` report local readiness. Setup and license acknowledgments are never exposed as REST or MCP actions.
+
+This page covers image-conditioned TRELLIS.2 and TripoSG. For the original TRELLIS text checkpoint, use the separate [TRELLIS Text Large CUDA guide](trellis-text-cuda.md).
 
 ## Choose a backend
 
@@ -17,10 +19,10 @@ These are experimental, manually provisioned backends. MeshHarbor ships only its
 
 ## Input support
 
-None of the three integrated model families currently has a text-only backend in MeshHarbor:
+These integrations take images:
 
 - [Pixal3D](https://github.com/TencentARC/Pixal3D) takes images, including posed views on the managed CUDA profile.
-- [TRELLIS.2-4B](https://huggingface.co/microsoft/TRELLIS.2-4B) takes images. Microsoft's [TRELLIS-text-large](https://huggingface.co/microsoft/TRELLIS-text-large) is a text-conditioned release from the original TRELLIS family, not a mode of TRELLIS.2 and not integrated here.
+- [TRELLIS.2-4B](https://huggingface.co/microsoft/TRELLIS.2-4B) takes images. The separate [TRELLIS Text Large](trellis-text-cuda.md) backend is from the original TRELLIS family, not a mode of TRELLIS.2.
 - [TripoSG](https://huggingface.co/VAST-AI/TripoSG) takes images. The separate [TripoSG-scribble](https://huggingface.co/VAST-AI/TripoSG-scribble) checkpoint takes both a scribble image and a text prompt; it is not the integrated checkpoint or a text-only workflow.
 
 ## Prepare Files
@@ -83,6 +85,6 @@ meshharbor --data-dir "$DATA_DIR" generate "$IMAGE_ASSET_ID" --backend-id "$BACK
 
 The marker is the operator's acknowledgment, not proof of rights or source integrity. Readiness checks only the marker, host family and required nonempty files. MeshHarbor does not inspect Git state, verify weights, or test GPU imports at readiness time. Removing the marker disables new jobs for that backend.
 
-Refresh model status in Studio after setup. Use the same explicit ID with REST's `model.generate` or MCP's `start_model_generation` and an image input. `auto` continues to select Pixal3D, not a manually installed runtime. Each external profile accepts one source image at resolution 512 (TRELLIS.2 pipeline or TripoSG extraction grid). Prefer a centered subject on a clean background, or a PNG with a foreground alpha mask. TripoSG does not expose texture size.
+Refresh model status in Studio after setup. Use the same explicit ID with REST's `model.generate` or MCP's `start_model_generation` and an image input. For images, `auto` continues to select Pixal3D. Each profile on this page accepts one source image at resolution 512 (TRELLIS.2 pipeline or TripoSG extraction grid). Prefer a centered subject on a clean background, or a PNG with a foreground alpha mask. TripoSG does not expose texture size.
 
 Inference launches the trusted local runtime with an isolated home and Hugging Face offline settings; it does not forward login tokens or run a package installer. This is not an OS network sandbox. Leave runtime files unchanged while jobs are running. Tests use stub workers; real Metal/CUDA builds, model loading, memory fit and generated-mesh quality are not yet verified by MeshHarbor.

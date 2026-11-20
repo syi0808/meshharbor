@@ -325,6 +325,12 @@ impl OperationCore {
 
     pub fn check_image_generation(&self, options: &GenerationOptions) -> CoreResult<()> {
         let profile = options.validated_profile()?;
+        if !profile.input_modes.contains(&GenerationInputMode::Image) {
+            return Err(CoreError::OperationUnavailable(format!(
+                "{} does not support image-to-3D input.",
+                profile.id
+            )));
+        }
         if let Some(external) = external_generation::ExternalProfile::find(profile.id) {
             external.require_ready(self.store.root())?;
         }
@@ -618,6 +624,10 @@ impl OperationCore {
                     "id": "triposg", "title": "TripoSG", "status": "experimental_opt_in",
                     "backend_ids": ["triposg-mlx", "triposg-cuda"], "output": "geometry_glb",
                 }),
+                json!({
+                    "id": "trellis-text", "title": "TRELLIS Text Large", "status": "experimental_opt_in",
+                    "backend_ids": [external_generation::TRELLIS_TEXT_CUDA_ID], "output": "geometry_glb",
+                }),
             ],
             quadriflow_backend: self.quadriflow_backend_status(),
             notes: vec![
@@ -626,7 +636,7 @@ impl OperationCore {
                 "QuadriFlow retopology is unavailable in this build: adjacent executables are ignored, and the in-process signature/provenance verifier has no approved sidecar to accept because the trusted manifest is empty. Backend status and an install request are exposed, but readiness and installation stay fail-closed until a verified managed release is available. It accepts one closed static triangle mesh; textured input needs POSITION, TEXCOORD_0, optional NORMAL, and the supported embedded base-color/metallic-roughness PNG maps. Supported maps are projected with distance, facing-normal, coverage, and opposing-shell ambiguity gates into the triangulated GLB preview only; the separate OBJ retains quad topology without UVs or appearance. Other maps/attributes are rejected, and self-intersection freedom or measured surface-error tolerance is not certified.".into(),
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
-                "TRELLIS.2 and TripoSG are manual opt-in runtimes. MeshHarbor does not install or bundle their sources, dependencies, or models. Readiness checks the operator activation and local file layout, not licenses, hashes, GPU compatibility, or inference quality.".into(),
+                "TRELLIS Text, TRELLIS.2, and TripoSG are manual opt-in runtimes. MeshHarbor does not install or bundle their sources, dependencies, or models. Readiness checks the operator activation and local file layout, not licenses, hashes, GPU compatibility, or inference quality.".into(),
                 "MeshHarbor's MIT license covers its own code. Third-party runtime and model terms, including DINOv3 and NAF, remain separate; gated access is user-controlled. See THIRD-PARTY-NOTICES.md.".into(),
             ],
         }

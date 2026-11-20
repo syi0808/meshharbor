@@ -98,6 +98,7 @@ const TARGET_FACES: Parameter = Parameter {
 
 const TEXTURED_PARAMETERS: &[Parameter] = &[RESOLUTION, TEXTURE_SIZE, TARGET_FACES, SEED];
 const GEOMETRY_PARAMETERS: &[Parameter] = &[RESOLUTION, TARGET_FACES, SEED];
+const TEXT_GEOMETRY_PARAMETERS: &[Parameter] = &[TARGET_FACES, SEED];
 
 #[derive(Serialize)]
 pub(crate) struct GenerationProfile {
@@ -123,14 +124,28 @@ static PROFILES: LazyLock<Vec<GenerationProfile>> = LazyLock::new(|| {
         ),
     ]
     .into_iter()
-    .map(|(id, label, views, max_views)| profile(id, label, views, max_views, true))
+    .map(|(id, label, views, max_views)| {
+        profile(
+            id,
+            label,
+            views,
+            max_views,
+            true,
+            &[GenerationInputMode::Image],
+        )
+    })
     .chain(external_generation::PROFILES.iter().map(|backend| {
+        let (view_modes, max_views, input_modes) = match backend.input_mode {
+            GenerationInputMode::Image => (&[Single][..], 1, &[GenerationInputMode::Image][..]),
+            GenerationInputMode::Text => (&[][..], 0, &[GenerationInputMode::Text][..]),
+        };
         profile(
             backend.id,
             backend.accelerator,
-            &[Single],
-            1,
+            view_modes,
+            max_views,
             backend.textured,
+            input_modes,
         )
     }))
     .collect()
@@ -142,9 +157,12 @@ fn profile(
     view_modes: &'static [GenerationViewMode],
     max_views: usize,
     textured: bool,
+    input_modes: &'static [GenerationInputMode],
 ) -> GenerationProfile {
     let core_parameters = if textured {
         TEXTURED_PARAMETERS
+    } else if !input_modes.contains(&GenerationInputMode::Image) {
+        TEXT_GEOMETRY_PARAMETERS
     } else {
         GEOMETRY_PARAMETERS
     };
@@ -157,13 +175,19 @@ fn profile(
             .chain(generation_tuning::definitions(id))
             .collect(),
         core_parameters,
-        input_modes: &[GenerationInputMode::Image],
+        input_modes,
         view_modes,
         max_views,
     }
 }
 
 impl GenerationProfile {
+    pub fn has_resolution(&self) -> bool {
+        self.core_parameters
+            .iter()
+            .any(|parameter| matches!(parameter.id, ParameterId::Resolution))
+    }
+
     pub fn has_textures(&self) -> bool {
         self.core_parameters
             .iter()
@@ -204,7 +228,11 @@ impl GenerationOptions {
                 "Posed views require an image input.".into(),
             ));
         }
-        let profile = self.validated_profile()?;
+        let profile = if self.backend_id == "auto" && input.mode() == GenerationInputMode::Text {
+            self.validate_for_backend(external_generation::TRELLIS_TEXT_CUDA_ID)?
+        } else {
+            self.validated_profile()?
+        };
         if !profile.input_modes.contains(&input.mode()) {
             let input_name = match input.mode() {
                 GenerationInputMode::Image => "image-to-3D",
@@ -239,6 +267,11 @@ impl GenerationOptions {
         let profile = generation_profile(backend_id).ok_or_else(|| {
             CoreError::InvalidInput(format!("Unknown generation backend '{backend_id}'."))
         })?;
+        if !profile.has_resolution() && u64::from(self.resolution) != RESOLUTION.default {
+            return Err(CoreError::InvalidInput(format!(
+                "{backend_id} does not support a resolution override."
+            )));
+        }
         if !profile.has_textures() && u64::from(self.texture_size) != TEXTURE_SIZE.default {
             return Err(CoreError::InvalidInput(format!(
                 "{backend_id} generates geometry only and does not support texture_size."
@@ -299,31 +332,54 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn current_profiles_advertise_only_image_inputs() {
+    fn profiles_validate_only_their_advertised_input_modes() {
+        let image = GenerationInput::Image {
+            asset_id: "asset_demo".into(),
+        };
+        let text = GenerationInput::Text {
+            prompt: "a ceramic cup".into(),
+        };
         for profile in PROFILES.iter() {
+            let text_only = profile.id == external_generation::TRELLIS_TEXT_CUDA_ID;
             assert_eq!(
                 serde_json::to_value(profile).unwrap()["input_modes"],
-                json!(["image"])
+                if text_only {
+                    json!(["text"])
+                } else {
+                    json!(["image"])
+                }
             );
             let options = GenerationOptions {
                 backend_id: profile.id.into(),
                 ..GenerationOptions::default()
             };
-            assert!(
-                options
-                    .validate_input(&GenerationInput::Image {
-                        asset_id: "asset_demo".into()
-                    })
-                    .is_ok()
-            );
-            let text = GenerationInput::Text {
-                prompt: "a ceramic cup".into(),
+            let (supported, unsupported) = if text_only {
+                (&text, &image)
+            } else {
+                (&image, &text)
             };
+            assert_eq!(options.validate_input(supported).unwrap().id, profile.id);
             assert!(matches!(
-                options.validate_input(&text),
+                options.validate_input(unsupported),
                 Err(CoreError::OperationUnavailable(_))
             ));
+            if text_only {
+                assert!(!profile.has_textures());
+                assert!(!profile.has_resolution());
+                assert!(profile.view_modes.is_empty());
+            }
         }
+        let auto = GenerationOptions::default();
+        assert_eq!(
+            auto.validate_input(&text).unwrap().id,
+            external_generation::TRELLIS_TEXT_CUDA_ID
+        );
+        assert!(
+            auto.validate_input(&image)
+                .unwrap()
+                .id
+                .starts_with("pixal3d-")
+        );
     }
 
     #[test]

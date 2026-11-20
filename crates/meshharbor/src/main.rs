@@ -124,7 +124,7 @@ enum Command {
             help = "Text prompt for a backend that supports text-to-3D"
         )]
         prompt: Option<String>,
-        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda"])]
+        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda", "trellis-text-cuda"])]
         backend_id: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
@@ -2090,10 +2090,12 @@ async fn start_generation_job(
                 "asset_id": result.asset.id,
                 "backend_id": result.backend_id,
                 "seed": result.seed,
-                "resolution": result.resolution,
                 "target_faces": result.target_faces,
                 "elapsed_ms": result.elapsed_ms,
             });
+            if let Some(resolution) = result.resolution {
+                payload["resolution"] = json!(resolution);
+            }
             if let Some(size) = result.texture_size {
                 payload["texture_size"] = json!(size);
             }
@@ -4737,6 +4739,14 @@ mod tests {
         for arguments in [
             vec!["meshharbor", "generate", "asset_demo"],
             vec!["meshharbor", "generate", "--prompt", "a ceramic cup"],
+            vec![
+                "meshharbor",
+                "generate",
+                "--prompt",
+                "a ceramic cup",
+                "--backend-id",
+                "trellis-text-cuda",
+            ],
         ] {
             assert!(Cli::try_parse_from(arguments).is_ok());
         }
@@ -4765,7 +4775,7 @@ mod tests {
             },
             "token".into(),
         );
-        let submit = |operation: &str, input: Value| {
+        let submit = |operation: &str, input: Value, backend_id: &str| {
             app.clone().oneshot(
                 axum::http::Request::builder()
                     .method("POST")
@@ -4776,7 +4786,7 @@ mod tests {
                     .body(Body::from(
                         json!({
                             "operation": operation, "input": input,
-                            "parameters": { "backend_id": "pixal3d-mlx" },
+                            "parameters": { "backend_id": backend_id },
                         })
                         .to_string(),
                     ))
@@ -4790,7 +4800,7 @@ mod tests {
             json!({"kind":"text","prompt":"a cup","asset_id":source.id}),
         ] {
             assert_eq!(
-                submit(MODEL_GENERATION_OPERATION, input)
+                submit(MODEL_GENERATION_OPERATION, input, "pixal3d-mlx")
                     .await
                     .unwrap()
                     .status(),
@@ -4800,6 +4810,7 @@ mod tests {
         let response = submit(
             MODEL_GENERATION_OPERATION,
             json!({"kind":"text","prompt":"a private draft"}),
+            "pixal3d-mlx",
         )
         .await
         .unwrap();
@@ -4807,6 +4818,18 @@ mod tests {
         let error = response.into_body().collect().await.unwrap().to_bytes();
         let error = String::from_utf8_lossy(&error);
         assert!(error.contains("does not support text-to-3D"));
+        assert!(!error.contains("a private draft"));
+        let response = submit(
+            MODEL_GENERATION_OPERATION,
+            json!({"kind":"text","prompt":"a private draft"}),
+            "trellis-text-cuda",
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let error = response.into_body().collect().await.unwrap().to_bytes();
+        let error = String::from_utf8_lossy(&error);
+        assert!(error.contains("trellis-text-cuda is not ready"));
         assert!(!error.contains("a private draft"));
         assert!(core.store().list_jobs(10).unwrap().is_empty());
         assert_eq!(core.store().list_assets(10).unwrap().len(), 1);
@@ -4819,7 +4842,7 @@ mod tests {
             ),
             (IMAGE_GENERATION_OPERATION, json!({"asset_id":source.id})),
         ] {
-            let response = submit(operation, input).await.unwrap();
+            let response = submit(operation, input, "pixal3d-mlx").await.unwrap();
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             let job: meshharbor_core::Job =
                 serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())

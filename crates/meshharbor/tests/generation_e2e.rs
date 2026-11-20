@@ -301,6 +301,100 @@ cp "$6/fixture.glb" "$9"
 }
 
 #[test]
+fn trellis_text_cli_uses_prompt_stdin_and_path_checked_runtime() {
+    let tree = TempTree::new("trellis-text-generation");
+    let data_dir = tree.0.join("store");
+    let output_path = tree.0.join("output.glb");
+    let prompt = "Private draft: 도자기 컵";
+    let run = || {
+        meshharbor()
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .env("HF_TOKEN", "must-not-reach-the-worker")
+            .args(["generate", "--prompt", prompt, "--output"])
+            .arg(&output_path)
+            .output()
+            .unwrap()
+    };
+    let declined = run();
+    assert!(!declined.status.success());
+    assert!(!output_path.exists());
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        assert!(String::from_utf8_lossy(&declined.stderr).contains("not supported on this host"));
+        return;
+    }
+    assert!(String::from_utf8_lossy(&declined.stderr).contains("activate.json"));
+
+    let root = data_dir.join("runtimes/trellis-text-cuda");
+    let write = |relative: &str, bytes: &[u8]| {
+        let file = root.join(relative);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, bytes).unwrap();
+    };
+    write(
+        "activate.json",
+        br#"{"source_revision":"193e0502b5cb3eb5997ec457d5340e95d09b158e","authorized_local_use":true}"#,
+    );
+    for relative in [
+        "source/trellis/pipelines/trellis_text_to_3d.py",
+        "source/trellis/representations/mesh/flexicubes/flexicubes.py",
+        "weights/model/pipeline.json",
+        "weights/clip/config.json",
+        "weights/clip/model.safetensors",
+        "weights/clip/merges.txt",
+        "weights/clip/special_tokens_map.json",
+        "weights/clip/tokenizer.json",
+        "weights/clip/tokenizer_config.json",
+        "weights/clip/vocab.json",
+    ] {
+        write(relative, b"fixture");
+    }
+    for stem in [
+        "model/ckpts/ss_flow_txt_dit_L_16l8_fp16",
+        "model/ckpts/slat_flow_txt_dit_L_64l8p2_fp16",
+        "decoders/ckpts/ss_dec_conv3d_16l8_fp16",
+        "decoders/ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16",
+    ] {
+        for extension in ["json", "safetensors"] {
+            write(&format!("weights/{stem}.{extension}"), b"fixture");
+        }
+    }
+    let glb = minimal_triangle_glb();
+    write("source/fixture.glb", &glb);
+    write(
+        ".venv/bin/python",
+        r#"#!/bin/sh
+set -eu
+[ "$# $1 $2 $3 $5 $8 ${10} ${11}" = '11 -I -B -u trellis-text-cuda - 42 100000' ]
+[ "$HF_HUB_OFFLINE" = 1 ]
+[ "$TRANSFORMERS_OFFLINE" = 1 ]
+[ -z "${HF_TOKEN-}" ]
+[ "$(cat)" = 'Private draft: 도자기 컵' ]
+cp "$6/fixture.glb" "$9"
+"#
+        .as_bytes(),
+    );
+    fs::set_permissions(
+        root.join(".venv/bin/python"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let generated = run();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&generated.stdout).contains(prompt));
+    let result: Value = serde_json::from_slice(&generated.stdout).unwrap();
+    assert_eq!(result["backend_id"], "trellis-text-cuda");
+    assert!(result.get("resolution").is_none());
+    assert!(result.get("texture_size").is_none());
+    assert_eq!(result["asset"]["model"]["generated"], true);
+    assert_eq!(fs::read(output_path).unwrap(), glb);
+}
+
+#[test]
 fn cli_import_generate_and_export_uses_mock_runtime_without_models() {
     let runtime = MockRuntime::new("cli-generation");
     let data_dir = runtime._tree.0.join("store");

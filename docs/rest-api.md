@@ -30,7 +30,7 @@ Selected endpoints:
 
 ## Model versions
 
-A mesh derived from another mesh is an immutable version of the same model. A GLB import or the result of image-to-3D generation starts a new model. A new edit advances the current version only if it was based on the current version; an edit from an older version creates a branch without replacing the current one. Restoring changes the current pointer, not any stored file. Existing data is grouped by its recorded source lineage on first open; the latest saved version becomes current. The existing asset endpoints, CLI, MCP, and job results still address individual assets.
+A mesh derived from another mesh is an immutable version of the same model. A GLB import or the result of 3D generation starts a new model. A new edit advances the current version only if it was based on the current version; an edit from an older version creates a branch without replacing the current one. Restoring changes the current pointer, not any stored file. Existing data is grouped by its recorded source lineage on first open; the latest saved version becomes current. The existing asset endpoints, CLI, MCP, and job results still address individual assets.
 
 ## Generation inputs
 
@@ -44,7 +44,7 @@ Use `POST /api/v1/jobs` with `operation: "model.generate"` and a tagged input:
 }
 ```
 
-`GET /api/v1/runtime` exposes each backend's `generation.input_modes`, `parameters`, `view_modes`, and `max_views`. Pick a ready backend and a supported input mode; `auto` still selects platform Pixal3D. The contract also accepts `{ "kind": "text", "prompt": "..." }` with a nonblank prompt of at most 4,096 UTF-8 bytes and no NUL characters. All current backends advertise only `image`: a valid text request returns HTTP 422 without creating a job. Legacy `image.generate` with `input: { "asset_id": "..." }` continues to work and shares the same generation queue.
+`GET /api/v1/runtime` exposes each backend's `generation.input_modes`, `parameters`, `view_modes`, and `max_views`. Pick a ready backend and a supported input mode. For [TRELLIS Text Large](trellis-text-cuda.md), send `input: { "kind": "text", "prompt": "..." }` and `parameters.backend_id: "trellis-text-cuda"`. The prompt must be nonblank, at most 4,096 UTF-8 bytes, and contain no NUL characters. With `auto`, image input selects platform Pixal3D and text selects TRELLIS Text CUDA. An unready external backend or unsupported input mode returns HTTP 422 without creating a job. Legacy `image.generate` with `input: { "asset_id": "..." }` continues to work and shares the same generation queue.
 
 Keep base fields such as `seed` at the top level of job parameters and put catalog fields marked `tuning: true` under `parameters.tuning`. For a ready multiview backend, send `parameters.view_input` with `mode` (`four`, `six`, or `custom`) and an ordered `references` array. Each entry contains an imported image's `asset_id`; the first must match `input.asset_id`. Presets use front/right/back/left order (then top/bottom for six). Custom entries each add a `camera` object with `azimuth_degrees`, `elevation_degrees`, `distance`, and `fov_degrees`. No client filesystem paths are accepted. The CUDA profile exposes `multiview_ready` once the separately approved snapshot is installed.
 

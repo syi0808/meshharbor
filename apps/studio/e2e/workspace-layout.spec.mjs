@@ -71,10 +71,12 @@ test('a backend can advertise text input without requiring an image asset', asyn
     model_catalog: [
       { id: 'image-fixture', title: 'Image fixture', backend_ids: ['image-fixture'] },
       { id: 'dual-fixture', title: 'Dual fixture', backend_ids: ['dual-fixture'] },
+      { id: 'trellis-text', title: 'TRELLIS Text Large', backend_ids: ['trellis-text-cuda'], output: 'geometry_glb' },
     ],
     model_backends: [
       { id: 'image-fixture', ready: true, generation: { id: 'image-fixture', input_modes: ['image'], parameters: [] } },
       { id: 'dual-fixture', ready: true, generation: { id: 'dual-fixture', input_modes: ['image', 'text'], parameters: [] } },
+      { id: 'trellis-text-cuda', ready: true, generation: { id: 'trellis-text-cuda', input_modes: ['text'], parameters: [] } },
     ],
   } }));
   await page.route('**/api/v1/operations', route => route.fulfill({ json: [{ id: 'model.generate', implemented: true }] }));
@@ -82,7 +84,7 @@ test('a backend can advertise text input without requiring an image asset', asyn
     expect(route.request().postDataJSON()).toEqual({
       operation: 'model.generate',
       input: { kind: 'text', prompt: 'a ceramic cup' },
-      parameters: { backend_id: 'dual-fixture' },
+      parameters: { backend_id: 'trellis-text-cuda' },
     });
     return route.fulfill({ status: 202, json: {
       id: 'text-fixture-job', operation: 'model.generate', state: 'queued', progress: 0,
@@ -103,6 +105,10 @@ test('a backend can advertise text input without requiring an image asset', asyn
   await expect(input.locator('option')).toHaveText(['Image', 'Text']);
   await input.selectOption('text');
   await expect(form.getByRole('button', { name: 'Choose reference' })).toHaveCount(0);
+  await expect(prompt).toBeVisible();
+  await model.selectOption('trellis-text');
+  await expect(input).toHaveCount(0);
+  await expect(form.getByRole('button', { name: 'Choose reference' })).toHaveCount(0);
   await expect(submit).toBeDisabled();
   await prompt.fill('가'.repeat(1366));
   await expect(prompt).toHaveAttribute('aria-invalid', 'true');
@@ -110,6 +116,10 @@ test('a backend can advertise text input without requiring an image asset', asyn
   await prompt.fill('  a ceramic cup  ');
   await submit.click();
   await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Text-to-3D generation queued.')).toBeVisible();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const models = page.getByRole('main', { name: 'Models' });
+  await expect(models.getByText('Text to 3D', { exact: true })).toHaveCount(2);
+  await expect(models.getByText('Image to 3D', { exact: true })).toHaveCount(2);
 });
 
 test('generation uses its explicit reference and leaves the inspected GLB selected until review', async ({ page, studioOrigin }) => {

@@ -1,4 +1,4 @@
-//! Local image generation and Pixal3D MLX process integration.
+//! Local model generation and Pixal3D MLX process integration.
 //!
 //! Runtime setup and model downloads are explicit user-triggered actions in
 //! `runtime.rs`; inference itself remains offline and never authenticates.
@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     Asset, AssetKind, CoreError, CoreResult, MAX_IMAGE_BYTES, OperationCore,
-    external_generation::ExternalProfile,
+    external_generation::{ExternalInput, ExternalProfile},
     generation_tuning,
     generation_views::PosedGenerationInput,
     huggingface_download::{PIXAL_CHECKPOINTS, PIXAL_REPOSITORY, PIXAL_REVISION},
@@ -138,7 +138,8 @@ pub struct GenerationResult {
     pub asset: Asset,
     pub backend_id: String,
     pub seed: u64,
-    pub resolution: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub texture_size: Option<u16>,
     pub target_faces: u32,
@@ -585,7 +586,16 @@ pub(crate) fn run_generation_command(
     command: &mut Command,
     execution: JobExecution<'_>,
 ) -> CoreResult<ExitStatus> {
-    if !execution.is_tracked() {
+    run_generation_command_with_input(command, execution, None)
+}
+
+pub(crate) fn run_generation_command_with_input(
+    command: &mut Command,
+    execution: JobExecution<'_>,
+    input: Option<&[u8]>,
+) -> CoreResult<ExitStatus> {
+    let tracked = execution.is_tracked();
+    if !tracked && input.is_none() {
         return Ok(command
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -593,14 +603,41 @@ pub(crate) fn run_generation_command(
     }
     execution.checkpoint()?;
     #[cfg(unix)]
-    {
+    if tracked {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command
-        .stdout(Stdio::piped())
+        .stdout(if tracked {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stderr(Stdio::inherit())
         .spawn()?;
+    if let Some(bytes) = input {
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("generation worker stdin is piped");
+        let written = stdin.write_all(bytes);
+        drop(stdin);
+        if let Err(error) = written {
+            if tracked {
+                stop_generation_worker(&mut child)?;
+            } else {
+                let _ = child.kill();
+                child.wait()?;
+            }
+            return Err(error.into());
+        }
+    }
+    if !tracked {
+        return Ok(child.wait()?);
+    }
     let stdout = child
         .stdout
         .take()
@@ -710,10 +747,21 @@ pub(crate) fn generate_model(
             &output_path,
             execution,
         )?,
-        GenerationInput::Text { .. } => {
-            return Err(CoreError::OperationUnavailable(
-                "This build has no text-conditioned generation worker.".into(),
-            ));
+        GenerationInput::Text { prompt } => {
+            let backend = ExternalProfile::find(selected_backend_id).ok_or_else(|| {
+                CoreError::OperationUnavailable(
+                    "No text-conditioned worker for this backend.".into(),
+                )
+            })?;
+            execution.stage("initialize_model")?;
+            let elapsed_ms = backend.generate(
+                core.store().root(),
+                ExternalInput::Text(prompt),
+                &output_path,
+                &options,
+                execution,
+            )?;
+            ("text-generated.glb".into(), elapsed_ms)
         }
     };
     execution.stage("validate_output")?;
@@ -721,6 +769,7 @@ pub(crate) fn generate_model(
     execution.stage("save_model")?;
     execution.begin_commit()?;
     let texture_size = profile.has_textures().then_some(options.texture_size);
+    let resolution = profile.has_resolution().then_some(options.resolution);
     let asset = core.store().import_generated_asset(
         &output_name,
         &output,
@@ -730,7 +779,7 @@ pub(crate) fn generate_model(
             "input_mode": input.mode(),
             "backend": selected_backend_id,
             "seed": options.seed,
-            "resolution": options.resolution,
+            "resolution": resolution,
             "texture_size": texture_size,
             "target_faces": options.target_faces,
             "elapsed_ms": elapsed_ms,
@@ -742,7 +791,7 @@ pub(crate) fn generate_model(
         asset,
         backend_id: selected_backend_id.into(),
         seed: options.seed,
-        resolution: options.resolution,
+        resolution,
         texture_size,
         target_faces: options.target_faces,
         elapsed_ms,
@@ -799,7 +848,7 @@ fn generate_from_images(
             .expect("generation profile has a local runtime")
             .generate(
                 core.store().root(),
-                &input_paths[0],
+                ExternalInput::Image(&input_paths[0]),
                 output_path,
                 options,
                 execution,
@@ -895,6 +944,20 @@ mod tests {
         );
         assert_eq!(generation_worker_stage("=== model log ==="), None);
         assert_eq!(generation_worker_stage("printed === pbr_export ==="), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_text_input_to_worker_stdin_and_closes_the_pipe() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "test \"$(cat)\" = '도자기 컵'"]);
+        let status = run_generation_command_with_input(
+            &mut command,
+            JobExecution::default(),
+            Some("도자기 컵".as_bytes()),
+        )
+        .unwrap();
+        assert!(status.success());
     }
 
     #[test]

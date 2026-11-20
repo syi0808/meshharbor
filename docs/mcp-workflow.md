@@ -9,7 +9,10 @@ diagnostics go to stderr. For mesh-only work, start with `list_operations`,
 
 The managed setup below is for Pixal3D. For TRELLIS.2 or TripoSG, follow the
 [manual runtime guide](external-generation-runtimes.md) locally, then pass
-its explicit backend ID to `start_model_generation`.
+its explicit backend ID to `start_model_generation`. For text generation,
+[prepare TRELLIS Text CUDA](trellis-text-cuda.md), then call
+`start_model_generation` with `input: { "kind": "text", "prompt": "A ceramic cup" }`
+and `parameters.backend_id: "trellis-text-cuda"`; no image import is needed.
 
 ## Prepare and generate
 
@@ -38,9 +41,9 @@ its explicit backend ID to `start_model_generation`.
 7. For MLX, call `convert_pixal3d_mlx_naf` and poll its job. For either backend,
    call `start_model_generation` with `input: { "kind": "image", "asset_id": "..." }`
    and an optional `parameters.backend_id` (`auto`, `pixal3d-mlx`, or `pixal3d-cuda`).
-   Check `runtime_doctor` for each backend's `generation.input_modes`. Current
-   backends accept only images; the compatibility tool `start_image_generation`
-   still accepts the original flat image arguments.
+   Check `runtime_doctor` for each backend's `generation.input_modes`. The
+   compatibility tool `start_image_generation` still accepts the original flat
+   image arguments.
 8. Poll `get_job` until the generation job succeeds. Its result contains the
    derived mesh `asset_id`.
 9. Call `export_glb` with that mesh asset ID and an absolute `.glb` output path
