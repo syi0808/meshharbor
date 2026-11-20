@@ -2,10 +2,6 @@ import { expect } from '@playwright/test';
 import { test } from './studio-fixture.mjs';
 
 test('the header shares dismissed toast history across Studio pages', async ({ page, studioOrigin }) => {
-  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [{
-    id: 'failed-download', operation: 'runtime.pixal3d.install_models', state: 'failed', progress: 0,
-    created_at: '1', updated_at: '2', error: { message: 'Local cache is unavailable.' },
-  }] }));
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
 
@@ -37,13 +33,13 @@ test('the header shares dismissed toast history across Studio pages', async ({ p
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await dismissToast('Local status refreshed.');
   await header.getByRole('button', { name: 'Dashboard', exact: true }).click();
-  await page.getByRole('region', { name: 'History', exact: true }).getByRole('button', { name: /Show error for/ }).click();
-  await dismissToast('Job failed.');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await dismissToast('Job history refreshed.');
   await page.setViewportSize({ width: 390, height: 844 });
   await bell.click();
 
   await expect(rows).toHaveCount(3);
-  await expect(rows.nth(0)).toContainText('Local cache is unavailable.');
+  await expect(rows.nth(0)).toContainText('Job history refreshed.');
   await expect(rows.nth(1)).toContainText('Local status refreshed.');
   await expect(rows.nth(2)).toContainText('Asset library refreshed.');
   await expect(rows.first().locator('time')).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/);

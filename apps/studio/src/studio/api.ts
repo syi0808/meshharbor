@@ -843,9 +843,20 @@ export class MeshHarborApi {
     return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
   }
 
-  async cancelJob(jobId: string): Promise<Job> {
+  generationQueue(signal?: AbortSignal): Promise<string[]> {
+    return this.request('/api/v1/jobs/generation-queue', { signal, cache: 'no-store' });
+  }
+
+  swapGenerationQueue(jobId: string, swapWith: string): Promise<string[]> {
+    return this.request('/api/v1/jobs/generation-queue', {
+      method: 'POST',
+      body: JSON.stringify({ job_id: jobId, swap_with: swapWith }),
+    });
+  }
+
+  async cancelJob(jobId: string, queuedOnly = false): Promise<Job> {
     try {
-      return await this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+      return await this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel${queuedOnly ? '?queued_only=true' : ''}`, { method: 'POST' });
     } catch (cancelError) {
       // The worker may claim the queued job before the cancellation reaches the store.
       // Refresh once so Studio can show the authoritative state rather than stale "queued" data.

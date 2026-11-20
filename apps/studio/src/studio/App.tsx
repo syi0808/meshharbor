@@ -30,7 +30,6 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
@@ -50,11 +49,12 @@ import { AssetGalleryCard } from './AssetGalleryCard';
 import { Disclosure } from './Disclosure';
 import { JobListItem } from './JobListItem';
 import { JobsDashboard, PendingGenerationCards, type StudioActivity } from './JobsDashboard';
-import { JOB_PAGE_SIZE, jobStage, mergeJobRecords } from './job-activity';
+import { JOB_PAGE_SIZE, generationJobName, jobStage, mergeJobRecords, updateJobTimeline, type JobEvent } from './job-activity';
 import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
 import { buildPosedInput, defaultViews, newView, PosedReferences, SingleReference, type ViewDraft } from './GenerationReferences';
 import { HelpTip } from './HelpTip';
+import { JobDetails } from './JobDetails';
 import { NotificationHistory } from './NotificationHistory';
 import { notify } from './notify';
 import { SettingsPage, settingsSectionFromPath, type RuntimeAction, type SettingsSection } from './SettingsPage';
@@ -194,11 +194,18 @@ export function App() {
   const [assetPageLoading, setAssetPageLoading] = useState(false);
   const assetPageRequestGuard = useRef(new LatestRequestGuard());
   const [jobSnapshot, setJobSnapshot] = useState<Job[]>([]);
+  const [jobEvents, setJobEvents] = useState(new Map<string, JobEvent[]>());
+  const [detailsTarget, setDetailsTarget] = useState<Job | null>(null);
+  const detailsTrigger = useRef<HTMLButtonElement | null>(null);
+  const observedJobStates = useRef(new Map<string, Job['state']>());
+  const localGenerations = useRef(new Set<string>());
   const [jobFeedLoaded, setJobFeedLoaded] = useState(false);
   const jobFeedInFlight = useRef<Promise<boolean> | null>(null);
   const observedJobResults = useRef(new Set<string>());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedIdRef = useRef<string | null>(null);
+  const [pendingSelection, setPendingSelection] = useState<Job | null>(null);
+  const pendingSelectionRef = useRef<Job | null>(null);
   const [comparisonPair, setComparisonPair] = useState<AssetComparisonPair | null>(null);
   const comparisonPairRef = useRef(comparisonPair);
   const [comparisonLoadingSide, setComparisonLoadingSide] = useState<AssetComparisonSide | null>(null);
@@ -281,13 +288,18 @@ export function App() {
   const [meshTool, setMeshTool] = useState('');
   const [installingBackend, setInstallingBackend] = useState(false);
   const isRunning = isActiveJob(job);
-  const retopologyAssetId = inspector === 'tools' && meshTool === 'mesh.retopology' && !settingsSection && !dashboard
-    && connection === 'connected' && !isRunning && validQuadTarget && selectedAsset?.kind === 'mesh' ? selectedAsset.id : null;
-  const { checking: checkingRetopology, report: retopologyCheck } = useRetopologyPreflight(api, retopologyAssetId, requestedQuads);
   const recentJobs = useMemo(() => mergeJobRecords(jobSnapshot, job ? [job] : []), [job, jobSnapshot]);
   const pendingGenerationJobs = recentJobs.filter(saved => saved.operation === 'image.generate' && isActiveJob(saved));
+  const selectedPendingJob = pendingSelection ? recentJobs.find(saved => saved.id === pendingSelection.id) ?? pendingSelection : null;
+  const retopologyAssetId = inspector === 'tools' && meshTool === 'mesh.retopology' && !settingsSection && !dashboard
+    && connection === 'connected' && !isRunning && !pendingGenerationJobs.some(saved => localGenerations.current.has(saved.id))
+    && validQuadTarget && selectedAsset?.kind === 'mesh' ? selectedAsset.id : null;
+  const { checking: checkingRetopology, report: retopologyCheck } = useRetopologyPreflight(api, retopologyAssetId, requestedQuads);
   const referenceNames = new Map(assets.map(asset => [asset.id, asset.name]));
   if (generationSource) referenceNames.set(generationSource.id, generationSource.name);
+  const visiblePendingGenerationJobs = pendingGenerationJobs.filter(saved => saved.id === pendingSelection?.id
+    || (assetFilters.origin !== 'original' && generationJobName(saved, referenceNames).toLowerCase().includes(assetFilters.query.toLowerCase())));
+  const currentDetails = detailsTarget ? recentJobs.find(saved => saved.id === detailsTarget.id) ?? detailsTarget : null;
   const localActivities: StudioActivity[] = [
     ...(settingsActivity ? [settingsActivity] : []),
     ...(importProgress ? [{
@@ -356,6 +368,32 @@ export function App() {
       return key === asset.id ? [asset, ...items] : items;
     });
   }, []);
+
+  useEffect(() => {
+    setJobEvents(previous => updateJobTimeline(recentJobs, previous));
+    const observed = new Map<string, Job['state']>();
+    let newestGenerationResult: Job | undefined;
+    for (const saved of recentJobs) {
+      const prior = observedJobStates.current.get(saved.id);
+      observed.set(saved.id, saved.state);
+      if (!prior || prior === saved.state || saved.id === jobRef.current?.id) continue;
+      const operation = saved.operation === 'image.generate' ? 'Image-to-3D generation' : studioOperationLabel(saved.operation);
+      const input = saved.input_asset_name ?? undefined;
+      if (saved.state === 'running' && prior === 'queued') notify('info', `${operation} started.`, input);
+      if (saved.state === 'succeeded') {
+        notify('success', `${operation} complete.`, input);
+        if (localGenerations.current.delete(saved.id) && saved.result?.asset_id) newestGenerationResult ??= saved;
+      } else if (saved.state === 'failed') {
+        localGenerations.current.delete(saved.id);
+        notify('error', `${operation} failed.`, saved.error?.message ?? input);
+      } else if (saved.state === 'cancelled') {
+        localGenerations.current.delete(saved.id);
+        notify('info', cancelJobNotice(saved), input);
+      }
+    }
+    if (newestGenerationResult) setGenerationResult(newestGenerationResult);
+    observedJobStates.current = observed;
+  }, [recentJobs]);
 
   async function requestAssetPage(
     filters: AssetBrowserFilters,
@@ -432,21 +470,31 @@ export function App() {
   const refreshRecentJobs = useCallback((): Promise<boolean> => {
     if (jobFeedInFlight.current) return jobFeedInFlight.current;
     const requestId = recentJobsRequestGuard.current.begin();
-    const request = api.jobs(JOB_PAGE_SIZE, { includeActive: true }).then(jobs => {
+    const request = api.jobs(JOB_PAGE_SIZE, { includeActive: true }).then(async jobs => {
+      const known = new Set(jobs.map(saved => saved.id));
+      const tracked = new Set(localGenerations.current);
+      if (pendingSelectionRef.current) tracked.add(pendingSelectionRef.current.id);
+      const missing = [...tracked].filter(id => !known.has(id));
+      if (missing.length > 0) {
+        const fetched = await Promise.all(missing.map(id => api.job(id).catch(() => null)));
+        jobs = [...jobs, ...fetched.filter((saved): saved is Job => saved !== null)];
+      }
       if (!recentJobsRequestGuard.current.isCurrent(requestId)) return false;
       setJobSnapshot(current => {
-        const known = new Set(jobs.map(saved => saved.id));
-        const merged = mergeJobRecords(jobs, current.filter(saved => known.has(saved.id) || saved.id === jobRef.current?.id));
+        const retained = new Set(jobs.map(saved => saved.id));
+        const merged = mergeJobRecords(jobs, current.filter(saved => retained.has(saved.id) || tracked.has(saved.id)
+          || localGenerations.current.has(saved.id) || saved.id === jobRef.current?.id));
         return [...merged.filter(isActiveJob), ...merged.filter(saved => !isActiveJob(saved)).slice(0, JOB_PAGE_SIZE)];
       });
       setJobFeedLoaded(true);
       for (const saved of jobs) {
         const assetId = saved.state === 'succeeded' ? saved.result?.asset_id : undefined;
         if (!assetId || observedJobResults.current.has(assetId)) continue;
-        if (saved.id === jobRef.current?.id || assetFiltersRef.current.kind !== 'mesh') {
+        if (saved.id === jobRef.current?.id) {
           observedJobResults.current.add(assetId);
           continue;
         }
+        if (saved.id === pendingSelectionRef.current?.id || assetFiltersRef.current.kind !== 'mesh') continue;
         observedJobResults.current.add(assetId);
         void api.derivedAsset(assetId).then(asset => {
           if (asset.id !== assetId) return;
@@ -562,7 +610,6 @@ export function App() {
         return;
       }
 
-      setJob(latest);
       setReportJob(latest.state === 'succeeded' ? latest : null);
       setComparisonPair(null);
       if (inputAsset) {
@@ -580,11 +627,6 @@ export function App() {
         setAssets(current => mergeCachedAssets([resultAsset], current));
         selectAssetId(resultAsset.id);
       }
-      if (latest.state === 'failed') {
-        notify('error', latest.error?.message ?? 'This saved job failed.');
-      } else {
-        notify('info', `Loaded the saved ${studioOperationLabel(latest.operation)} record.`);
-      }
     } catch (cause) {
       if (!historySelectionGuard.current.isCurrent(requestId)) return;
       notify('error', cause instanceof Error ? cause.message : 'Could not load this saved job.');
@@ -595,6 +637,7 @@ export function App() {
     if (!quadriflowBackend?.install_available || installingBackend) return;
     backendInstallStartedAt.current = Date.now();
     setInstallingBackend(true);
+    notify('info', 'Installing QuadriFlow.');
     try {
       await api.installQuadriflowBackend();
       const [runtimeInfo, operationList] = await Promise.all([api.runtime(), api.operations()]);
@@ -644,7 +687,7 @@ export function App() {
       setJobSnapshot(jobList);
       setJobFeedLoaded(true);
       setSelectedId((current) => {
-        const next = current && (assetPage.items.some((item) => item.id === current)
+        const next = pendingSelectionRef.current ? null : current && (assetPage.items.some((item) => item.id === current)
           || current === selectedIdRef.current)
           ? current
           : assetPage.items.find((item) => item.kind === 'mesh')?.id ?? null;
@@ -680,11 +723,43 @@ export function App() {
     comparisonPairRef.current = comparisonPair;
   }, [comparisonPair]);
 
-  function selectAssetId(assetId: string | null) {
+  const selectAssetId = useCallback((assetId: string | null) => {
     assetSelectionInteractionRevision.current += 1;
     selectedIdRef.current = assetId;
+    pendingSelectionRef.current = null;
+    setPendingSelection(null);
     setSelectedId(assetId);
+  }, []);
+
+  function selectPendingModel(pending: Job) {
+    invalidateHistoryRequests();
+    selectAssetId(null);
+    pendingSelectionRef.current = pending;
+    setPendingSelection(pending);
+    setComparisonPair(null);
+    setReportJob(null);
+    if (sidebar.narrow) sidebar.setOpen(false);
   }
+
+  const pendingPreviewJobId = selectedPendingJob?.id;
+  const pendingPreviewAssetId = selectedPendingJob?.state === 'succeeded' ? selectedPendingJob.result?.asset_id : undefined;
+  useEffect(() => {
+    if (!pendingPreviewJobId || !pendingPreviewAssetId || connection !== 'connected') return;
+    let stopped = false;
+    void api.derivedAsset(pendingPreviewAssetId).then(asset => {
+      if (asset.id !== pendingPreviewAssetId) throw new Error('The generation result did not match the selected job.');
+      if (stopped || pendingSelectionRef.current?.id !== pendingPreviewJobId) return;
+      observedJobResults.current.add(asset.id);
+      publishInventoryAsset(asset);
+      setAssets(current => mergeCachedAssets([asset], current));
+      selectAssetId(asset.id);
+    }).catch(cause => {
+      if (!stopped && pendingSelectionRef.current?.id === pendingPreviewJobId) {
+        notify('error', 'Could not open the generated model.', cause instanceof Error ? cause.message : undefined);
+      }
+    });
+    return () => { stopped = true; };
+  }, [api, connection, pendingPreviewAssetId, pendingPreviewJobId, publishInventoryAsset, selectAssetId]);
 
   useEffect(() => {
     if (!job || !['queued', 'running', 'validating', 'cancelling'].includes(job.state)) return;
@@ -700,6 +775,9 @@ export function App() {
           return;
         }
         consecutiveFailures = 0;
+        if (latest.state === 'running' && jobRef.current.state === 'queued') {
+          notify('info', `${studioOperationLabel(latest.operation)} started.`);
+        }
         if (latest.state === 'succeeded') {
           if (latest.operation.startsWith('runtime.')) {
             let refreshed: [RuntimeInfo, Operation[]] | null = null;
@@ -740,14 +818,9 @@ export function App() {
           if (derived) {
             const completedAsset = derived;
             const pair = assetComparisonPairFromJob(latest, completedAsset);
-            const isGeneration = latest.operation === 'image.generate';
-            const advance = shouldAutoSelectComparisonResult(pair, selectedIdRef.current)
-              || (isGeneration && selectedIdRef.current === null);
-            if (!isGeneration || advance) {
-              setComparisonPair(pair);
-              setReportJob(latest);
-            }
-            if (isGeneration) setGenerationResult(latest);
+            const advance = shouldAutoSelectComparisonResult(pair, selectedIdRef.current);
+            setComparisonPair(pair);
+            setReportJob(latest);
             observedJobResults.current.add(completedAsset.id);
             publishInventoryAsset(completedAsset);
             setAssets(current => mergeCachedAssets([completedAsset], current));
@@ -793,9 +866,7 @@ export function App() {
             const size = width && height ? ` at ${width}×${height}px` : '';
             notify('success', `Atlas UV unwrap and same-mesh texture rebake complete${size}.`);
           } else {
-            notify('success', latest.operation === 'image.generate'
-              ? 'Image-to-3D generation complete. Your source image is unchanged.'
-              : 'Mesh simplification complete. Your original file is unchanged.');
+            notify('success', 'Mesh simplification complete. Your original file is unchanged.');
           }
           return;
         }
@@ -814,11 +885,7 @@ export function App() {
             setRuntime(refreshed[0]);
             setOperations(refreshed[1]);
           }
-          notify('error', latest.error?.message ?? (latest.operation === 'image.generate'
-            ? 'This image generation job failed.'
-            : latest.operation === 'mesh.simplify'
-              ? 'This simplification job failed.'
-              : 'This mesh processing job failed.'));
+          notify('error', `${studioOperationLabel(latest.operation)} failed.`, latest.error?.message);
           return;
         }
         if (latest.state === 'cancelled') {
@@ -946,6 +1013,7 @@ export function App() {
 
     importBatchInFlight.current = true;
     importStartedAt.current = Date.now();
+    const startNotice = window.setTimeout(() => notify('info', 'Import in progress.'), 500);
     const started = {
       selectedId: selectedIdRef.current,
       filters: { ...assetFiltersRef.current },
@@ -1035,6 +1103,7 @@ export function App() {
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not import these files.');
     } finally {
+      window.clearTimeout(startNotice);
       importBatchInFlight.current = false;
       setImportProgress(null);
       setBusy(false);
@@ -1050,6 +1119,7 @@ export function App() {
     try {
       const nextJob = await api.createSimplifyJob(selectedAsset.id, Math.max(1, Math.floor(targetTriangles)), maxError);
       setJob(nextJob);
+      notify('info', 'Mesh simplification queued.');
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not start simplification.');
     } finally {
@@ -1069,6 +1139,7 @@ export function App() {
       if (operation === 'mesh.retopology') parameters.target_quads = requestedQuads;
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
       setJob(nextJob);
+      notify('info', `${studioOperationLabel(operation)} queued.`);
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not start mesh processing.');
     } finally {
@@ -1077,16 +1148,18 @@ export function App() {
   }
 
   async function generate() {
-    if (!generationAssetId || !selectedGenerationProfile || !generationPayload || !canGenerate || busy || isRunning || connection !== 'connected') return;
-    invalidateHistoryRequests();
+    if (!generationAssetId || !selectedGenerationProfile || !generationPayload || !canGenerate || busy || connection !== 'connected') return;
     setBusy(true);
     try {
       const nextJob = await api.createImageGenerationJob(generationAssetId, selectedGenerationProfile.id, {
         ...generationPayload,
         ...(posedInput ? { view_input: posedInput } : {}),
       });
-      setGenerationResult(null);
-      setJob(nextJob);
+      localGenerations.current.add(nextJob.id);
+      if (!observedJobStates.current.has(nextJob.id)) observedJobStates.current.set(nextJob.id, nextJob.state);
+      setJobSnapshot(current => mergeJobRecords([nextJob], current));
+      notify('info', nextJob.state === 'queued' ? 'Image-to-3D generation queued.' : 'Image-to-3D generation started.',
+        nextJob.input_asset_name ?? referenceNames.get(generationAssetId));
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not start image generation.');
     } finally {
@@ -1106,6 +1179,7 @@ export function App() {
           ? await (cuda ? api.installPixal3dCudaModels() : api.installPixal3dModels())
           : await api.convertPixal3dNaf();
       setJob(nextJob);
+      notify('info', `${studioOperationLabel(nextJob.operation)} queued.`);
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not start the runtime operation.');
     } finally {
@@ -1118,6 +1192,7 @@ export function App() {
     downloadInFlight.current = true;
     exportStartedAt.current = Date.now();
     setDownloading(true);
+    const startNotice = window.setTimeout(() => notify('info', 'Preparing export.', selectedAsset.name), 500);
     try {
       const blob = artifact ? await api.downloadArtifact(artifact) : await api.artifact(selectedAsset);
       const url = URL.createObjectURL(blob);
@@ -1130,6 +1205,7 @@ export function App() {
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not download this asset.');
     } finally {
+      window.clearTimeout(startNotice);
       downloadInFlight.current = false;
       setDownloading(false);
     }
@@ -1140,16 +1216,28 @@ export function App() {
     setStopTarget(target);
   }
 
+  function showJobDetails(target: Job, trigger: HTMLButtonElement) {
+    detailsTrigger.current = trigger;
+    setDetailsTarget(target);
+  }
+
   async function stopJob() {
     if (!stopTarget || stoppingJob) return;
     setStoppingJob(true);
     try {
-      const updated = await api.cancelJob(stopTarget.id);
+      const queuedOnly = stopTarget.state === 'queued';
+      const updated = await api.cancelJob(stopTarget.id, queuedOnly);
       if (jobRef.current?.id === updated.id && isActiveJob(jobRef.current)) {
         if (updated.state === 'cancelled' || updated.state === 'cancelling') setJob(updated);
       }
+      if (updated.operation === 'image.generate' && updated.state === 'cancelled') {
+        localGenerations.current.delete(updated.id);
+      }
+      if (updated.state === 'cancelled') observedJobStates.current.set(updated.id, updated.state);
       setJobSnapshot(current => mergeJobRecords([updated], current));
-      notify(updated.state === 'cancelled' ? 'success' : updated.state === 'cancelling' ? 'info' : 'warning', cancelJobNotice(updated));
+      const alreadyStarted = queuedOnly && updated.state !== 'queued' && updated.state !== 'cancelled';
+      notify(updated.state === 'cancelled' ? 'success' : !alreadyStarted && updated.state === 'cancelling' ? 'info' : 'warning',
+        alreadyStarted ? 'The job already started and was not removed.' : cancelJobNotice(updated), stopTarget.input_asset_name ?? undefined);
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not stop this job.');
     } finally {
@@ -1180,24 +1268,6 @@ export function App() {
     && (typeof beforeTriangles === 'number' || comparisonSizes);
   const inspectorTitle = openInspector === 'generation' ? 'Generate model' : openInspector === 'optimize' ? 'Optimize mesh' : openInspector === 'jobs' ? 'Jobs' : 'Mesh tools';
   const exportIsPrimary = shouldHighlightExport(activeView, isRunning, connection === 'connected');
-  const jobFeedback = isRunning ? (
-    <Card size="sm"><CardContent className="grid gap-2">
-      <div className="flex flex-wrap items-center gap-2" role="status">
-        <Spinner role="progressbar" aria-label="Job progress" />
-        <strong>{job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating' : job.state === 'cancelling' ? 'Stopping' : 'Working'}</strong>
-        <span>{studioOperationLabel(job.operation)}</span>
-      </div>
-      <p className="text-muted-foreground">{jobStage(job)}</p>
-      {isJobCancellable(job) && <Button variant="outline" size="sm" className="justify-self-start" onClick={event => requestStop(job, event.currentTarget)}>Stop job</Button>}
-    </CardContent></Card>
-  ) : null;
-  const workbenchActivity = jobFeedback || importProgress ? <>
-    {jobFeedback}
-    {importProgress && <Card size="sm" role="status"><CardContent className="flex items-start gap-2">
-      <Spinner aria-hidden="true" className="shrink-0" />
-      <span className="min-w-0 wrap-anywhere">Importing {importProgress.current} of {importProgress.total}: {importProgress.fileName}</span>
-    </CardContent></Card>}
-  </> : null;
 
   function renderAssetCard(asset: Asset) {
     return <AssetGalleryCard key={inventoryAssetKey(asset)} asset={asset} loadPreview={loadPreview}
@@ -1244,12 +1314,12 @@ export function App() {
             ? <Empty><EmptyHeader><EmptyDescription>No saved jobs yet.</EmptyDescription></EmptyHeader></Empty>
             : <ItemGroup>{recentJobs.slice(0, 8).map((savedJob) => (
               <JobListItem key={savedJob.id} job={savedJob} title={studioOperationLabel(savedJob.operation)} showUpdated
-                selected={savedJob.id === job?.id}>
+                selected={savedJob.id === (reportJob?.id ?? job?.id)} onDetails={showJobDetails}>
                 {isJobCancellable(savedJob) && <Button variant="ghost" size="sm" disabled={connection !== 'connected'} onClick={event => requestStop(savedJob, event.currentTarget)}>Stop job</Button>}
-                {(savedJob.state !== 'failed' || savedJob.input_asset_id) &&
+                {(savedJob.result?.asset_id || (savedJob.state === 'failed' && savedJob.input_asset_id)) &&
                   <Button variant="ghost" size="sm" onClick={() => void openRecentJob(savedJob.id)}
                     disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>
-                    {savedJob.state === 'failed' ? 'View input' : 'View'}
+                    {savedJob.state === 'failed' ? 'View input' : 'View result'}
                   </Button>}
               </JobListItem>
             ))}</ItemGroup>}
@@ -1295,7 +1365,9 @@ export function App() {
             </AccordionContent>
           </AccordionItem>
         </Accordion>
-        {!(isRunning && job.operation === 'mesh.simplify') && <Button className="w-full" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : <><SlidersHorizontalIcon aria-hidden="true" /> Optimize mesh</>}</Button>}
+        <Button className="w-full" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>
+          <SlidersHorizontalIcon aria-hidden="true" /> Optimize mesh
+        </Button>
       </div>}
 
       {openInspector === 'generation' && <section className="grid gap-4 p-4 text-xs/relaxed" id="image-generation">
@@ -1441,16 +1513,15 @@ export function App() {
       ))}
     </SidebarMenu>
   </div>;
-  const showGenerateAction = canGenerate && !(isRunning && job.operation === 'image.generate');
+  const showGenerateAction = canGenerate;
   const inspectorContent = <>
     <ScrollArea key={openInspector} type="auto" className="min-h-0 min-w-0 flex-1"
       viewportProps={{ tabIndex: 0, role: 'region', 'aria-label': `${inspectorTitle} content`, className: 'overscroll-contain [&>div]:block!' }}>
-      {!settingsSection && !dashboard && workbenchActivity && <div className="grid gap-2 p-3">{workbenchActivity}</div>}
       {inspectorBody()}
     </ScrollArea>
     {openInspector === 'generation' && (showGenerateAction || generationResult?.result?.asset_id) && <SidebarFooter className="shrink-0 border-t px-4 py-3">
-      {showGenerateAction && <Button disabled={!generationAssetId || !generationPayload || busy || connection !== 'connected' || isRunning}
-        onClick={() => void generate()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : 'Generate 3D'}</Button>}
+      {showGenerateAction && <Button disabled={!generationAssetId || !generationPayload || busy || connection !== 'connected'}
+        onClick={() => void generate()}>Generate 3D</Button>}
       {generationResult?.result?.asset_id && <Button variant="secondary" disabled={busy || isRunning} onClick={() => void openRecentJob(generationResult.id)}>View generated model</Button>}
     </SidebarFooter>}
   </>;
@@ -1472,16 +1543,16 @@ export function App() {
         mobileOffset={{ left: 12, right: 12, bottom: 80 }} />
       <SettingsPage api={api} section={settingsSection} backendId={settingsBackend} runtime={runtime}
         connection={connection} busy={busy || isRunning || installingBackend}
-        jobFeedback={jobFeedback} jobs={recentJobs} operationLabel={studioOperationLabel}
+        jobs={recentJobs} operationLabel={studioOperationLabel} onJobDetails={showJobDetails}
         theme={theme} onThemeChange={setTheme}
         onVisit={openSettings} onProfileChange={setSettingsBackend} onClose={closeSettings}
         onOpenDashboard={() => openDashboard()} onActivityChange={setSettingsActivity}
         onReconnect={() => void connect(true)} onRefreshJobs={refreshRecentJobs} onRuntimeChange={setRuntime}
         onRuntimeAction={(backend, action) => void runRuntimeAction(backend, action)} />
-      {dashboard && <JobsDashboard jobs={recentJobs} localActivities={localActivities} focusedJobId={dashboard.jobId}
+      {dashboard && <JobsDashboard api={api} jobs={recentJobs} localActivities={localActivities} focusedJobId={dashboard.jobId}
         connection={connection} loaded={jobFeedLoaded} resultBlocked={isRunning}
         operationLabel={studioOperationLabel} onBack={closeDashboard} onRefresh={refreshJobHistory} onReconnect={() => void connect(true)}
-        onStop={requestStop}
+        onStop={requestStop} onDetails={showJobDetails}
         onLoadOlder={before => api.jobs(JOB_PAGE_SIZE, { before })}
         onViewResult={id => { closeDashboard(); void openRecentJob(id); }} />}
       <div className={`${settingsSection || dashboard ? 'hidden' : 'flex'} h-dvh min-w-0 flex-col overflow-hidden bg-background`} onDragOver={(event) => {
@@ -1586,12 +1657,13 @@ export function App() {
                 </Disclosure></>}
                 </div>
                 <div className="grid min-w-0 gap-3 px-3 py-3">
-                {assetFilters.kind === 'mesh' && <PendingGenerationCards jobs={pendingGenerationJobs} sources={referenceNames} onOpen={openDashboard} />}
+                {assetFilters.kind === 'mesh' && <PendingGenerationCards jobs={visiblePendingGenerationJobs} sources={referenceNames}
+                  selectedId={pendingSelection?.id ?? null} onSelect={selectPendingModel} />}
                 {matchingAssets.length > 0 && <p className="text-xs text-muted-foreground" aria-live="polite">
                   {assetPageLoading ? 'Loading assets…' : `${matchingAssets.length} loaded ${hasActiveAssetFilters ? 'result' : 'asset'}${matchingAssets.length === 1 ? '' : 's'}`}
                 </p>}
                 {matchingAssets.length === 0
-                  ? (assetFilters.kind !== 'mesh' || !pendingGenerationJobs.length || hasActiveAssetFilters) && <Empty role="status"><EmptyHeader><EmptyDescription>
+                  ? (assetFilters.kind !== 'mesh' || !visiblePendingGenerationJobs.length) && <Empty role="status"><EmptyHeader><EmptyDescription>
                       {assetPageLoading ? 'Loading assets…' : hasActiveAssetFilters
                         ? 'No matching assets' : assetFilters.kind === 'mesh' ? 'Opened GLBs and 3D results appear here' : 'Imported images appear here'}
                     </EmptyDescription></EmptyHeader></Empty>
@@ -1613,8 +1685,15 @@ export function App() {
               }
             >
 
-            <section className="@container flex min-h-0 min-w-0 flex-1 flex-col bg-muted dark:bg-neutral-800" aria-label={selectedAsset ? 'Selected asset' : 'Start a model'}>
-              {!selectedAsset ? <div className="flex min-h-0 flex-1 overflow-y-auto">
+            <section className="@container flex min-h-0 min-w-0 flex-1 flex-col bg-muted dark:bg-neutral-800" aria-label={selectedPendingJob ? 'Pending model preview' : selectedAsset ? 'Selected asset' : 'Start a model'}>
+              {selectedPendingJob ? <Empty className="m-auto min-h-0 w-full overflow-auto">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon"><CubeIcon aria-hidden="true" /></EmptyMedia>
+                  <EmptyTitle className="wrap-anywhere">{generationJobName(selectedPendingJob, referenceNames)}</EmptyTitle>
+                  <EmptyDescription role="status">{jobStage(selectedPendingJob)}</EmptyDescription>
+                </EmptyHeader>
+                <EmptyContent><Button variant="outline" onClick={() => openDashboard(selectedPendingJob.id)}>View in dashboard</Button></EmptyContent>
+              </Empty> : !selectedAsset ? <div className="flex min-h-0 flex-1 overflow-y-auto">
                 <div className="m-auto grid w-full max-w-4xl items-center gap-4 p-4 @min-[42rem]:grid-cols-[minmax(0,22rem)_minmax(0,24rem)] @min-[42rem]:gap-8 sm:p-6">
                 <div className="order-2 grid min-w-0 gap-4 @min-[42rem]:order-first">
                   <h2 className="font-heading text-xl font-medium @min-[42rem]:text-3xl">Start with a model or an image</h2>
@@ -1743,6 +1822,12 @@ export function App() {
       </div>}
 
       </div>
+      {currentDetails && <JobDetails job={currentDetails} title={studioOperationLabel(currentDetails.operation)}
+        events={jobEvents.get(currentDetails.id)} onClose={() => setDetailsTarget(null)} returnFocus={() => {
+          const trigger = detailsTrigger.current;
+          if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus();
+          else document.getElementById(dashboard ? 'jobs-dashboard-title' : settingsSection ? 'settings-heading' : 'workbench-inspector-title')?.focus();
+        }} />}
       <AlertDialog open={stopTarget !== null} onOpenChange={open => { if (!open && !stoppingJob) setStopTarget(null); }}>
         <AlertDialogContent onEscapeKeyDown={event => { if (stoppingJob) event.preventDefault(); }}
           onCloseAutoFocus={event => {
@@ -1752,7 +1837,7 @@ export function App() {
             else document.getElementById(dashboard ? 'jobs-dashboard-title' : settingsSection ? 'settings-heading' : 'workbench-inspector-title')?.focus();
           }}>
           <AlertDialogHeader>
-            <AlertDialogTitle>Stop this job?</AlertDialogTitle>
+            <AlertDialogTitle>{stopTarget?.state === 'queued' ? 'Remove this queued job?' : 'Stop this job?'}</AlertDialogTitle>
             <AlertDialogDescription>
               {stopTarget?.state === 'running' && stopTarget.operation !== 'image.generate'
                 ? 'Stops at the next safe checkpoint without saving a result. '
@@ -1765,7 +1850,7 @@ export function App() {
             <AlertDialogAction variant="destructive" disabled={stoppingJob} onClick={event => {
               event.preventDefault();
               void stopJob();
-            }}>{stoppingJob ? 'Requesting stop…' : 'Stop job'}</AlertDialogAction>
+            }}>{stoppingJob ? 'Requesting stop…' : stopTarget?.state === 'queued' ? 'Remove from queue' : 'Stop job'}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

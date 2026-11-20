@@ -3,6 +3,26 @@ import type { Job } from './types';
 
 export const JOB_PAGE_SIZE = 20;
 
+export function jobStateLabel(state: Job['state']): string {
+  return state === 'succeeded' ? 'Complete' : state === 'cancelling' ? 'Stopping' : state[0].toUpperCase() + state.slice(1);
+}
+
+export function generationJobName(job: Job, sources: ReadonlyMap<string, string>): string {
+  return job.input_asset_name || (job.input_asset_id && sources.get(job.input_asset_id)) || 'New model';
+}
+
+export type JobEvent = { state: Job['state']; stage: string; at: string };
+
+export function updateJobTimeline(jobs: Job[], previous: ReadonlyMap<string, JobEvent[]>): Map<string, JobEvent[]> {
+  return new Map(jobs.map(job => {
+    const events = previous.get(job.id) ?? [];
+    const stage = jobStage(job);
+    const last = events.at(-1);
+    if (last?.state === job.state && last.stage === stage) return [job.id, events];
+    return [job.id, [...events.slice(-19), { state: job.state, stage, at: job.updated_at }]];
+  }));
+}
+
 const generationStages: Partial<Record<string, string>> = {
   check_runtime: 'Checking model runtime',
   prepare_references: 'Preparing reference images',

@@ -199,17 +199,21 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   const inventory = page.getByRole('complementary', { name: 'Inventory' });
   const pending = inventory.getByRole('region', { name: 'Models in progress' });
   await expect(pending.getByText('Waiting for an engine slot')).toBeVisible();
-  await expect(pending.getByText(/^Queue time:/)).toBeVisible();
+  await expect(generate.getByRole('progressbar', { name: 'Job progress' })).toHaveCount(0);
+  await expect(generateAction).toBeEnabled();
   await inventory.getByRole('tab', { name: 'Images' }).click();
   await expect(pending).toHaveCount(0);
   await inventory.getByRole('tab', { name: '3D models' }).click();
   generationState = 'running';
   await expect(pending.getByText('Generating textures', { exact: true })).toBeVisible();
-  await pending.getByRole('button', { name: 'View progress for reference.png' }).click();
+  await page.getByRole('button', { name: 'Dashboard', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Jobs dashboard' })).toBeFocused();
   const inProgress = page.getByRole('region', { name: /In progress/ });
   await expect(inProgress.getByText('Generating textures', { exact: true })).toBeVisible();
   await expect(inProgress.getByText(/^Elapsed: /)).toBeVisible();
+  await inProgress.getByRole('button', { name: 'View details for Generate model' }).click();
+  await expect(page.getByRole('dialog', { name: 'Job details' }).getByText('Running · Generating textures')).toBeVisible();
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Studio', exact: true }).click();
   generationState = 'succeeded';
   await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Image-to-3D generation complete.', { exact: false })).toBeVisible();
@@ -218,6 +222,100 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   await expect(selected.getByTitle(active.name)).toBeVisible();
   await generate.getByRole('button', { name: 'View generated model' }).click();
   await expect(selected.getByTitle(derived.name)).toBeVisible();
+});
+
+test('generation can be queued, reordered and selected before its preview is ready', async ({ page, studioOrigin }) => {
+  const jobs = [];
+  let order = [];
+  const references = new Map();
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
+    platform: 'macos', status: 'ready_for_mesh_operations',
+    model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', backend_ids: ['pixal3d-mlx'] }],
+    model_backends: [{ id: 'pixal3d-mlx', ready: true, installable: true, generation: { id: 'pixal3d-mlx', parameters: [] } }],
+  } }));
+  await page.route('**/api/v1/operations', route => route.fulfill({ json: [{ id: 'image.generate', implemented: true }] }));
+  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: jobs }));
+  await page.route('**/api/v1/jobs/generation-queue', route => {
+    if (route.request().method() === 'POST') {
+      const { job_id, swap_with } = route.request().postDataJSON();
+      expect([job_id, swap_with]).toEqual(['generation-2', 'generation-1']);
+      order = ['generation-2', 'generation-1', 'generation-3'];
+    }
+    return route.fulfill({ json: order });
+  });
+  await page.route('**/api/v1/jobs', route => {
+    const request = route.request().postDataJSON();
+    const timestamp = String(Date.now());
+    const job = {
+      id: `generation-${jobs.length + 1}`, operation: 'image.generate', state: 'queued', progress: 0,
+      input_asset_id: request.input.asset_id, input_asset_name: references.get(request.input.asset_id),
+      created_at: timestamp, updated_at: timestamp,
+    };
+    jobs.push(job);
+    order.push(job.id);
+    return route.fulfill({ status: 202, json: job });
+  });
+  await page.route('**/api/v1/jobs/generation-3/cancel?queued_only=true', route => {
+    order = order.filter(id => id !== 'generation-3');
+    jobs[2].state = 'cancelled';
+    jobs[2].updated_at = String(Date.now());
+    return route.fulfill({ json: jobs[2] });
+  });
+  await page.goto(studioOrigin);
+  await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  const original = await chooseFile(page, page.getByRole('button', { name: 'Open GLB', exact: true }), 'original.glb', 'model/gltf-binary', texturedGlb());
+  const image = new PNG({ width: 2, height: 2 });
+  const form = page.getByRole('complementary', { name: 'Generate model' });
+  const submit = form.getByRole('button', { name: 'Generate 3D', exact: true });
+  const notifications = page.getByRole('region', { name: /Notifications/ });
+  for (const [index, name] of ['first.png', 'second.png', 'third.png'].entries()) {
+    image.data.fill(120 + index);
+    const reference = await chooseFile(page, form.getByRole('button', { name: /Choose reference|Replace reference/ }), name, 'image/png', PNG.sync.write(image));
+    references.set(reference.id, name);
+    await submit.click();
+    await expect(submit).toBeEnabled();
+  }
+  await expect(notifications.getByText('Image-to-3D generation queued.').last()).toBeVisible();
+  const pending = page.getByRole('button', { name: 'Select pending model second.png' });
+  await pending.click();
+  await expect(pending).toHaveAttribute('aria-pressed', 'true');
+  const preview = page.getByRole('region', { name: 'Pending model preview' });
+  await expect(preview.getByText('Waiting for an engine slot')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
+  const storage = page.getByRole('main', { name: 'Downloads & storage' });
+  await expect(storage.getByText('No finished storage jobs for this backend.')).toBeVisible();
+  await expect(storage.getByText(/Generate model|Waiting for an engine slot/)).toHaveCount(0);
+  await page.getByRole('button', { name: 'Workbench', exact: true }).click();
+  await preview.getByRole('button', { name: 'View in dashboard' }).click();
+  const queue = page.getByRole('region', { name: /Generation queue/ });
+  const second = queue.getByRole('listitem').filter({ hasText: 'second.png' });
+  await expect(second).toContainText('#2 in queue');
+  await second.getByRole('button', { name: 'Move earlier' }).click();
+  await expect(second).toContainText('#1 in queue');
+  await queue.getByRole('listitem').filter({ hasText: 'third.png' }).getByRole('button', { name: 'Remove from queue' }).click();
+  await page.getByRole('alertdialog', { name: 'Remove this queued job?' }).getByRole('button', { name: 'Remove from queue' }).click();
+  await expect(queue.getByText('third.png')).toHaveCount(0);
+
+  order.shift();
+  Object.assign(jobs[1], { state: 'running', stage: 'shape_hr', progress: 5, started_at: String(Date.now()), updated_at: String(Date.now()) });
+  await expect(notifications.getByText('Image-to-3D generation started.')).toBeVisible();
+  const active = page.getByRole('region', { name: /In progress/ });
+  await active.getByRole('button', { name: 'View details for Generate model' }).click();
+  const details = page.getByRole('dialog', { name: 'Job details' });
+  await expect(details.getByText('Running · Refining geometry')).toBeVisible();
+  Object.assign(jobs[1], { stage: 'texture_flow', updated_at: String(Date.now()) });
+  await expect(details.getByText('Running · Generating textures')).toBeVisible();
+  const model = { ...original, id: 'completed-second', name: 'second.glb', source_asset_id: jobs[1].input_asset_id, model: undefined };
+  await page.route('**/api/v1/assets/completed-second', route => route.fulfill({ json: model }));
+  Object.assign(jobs[1], { state: 'succeeded', progress: 100, result: { asset_id: model.id }, updated_at: String(Date.now()) });
+  await expect(details.getByText('Complete · Finished')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(notifications.getByText('Image-to-3D generation complete.')).toBeVisible();
+  await page.getByRole('button', { name: 'Studio', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Selected asset' }).getByTitle('second.glb')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Select pending model first.png' })).toBeVisible();
 });
 
 test('generation switches between posed presets and maps each custom image to its camera', async ({ page, studioOrigin }) => {

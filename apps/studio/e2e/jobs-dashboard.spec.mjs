@@ -32,9 +32,13 @@ test('the dashboard polls engine activity, keeps stable completed durations, and
   await expect(active.getByText('Nothing in progress')).toBeVisible();
   await expect(history.getByText('Elapsed: 25s')).toHaveCount(20);
   await history.getByRole('button', { name: 'Load older jobs' }).click();
-  await history.getByRole('button', { name: /Show error for/ }).click();
+  await history.getByRole('button', { name: 'View details for Download MLX models' }).click();
+  const details = page.getByRole('dialog', { name: 'Job details' });
   await expect(history.getByText('Local cache is unavailable.')).toHaveCount(0);
-  await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Local cache is unavailable.')).toBeVisible();
+  await expect(details.getByText('Local cache is unavailable.')).toBeVisible();
+  await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Local cache is unavailable.')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(details).toHaveCount(0);
 
   jobs = [external, ...lastFinished];
   await expect(active.getByText('Refining geometry')).toBeVisible();

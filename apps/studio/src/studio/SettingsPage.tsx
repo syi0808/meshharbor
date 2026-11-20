@@ -1,5 +1,5 @@
 import { ArrowLeftIcon, ArrowsClockwiseIcon, CubeIcon, HardDrivesIcon, KeyIcon, ListChecksIcon, PaintBrushIcon } from '@phosphor-icons/react';
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -19,7 +19,7 @@ import { JobListItem } from './JobListItem';
 import type { StudioActivity } from './JobsDashboard';
 import { NotificationHistory } from './NotificationHistory';
 import { notify } from './notify';
-import type { MeshHarborApi } from './api';
+import { isActiveJob, type MeshHarborApi } from './api';
 import type { HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, RuntimeBackendId, RuntimeInfo } from './types';
 import { runtimeSetupStage } from './workbench-state';
 import type { StudioTheme } from './theme';
@@ -60,10 +60,10 @@ interface Props {
   runtime: RuntimeInfo | null;
   connection: 'disconnected' | 'connecting' | 'connected';
   busy: boolean;
-  jobFeedback: ReactNode;
   theme: StudioTheme;
   jobs: Job[];
   operationLabel: (operation: string) => string;
+  onJobDetails: (job: Job, trigger: HTMLButtonElement) => void;
   onVisit: VisitSettings;
   onProfileChange: (backend: RuntimeBackendId) => void;
   onClose: () => void;
@@ -76,7 +76,7 @@ interface Props {
   onRuntimeAction: (backend: RuntimeBackendId, action: RuntimeAction) => void;
 }
 
-export function SettingsPage({ api, section, backendId, runtime, connection, busy, jobFeedback, theme, jobs, operationLabel, onVisit, onProfileChange, onClose, onOpenDashboard, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
+export function SettingsPage({ api, section, backendId, runtime, connection, busy, theme, jobs, operationLabel, onJobDetails, onVisit, onProfileChange, onClose, onOpenDashboard, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
   const heading = useRef<HTMLHeadingElement>(null);
   const removalTrigger = useRef<HTMLButtonElement | null>(null);
   const [accounts, setAccounts] = useState<Partial<Record<RuntimeBackendId, AccountStatus>>>({});
@@ -94,7 +94,12 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
   const browserSessionId = browserLogin?.session.id;
   const browserActive = browserLogin && browserLoginIsActive(browserLogin.session);
   const disabled = pending || busy || Boolean(browserActive);
-  const runtimeJobs = jobs.filter(job => job.operation.startsWith('runtime.')).slice(0, 6);
+  const storageJobs = jobs.filter(job => {
+    const action = job.operation.replace(/^runtime\.pixal3d\./, '');
+    const cuda = action.startsWith('cuda_');
+    return !isActiveJob(job) && cuda === (selectedId === 'pixal3d-cuda')
+      && (action === 'install_models' || action === 'convert_naf' || action === 'cuda_install_models' || action === 'cuda_install_multiview');
+  }).slice(0, 6);
   useEffect(() => {
     if (section) heading.current?.focus();
     else setRemoval(null);
@@ -200,6 +205,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
         stage: `Removing local weights for ${profiles[backend].title}`,
         startedAt: Date.now(),
       });
+      if (scope === 'model-files') notify('info', 'Removing local model files.');
       try {
         onRuntimeChange(await api.removeRuntimeFiles(backend, scope));
         if (scope === 'huggingface') {
@@ -265,11 +271,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
             notify('success', 'Local status refreshed.');
           })} disabled={disabled}><ArrowsClockwiseIcon aria-hidden="true" /> Refresh status</Button>}
         </div>
-        {section !== 'connections' && section !== 'preferences' && jobFeedback}
-        {section !== 'connections' && browserActive && <Alert role="status">
-          <AlertDescription>Hugging Face sign-in is in progress.</AlertDescription>
-          <Button variant="outline" onClick={() => onVisit('connections', browserBackend)}>Return to sign-in</Button>
-        </Alert>}
         {section === 'preferences' ? <Card>
           <CardHeader><CardTitle className="text-base"><h2>Appearance</h2></CardTitle></CardHeader>
           <CardContent>
@@ -361,9 +362,9 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
           {section === 'storage' && <Card role="region" aria-labelledby="runtime-activity-heading">
             <CardHeader><CardTitle className="text-base"><h2 id="runtime-activity-heading">Recent activity</h2></CardTitle></CardHeader>
             <CardContent>
-              {runtimeJobs.length ? <ItemGroup>
-                {runtimeJobs.map(job => <JobListItem key={job.id} job={job} title={operationLabel(job.operation)} />)}
-              </ItemGroup> : <Empty className="p-3"><EmptyHeader><EmptyDescription>No setup or download jobs yet.</EmptyDescription></EmptyHeader></Empty>}
+              {storageJobs.length ? <ItemGroup>
+                {storageJobs.map(job => <JobListItem key={job.id} job={job} title={operationLabel(job.operation)} onDetails={onJobDetails} />)}
+              </ItemGroup> : <Empty className="p-3"><EmptyHeader><EmptyDescription>No finished storage jobs for this backend.</EmptyDescription></EmptyHeader></Empty>}
             </CardContent>
           </Card>}
         </>}

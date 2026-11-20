@@ -43,7 +43,7 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   await expect(page.getByRole('complementary', { name: 'Generate model' })).toBeVisible();
 });
 
-test('Jobs and storage activity show saved failures in toasts', async ({ page, studioOrigin }) => {
+test('Jobs and storage show saved failures in a details popup', async ({ page, studioOrigin }) => {
   const recorded = {
     id: 'failed-download', operation: 'runtime.pixal3d.install_models', state: 'failed', progress: 0,
     created_at: '1', updated_at: '2', error: { message: 'Local cache is unavailable.' },
@@ -55,16 +55,21 @@ test('Jobs and storage activity show saved failures in toasts', async ({ page, s
   await expect(jobsRow).toHaveAttribute('data-slot', 'item');
   await expect(jobsRow.getByText('Failed', { exact: true })).toBeVisible();
   await expect(jobsRow.getByText(recorded.error.message)).toHaveCount(0);
-  await jobsRow.getByRole('button', { name: /Show error for/ }).click();
+  const details = page.getByRole('dialog', { name: 'Job details' });
+  const detailsButton = jobsRow.getByRole('button', { name: 'View details for Download MLX models' });
+  await detailsButton.click();
   const toasts = page.getByRole('region', { name: /Notifications/ });
-  await expect(toasts.getByText(recorded.error.message)).toBeVisible();
+  await expect(details.getByText(recorded.error.message)).toBeVisible();
+  await expect(toasts.getByText(recorded.error.message)).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(detailsButton).toBeFocused();
   await page.goto(studioOrigin + '/settings/storage');
   const activityRow = page.getByRole('region', { name: 'Recent activity' }).getByRole('listitem');
   await expect(activityRow).toHaveAttribute('data-slot', 'item');
   await expect(activityRow.getByText('Download MLX models')).toBeVisible();
   await expect(activityRow.getByText(recorded.error.message)).toHaveCount(0);
-  await activityRow.getByRole('button', { name: /Show error for/ }).click();
-  await expect(toasts.getByText(recorded.error.message)).toBeVisible();
+  await activityRow.getByRole('button', { name: 'View details for Download MLX models' }).click();
+  await expect(details.getByText(recorded.error.message)).toBeVisible();
 });
 
 test('the icon-only rail always shows one panel and exposes mesh tools without a model', async ({ page, studioOrigin }) => {
@@ -319,9 +324,8 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   const setup = main.getByRole('button', { name: 'Set up Python environment' });
   await expect(main.getByText('Not supported here')).toBeVisible();
   await setup.click();
-  const progress = main.getByRole('progressbar', { name: 'Job progress' });
-  await expect(progress).toBeVisible();
-  await expect(progress).not.toHaveAttribute('aria-valuenow');
+  await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Set up MLX queued.')).toBeVisible();
+  await expect(main.getByRole('progressbar', { name: 'Job progress' })).toHaveCount(0);
   await expect(setup).toBeDisabled();
   finishSetup = true;
   await expect(main.getByText('Download required')).toBeVisible();
