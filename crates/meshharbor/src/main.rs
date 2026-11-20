@@ -124,7 +124,7 @@ enum Command {
             help = "Text prompt for a backend that supports text-to-3D"
         )]
         prompt: Option<String>,
-        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda", "trellis-text-cuda"])]
+        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda", "trellis-text-cuda", "trellis-text-mlx"])]
         backend_id: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,

@@ -38,6 +38,8 @@ const generationStages: Partial<Record<string, string>> = {
   texture_conditioning: 'Preparing textures',
   texture_flow: 'Generating textures',
   texture_decode: 'Decoding textures',
+  text_conditioning: 'Encoding text prompt',
+  generate_latents: 'Generating shape latents',
   generate_mesh: 'Generating mesh',
   mesh_export: 'Exporting geometry GLB',
   pbr_export: 'Baking textures and exporting GLB',

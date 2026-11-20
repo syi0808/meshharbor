@@ -229,7 +229,11 @@ impl GenerationOptions {
             ));
         }
         let profile = if self.backend_id == "auto" && input.mode() == GenerationInputMode::Text {
-            self.validate_for_backend(external_generation::TRELLIS_TEXT_CUDA_ID)?
+            self.validate_for_backend(if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                external_generation::TRELLIS_TEXT_MLX_ID
+            } else {
+                external_generation::TRELLIS_TEXT_CUDA_ID
+            })?
         } else {
             self.validated_profile()?
         };
@@ -340,7 +344,11 @@ mod tests {
             prompt: "a ceramic cup".into(),
         };
         for profile in PROFILES.iter() {
-            let text_only = profile.id == external_generation::TRELLIS_TEXT_CUDA_ID;
+            let text_only = matches!(
+                profile.id,
+                external_generation::TRELLIS_TEXT_CUDA_ID
+                    | external_generation::TRELLIS_TEXT_MLX_ID
+            );
             assert_eq!(
                 serde_json::to_value(profile).unwrap()["input_modes"],
                 if text_only {
@@ -372,7 +380,11 @@ mod tests {
         let auto = GenerationOptions::default();
         assert_eq!(
             auto.validate_input(&text).unwrap().id,
-            external_generation::TRELLIS_TEXT_CUDA_ID
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                external_generation::TRELLIS_TEXT_MLX_ID
+            } else {
+                external_generation::TRELLIS_TEXT_CUDA_ID
+            }
         );
         assert!(
             auto.validate_input(&image)

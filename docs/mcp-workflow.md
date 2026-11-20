@@ -10,9 +10,9 @@ diagnostics go to stderr. For mesh-only work, start with `list_operations`,
 The managed setup below is for Pixal3D. For TRELLIS.2 or TripoSG, follow the
 [manual runtime guide](external-generation-runtimes.md) locally, then pass
 its explicit backend ID to `start_model_generation`. For text generation,
-[prepare TRELLIS Text CUDA](trellis-text-cuda.md), then call
+prepare TRELLIS Text for [Apple MLX](trellis-text-mlx.md) or [NVIDIA CUDA](trellis-text-cuda.md), then call
 `start_model_generation` with `input: { "kind": "text", "prompt": "A ceramic cup" }`
-and `parameters.backend_id: "trellis-text-cuda"`; no image import is needed.
+and set `parameters.backend_id` to `trellis-text-mlx` or `trellis-text-cuda`; no image import is needed.
 
 ## Prepare and generate
 

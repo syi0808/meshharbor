@@ -2,7 +2,7 @@
 
 These are experimental, manually provisioned backends. MeshHarbor ships only its Python adapter: it does not fork, vendor, or download the upstream source, dependencies, or weights. Studio's **Settings → Models** and `meshharbor doctor` report local readiness. Setup and license acknowledgments are never exposed as REST or MCP actions.
 
-This page covers image-conditioned TRELLIS.2 and TripoSG. For the original TRELLIS text checkpoint, use the separate [TRELLIS Text Large CUDA guide](trellis-text-cuda.md).
+This page covers image-conditioned TRELLIS.2 and TripoSG. For the original TRELLIS text checkpoint, use the separate [Apple MLX](trellis-text-mlx.md) or [NVIDIA CUDA](trellis-text-cuda.md) guide.
 
 ## Choose a backend
 

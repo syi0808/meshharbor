@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub(crate) const TRELLIS_TEXT_CUDA_ID: &str = "trellis-text-cuda";
+pub(crate) const TRELLIS_TEXT_MLX_ID: &str = "trellis-text-mlx";
 
 pub(crate) enum ExternalInput<'a> {
     Image(&'a Path),
@@ -83,6 +84,16 @@ pub(crate) const PROFILES: &[ExternalProfile] = &[
         revision: "193e0502b5cb3eb5997ec457d5340e95d09b158e",
         entry: "trellis/pipelines/trellis_text_to_3d.py",
         notice: "TRELLIS v1 Text Large exports geometry only. The runtime and weights are manually provisioned; review the CLIP and CUDA dependency terms in docs/trellis-text-cuda.md.",
+    },
+    ExternalProfile {
+        id: TRELLIS_TEXT_MLX_ID,
+        accelerator: "Apple MLX",
+        textured: false,
+        input_mode: GenerationInputMode::Text,
+        repository: "https://github.com/amirhossein-razlighi/mlx_diffuser",
+        revision: "a26b42aee4e31999dbb4429226b66d896d49e1d8",
+        entry: "src/mlx_diffuser/models/trellis_slat.py",
+        notice: "MeshHarbor's experimental native MLX port of TRELLIS v1 Text Large exports geometry only. See docs/trellis-text-mlx.md for setup and dependency terms.",
     },
 ];
 
@@ -175,7 +186,7 @@ impl ExternalProfile {
     }
 
     fn required_model_files(&self) -> Vec<String> {
-        if self.id == TRELLIS_TEXT_CUDA_ID {
+        if matches!(self.id, TRELLIS_TEXT_CUDA_ID | TRELLIS_TEXT_MLX_ID) {
             TRELLIS_TEXT_MODEL_FILES
                 .iter()
                 .map(|file| (*file).into())
@@ -232,9 +243,15 @@ impl ExternalProfile {
                 missing.push(format!("Missing local runtime file: {}", path.display()));
             }
         }
-        if self.id == TRELLIS_TEXT_CUDA_ID {
-            let flexicubes =
-                root.join("source/trellis/representations/mesh/flexicubes/flexicubes.py");
+        let flexicubes_file = match self.id {
+            TRELLIS_TEXT_CUDA_ID => {
+                Some("source/trellis/representations/mesh/flexicubes/flexicubes.py")
+            }
+            TRELLIS_TEXT_MLX_ID => Some("source/flexicubes/tables.py"),
+            _ => None,
+        };
+        if let Some(file) = flexicubes_file {
+            let flexicubes = root.join(file);
             if !is_nonempty_file(&flexicubes) {
                 missing.push(format!(
                     "Missing local runtime file: {}",
@@ -322,34 +339,40 @@ impl ExternalProfile {
     ) -> CoreResult<u128> {
         self.require_ready(data_root)?;
         let root = self.root(data_root).canonicalize()?;
-        let (input_arg, stdin, adapter_source): (PathBuf, Option<&[u8]>, &[u8]) =
-            match (self.input_mode, input) {
-                (GenerationInputMode::Image, ExternalInput::Image(path)) => (
-                    path.canonicalize()?,
-                    None,
-                    include_bytes!("external_generation.py"),
-                ),
-                (GenerationInputMode::Text, ExternalInput::Text(prompt))
-                    if self.id == TRELLIS_TEXT_CUDA_ID =>
-                {
-                    (
-                        PathBuf::from("-"),
-                        Some(prompt.as_bytes()),
-                        include_bytes!("trellis_text_generation.py"),
-                    )
-                }
-                _ => {
-                    return Err(CoreError::InvalidInput(
-                        "Input does not match the external generation backend.".into(),
-                    ));
-                }
-            };
+        let (input_arg, stdin) = match (self.input_mode, input) {
+            (GenerationInputMode::Image, ExternalInput::Image(path)) => {
+                (path.canonicalize()?, None)
+            }
+            (GenerationInputMode::Text, ExternalInput::Text(prompt)) => {
+                (PathBuf::from("-"), Some(prompt.as_bytes()))
+            }
+            _ => {
+                return Err(CoreError::InvalidInput(
+                    "Input does not match the external generation backend.".into(),
+                ));
+            }
+        };
         let work = output
             .parent()
             .expect("generation output always has a work directory")
             .canonicalize()?;
         let output = work.join(output.file_name().expect("generation output has a name"));
         let adapter = work.join("external-generation.py");
+        let adapter_source: &[u8] = match self.id {
+            TRELLIS_TEXT_CUDA_ID => include_bytes!("trellis_text_generation.py"),
+            TRELLIS_TEXT_MLX_ID => {
+                fs::write(
+                    work.join("mesh_decoder.py"),
+                    include_bytes!("trellis_text_mlx/mesh_decoder.py"),
+                )?;
+                fs::write(
+                    work.join("surface.py"),
+                    include_bytes!("trellis_text_mlx/surface.py"),
+                )?;
+                include_bytes!("trellis_text_mlx/worker.py")
+            }
+            _ => include_bytes!("external_generation.py"),
+        };
         fs::write(&adapter, adapter_source)?;
         let home = root.join("home");
         fs::create_dir_all(&home)?;

@@ -7,7 +7,7 @@
 - Microsoft publishes the [TRELLIS v1 source](https://github.com/microsoft/TRELLIS/tree/193e0502b5cb3eb5997ec457d5340e95d09b158e#license) and [TRELLIS-text-large weights](https://huggingface.co/microsoft/TRELLIS-text-large) under MIT, subject to the source repository's separately licensed components. The geometry adapter uses two shared decoders from [TRELLIS-image-large](https://huggingface.co/microsoft/TRELLIS-image-large); those do not require an input image or DINOv3.
 - Mesh extraction uses TRELLIS's pinned [FlexiCubes fork](https://github.com/MaxtirError/FlexiCubes/blob/815e075a2a400d06c48d94c347674344ed6ae5c5/LICENSE.txt) and [NVIDIA Kaolin](https://github.com/NVIDIAGameWorks/kaolin/blob/master/LICENSE), both Apache-2.0. This path does not load the Gaussian decoder or the `nvdiffrast` texture baker.
 - The local text encoder uses [OpenAI CLIP ViT-L/14](https://huggingface.co/openai/clip-vit-large-patch14); [OpenAI's CLIP code](https://github.com/openai/CLIP/blob/main/LICENSE) is MIT. Review the checkpoint's terms and the separate terms for CUDA and Python dependencies before use or redistribution. MeshHarbor includes only its adapter, not any of these components or weights.
-- No compatible native MLX port of this text pipeline was confirmed. Both [mlx-diffuser's TRELLIS v1 port](https://github.com/amirhossein-razlighi/mlx_diffuser) and the [integrated TRELLIS.2 MLX port](https://github.com/gtrg55/trellis2-mlx) take images. The [TRELLIS v1 macOS port](https://github.com/vinayapathak/trellis-mac-mps) uses PyTorch MPS. A [Core ML conversion of Text Large](https://huggingface.co/mickeyvanolst/trellis-text-coreml) is available for a TouchDesigner helper; it is not an MLX or standalone backend.
+- On Apple Silicon, use [MeshHarbor's native MLX port](trellis-text-mlx.md) with the same checkpoints. TRELLIS.2 MLX is a different, image-conditioned model.
 
 ## Prepare a local runtime
 
@@ -35,7 +35,9 @@ PYTHON="$RUNTIME/.venv/bin/python"
 "$PYTHON" -m pip check
 ```
 
-Download the pinned text model, shared decoders, and CLIP encoder before running inference:
+## Download the weights
+
+Download the pinned text model, shared decoders, and CLIP encoder before running inference. This layout works for both CUDA and MLX.
 
 ```sh
 hf download microsoft/TRELLIS-text-large --revision 4aad9f4a110329a410974d7f41ce5333a9a1fc87 \

@@ -626,7 +626,8 @@ impl OperationCore {
                 }),
                 json!({
                     "id": "trellis-text", "title": "TRELLIS Text Large", "status": "experimental_opt_in",
-                    "backend_ids": [external_generation::TRELLIS_TEXT_CUDA_ID], "output": "geometry_glb",
+                    "backend_ids": [external_generation::TRELLIS_TEXT_MLX_ID, external_generation::TRELLIS_TEXT_CUDA_ID],
+                    "output": "geometry_glb",
                 }),
             ],
             quadriflow_backend: self.quadriflow_backend_status(),

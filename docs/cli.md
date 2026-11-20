@@ -47,10 +47,10 @@ TRELLIS.2 and TripoSG also expose experimental Apple MLX and NVIDIA CUDA profile
 
 ## Text-to-3D
 
-After [manually provisioning TRELLIS Text Large](trellis-text-cuda.md) on Linux/NVIDIA, pass a prompt instead of an image asset ID. The experimental profile outputs a geometry-only GLB.
+After manually provisioning TRELLIS Text Large on [Apple Silicon](trellis-text-mlx.md) or [Linux/NVIDIA](trellis-text-cuda.md), pass a prompt instead of an image asset ID. The experimental profiles output a geometry-only GLB. With `auto`, Apple Silicon uses `trellis-text-mlx` and Linux/NVIDIA uses `trellis-text-cuda`.
 
 ```sh
-meshharbor generate --backend-id trellis-text-cuda --prompt "A ceramic cup" --output ./cup.glb
+meshharbor generate --prompt "A ceramic cup" --output ./cup.glb
 ```
 
 ## File and output limits

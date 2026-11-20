@@ -7,7 +7,7 @@
 
 MeshHarbor is a local-first alternative to [Tripo](https://www.tripo3d.ai/) and [Meshy](https://www.meshy.ai/) for 3D asset generation. After you set up a runtime and download its weights, generation runs on your hardware instead of sending inputs to a hosted service.
 
-- **Generate with local models.** Run Pixal3D from images on Apple Silicon (MLX) or Linux with NVIDIA (CUDA). Experimental manual backends include TRELLIS.2 and TripoSG for image input, and [TRELLIS Text Large](docs/trellis-text-cuda.md) for text prompts on Linux/NVIDIA.
+- **Generate with local models.** Run Pixal3D from images or TRELLIS Text Large from prompts on Apple Silicon (MLX) and Linux with NVIDIA (CUDA). The experimental manual backends also include TRELLIS.2 and TripoSG for image input.
 - **Refine and export GLBs.** Inspect, simplify, clean, split connected parts, or compress meshes. Compare revisions and export without overwriting the original. Supported textured meshes can get a new UV atlas with a same-mesh rebake.
 - **Work in Studio or automate locally.** Use the browser workbench, CLI, loopback REST API, or stdio MCP through the same Rust engine.
 
@@ -31,7 +31,7 @@ cargo run --locked --bin meshharbor -- serve --listen 127.0.0.1:7432
 
 Open **http://127.0.0.1:7432**. The server is single-user and loopback-only; do not expose it through a public proxy.
 
-- **Generate a model:** Set up [Pixal3D MLX](docs/pixal3d-mlx-manual-runtime.md) or [Pixal3D CUDA](docs/pixal3d-cuda-managed-runtime.md) for images, or [TRELLIS Text Large](docs/trellis-text-cuda.md) for prompts on Linux/NVIDIA. Once the backend is ready, open **New model**, provide its input, and click **Generate 3D**.
+- **Generate a model:** Set up Pixal3D for images ([MLX](docs/pixal3d-mlx-manual-runtime.md) or [CUDA](docs/pixal3d-cuda-managed-runtime.md)) or TRELLIS Text Large for prompts ([MLX](docs/trellis-text-mlx.md) or [CUDA](docs/trellis-text-cuda.md)). Once the backend is ready, open **New model**, provide its input, and click **Generate 3D**.
 - **Try Studio without a model download:** Select **Inventory → 3D models → Open GLB**. Use **Optimize**, compare **Original** and **Result**, then **Export GLB**.
 
 For the CLI, run `cargo run --locked --bin meshharbor -- --help`.
@@ -43,7 +43,7 @@ For the CLI, run `cargo run --locked --bin meshharbor -- --help`.
 | Use Studio, version history, or job controls | [Studio guide](apps/studio/README.md) |
 | Process assets from a terminal | [CLI guide](docs/cli.md) |
 | Integrate with the local API or an MCP client | [REST API](docs/rest-api.md) · [MCP workflow](docs/mcp-workflow.md) |
-| Set up a generation model | [Pixal3D MLX](docs/pixal3d-mlx-manual-runtime.md) · [Pixal3D CUDA](docs/pixal3d-cuda-managed-runtime.md) · [TRELLIS.2 and TripoSG](docs/external-generation-runtimes.md) · [TRELLIS Text CUDA](docs/trellis-text-cuda.md) |
+| Set up a generation model | [Pixal3D MLX](docs/pixal3d-mlx-manual-runtime.md) · [Pixal3D CUDA](docs/pixal3d-cuda-managed-runtime.md) · [TRELLIS.2 and TripoSG](docs/external-generation-runtimes.md) · TRELLIS Text [MLX](docs/trellis-text-mlx.md) / [CUDA](docs/trellis-text-cuda.md) |
 | Understand format limits or work on the project | [Architecture](docs/architecture.md) · [Documentation index](docs/README.md) · [Contributing](CONTRIBUTING.md) |
 
 ## Contributing

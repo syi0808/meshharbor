@@ -319,13 +319,30 @@ fn trellis_text_cli_uses_prompt_stdin_and_path_checked_runtime() {
     let declined = run();
     assert!(!declined.status.success());
     assert!(!output_path.exists());
-    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        assert!(String::from_utf8_lossy(&declined.stderr).contains("not supported on this host"));
-        return;
-    }
+    let (backend, source_revision, entry, extractor) =
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            (
+                "trellis-text-mlx",
+                "a26b42aee4e31999dbb4429226b66d896d49e1d8",
+                "source/src/mlx_diffuser/models/trellis_slat.py",
+                "source/flexicubes/tables.py",
+            )
+        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            (
+                "trellis-text-cuda",
+                "193e0502b5cb3eb5997ec457d5340e95d09b158e",
+                "source/trellis/pipelines/trellis_text_to_3d.py",
+                "source/trellis/representations/mesh/flexicubes/flexicubes.py",
+            )
+        } else {
+            assert!(
+                String::from_utf8_lossy(&declined.stderr).contains("not supported on this host")
+            );
+            return;
+        };
     assert!(String::from_utf8_lossy(&declined.stderr).contains("activate.json"));
 
-    let root = data_dir.join("runtimes/trellis-text-cuda");
+    let root = data_dir.join("runtimes").join(backend);
     let write = |relative: &str, bytes: &[u8]| {
         let file = root.join(relative);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -333,11 +350,14 @@ fn trellis_text_cli_uses_prompt_stdin_and_path_checked_runtime() {
     };
     write(
         "activate.json",
-        br#"{"source_revision":"193e0502b5cb3eb5997ec457d5340e95d09b158e","authorized_local_use":true}"#,
+        &serde_json::to_vec(
+            &json!({"source_revision": source_revision, "authorized_local_use": true}),
+        )
+        .unwrap(),
     );
     for relative in [
-        "source/trellis/pipelines/trellis_text_to_3d.py",
-        "source/trellis/representations/mesh/flexicubes/flexicubes.py",
+        entry,
+        extractor,
         "weights/model/pipeline.json",
         "weights/clip/config.json",
         "weights/clip/model.safetensors",
@@ -365,7 +385,15 @@ fn trellis_text_cli_uses_prompt_stdin_and_path_checked_runtime() {
         ".venv/bin/python",
         r#"#!/bin/sh
 set -eu
-[ "$# $1 $2 $3 $5 $8 ${10} ${11}" = '11 -I -B -u trellis-text-cuda - 42 100000' ]
+[ "$# $1 $2 $3 $8 ${10} ${11}" = '11 -I -B -u - 42 100000' ]
+case "$5" in
+  trellis-text-mlx)
+    [ -s mesh_decoder.py ]
+    [ -s surface.py ]
+    ;;
+  trellis-text-cuda) ;;
+  *) exit 1 ;;
+esac
 [ "$HF_HUB_OFFLINE" = 1 ]
 [ "$TRANSFORMERS_OFFLINE" = 1 ]
 [ -z "${HF_TOKEN-}" ]
@@ -387,7 +415,7 @@ cp "$6/fixture.glb" "$9"
     );
     assert!(!String::from_utf8_lossy(&generated.stdout).contains(prompt));
     let result: Value = serde_json::from_slice(&generated.stdout).unwrap();
-    assert_eq!(result["backend_id"], "trellis-text-cuda");
+    assert_eq!(result["backend_id"], backend);
     assert!(result.get("resolution").is_none());
     assert!(result.get("texture_size").is_none());
     assert_eq!(result["asset"]["model"]["generated"], true);
