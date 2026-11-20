@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    Asset, AtlasBakeError, AtlasBakeOptions, CoreError, CoreResult, GenerationOptions,
-    GenerationResult, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dProfile,
+    Asset, AssetKind, AtlasBakeError, AtlasBakeOptions, CoreError, CoreResult, GenerationInput,
+    GenerationInputMode, GenerationOptions, GenerationResult, IMAGE_GENERATION_OPERATION,
+    MODEL_GENERATION_OPERATION, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dProfile,
     Pixal3dRuntimeManager, QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport,
     SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb, external_generation,
     inspect_asset, install_bundled_quadriflow_sidecar, job_execution::JobExecution,
@@ -330,12 +331,78 @@ impl OperationCore {
         Ok(())
     }
 
+    pub fn check_model_generation(
+        &self,
+        input: &GenerationInput,
+        options: &GenerationOptions,
+    ) -> CoreResult<()> {
+        let profile = options.validate_input(input)?;
+        if let Some(asset_id) = input.asset_id() {
+            let references = options
+                .view_input
+                .iter()
+                .flat_map(|views| views.references.iter().skip(1))
+                .map(|reference| reference.asset_id.as_str());
+            for reference in std::iter::once(asset_id).chain(references) {
+                let asset = self.store.get_asset(reference)?.ok_or_else(|| {
+                    CoreError::NotFound(format!("Asset '{reference}' was not found."))
+                })?;
+                if asset.kind != AssetKind::Image {
+                    return Err(CoreError::InvalidInput(
+                        "Image generation requires imported PNG or JPEG reference assets.".into(),
+                    ));
+                }
+            }
+        }
+        if let Some(external) = external_generation::ExternalProfile::find(profile.id) {
+            external.require_ready(self.store.root())?;
+        }
+        Ok(())
+    }
+
+    pub fn generate_model(
+        &self,
+        input: &GenerationInput,
+        options: GenerationOptions,
+    ) -> CoreResult<GenerationResult> {
+        crate::generation::generate_model(
+            self,
+            input,
+            options,
+            JobExecution::default(),
+            MODEL_GENERATION_OPERATION,
+        )
+    }
+
+    pub fn generate_model_for_job(
+        &self,
+        input: &GenerationInput,
+        options: GenerationOptions,
+        job_id: &str,
+    ) -> CoreResult<GenerationResult> {
+        crate::generation::generate_model(
+            self,
+            input,
+            options,
+            JobExecution::for_job(&self.store, job_id),
+            MODEL_GENERATION_OPERATION,
+        )
+    }
+
     pub fn generate_image(
         &self,
         input_asset_id: &str,
         options: GenerationOptions,
     ) -> CoreResult<GenerationResult> {
-        crate::generation::generate_image(self, input_asset_id, options, JobExecution::default())
+        crate::generation::generate_model(
+            self,
+            &GenerationInput::Image {
+                asset_id: input_asset_id.to_owned(),
+            },
+            options,
+            JobExecution::default(),
+            IMAGE_GENERATION_OPERATION,
+        )
     }
 
     pub fn generate_image_for_job(
@@ -344,11 +411,14 @@ impl OperationCore {
         options: GenerationOptions,
         job_id: &str,
     ) -> CoreResult<GenerationResult> {
-        crate::generation::generate_image(
+        crate::generation::generate_model(
             self,
-            input_asset_id,
+            &GenerationInput::Image {
+                asset_id: input_asset_id.to_owned(),
+            },
             options,
             JobExecution::for_job(&self.store, job_id),
+            IMAGE_GENERATION_OPERATION,
         )
     }
 
@@ -391,21 +461,42 @@ impl OperationCore {
     }
 
     pub fn list_operations(&self) -> Vec<OperationDescriptor> {
-        let generation_ready = Pixal3dMlxRuntime::discover(self.store.root())
-            .readiness()
-            .ready
-            || Pixal3dCudaRuntimeManager::new(self.store.root())
-                .readiness()
-                .ready
-            || external_generation::PROFILES
+        let generation_profiles: Vec<_> = [
+            (
+                "pixal3d-mlx",
+                Pixal3dMlxRuntime::discover(self.store.root())
+                    .readiness()
+                    .ready,
+            ),
+            (
+                "pixal3d-cuda",
+                Pixal3dCudaRuntimeManager::new(self.store.root())
+                    .readiness()
+                    .ready,
+            ),
+        ]
+        .into_iter()
+        .chain(
+            external_generation::PROFILES
                 .iter()
-                .any(|profile| profile.is_ready(self.store.root()));
+                .map(|profile| (profile.id, profile.is_ready(self.store.root()))),
+        )
+        .filter_map(|(id, ready)| {
+            ready
+                .then(|| crate::generation_catalog::generation_profile(id))
+                .flatten()
+        })
+        .collect();
+        let image_generation_ready = generation_profiles
+            .iter()
+            .any(|profile| profile.input_modes.contains(&GenerationInputMode::Image));
         let quadriflow_ready =
             crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root());
         vec![
             OperationDescriptor { id: "asset.import".into(), title: "Import asset".into(), category: "asset".into(), summary: "Import PNG, JPEG, or GLB files while retaining an immutable content-addressed source artifact.".into(), implemented: true },
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
-            OperationDescriptor { id: "image.generate".into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Generate a local GLB with a ready Pixal3D, TRELLIS.2, or TripoSG backend. Inference does not install packages or download weights.".into(), implemented: generation_ready },
+            OperationDescriptor { id: MODEL_GENERATION_OPERATION.into(), title: "Generate 3D model".into(), category: "generation".into(), summary: "Generate a local GLB with a ready backend that supports the requested input. Inference does not install packages or download weights.".into(), implemented: !generation_profiles.is_empty() },
+            OperationDescriptor { id: IMAGE_GENERATION_OPERATION.into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Compatibility operation for generating a local GLB from an imported image.".into(), implemented: image_generation_ready },
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangle primitives with meshoptimizer while retaining original vertex streams, materials, and textures.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces while preserving seams, vertex streams, materials, and the source asset.".into(), implemented: true },
             OperationDescriptor { id: "mesh.separate_parts".into(), title: "Separate connected parts".into(), category: "mesh".into(), summary: "Find components in one static indexed TRIANGLES primitive by shared indices and exact unambiguous edges. Emit up to 256 primitives, grouping excess fragments without discarding triangles. No vertex welding or scene-node split.".into(), implemented: true },

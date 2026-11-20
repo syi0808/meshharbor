@@ -32,8 +32,62 @@ use crate::{cuda_runtime::Pixal3dCudaRuntimeManager, runtime::Pixal3dRuntimeMana
 const DINO_REPOSITORY: &str = "models--facebook--dinov3-vitl16-pretrain-lvd1689m";
 const DINO_REVISION: &str = "ea8dc2863c51be0a264bab82070e3e8836b02d51";
 const MAX_GENERATED_GLB_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_GENERATION_PROMPT_BYTES: usize = 4096;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub const MODEL_GENERATION_OPERATION: &str = "model.generate";
+pub const IMAGE_GENERATION_OPERATION: &str = "image.generate";
+
+pub fn is_generation_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        MODEL_GENERATION_OPERATION | IMAGE_GENERATION_OPERATION
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationInputMode {
+    Image,
+    Text,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GenerationInput {
+    Image { asset_id: String },
+    Text { prompt: String },
+}
+
+impl GenerationInput {
+    pub fn asset_id(&self) -> Option<&str> {
+        match self {
+            Self::Image { asset_id } => Some(asset_id),
+            Self::Text { .. } => None,
+        }
+    }
+
+    pub fn mode(&self) -> GenerationInputMode {
+        match self {
+            Self::Image { .. } => GenerationInputMode::Image,
+            Self::Text { .. } => GenerationInputMode::Text,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> CoreResult<()> {
+        if let Self::Text { prompt } = self
+            && (prompt.trim().is_empty()
+                || prompt.contains('\0')
+                || prompt.len() > MAX_GENERATION_PROMPT_BYTES)
+        {
+            return Err(CoreError::InvalidInput(format!(
+                "A text prompt must be nonempty, contain no NUL, and use at most {MAX_GENERATION_PROMPT_BYTES} UTF-8 bytes."
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct GenerationOptions {
     /// Backend selector from the runtime catalog, or `auto` for platform Pixal3D.
@@ -630,113 +684,50 @@ fn generation_worker_stage(line: &str) -> Option<&'static str> {
     })
 }
 
-pub(crate) fn generate_image(
+pub(crate) fn generate_model(
     core: &OperationCore,
-    input_asset_id: &str,
+    input: &GenerationInput,
     options: GenerationOptions,
     execution: JobExecution<'_>,
+    operation: &'static str,
 ) -> CoreResult<GenerationResult> {
-    execution.stage("prepare_references")?;
-    let profile = options.validated_profile()?;
+    let profile = options.validate_input(input)?;
     let selected_backend_id = profile.id;
-    options.validate_primary_image(input_asset_id)?;
-    let source = core
-        .store()
-        .get_asset(input_asset_id)?
-        .ok_or_else(|| CoreError::NotFound(format!("Asset '{input_asset_id}' was not found.")))?;
     let work_dir = core
         .store()
         .staging_root()
         .join(format!("generate-{}", Uuid::new_v4()));
     std::fs::create_dir(&work_dir)?;
     let cleanup = WorkDir(work_dir.clone());
-    let mut input_paths = vec![stage_reference(core, &source, &work_dir, 0)?];
-    if let Some(input) = &options.view_input {
-        for (index, reference) in input.references.iter().enumerate().skip(1) {
-            execution.checkpoint()?;
-            let image = core
-                .store()
-                .get_asset(&reference.asset_id)?
-                .ok_or_else(|| {
-                    CoreError::NotFound(format!("View {} image was not found.", index + 1))
-                })?;
-            input_paths.push(stage_reference(core, &image, &work_dir, index)?);
-        }
-    }
     let output_path = work_dir.join("result.glb");
-    execution.stage("initialize_model")?;
-
-    let elapsed_ms = match selected_backend_id {
-        "pixal3d-mlx" => {
-            let runtime = Pixal3dMlxRuntime::discover(core.store().root());
-            if !runtime.readiness().ready {
-                return Err(CoreError::OperationUnavailable(format!(
-                    "Pixal3D MLX runtime is not ready: {}",
-                    runtime.readiness().missing.join("; ")
-                )));
-            }
-            runtime
-                .generate(&input_paths[0], &output_path, &options, execution)?
-                .elapsed_ms
+    let (output_name, elapsed_ms) = match input {
+        GenerationInput::Image { asset_id } => generate_from_images(
+            core,
+            asset_id,
+            &options,
+            selected_backend_id,
+            &work_dir,
+            &output_path,
+            execution,
+        )?,
+        GenerationInput::Text { .. } => {
+            return Err(CoreError::OperationUnavailable(
+                "This build has no text-conditioned generation worker.".into(),
+            ));
         }
-        "pixal3d-cuda" => {
-            let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());
-            runtime.generate_from_references(&input_paths, &work_dir, &options, execution)?
-        }
-        backend_id => ExternalProfile::find(backend_id)
-            .expect("generation profile has a local runtime")
-            .generate(
-                core.store().root(),
-                &input_paths[0],
-                &output_path,
-                &options,
-                execution,
-            )?,
     };
     execution.stage("validate_output")?;
-    let metadata = output_path.symlink_metadata().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            CoreError::InvalidInput(format!("{selected_backend_id} did not produce a GLB."))
-        } else {
-            error.into()
-        }
-    })?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_GENERATED_GLB_BYTES {
-        return Err(CoreError::InvalidInput(
-            "Generation must produce a regular, nonempty GLB up to 512 MiB.".into(),
-        ));
-    }
-    let mut output = Vec::new();
-    std::fs::File::open(&output_path)?
-        .take(MAX_GENERATED_GLB_BYTES + 1)
-        .read_to_end(&mut output)?;
-    if output.len() as u64 > MAX_GENERATED_GLB_BYTES {
-        return Err(CoreError::InvalidInput(
-            "Generated GLB exceeds 512 MiB.".into(),
-        ));
-    }
-    let descriptor = inspect_asset("result.glb", &output)?;
-    if descriptor.kind != AssetKind::Mesh
-        || descriptor.metadata["triangles"].as_u64().unwrap_or(0) == 0
-    {
-        return Err(CoreError::InvalidInput(
-            "Generation output did not validate as a triangle GLB mesh.".into(),
-        ));
-    }
-    let output_name = source
-        .name
-        .rsplit_once('.')
-        .map(|(stem, _)| format!("{stem}-generated.glb"))
-        .unwrap_or_else(|| "generated.glb".into());
+    let (output, descriptor) = read_generated_glb(&output_path, selected_backend_id)?;
     execution.stage("save_model")?;
     execution.begin_commit()?;
     let texture_size = profile.has_textures().then_some(options.texture_size);
-    let asset = core.store().import_derived_asset(
+    let asset = core.store().import_generated_asset(
         &output_name,
         &output,
-        input_asset_id,
+        input.asset_id(),
         json!({
-            "operation": "image.generate",
+            "operation": operation,
+            "input_mode": input.mode(),
             "backend": selected_backend_id,
             "seed": options.seed,
             "resolution": options.resolution,
@@ -756,6 +747,106 @@ pub(crate) fn generate_image(
         target_faces: options.target_faces,
         elapsed_ms,
     })
+}
+
+fn generate_from_images(
+    core: &OperationCore,
+    input_asset_id: &str,
+    options: &GenerationOptions,
+    selected_backend_id: &str,
+    work_dir: &Path,
+    output_path: &Path,
+    execution: JobExecution<'_>,
+) -> CoreResult<(String, u128)> {
+    execution.stage("prepare_references")?;
+    let source = core
+        .store()
+        .get_asset(input_asset_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("Asset '{input_asset_id}' was not found.")))?;
+    let mut input_paths = vec![stage_reference(core, &source, work_dir, 0)?];
+    if let Some(input) = &options.view_input {
+        for (index, reference) in input.references.iter().enumerate().skip(1) {
+            execution.checkpoint()?;
+            let image = core
+                .store()
+                .get_asset(&reference.asset_id)?
+                .ok_or_else(|| {
+                    CoreError::NotFound(format!("View {} image was not found.", index + 1))
+                })?;
+            input_paths.push(stage_reference(core, &image, work_dir, index)?);
+        }
+    }
+    execution.stage("initialize_model")?;
+
+    let elapsed_ms = match selected_backend_id {
+        "pixal3d-mlx" => {
+            let runtime = Pixal3dMlxRuntime::discover(core.store().root());
+            if !runtime.readiness().ready {
+                return Err(CoreError::OperationUnavailable(format!(
+                    "Pixal3D MLX runtime is not ready: {}",
+                    runtime.readiness().missing.join("; ")
+                )));
+            }
+            runtime
+                .generate(&input_paths[0], output_path, options, execution)?
+                .elapsed_ms
+        }
+        "pixal3d-cuda" => {
+            let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());
+            runtime.generate_from_references(&input_paths, work_dir, options, execution)?
+        }
+        backend_id => ExternalProfile::find(backend_id)
+            .expect("generation profile has a local runtime")
+            .generate(
+                core.store().root(),
+                &input_paths[0],
+                output_path,
+                options,
+                execution,
+            )?,
+    };
+    let output_name = source
+        .name
+        .rsplit_once('.')
+        .map(|(stem, _)| format!("{stem}-generated.glb"))
+        .unwrap_or_else(|| "generated.glb".into());
+    Ok((output_name, elapsed_ms))
+}
+
+fn read_generated_glb(
+    output_path: &Path,
+    selected_backend_id: &str,
+) -> CoreResult<(Vec<u8>, crate::AssetDescriptor)> {
+    let metadata = output_path.symlink_metadata().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CoreError::InvalidInput(format!("{selected_backend_id} did not produce a GLB."))
+        } else {
+            error.into()
+        }
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_GENERATED_GLB_BYTES {
+        return Err(CoreError::InvalidInput(
+            "Generation must produce a regular, nonempty GLB up to 512 MiB.".into(),
+        ));
+    }
+    let mut output = Vec::new();
+    std::fs::File::open(output_path)?
+        .take(MAX_GENERATED_GLB_BYTES + 1)
+        .read_to_end(&mut output)?;
+    if output.len() as u64 > MAX_GENERATED_GLB_BYTES {
+        return Err(CoreError::InvalidInput(
+            "Generated GLB exceeds 512 MiB.".into(),
+        ));
+    }
+    let descriptor = inspect_asset("result.glb", &output)?;
+    if descriptor.kind != AssetKind::Mesh
+        || descriptor.metadata["triangles"].as_u64().unwrap_or(0) == 0
+    {
+        return Err(CoreError::InvalidInput(
+            "Generation output did not validate as a triangle GLB mesh.".into(),
+        ));
+    }
+    Ok((output, descriptor))
 }
 
 struct WorkDir(PathBuf);
@@ -818,14 +909,12 @@ mod tests {
         std::fs::write(path, changed).unwrap();
 
         for backend_id in ["pixal3d-mlx", "pixal3d-cuda"] {
-            let result = generate_image(
-                &core,
+            let result = core.generate_image(
                 &asset.id,
                 GenerationOptions {
                     backend_id: backend_id.into(),
                     ..GenerationOptions::default()
                 },
-                JobExecution::default(),
             );
             assert!(
                 matches!(result, Err(CoreError::Conflict(_))),
@@ -901,14 +990,12 @@ mod tests {
             .unwrap();
 
         for backend_id in ["pixal3d-mlx", "pixal3d-cuda"] {
-            let result = generate_image(
-                &core,
+            let result = core.generate_image(
                 &asset.id,
                 GenerationOptions {
                     backend_id: backend_id.into(),
                     ..GenerationOptions::default()
                 },
-                JobExecution::default(),
             );
             assert!(
                 matches!(result, Err(CoreError::InvalidInput(_))),

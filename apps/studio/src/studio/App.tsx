@@ -9,7 +9,9 @@ import {
   planAssetImportUiCompletion,
   cancelJobNotice,
   canInspectJobHistoryRecord,
+  generationLabel,
   isActiveJob,
+  isGenerationOperation,
   isJobCancellable,
   jobReportMatchesAsset,
   jobResultCardModel,
@@ -43,6 +45,7 @@ import { Slider } from '@/components/ui/slider';
 import { Spinner } from '@/components/ui/spinner';
 import { Toaster } from '@/components/ui/sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Textarea } from '@/components/ui/textarea';
 import { ModelPreview } from './ModelPreview';
 import { ModelVersionHistory } from './ModelVersionHistory';
 import { AssetGalleryCard } from './AssetGalleryCard';
@@ -62,12 +65,14 @@ import { applyStudioTheme, loadStudioTheme } from './theme';
 import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
 import { useRetopologyPreflight } from './useRetopologyPreflight';
 import { formatVersionSizes, shouldHighlightExport, type Inspector } from './workbench-state';
-import type { Artifact, Asset, AssetKind, GenerationViewMode, Job, MeshOperationId, Operation, PosedViewMode, RuntimeBackendId, RuntimeInfo } from './types';
+import type { Artifact, Asset, AssetKind, GenerationInput, GenerationInputMode, GenerationViewMode, Job, MeshOperationId, Operation, PosedViewMode, RuntimeBackendId, RuntimeInfo } from './types';
 
 type Connection = 'disconnected' | 'connecting' | 'connected';
 type AssetOriginFilter = 'all' | 'original' | 'derived';
 type AssetImportPurpose = 'library' | 'reference' | { mode: PosedViewMode; maxViews: number; index?: number };
 const viewLabels: Record<GenerationViewMode, string> = { single: '1 view', four: '4 views', six: '6 views', custom: 'Custom views' };
+const inputModeLabels: Record<GenerationInputMode, string> = { image: 'Image', text: 'Text' };
+const MAX_PROMPT_BYTES = 4096;
 interface AssetBrowserFilters {
   query: string;
   kind: AssetKind;
@@ -217,6 +222,8 @@ export function App() {
   const [generationModelId, setGenerationModelId] = useState('');
   const [generationDrafts, setGenerationDrafts] = useState<Record<string, Record<string, string>>>({});
   const [generationSource, setGenerationSource] = useState<Asset | null>(null);
+  const [generationPrompt, setGenerationPrompt] = useState('');
+  const [preferredInputMode, setPreferredInputMode] = useState<GenerationInputMode>('image');
   const [preferredViewMode, setPreferredViewMode] = useState<GenerationViewMode>('single');
   const [posedDrafts, setPosedDrafts] = useState<Partial<Record<PosedViewMode, ViewDraft[]>>>({});
   const [generationResult, setGenerationResult] = useState<Job | null>(null);
@@ -289,7 +296,7 @@ export function App() {
   const [installingBackend, setInstallingBackend] = useState(false);
   const isRunning = isActiveJob(job);
   const recentJobs = useMemo(() => mergeJobRecords(jobSnapshot, job ? [job] : []), [job, jobSnapshot]);
-  const pendingGenerationJobs = recentJobs.filter(saved => saved.operation === 'image.generate' && isActiveJob(saved));
+  const pendingGenerationJobs = recentJobs.filter(saved => isGenerationOperation(saved.operation) && isActiveJob(saved));
   const selectedPendingJob = pendingSelection ? recentJobs.find(saved => saved.id === pendingSelection.id) ?? pendingSelection : null;
   const retopologyAssetId = inspector === 'tools' && meshTool === 'mesh.retopology' && !settingsSection && !dashboard
     && connection === 'connected' && !isRunning && !pendingGenerationJobs.some(saved => localGenerations.current.has(saved.id))
@@ -320,11 +327,18 @@ export function App() {
   ];
   const generationProfiles = useMemo(() => readyGenerationProfiles(runtime), [runtime]);
   const selectedGenerationProfile = generationProfiles.find(profile => profile.modelId === generationModelId) ?? generationProfiles[0];
-  const viewMode = selectedGenerationProfile?.multiviewReady && selectedGenerationProfile.view_modes.includes(preferredViewMode)
+  const inputModes = selectedGenerationProfile?.input_modes;
+  const inputMode = inputModes?.includes(preferredInputMode) ? preferredInputMode : inputModes?.[0] ?? 'image';
+  const viewMode = inputMode === 'image' && selectedGenerationProfile?.multiviewReady && selectedGenerationProfile.view_modes.includes(preferredViewMode)
     ? preferredViewMode : 'single';
   const posedViews = viewMode === 'single' ? [] : posedDrafts[viewMode] ?? defaultViews(viewMode);
   const posedInput = viewMode === 'single' ? null : buildPosedInput(viewMode, posedViews, selectedGenerationProfile?.max_views ?? 1);
   const generationAssetId = viewMode === 'single' ? generationSource?.id : posedInput?.references[0].asset_id;
+  const prompt = generationPrompt.trim();
+  const invalidPrompt = generationPrompt.includes('\0') || new TextEncoder().encode(generationPrompt).length > MAX_PROMPT_BYTES;
+  const generationInput: GenerationInput | null = inputMode === 'text'
+    ? prompt && !invalidPrompt ? { kind: 'text', prompt } : null
+    : generationAssetId ? { kind: 'image', asset_id: generationAssetId } : null;
   const generationDraft = selectedGenerationProfile ? generationDrafts[selectedGenerationProfile.id] ?? {} : {};
   const generationPayload = selectedGenerationProfile
     ? generationParameters(selectedGenerationProfile, generationDraft, viewMode !== 'single') : null;
@@ -377,7 +391,7 @@ export function App() {
       const prior = observedJobStates.current.get(saved.id);
       observed.set(saved.id, saved.state);
       if (!prior || prior === saved.state || saved.id === jobRef.current?.id) continue;
-      const operation = saved.operation === 'image.generate' ? 'Image-to-3D generation' : studioOperationLabel(saved.operation);
+      const operation = isGenerationOperation(saved.operation) ? generationLabel(saved.parameters?.input_mode) : studioOperationLabel(saved.operation);
       const input = saved.input_asset_name ?? undefined;
       if (saved.state === 'running' && prior === 'queued') notify('info', `${operation} started.`, input);
       if (saved.state === 'succeeded') {
@@ -1148,20 +1162,20 @@ export function App() {
   }
 
   async function generate() {
-    if (!generationAssetId || !selectedGenerationProfile || !generationPayload || !canGenerate || busy || connection !== 'connected') return;
+    if (!generationInput || !selectedGenerationProfile || !generationPayload || !canGenerate || busy || connection !== 'connected') return;
     setBusy(true);
     try {
-      const nextJob = await api.createImageGenerationJob(generationAssetId, selectedGenerationProfile.id, {
+      const nextJob = await api.createModelGenerationJob(generationInput, selectedGenerationProfile.id, {
         ...generationPayload,
         ...(posedInput ? { view_input: posedInput } : {}),
       });
       localGenerations.current.add(nextJob.id);
       if (!observedJobStates.current.has(nextJob.id)) observedJobStates.current.set(nextJob.id, nextJob.state);
       setJobSnapshot(current => mergeJobRecords([nextJob], current));
-      notify('info', nextJob.state === 'queued' ? 'Image-to-3D generation queued.' : 'Image-to-3D generation started.',
-        nextJob.input_asset_name ?? referenceNames.get(generationAssetId));
+      notify('info', `${generationLabel(generationInput.kind)} ${nextJob.state === 'queued' ? 'queued' : 'started'}.`,
+        nextJob.input_asset_name ?? (generationInput.kind === 'image' ? referenceNames.get(generationInput.asset_id) : undefined));
     } catch (cause) {
-      notify('error', cause instanceof Error ? cause.message : 'Could not start image generation.');
+      notify('error', cause instanceof Error ? cause.message : 'Could not start generation.');
     } finally {
       setBusy(false);
     }
@@ -1230,7 +1244,7 @@ export function App() {
       if (jobRef.current?.id === updated.id && isActiveJob(jobRef.current)) {
         if (updated.state === 'cancelled' || updated.state === 'cancelling') setJob(updated);
       }
-      if (updated.operation === 'image.generate' && updated.state === 'cancelled') {
+      if (isGenerationOperation(updated.operation) && updated.state === 'cancelled') {
         localGenerations.current.delete(updated.id);
       }
       if (updated.state === 'cancelled') observedJobStates.current.set(updated.id, updated.state);
@@ -1248,11 +1262,11 @@ export function App() {
 
   const triangleCount = Number(selectedAsset?.metadata.triangles ?? 0);
   const canSimplify = !!selectedAsset && selectedAsset.kind === 'mesh' && !!operations.find((operation) => operation.id === 'mesh.simplify')?.implemented;
-  const canGenerate = !!operations.find((operation) => operation.id === 'image.generate')?.implemented
+  const canGenerate = !!operations.find((operation) => operation.id === 'model.generate')?.implemented
     && selectedGenerationProfile !== undefined;
   const isComparingResult = selectedComparisonPair
     ? selectedComparisonPair.resultAssetId === selectedId
-    : Boolean(selectedAsset?.source_asset_id);
+    : Boolean(selectedAsset?.source_asset_id || selectedAsset?.model?.generated);
   const activeView: AssetComparisonSide = isComparingResult ? 'result' : 'source';
   const openInspector = inspector;
   const hasSelectedMesh = selectedAsset?.kind === 'mesh';
@@ -1370,7 +1384,7 @@ export function App() {
         </Button>
       </div>}
 
-      {openInspector === 'generation' && <section className="grid gap-4 p-4 text-xs/relaxed" id="image-generation">
+      {openInspector === 'generation' && <section className="grid gap-4 p-4 text-xs/relaxed" id="model-generation">
           {selectedGenerationProfile && <>
             <Field>
               <div className="flex items-center gap-1">
@@ -1382,7 +1396,17 @@ export function App() {
                 {generationProfiles.map(profile => <NativeSelectOption key={profile.modelId} value={profile.modelId}>{profile.label}</NativeSelectOption>)}
               </NativeSelect>
             </Field>
-            {selectedGenerationProfile.view_modes.length > 1 && <Field>
+            {selectedGenerationProfile.input_modes.length > 1 && <Field>
+              <FieldLabel htmlFor="generation-input-mode">Input type</FieldLabel>
+              <NativeSelect className="w-full" id="generation-input-mode" value={inputMode} disabled={busy || isRunning}
+                onChange={event => {
+                  const next = selectedGenerationProfile.input_modes.find(mode => mode === event.target.value);
+                  if (next) setPreferredInputMode(next);
+                }}>
+                {selectedGenerationProfile.input_modes.map(mode => <NativeSelectOption key={mode} value={mode}>{inputModeLabels[mode]}</NativeSelectOption>)}
+              </NativeSelect>
+            </Field>}
+            {inputMode === 'image' && selectedGenerationProfile.view_modes.length > 1 && <Field>
               <FieldLabel htmlFor="generation-view-mode">View mode</FieldLabel>
               <NativeSelect className="w-full" id="generation-view-mode" value={viewMode} disabled={busy || isRunning}
                 onChange={event => {
@@ -1396,7 +1420,12 @@ export function App() {
                 <Button variant="outline" size="sm" className="self-start" onClick={() => openSettings('storage', 'pixal3d-cuda')}>Set up multiview</Button>
               </>}
             </Field>}
-            {viewMode === 'single'
+            {inputMode === 'text' ? <Field>
+              <FieldLabel htmlFor="generation-prompt">Text prompt</FieldLabel>
+              <Textarea id="generation-prompt" value={generationPrompt} disabled={busy || isRunning}
+                aria-invalid={invalidPrompt} onChange={event => setGenerationPrompt(event.currentTarget.value)} />
+              {invalidPrompt && <p role="alert">Use at most {MAX_PROMPT_BYTES} UTF-8 bytes and no NUL characters.</p>}
+            </Field> : viewMode === 'single'
               ? singleReferencePicker()
               : <PosedReferences mode={viewMode} views={posedViews} maxViews={selectedGenerationProfile.max_views} load={loadPreview} disabled={busy || isRunning}
                 onPick={(files, index) => void importFiles(files, { mode: viewMode, maxViews: selectedGenerationProfile.max_views, index })}
@@ -1520,7 +1549,7 @@ export function App() {
       {inspectorBody()}
     </ScrollArea>
     {openInspector === 'generation' && (showGenerateAction || generationResult?.result?.asset_id) && <SidebarFooter className="shrink-0 border-t px-4 py-3">
-      {showGenerateAction && <Button disabled={!generationAssetId || !generationPayload || busy || connection !== 'connected'}
+      {showGenerateAction && <Button disabled={!generationInput || !generationPayload || busy || connection !== 'connected'}
         onClick={() => void generate()}>Generate 3D</Button>}
       {generationResult?.result?.asset_id && <Button variant="secondary" disabled={busy || isRunning} onClick={() => void openRecentJob(generationResult.id)}>View generated model</Button>}
     </SidebarFooter>}
@@ -1839,7 +1868,7 @@ export function App() {
           <AlertDialogHeader>
             <AlertDialogTitle>{stopTarget?.state === 'queued' ? 'Remove this queued job?' : 'Stop this job?'}</AlertDialogTitle>
             <AlertDialogDescription>
-              {stopTarget?.state === 'running' && stopTarget.operation !== 'image.generate'
+              {stopTarget?.state === 'running' && !isGenerationOperation(stopTarget.operation)
                 ? 'Stops at the next safe checkpoint without saving a result. '
                 : ''}
               A stopped job cannot be resumed.
@@ -1861,6 +1890,7 @@ export function App() {
 function studioOperationLabel(operation: string): string {
   switch (operation) {
     case 'mesh.simplify': return 'Optimize mesh';
+    case 'model.generate':
     case 'image.generate': return 'Generate model';
     case 'uv.unwrap': return 'Unwrap UVs';
     case 'runtime.pixal3d.setup': return 'Set up MLX';

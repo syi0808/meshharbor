@@ -64,8 +64,9 @@ Studio **Settings** shows MLX and CUDA as Pixal3D execution profiles and has
 separate Connections and Downloads & storage sections. The workbench shows model
 names and automatically selects a locally ready runtime. The same
 generation option (`backend_id: "auto" | "pixal3d-mlx" | "pixal3d-cuda"`) is
-accepted by the CLI, `POST /api/v1/jobs` `image.generate`, and MCP
-`start_image_generation`. Runtime setup/model installation are asynchronous:
+accepted by the CLI, `POST /api/v1/jobs` `model.generate`, and MCP
+`start_model_generation`. REST and MCP requests use `input.kind: "image"`.
+Runtime setup/model installation are asynchronous:
 
 - `POST /api/v1/runtime/pixal3d-cuda/setup`
 - `POST /api/v1/runtime/pixal3d-cuda/models` with both

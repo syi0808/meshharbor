@@ -15,6 +15,14 @@ These are experimental, manually provisioned backends. MeshHarbor ships only its
 - **TripoSG MLX:** uses a separate mesh extractor but [retains a HunyuanDiT notice](https://github.com/cavi-ai/mlx-agent/blob/c4c04b4cbbdf563fa3ae931f9a584bb7f0b240d5/src/mlx_agent/resources/ports/mlx-3d/triposg/NOTICE). Review the port and the original model/checkpoint terms independently; conversion does not change the rights in the weights.
 - **TRELLIS.2:** both paths require [gated DINOv3](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m). CUDA PBR export uses [nvdiffrast v0.4.0](https://github.com/NVlabs/nvdiffrast/blob/v0.4.0/LICENSE.txt), whose standard terms restrict use to non-commercial research/evaluation. The MLX port runs model inference in MLX but still needs PyTorch MPS and native Metal dependencies for postprocessing. Neither adapter loads the default BRIA background-removal model.
 
+## Input support
+
+None of the three integrated model families currently has a text-only backend in MeshHarbor:
+
+- [Pixal3D](https://github.com/TencentARC/Pixal3D) takes images, including posed views on the managed CUDA profile.
+- [TRELLIS.2-4B](https://huggingface.co/microsoft/TRELLIS.2-4B) takes images. Microsoft's [TRELLIS-text-large](https://huggingface.co/microsoft/TRELLIS-text-large) is a text-conditioned release from the original TRELLIS family, not a mode of TRELLIS.2 and not integrated here.
+- [TripoSG](https://huggingface.co/VAST-AI/TripoSG) takes images. The separate [TripoSG-scribble](https://huggingface.co/VAST-AI/TripoSG-scribble) checkpoint takes both a scribble image and a text prompt; it is not the integrated checkpoint or a text-only workflow.
+
 ## Prepare Files
 
 Use the same data directory for setup and for CLI, REST, or MCP. These commands are manual setup recipes, not a tested lockfile or hardware compatibility promise. Do not run the upstream download-on-inference demos. Use only trusted local Python packages, checkouts, and checkpoints you are authorized to run.
@@ -75,6 +83,6 @@ meshharbor --data-dir "$DATA_DIR" generate "$IMAGE_ASSET_ID" --backend-id "$BACK
 
 The marker is the operator's acknowledgment, not proof of rights or source integrity. Readiness checks only the marker, host family and required nonempty files. MeshHarbor does not inspect Git state, verify weights, or test GPU imports at readiness time. Removing the marker disables new jobs for that backend.
 
-Refresh model status in Studio after setup. Use the same explicit ID in REST's `image.generate` or MCP's `start_image_generation`. `auto` continues to select Pixal3D, not a manually installed runtime. Each new profile accepts one source image at resolution 512 (TRELLIS.2 pipeline or TripoSG extraction grid). Prefer a centered subject on a clean background, or a PNG with a foreground alpha mask. TripoSG does not expose texture size.
+Refresh model status in Studio after setup. Use the same explicit ID with REST's `model.generate` or MCP's `start_model_generation` and an image input. `auto` continues to select Pixal3D, not a manually installed runtime. Each external profile accepts one source image at resolution 512 (TRELLIS.2 pipeline or TripoSG extraction grid). Prefer a centered subject on a clean background, or a PNG with a foreground alpha mask. TripoSG does not expose texture size.
 
 Inference launches the trusted local runtime with an isolated home and Hugging Face offline settings; it does not forward login tokens or run a package installer. This is not an OS network sandbox. Leave runtime files unchanged while jobs are running. Tests use stub workers; real Metal/CUDA builds, model loading, memory fit and generated-mesh quality are not yet verified by MeshHarbor.

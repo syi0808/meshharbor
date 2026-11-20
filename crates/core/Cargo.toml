@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 base64 = "0.23.1"
 rusqlite.workspace = true
+schemars.workspace = true
 meshopt.workspace = true
 serde.workspace = true
 serde_json.workspace = true

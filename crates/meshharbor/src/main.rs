@@ -15,8 +15,9 @@ use axum::{
 use clap::{Parser, Subcommand};
 use job_scheduler::JobScheduler;
 use meshharbor_core::{
-    CoreError, GenerationOptions, MAX_ASSET_BYTES, OperationCore, Pixal3dCudaRuntimeManager,
-    Pixal3dProfile, Pixal3dRuntimeManager, RuntimeDoctor,
+    CoreError, GenerationInput, GenerationOptions, IMAGE_GENERATION_OPERATION, MAX_ASSET_BYTES,
+    MODEL_GENERATION_OPERATION, OperationCore, Pixal3dCudaRuntimeManager, Pixal3dProfile,
+    Pixal3dRuntimeManager, RuntimeDoctor,
 };
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -113,9 +114,16 @@ enum Command {
         #[arg(long)]
         quad_output: Option<PathBuf>,
     },
-    /// Generate a GLB from a previously imported image using a ready local backend.
+    /// Generate a GLB using a ready local backend that supports the input.
     Generate {
-        asset_id: String,
+        #[arg(required_unless_present = "prompt")]
+        asset_id: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "asset_id",
+            help = "Text prompt for a backend that supports text-to-3D"
+        )]
+        prompt: Option<String>,
         #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda"])]
         backend_id: String,
         #[arg(long, default_value_t = 42)]
@@ -260,6 +268,13 @@ struct GenerateArgs {
     texture_size: u16,
     #[serde(default = "default_generation_target_faces")]
     target_faces: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GenerateModelArgs {
+    input: GenerationInput,
+    #[serde(default)]
+    parameters: GenerationOptions,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -505,14 +520,37 @@ impl McpServer {
         match start_generation_job(
             self.core.clone(),
             self.scheduler.clone(),
-            &args.asset_id,
+            GenerationInput::Image {
+                asset_id: args.asset_id,
+            },
             options,
+            IMAGE_GENERATION_OPERATION,
         )
         .await
         {
             Ok(job) => serde_json::to_string_pretty(&job)
                 .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
             Err(error) => json!({"error": error.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Start a local model.generate job. Check runtime_doctor for each backend's input_modes. Text input requires a text-conditioned backend. This tool never installs packages or downloads weights."
+    )]
+    async fn start_model_generation(&self, params: Parameters<GenerateModelArgs>) -> String {
+        let args = params.0;
+        match start_generation_job(
+            self.core.clone(),
+            self.scheduler.clone(),
+            args.input,
+            args.parameters,
+            MODEL_GENERATION_OPERATION,
+        )
+        .await
+        {
+            Ok(job) => serde_json::to_string_pretty(&job)
+                .unwrap_or_else(|error| json!({"error":error.to_string()}).to_string()),
+            Err(error) => json!({"error":error.to_string()}).to_string(),
         }
     }
 
@@ -857,6 +895,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Generate {
             asset_id,
+            prompt,
             backend_id,
             seed,
             resolution,
@@ -867,17 +906,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             preflight_cli_output_paths(output.as_deref(), None)?;
             let _runtime_lock = acquire_generation_runtime_lock(&root)?;
             let core = OperationCore::open(&root)?;
-            let result = core.generate_image(
-                &asset_id,
-                GenerationOptions {
-                    backend_id,
-                    seed,
-                    resolution,
-                    texture_size,
-                    target_faces,
-                    ..GenerationOptions::default()
-                },
-            )?;
+            let options = GenerationOptions {
+                backend_id,
+                seed,
+                resolution,
+                texture_size,
+                target_faces,
+                ..GenerationOptions::default()
+            };
+            let result = match (asset_id, prompt) {
+                (Some(asset_id), None) => core.generate_image(&asset_id, options)?,
+                (None, Some(prompt)) => {
+                    core.generate_model(&GenerationInput::Text { prompt }, options)?
+                }
+                _ => unreachable!("Clap requires one generation input"),
+            };
             if let Some(path) = output {
                 let artifact = result
                     .asset
@@ -1651,7 +1694,7 @@ struct SimplifyBody {
 #[derive(Debug, Deserialize)]
 struct JobStartBody {
     operation: String,
-    input: JobStartInput,
+    input: Value,
     #[serde(default)]
     parameters: Option<Value>,
 }
@@ -1666,6 +1709,25 @@ async fn api_create_job(
     Json(body): Json<JobStartBody>,
 ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
     let parameters = body.parameters.unwrap_or_else(|| json!({}));
+    if body.operation == MODEL_GENERATION_OPERATION {
+        let input = serde_json::from_value(body.input).map_err(|error| {
+            CoreError::InvalidInput(format!("Invalid model.generate input: {error}"))
+        })?;
+        let parameters = serde_json::from_value(parameters).map_err(|error| {
+            CoreError::InvalidInput(format!("Invalid model.generate parameters: {error}"))
+        })?;
+        let job = start_generation_job(
+            state.core,
+            state.scheduler,
+            input,
+            parameters,
+            MODEL_GENERATION_OPERATION,
+        )
+        .await?;
+        return Ok((StatusCode::ACCEPTED, Json(job)));
+    }
+    let input: JobStartInput = serde_json::from_value(body.input)
+        .map_err(|error| CoreError::InvalidInput(format!("Invalid asset job input: {error}")))?;
     let job = match body.operation.as_str() {
         "mesh.simplify" => {
             let parameters: SimplifyBody = serde_json::from_value(parameters).map_err(|error| {
@@ -1676,7 +1738,7 @@ async fn api_create_job(
             start_simplify_job(
                 state.core,
                 state.scheduler,
-                &body.input.asset_id,
+                &input.asset_id,
                 parameters.target_triangles,
                 parameters.max_error,
             )
@@ -1691,13 +1753,13 @@ async fn api_create_job(
             start_mesh_operation_job(
                 state.core,
                 state.scheduler,
-                &body.input.asset_id,
+                &input.asset_id,
                 &body.operation,
                 parameters,
             )
             .await?
         }
-        "image.generate" => {
+        IMAGE_GENERATION_OPERATION => {
             let parameters: GenerationOptions =
                 serde_json::from_value(parameters).map_err(|error| {
                     ApiError(CoreError::InvalidInput(format!(
@@ -1707,8 +1769,11 @@ async fn api_create_job(
             start_generation_job(
                 state.core,
                 state.scheduler,
-                &body.input.asset_id,
+                GenerationInput::Image {
+                    asset_id: input.asset_id,
+                },
                 parameters,
+                IMAGE_GENERATION_OPERATION,
             )
             .await?
         }
@@ -1976,53 +2041,29 @@ async fn start_mesh_operation_job(
 async fn start_generation_job(
     core: OperationCore,
     scheduler: Arc<JobScheduler>,
-    asset_id: &str,
+    input: GenerationInput,
     options: GenerationOptions,
+    operation: &'static str,
 ) -> Result<meshharbor_core::Job, CoreError> {
-    let source = core
-        .store()
-        .get_asset(asset_id)?
-        .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' was not found.")))?;
-    if source.kind != meshharbor_core::AssetKind::Image {
-        return Err(CoreError::InvalidInput(
-            "image.generate requires a previously imported PNG or JPEG image asset.".into(),
-        ));
-    }
-    core.check_image_generation(&options)?;
-    options.validate_primary_image(asset_id)?;
-    if let Some(input) = &options.view_input {
-        for reference in input.references.iter().skip(1) {
-            let image = core
-                .store()
-                .get_asset(&reference.asset_id)?
-                .ok_or_else(|| {
-                    CoreError::NotFound(format!(
-                        "View image '{}' was not found.",
-                        reference.asset_id
-                    ))
-                })?;
-            if image.kind != meshharbor_core::AssetKind::Image {
-                return Err(CoreError::InvalidInput(
-                    "Generation references must be imported images.".into(),
-                ));
-            }
-        }
-    }
+    core.check_model_generation(&input, &options)?;
 
-    let parameters = serde_json::to_value(&options)?;
+    let mut parameters = serde_json::to_value(&options)?;
+    if operation == MODEL_GENERATION_OPERATION {
+        parameters["input_mode"] = json!(input.mode());
+    }
     let job = core
         .store()
-        .create_job("image.generate", Some(asset_id), &parameters)?;
+        .create_job(operation, input.asset_id(), &parameters)?;
     let job_id = job.id.clone();
     scheduler.enqueue(&job_id, &job.operation);
     tokio::spawn(async move {
         let Some(permit) = scheduler.acquire(&job_id).await else {
             return;
         };
-        let current = match core.store().get_job(&job_id) {
-            Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued => job,
-            _ => return,
-        };
+        if !matches!(core.store().get_job(&job_id), Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued)
+        {
+            return;
+        }
         if core
             .store()
             .update_job(&job_id, meshharbor_core::JobState::Running, 5, None, None)
@@ -2033,15 +2074,18 @@ async fn start_generation_job(
 
         let worker_core = core.clone();
         let worker_data_dir = core.store().root().to_path_buf();
-        let worker_asset_id = current.input_asset_id.clone().unwrap_or_default();
         let worker_job_id = job_id.clone();
         let result = task::spawn_blocking(move || {
             worker_core
                 .store()
                 .update_running_job_stage(&worker_job_id, "check_runtime")?;
             let _runtime_lock = acquire_generation_runtime_lock(&worker_data_dir)?;
-            let result =
-                worker_core.generate_image_for_job(&worker_asset_id, options, &worker_job_id)?;
+            let result = match (&input, operation) {
+                (GenerationInput::Image { asset_id }, IMAGE_GENERATION_OPERATION) => {
+                    worker_core.generate_image_for_job(asset_id, options, &worker_job_id)?
+                }
+                _ => worker_core.generate_model_for_job(&input, options, &worker_job_id)?,
+            };
             let mut payload = json!({
                 "asset_id": result.asset.id,
                 "backend_id": result.backend_id,
@@ -4685,6 +4729,121 @@ mod tests {
             .unwrap()["error"],
             "invalid request: resolution is fixed at 512 for pixal3d-mlx."
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_generate_requires_exactly_one_input() {
+        for arguments in [
+            vec!["meshharbor", "generate", "asset_demo"],
+            vec!["meshharbor", "generate", "--prompt", "a ceramic cup"],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_ok());
+        }
+        assert!(Cli::try_parse_from(["meshharbor", "generate"]).is_err());
+        assert!(
+            Cli::try_parse_from(["meshharbor", "generate", "asset_demo", "--prompt", "a cup"])
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn model_generation_rejects_unsupported_text_without_queuing_and_preserves_image_requests()
+     {
+        let root = std::env::temp_dir().join(format!(
+            "meshharbor-model-generate-api-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let core = OperationCore::open(&root).unwrap();
+        let source = core.import_asset("source.png", &minimal_png()).unwrap();
+        let scheduler = Arc::new(JobScheduler::default());
+        let permit = scheduler.try_acquire_owned().unwrap();
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: scheduler.clone(),
+            },
+            "token".into(),
+        );
+        let submit = |operation: &str, input: Value| {
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/jobs")
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::AUTHORIZATION, "Bearer token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "operation": operation, "input": input,
+                            "parameters": { "backend_id": "pixal3d-mlx" },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+        };
+        for input in [
+            json!({"kind":"text","prompt":"  "}),
+            json!({"kind":"text","prompt":"가".repeat(1366)}),
+            json!({"kind":"text","prompt":"a\u{0}cup"}),
+            json!({"kind":"text","prompt":"a cup","asset_id":source.id}),
+        ] {
+            assert_eq!(
+                submit(MODEL_GENERATION_OPERATION, input)
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let response = submit(
+            MODEL_GENERATION_OPERATION,
+            json!({"kind":"text","prompt":"a private draft"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let error = response.into_body().collect().await.unwrap().to_bytes();
+        let error = String::from_utf8_lossy(&error);
+        assert!(error.contains("does not support text-to-3D"));
+        assert!(!error.contains("a private draft"));
+        assert!(core.store().list_jobs(10).unwrap().is_empty());
+        assert_eq!(core.store().list_assets(10).unwrap().len(), 1);
+
+        let mut jobs = Vec::new();
+        for (operation, input) in [
+            (
+                MODEL_GENERATION_OPERATION,
+                json!({"kind":"image","asset_id":source.id}),
+            ),
+            (IMAGE_GENERATION_OPERATION, json!({"asset_id":source.id})),
+        ] {
+            let response = submit(operation, input).await.unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let job: meshharbor_core::Job =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(job.operation, operation);
+            assert_eq!(job.input_asset_id.as_deref(), Some(source.id.as_str()));
+            assert_eq!(
+                job.parameters["input_mode"],
+                if operation == MODEL_GENERATION_OPERATION {
+                    json!("image")
+                } else {
+                    Value::Null
+                }
+            );
+            jobs.push(job.id);
+        }
+        assert_eq!(scheduler.generation_queue(), jobs);
+        for job in jobs {
+            core.store().request_job_cancellation(&job, true).unwrap();
+            scheduler.remove(&job);
+        }
+        drop(permit);
+        drop(app);
+        drop(core);
         std::fs::remove_dir_all(root).unwrap();
     }
 

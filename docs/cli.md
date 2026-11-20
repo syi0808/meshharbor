@@ -43,6 +43,9 @@ meshharbor generate "$IMAGE_ASSET_ID" --backend-id pixal3d-mlx --output ./genera
 
 Use `pixal3d-cuda` for the Linux/NVIDIA profile.
 
+`generate --prompt` is reserved for backends that can consume text directly.
+None of the current backends advertises text input, so it is rejected without starting a worker.
+
 TRELLIS.2 and TripoSG also expose experimental Apple MLX and NVIDIA CUDA profiles through CLI, REST, MCP, and Studio. They require [manual provisioning and authorization](external-generation-runtimes.md); only first-party adapters are included. TRELLIS.2 produces textured GLB, while TripoSG produces geometry-only GLB. Neither model has been qualified with real GPU inference in MeshHarbor.
 
 ## File and output limits

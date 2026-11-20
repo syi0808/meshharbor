@@ -72,6 +72,10 @@ export type GenerationParameter = { id: string; label: string; description?: str
   | { kind: 'boolean'; default: boolean }
 );
 
+export type GenerationInputMode = 'image' | 'text';
+export type GenerationInput =
+  | { kind: 'image'; asset_id: string }
+  | { kind: 'text'; prompt: string };
 export type GenerationViewMode = 'single' | 'four' | 'six' | 'custom';
 export type PosedViewMode = Exclude<GenerationViewMode, 'single'>;
 export type OrbitCamera = { azimuth_degrees: number; elevation_degrees: number; distance: number; fov_degrees: number };
@@ -92,6 +96,7 @@ export type GenerationParameters = {
 export interface GenerationProfile {
   id: string;
   parameters: GenerationParameter[];
+  input_modes?: GenerationInputMode[];
   view_modes?: GenerationViewMode[];
   max_views?: number;
 }
@@ -100,6 +105,7 @@ export interface GenerationModel extends GenerationProfile {
   modelId: string;
   label: string;
   multiviewReady: boolean;
+  input_modes: GenerationInputMode[];
   view_modes: GenerationViewMode[];
   max_views: number;
 }
@@ -164,6 +170,7 @@ export interface Job {
   state: 'queued' | 'running' | 'validating' | 'succeeded' | 'failed' | 'cancelling' | 'cancelled';
   input_asset_id?: string | null;
   input_asset_name?: string | null;
+  parameters?: { input_mode?: GenerationInputMode };
   progress: number;
   result?: {
     asset_id?: string;

@@ -304,6 +304,17 @@ impl Store {
         self.import_with_metadata(name, bytes, Some(source_asset_id), "derived", metadata)
     }
 
+    pub(crate) fn import_generated_asset(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        source_asset_id: Option<&str>,
+        mut metadata: Value,
+    ) -> CoreResult<Asset> {
+        metadata["origin"] = Value::String("generated".into());
+        self.import_with_metadata(name, bytes, source_asset_id, "derived", metadata)
+    }
+
     /// Import a derived asset and its secondary artifacts in the same database transaction.
     /// This prevents an output preview from being visible when its primary editable artifact
     /// (for example, the original QuadriFlow OBJ) could not be committed.
@@ -527,7 +538,9 @@ impl Store {
             .query_row(
                 "SELECT version.id,version.name,version.kind,version.mime_type,version.sha256,version.byte_size,
                         version.source_asset_id,version.metadata_json,version.created_at,
-                        root.id,root.name,root.source_asset_id IS NOT NULL,head.current_asset_id,version.model_version
+                        root.id,root.name,
+                        root.source_asset_id IS NOT NULL OR json_extract(root.metadata_json,'$.origin') IS 'generated',
+                        head.current_asset_id,version.model_version
                  FROM assets AS version LEFT JOIN assets AS root ON root.id=version.model_id
                  LEFT JOIN model_heads AS head ON head.model_id=root.id WHERE version.id=?1",
                 [id],
@@ -705,9 +718,8 @@ impl Store {
                  WHERE (?1 IS NULL OR name LIKE ?1 ESCAPE '\\')
                    AND (?2 IS NULL OR kind = ?2)
                    AND (NOT ?7 OR assets.model_id=assets.id)
-                   AND (?3 IS NULL
-                        OR (?3 = 1 AND source_asset_id IS NOT NULL)
-                        OR (?3 = 0 AND source_asset_id IS NULL))
+                   AND (?3 IS NULL OR ?3 = (
+                        source_asset_id IS NOT NULL OR json_extract(metadata_json,'$.origin') IS 'generated'))
                    AND (?4 IS NULL OR created_at < ?4 OR (created_at = ?4 AND id > ?5))
                  ORDER BY created_at DESC, id ASC
                  LIMIT ?6",
@@ -1063,7 +1075,7 @@ impl Store {
         conn.execute(
             "UPDATE jobs SET state=CASE state WHEN 'queued' THEN 'cancelled' ELSE 'cancelling' END,updated_at=?2
              WHERE id=?1 AND (state='queued' OR (NOT ?3 AND state='running' AND
-                (operation LIKE 'mesh.%' OR operation IN ('image.generate','uv.unwrap','render.optimize'))))",
+                (operation LIKE 'mesh.%' OR operation IN ('model.generate','image.generate','uv.unwrap','render.optimize'))))",
             params![id, timestamp()?, queued_only],
         )?;
         drop(conn);
@@ -1377,6 +1389,53 @@ mod tests {
         assert_eq!(
             store.get_asset(&imported.id).unwrap().unwrap().sha256,
             imported.sha256
+        );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn generated_models_without_source_assets_have_their_own_lineage_and_filter() {
+        let dir = temp_dir();
+        let store = Store::open(&dir).unwrap();
+        let document = br#"{"asset":{"version":"2.0"}} "#;
+        let mut bytes = b"glTF".to_vec();
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&((20 + document.len()) as u32).to_le_bytes());
+        bytes.extend_from_slice(&(document.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"JSON");
+        bytes.extend_from_slice(document);
+
+        let imported = store.import_asset("imported.glb", &bytes).unwrap();
+        let generated = store
+            .import_generated_asset("generated.glb", &bytes, None, json!({"input_mode": "text"}))
+            .unwrap();
+        assert!(generated.source_asset_id.is_none());
+        assert!(generated.model.as_ref().unwrap().generated);
+        assert_eq!(generated.model_version, Some(1));
+        assert_eq!(generated.artifacts[0].kind, "derived");
+        let edited = store
+            .import_derived_asset("edited.glb", &bytes, &generated.id, json!({}))
+            .unwrap();
+        assert_eq!(edited.model.as_ref().unwrap().id, generated.id);
+        assert!(edited.model.as_ref().unwrap().generated);
+        assert_eq!(edited.model_version, Some(2));
+        for (generated_only, expected) in [(true, &edited.id), (false, &imported.id)] {
+            let page = store
+                .list_models_page(10, None, None, Some(generated_only))
+                .unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(&page.items[0].id, expected);
+        }
+        let job = store
+            .create_job("model.generate", None, &json!({"input_mode":"text"}))
+            .unwrap();
+        store
+            .update_job(&job.id, JobState::Running, 5, None, None)
+            .unwrap();
+        assert_eq!(
+            store.cancel_job(&job.id).unwrap().state,
+            JobState::Cancelling
         );
         drop(store);
         fs::remove_dir_all(dir).unwrap();

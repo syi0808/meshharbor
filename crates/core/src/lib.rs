@@ -26,7 +26,11 @@ mod store;
 mod uv_bootstrap;
 
 pub use cuda_runtime::Pixal3dCudaRuntimeManager;
-pub use generation::{GenerationOptions, GenerationResult, Pixal3dMlxRuntime, RuntimeReadiness};
+pub use generation::{
+    GenerationInput, GenerationInputMode, GenerationOptions, GenerationResult,
+    IMAGE_GENERATION_OPERATION, MODEL_GENERATION_OPERATION, Pixal3dMlxRuntime, RuntimeReadiness,
+    is_generation_operation,
+};
 pub use generation_views::{
     GenerationReference, GenerationViewMode, OrbitCamera, PosedGenerationInput,
 };

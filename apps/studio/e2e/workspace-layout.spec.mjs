@@ -65,6 +65,53 @@ test('the tool panel stays docked on desktop and stacks on mobile while inventor
   expect(await page.locator('html').evaluate(element => element.scrollWidth)).toBe(390);
 });
 
+test('a backend can advertise text input without requiring an image asset', async ({ page, studioOrigin }) => {
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
+    platform: 'macos', status: 'ready_for_mesh_operations',
+    model_catalog: [
+      { id: 'image-fixture', title: 'Image fixture', backend_ids: ['image-fixture'] },
+      { id: 'dual-fixture', title: 'Dual fixture', backend_ids: ['dual-fixture'] },
+    ],
+    model_backends: [
+      { id: 'image-fixture', ready: true, generation: { id: 'image-fixture', input_modes: ['image'], parameters: [] } },
+      { id: 'dual-fixture', ready: true, generation: { id: 'dual-fixture', input_modes: ['image', 'text'], parameters: [] } },
+    ],
+  } }));
+  await page.route('**/api/v1/operations', route => route.fulfill({ json: [{ id: 'model.generate', implemented: true }] }));
+  await page.route('**/api/v1/jobs', route => {
+    expect(route.request().postDataJSON()).toEqual({
+      operation: 'model.generate',
+      input: { kind: 'text', prompt: 'a ceramic cup' },
+      parameters: { backend_id: 'dual-fixture' },
+    });
+    return route.fulfill({ status: 202, json: {
+      id: 'text-fixture-job', operation: 'model.generate', state: 'queued', progress: 0,
+      parameters: { input_mode: 'text' }, input_asset_id: null,
+      created_at: String(Date.now()), updated_at: String(Date.now()),
+    } });
+  });
+  await page.goto(studioOrigin);
+  const form = page.getByRole('complementary', { name: 'Generate model' });
+  const model = form.getByLabel('Generation model', { exact: true });
+  const input = form.getByLabel('Input type');
+  const prompt = form.getByLabel('Text prompt');
+  const submit = form.getByRole('button', { name: 'Generate 3D' });
+  await expect(model).toHaveValue('image-fixture');
+  await expect(input).toHaveCount(0);
+  await expect(prompt).toHaveCount(0);
+  await model.selectOption('dual-fixture');
+  await expect(input.locator('option')).toHaveText(['Image', 'Text']);
+  await input.selectOption('text');
+  await expect(form.getByRole('button', { name: 'Choose reference' })).toHaveCount(0);
+  await expect(submit).toBeDisabled();
+  await prompt.fill('가'.repeat(1366));
+  await expect(prompt).toHaveAttribute('aria-invalid', 'true');
+  await expect(submit).toBeDisabled();
+  await prompt.fill('  a ceramic cup  ');
+  await submit.click();
+  await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Text-to-3D generation queued.')).toBeVisible();
+});
+
 test('generation uses its explicit reference and leaves the inspected GLB selected until review', async ({ page, studioOrigin }) => {
   const parameters = (textureOptions, seedDefault) => [
     { id: 'resolution', kind: 'fixed', label: 'Geometry resolution', description: 'Fixed by the profile.', default: 512 },
@@ -94,7 +141,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
     },
   }));
   await page.route('**/api/v1/operations', route => route.fulfill({
-    json: [{ id: 'image.generate', implemented: true }, { id: 'mesh.simplify', implemented: true }],
+    json: [{ id: 'model.generate', implemented: true }, { id: 'mesh.simplify', implemented: true }],
   }));
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
@@ -103,6 +150,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   const generate = page.getByRole('complementary', { name: 'Generate model' });
   const model = generate.getByRole('combobox', { name: 'Generation model', exact: true });
   await expect(model.locator('option')).toHaveText(['Pixal3D', 'Second model']);
+  await expect(generate.getByLabel('Text prompt')).toHaveCount(0);
   expect((await model.boundingBox()).y).toBeLessThan((await generate.getByRole('region', { name: 'Reference image' }).boundingBox()).y);
   await expect(generate.getByRole('button', { name: 'Generate 3D' })).toBeDisabled();
   const active = await chooseFile(page, page.getByRole('button', { name: 'Open GLB', exact: true }), 'inspected.glb',
@@ -174,7 +222,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   };
   const job = {
     id: 'job_generation_layout',
-    operation: 'image.generate',
+    operation: 'model.generate',
     input_asset_id: reference.id,
     created_at: String(Date.now()),
     updated_at: String(Date.now()),
@@ -182,8 +230,8 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   let generationState = 'queued';
   await page.route('**/api/v1/jobs', async route => {
     const payload = route.request().postDataJSON();
-    expect(payload.operation).toBe('image.generate');
-    expect(payload.input.asset_id).toBe(reference.id);
+    expect(payload.operation).toBe('model.generate');
+    expect(payload.input).toEqual({ kind: 'image', asset_id: reference.id });
     expect(payload.parameters).toEqual({ backend_id: 'pixal3d-cuda', resolution: 512, texture_size: 2048, target_faces: 50001, seed: 0, tuning: { texture_steps: 18 } });
     await route.fulfill({ status: 202, json: { ...job, state: 'queued', progress: 0 } });
   });
@@ -233,7 +281,7 @@ test('generation can be queued, reordered and selected before its preview is rea
     model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', backend_ids: ['pixal3d-mlx'] }],
     model_backends: [{ id: 'pixal3d-mlx', ready: true, installable: true, generation: { id: 'pixal3d-mlx', parameters: [] } }],
   } }));
-  await page.route('**/api/v1/operations', route => route.fulfill({ json: [{ id: 'image.generate', implemented: true }] }));
+  await page.route('**/api/v1/operations', route => route.fulfill({ json: [{ id: 'model.generate', implemented: true }] }));
   await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: jobs }));
   await page.route('**/api/v1/jobs/generation-queue', route => {
     if (route.request().method() === 'POST') {
@@ -247,7 +295,7 @@ test('generation can be queued, reordered and selected before its preview is rea
     const request = route.request().postDataJSON();
     const timestamp = String(Date.now());
     const job = {
-      id: `generation-${jobs.length + 1}`, operation: 'image.generate', state: 'queued', progress: 0,
+      id: `generation-${jobs.length + 1}`, operation: 'model.generate', state: 'queued', progress: 0,
       input_asset_id: request.input.asset_id, input_asset_name: references.get(request.input.asset_id),
       created_at: timestamp, updated_at: timestamp,
     };
@@ -347,7 +395,7 @@ test('generation switches between posed presets and maps each custom image to it
     multiviewInstalled = true;
     return route.fulfill({ json: { ...installJob, state: 'succeeded', progress: 100 } });
   });
-  await page.route('**/api/v1/operations', route => route.fulfill({ json: [{ id: 'image.generate', implemented: true }] }));
+  await page.route('**/api/v1/operations', route => route.fulfill({ json: [{ id: 'model.generate', implemented: true }] }));
   await page.goto(studioOrigin);
   await page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'New model' }).click();
   const form = page.getByRole('complementary', { name: 'Generate model' });
@@ -397,8 +445,8 @@ test('generation switches between posed presets and maps each custom image to it
   await submit.click();
   const payload = (await request).postDataJSON();
   expect(payload).toEqual({
-    operation: 'image.generate',
-    input: { asset_id: uploads[0].id },
+    operation: 'model.generate',
+    input: { kind: 'image', asset_id: uploads[0].id },
     parameters: {
       backend_id: 'pixal3d-cuda',
       tuning: { structure_steps: 16 },

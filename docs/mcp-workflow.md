@@ -9,7 +9,7 @@ diagnostics go to stderr. For mesh-only work, start with `list_operations`,
 
 The managed setup below is for Pixal3D. For TRELLIS.2 or TripoSG, follow the
 [manual runtime guide](external-generation-runtimes.md) locally, then pass
-its explicit backend ID to `start_image_generation`.
+its explicit backend ID to `start_model_generation`.
 
 ## Prepare and generate
 
@@ -36,9 +36,12 @@ its explicit backend ID to `start_image_generation`.
    checks existing gated DINOv3 access before fetching checkpoints. Poll with
    `get_job`.
 7. For MLX, call `convert_pixal3d_mlx_naf` and poll its job. For either backend,
-   call `start_image_generation` with the imported `asset_id` and optional
-   `backend_id` (`auto`, `pixal3d-mlx`, or `pixal3d-cuda`).
-8. Poll `get_job` until `image.generate` succeeds. Its result contains the
+   call `start_model_generation` with `input: { "kind": "image", "asset_id": "..." }`
+   and an optional `parameters.backend_id` (`auto`, `pixal3d-mlx`, or `pixal3d-cuda`).
+   Check `runtime_doctor` for each backend's `generation.input_modes`. Current
+   backends accept only images; the compatibility tool `start_image_generation`
+   still accepts the original flat image arguments.
+8. Poll `get_job` until the generation job succeeds. Its result contains the
    derived mesh `asset_id`.
 9. Call `export_glb` with that mesh asset ID and an absolute `.glb` output path
    on the computer running the local MCP server.

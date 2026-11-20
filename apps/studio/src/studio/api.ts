@@ -1,4 +1,4 @@
-import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, GenerationParameters, HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, MeshOperationId, ModelVersionPage, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
+import type { ApiErrorBody, Artifact, Asset, AssetKind, AssetPage, GenerationInput, GenerationParameters, HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, MeshOperationId, ModelVersionPage, Operation, RetopologyPreflight, RuntimeBackendId, RuntimeInfo } from './types';
 
 export const MAX_ASSET_IMPORT_FILES = 10;
 export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
@@ -224,9 +224,17 @@ export function cancelJobNotice(job: Job): string {
 export function isJobCancellable(job: Job | null): boolean {
   if (!job) return false;
   return job.state === 'queued' || (job.state === 'running' && (
-    job.operation === 'image.generate' || job.operation.startsWith('mesh.')
+    isGenerationOperation(job.operation) || job.operation.startsWith('mesh.')
     || job.operation === 'uv.unwrap' || job.operation === 'render.optimize'
   ));
+}
+
+export function isGenerationOperation(operation: string): boolean {
+  return operation === 'model.generate' || operation === 'image.generate';
+}
+
+export function generationLabel(inputMode?: 'text' | 'image'): string {
+  return inputMode === 'text' ? 'Text-to-3D generation' : 'Image-to-3D generation';
 }
 
 export function isActiveJob(
@@ -328,8 +336,8 @@ interface JobReportSchema {
 const MAX_REPORT_LIST_ITEMS = 256;
 
 const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
-  'image.generate': {
-    title: 'Image-to-3D generation',
+  'model.generate': {
+    title: '3D generation',
     metrics: [
       { key: 'backend_id', label: 'Backend', formatter: 'text' },
       { key: 'seed', label: 'Seed', formatter: 'count' },
@@ -525,11 +533,12 @@ function readReportWarnings(object: Record<string, unknown> | null, prefix = '')
 /** Turn known operation reports into a curated, text-only card model. */
 export function jobResultCardModel(job: Job | null | undefined): JobReportCardModel | null {
   if (!job || job.state !== 'succeeded') return null;
-  const schema = JOB_REPORT_SCHEMAS[job.operation];
+  const generation = isGenerationOperation(job.operation);
+  const schema = JOB_REPORT_SCHEMAS[generation ? 'model.generate' : job.operation];
   if (!schema) return null;
 
   const resultObject = reportObject(job.result);
-  const report = job.operation === 'image.generate' ? resultObject : reportObject(resultObject?.report);
+  const report = generation ? resultObject : reportObject(resultObject?.report);
   const metrics = schema.metrics.map((field) => ({
     label: field.label,
     value: formatReportField(report?.[field.key], field.formatter),
@@ -578,7 +587,7 @@ export function jobResultCardModel(job: Job | null | undefined): JobReportCardMo
   if (warningFormatIssue && warningValues.length === 0) warningsState = 'unavailable';
 
   return {
-    title: schema.title,
+    title: generation ? generationLabel(job.parameters?.input_mode) : schema.title,
     jobId: typeof job.id === 'string' && job.id ? job.id : 'Not reported',
     inputAssetId: typeof job.input_asset_id === 'string' && job.input_asset_id ? job.input_asset_id : null,
     resultAssetId: typeof job.result?.asset_id === 'string' && job.result.asset_id ? job.result.asset_id : null,
@@ -589,6 +598,8 @@ export function jobResultCardModel(job: Job | null | undefined): JobReportCardMo
     warningsState,
     warningsMessage: job.operation === 'image.generate'
       ? 'Image generation does not include a warning list in its saved result.'
+      : generation
+        ? 'Generation does not include a warning list in its saved result.'
       : warningFormatIssue
         ? 'Warning details are missing or malformed in this saved result.'
         : 'Warning list unavailable in this report.',
@@ -828,12 +839,12 @@ export class MeshHarborApi {
     });
   }
 
-  createImageGenerationJob(assetId: string, backendId: string, parameters: GenerationParameters): Promise<Job> {
+  createModelGenerationJob(input: GenerationInput, backendId: string, parameters: GenerationParameters): Promise<Job> {
     return this.request('/api/v1/jobs', {
       method: 'POST',
       body: JSON.stringify({
-        operation: 'image.generate',
-        input: { asset_id: assetId },
+        operation: 'model.generate',
+        input,
         parameters: { ...parameters, backend_id: backendId },
       }),
     });

@@ -8,7 +8,7 @@ use crate::{CoreError, CoreResult};
 pub(crate) const MAX_CUSTOM_VIEWS: usize = 8;
 const PRESET_DISTANCE: f64 = 3.1192049980163574;
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GenerationViewMode {
     Single,
@@ -17,14 +17,14 @@ pub enum GenerationViewMode {
     Custom,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PosedGenerationInput {
     pub mode: GenerationViewMode,
     pub references: Vec<GenerationReference>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationReference {
     pub asset_id: String,
@@ -32,7 +32,7 @@ pub struct GenerationReference {
     pub camera: Option<OrbitCamera>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OrbitCamera {
     pub azimuth_degrees: f64,

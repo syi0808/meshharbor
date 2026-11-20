@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@/components/ui/item';
 import { Spinner } from '@/components/ui/spinner';
-import { isActiveJob, isJobCancellable, type MeshHarborApi } from './api';
+import { isActiveJob, isGenerationOperation, isJobCancellable, type MeshHarborApi } from './api';
 import { HelpTip } from './HelpTip';
 import { JOB_PAGE_SIZE, formatDuration, generationJobName, jobStage, jobTiming, lastGenerationStage, mergeJobRecords } from './job-activity';
 import { JobListItem } from './JobListItem';
@@ -93,7 +93,7 @@ export function JobsDashboard({ api, jobs, localActivities, focusedJobId, connec
   const queueEditing = useRef(false);
   const heading = useRef<HTMLHeadingElement>(null);
   const focusRow = useRef<HTMLDivElement>(null);
-  const queueById = new Map(jobs.filter(job => job.operation === 'image.generate' && job.state === 'queued').map(job => [job.id, job]));
+  const queueById = new Map(jobs.filter(job => isGenerationOperation(job.operation) && job.state === 'queued').map(job => [job.id, job]));
   const hasQueuedGeneration = queueById.size > 0;
   const queued = queue.flatMap(id => { const job = queueById.get(id); return job ? [job] : []; });
   const queuedIds = new Set(queued.map(job => job.id));

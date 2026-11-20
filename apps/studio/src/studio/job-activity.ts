@@ -1,4 +1,4 @@
-import { isActiveJob } from './api';
+import { isActiveJob, isGenerationOperation } from './api';
 import type { Job } from './types';
 
 export const JOB_PAGE_SIZE = 20;
@@ -49,12 +49,12 @@ export function jobStage(job: Job): string {
   switch (job.state) {
     case 'queued': return 'Waiting for an engine slot';
     case 'validating': return 'Finalizing result';
-    case 'cancelling': return job.operation === 'image.generate' ? 'Stopping generation worker' : 'Stopping at a safe checkpoint';
+    case 'cancelling': return isGenerationOperation(job.operation) ? 'Stopping generation worker' : 'Stopping at a safe checkpoint';
     case 'succeeded': return 'Finished';
     case 'failed': return 'Stopped with an error';
     case 'cancelled': return 'Cancelled';
     case 'running':
-      if (job.operation === 'image.generate') return lastGenerationStage(job) ?? 'Preparing generation';
+      if (isGenerationOperation(job.operation)) return lastGenerationStage(job) ?? 'Preparing generation';
       if (job.operation.includes('install_models')) return 'Checking cache and downloading weights';
       if (job.operation.endsWith('install_multiview')) return 'Checking cache and downloading multiview weights';
       if (job.operation.endsWith('_setup') || job.operation.endsWith('.setup')) return 'Setting up local runtime';
@@ -64,7 +64,7 @@ export function jobStage(job: Job): string {
 }
 
 export function lastGenerationStage(job: Job): string | undefined {
-  return job.operation === 'image.generate' && job.stage ? generationStages[job.stage] : undefined;
+  return isGenerationOperation(job.operation) && job.stage ? generationStages[job.stage] : undefined;
 }
 
 function timestamp(value: string | null | undefined): number | null {

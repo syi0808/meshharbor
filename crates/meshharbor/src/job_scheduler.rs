@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use meshharbor_core::CoreError;
+use meshharbor_core::{CoreError, is_generation_operation};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, watch};
 
 struct PendingJob {
@@ -34,7 +34,7 @@ impl JobScheduler {
             .expect("job queue mutex poisoned")
             .push_back(PendingJob {
                 id: id.into(),
-                generation: operation == "image.generate",
+                generation: is_generation_operation(operation),
             });
         self.changes.send_replace(());
     }
@@ -128,7 +128,7 @@ mod tests {
         let busy = scheduler.try_acquire_owned().unwrap();
         scheduler.enqueue("first", "image.generate");
         scheduler.enqueue("mesh", "mesh.cleanup");
-        scheduler.enqueue("second", "image.generate");
+        scheduler.enqueue("second", "model.generate");
         let claim = |id| {
             let scheduler = scheduler.clone();
             tokio::spawn(async move { scheduler.acquire(id).await.unwrap() })

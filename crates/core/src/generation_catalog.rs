@@ -4,7 +4,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    CoreError, CoreResult, GenerationOptions, external_generation, generation_tuning,
+    CoreError, CoreResult, GenerationInput, GenerationInputMode, GenerationOptions,
+    external_generation, generation_tuning,
     generation_views::{GenerationViewMode, MAX_CUSTOM_VIEWS},
 };
 
@@ -105,6 +106,7 @@ pub(crate) struct GenerationProfile {
     parameters: Vec<Value>,
     #[serde(skip)]
     core_parameters: &'static [Parameter],
+    pub(crate) input_modes: &'static [GenerationInputMode],
     view_modes: &'static [GenerationViewMode],
     max_views: usize,
 }
@@ -155,6 +157,7 @@ fn profile(
             .chain(generation_tuning::definitions(id))
             .collect(),
         core_parameters,
+        input_modes: &[GenerationInputMode::Image],
         view_modes,
         max_views,
     }
@@ -189,6 +192,33 @@ impl Default for GenerationOptions {
 impl GenerationOptions {
     pub fn validate(&self) -> CoreResult<()> {
         self.validated_profile().map(|_| ())
+    }
+
+    pub(crate) fn validate_input(
+        &self,
+        input: &GenerationInput,
+    ) -> CoreResult<&'static GenerationProfile> {
+        input.validate()?;
+        if input.mode() == GenerationInputMode::Text && self.view_input.is_some() {
+            return Err(CoreError::InvalidInput(
+                "Posed views require an image input.".into(),
+            ));
+        }
+        let profile = self.validated_profile()?;
+        if !profile.input_modes.contains(&input.mode()) {
+            let input_name = match input.mode() {
+                GenerationInputMode::Image => "image-to-3D",
+                GenerationInputMode::Text => "text-to-3D",
+            };
+            return Err(CoreError::OperationUnavailable(format!(
+                "{} does not support {input_name} input.",
+                profile.id
+            )));
+        }
+        if let Some(asset_id) = input.asset_id() {
+            self.validate_primary_image(asset_id)?;
+        }
+        Ok(profile)
     }
 
     pub(crate) fn validated_profile(&self) -> CoreResult<&'static GenerationProfile> {
@@ -267,6 +297,34 @@ mod tests {
     use super::*;
     use crate::generation_views::{GenerationReference, OrbitCamera, PosedGenerationInput};
     use serde_json::json;
+
+    #[test]
+    fn current_profiles_advertise_only_image_inputs() {
+        for profile in PROFILES.iter() {
+            assert_eq!(
+                serde_json::to_value(profile).unwrap()["input_modes"],
+                json!(["image"])
+            );
+            let options = GenerationOptions {
+                backend_id: profile.id.into(),
+                ..GenerationOptions::default()
+            };
+            assert!(
+                options
+                    .validate_input(&GenerationInput::Image {
+                        asset_id: "asset_demo".into()
+                    })
+                    .is_ok()
+            );
+            let text = GenerationInput::Text {
+                prompt: "a ceramic cup".into(),
+            };
+            assert!(matches!(
+                options.validate_input(&text),
+                Err(CoreError::OperationUnavailable(_))
+            ));
+        }
+    }
 
     #[test]
     fn catalog_defaults_are_accepted_by_each_profile() {

@@ -16,14 +16,18 @@ export function readyGenerationProfiles(runtime: RuntimeInfo | null): Generation
       model.backend_ids.includes(backend.id) && backend.ready && backend.generation?.id === backend.id);
     const selected = backends.find(backend => backend.id === preferred) ?? backends[0];
     const profile = selected?.generation;
-    return profile ? [{
+    if (!profile) return [];
+    const modes = profile.input_modes === undefined ? (['image'] as const) : profile.input_modes;
+    if (!modes.length) return [];
+    return [{
       ...profile,
       modelId: model.id,
       label: model.title,
+      input_modes: [...modes],
       view_modes: profile.view_modes ?? ['single'],
       max_views: profile.max_views ?? 1,
       multiviewReady: selected.multiview_ready === true,
-    }] : [];
+    }];
   });
 }
 
