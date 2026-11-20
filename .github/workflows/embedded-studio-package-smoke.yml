@@ -51,19 +51,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Install pinned Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 24.22.3
-
-      - name: Install locked Studio dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
-        working-directory: apps/studio
-
-      - name: Build Studio production bundle
-        run: npm run build
-        working-directory: apps/studio
-
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759
 
@@ -85,7 +72,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Pinned NASM version check failed.' }
           $nasmDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Build release CLI with embedded Studio
+      - name: Build release CLI with the checked-in Studio bundle
         env:
           CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
         run: cargo build --locked --release --package meshharbor --bin meshharbor
@@ -101,16 +88,32 @@ jobs:
           CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
         run: cargo test --locked --release --package meshharbor --bin meshharbor cli_output_paths_reject_windows_case_only_aliases
 
+      - name: Install pinned Node.js for smoke tests
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.22.3
+
       - name: Launch binary and verify embedded Studio assets
         shell: bash
         env:
           MESHHARBOR_BINARY: target/release/meshharbor${{ runner.os == 'Windows' && '.exe' || '' }}
         run: node scripts/smoke_embedded_studio.mjs "$MESHHARBOR_BINARY"
 
+      - name: Install pinned pnpm for browser tests
+        if: runner.os == 'Linux'
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
+        with:
+          package_json_file: apps/studio/package.json
+
+      - name: Install locked browser test dependencies
+        if: runner.os == 'Linux'
+        working-directory: apps/studio
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
       - name: Install headless Chromium for Studio regression
         if: runner.os == 'Linux'
         working-directory: apps/studio
-        run: npx --no playwright install --with-deps --only-shell chromium
+        run: pnpm exec playwright install --with-deps --only-shell chromium
 
       - name: Verify Studio workflows in Chromium
         id: studio_browser_regression
@@ -118,7 +121,7 @@ jobs:
         working-directory: apps/studio
         env:
           MESHHARBOR_BINARY: ${{ github.workspace }}/target/release/meshharbor
-        run: npm run test:e2e
+        run: pnpm run test:e2e
 
       - name: Collect Studio regression diagnostics
         if: failure() && steps.studio_browser_regression.outcome == 'failure'

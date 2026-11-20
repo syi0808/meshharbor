@@ -6,7 +6,7 @@ The root [MIT license](LICENSE) covers MeshHarbor's own code and documentation. 
 | --- | --- |
 | Pixal3D CUDA and MLX source snapshots | [Pixal3D notices](runtimes/pixal3d/THIRD-PARTY-NOTICES.md), [upstream license texts](runtimes/pixal3d/THIRD-PARTY-LICENSES/), and [pinned source inventory](docs/pixal3d-source-inventory.json). Port MIT notices do not override the separate terms for DINOv3 or other derived components. |
 | Vendored xatlas and stb headers | [Native source notices](crates/xatlas-sys/THIRD_PARTY_NOTICES.md) and the [xatlas license](crates/xatlas-sys/vendor/xatlas/LICENSE). |
-| Studio UI and bundled assets | [Studio notices](apps/studio/THIRD-PARTY-NOTICES.md) for shadcn/ui, Phosphor, Inter, and Noto Sans. See also the [npm lockfile](apps/studio/package-lock.json). |
+| Studio UI and bundled assets | [Studio notices](apps/studio/THIRD-PARTY-NOTICES.md) for the checked-in client. See also the [pnpm lockfile](apps/studio/pnpm-lock.yaml). |
 | Rust and native build dependencies | [Cargo lockfile](Cargo.lock) and [licensing status](docs/licensing-status.md). |
 | External or separately downloaded components | [TRELLIS.2 and TripoSG terms](docs/external-generation-runtimes.md#choose-a-backend), [QuadriFlow candidate notes](docs/retopology-candidate.md#upstream-and-licensing), and [model/runtime licensing status](docs/licensing-status.md). No model weights or QuadriFlow executable are bundled. |
 

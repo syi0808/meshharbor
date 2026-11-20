@@ -3,37 +3,38 @@
 [![MIT license for first-party code](https://img.shields.io/badge/first--party%20license-MIT-blue)](LICENSE)
 [![Embedded Studio smoke](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml/badge.svg)](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml)
 
-MeshHarbor is a local workbench for inspecting, editing, and exporting 3D assets. Use the browser-based Studio for interactive work, or drive the same Rust engine through the CLI, a loopback REST API, or stdio MCP.
+**Generate 3D assets locally with open-weight models.**
 
-- **Inspect and edit GLB files.** Preview models, simplify meshes, clean degenerate faces, or separate connected parts. Compare before and after, revisit earlier versions, and export without overwriting the original.
-- **Prepare assets for rendering.** Reorder geometry, export meshopt-compressed GLBs, or rebuild a UV atlas and rebake supported embedded textures from the same mesh.
-- **Try local image-to-3D.** Pixal3D has opt-in Apple Silicon (MLX) and Linux/NVIDIA (CUDA) profiles. TRELLIS.2 and TripoSG require manually provisioned runtimes. Model weights are not bundled.
+MeshHarbor is a local-first alternative to [Tripo](https://www.tripo3d.ai/) and [Meshy](https://www.meshy.ai/) for image-to-3D. After you set up a runtime and download its weights, generation runs on your hardware without sending reference images to a hosted generation service.
+
+- **Generate from images.** Run Pixal3D on Apple Silicon (MLX) or Linux with NVIDIA (CUDA). Experimental TRELLIS.2 and TripoSG integrations require manual setup.
+- **Refine and export GLBs.** Inspect, simplify, clean, split connected parts, or compress meshes. Compare revisions and export without overwriting the original. Supported textured meshes can get a new UV atlas with a same-mesh rebake.
+- **Work in Studio or automate locally.** Use the browser workbench, CLI, loopback REST API, or stdio MCP through the same Rust engine.
 
 ![MeshHarbor Studio with the generation panel open and the Surveyor rover in the 3D viewport](docs/images/studio-workbench.png)
 
 *The Studio generation screen with an imported example GLB.*
 
-**Status:** Early source build. There is no official installer or binary release. Mesh editing works without Python, model weights, or a Hugging Face account. Mesh operations support specific static GLB layouts; generic high-to-low baking is not implemented, and the experimental QuadriFlow operation is unavailable because there is no approved sidecar.
+**Status:** Early source build, not feature parity with hosted services. No official installer, binary release, or bundled model weights. Some checkpoints require gated access and have separate usage terms. Mesh editing needs no Python or model setup. Generic high-to-low baking and QuadriFlow retopology are not available.
 
 ## Quick start
 
-Install Rust/Cargo 1.88 or later, a C/C++ toolchain, and Node.js 24 for Studio. See the [build and smoke guide](docs/embedded-studio-package-smoke.md) for pinned CI versions and additional Windows build requirements.
+Install Rust/Cargo 1.88 or later and a C/C++ toolchain. The checkout includes the built Studio client, so you don't need Node.js, pnpm, or a separate frontend build to run it. See the [build and smoke guide](docs/embedded-studio-package-smoke.md) for additional Windows build requirements.
 
-Clone the repository, build Studio, then start the local server:
+Clone the repository and start the local server:
 
 ```sh
 git clone https://github.com/syi0808/meshharbor.git
 cd meshharbor
-cd apps/studio
-npm ci --ignore-scripts --no-audit --no-fund
-npm run build
-cd ../..
 cargo run --locked --bin meshharbor -- serve --listen 127.0.0.1:7432
 ```
 
-Open **http://127.0.0.1:7432**, choose **Inventory → 3D models → Open GLB**, and select a local static GLB. Try **Optimize**, compare **Original** and **Result**, then use **Export GLB**. The default server is single-user and loopback-only; do not expose it through a public proxy.
+Open **http://127.0.0.1:7432**. The server is single-user and loopback-only; do not expose it through a public proxy.
 
-The Studio bundle is embedded at Rust build time. For the CLI alone, skip the npm steps and run `cargo run --locked --bin meshharbor -- --help`.
+- **Generate a model:** Follow the [Pixal3D MLX](docs/pixal3d-mlx-manual-runtime.md) or [Pixal3D CUDA](docs/pixal3d-cuda-managed-runtime.md) setup for your hardware. Once the model is ready, open **New model**, choose a reference image, and click **Generate 3D**.
+- **Try Studio without a model download:** Select **Inventory → 3D models → Open GLB**. Use **Optimize**, compare **Original** and **Result**, then **Export GLB**.
+
+For the CLI, run `cargo run --locked --bin meshharbor -- --help`.
 
 ## Documentation
 

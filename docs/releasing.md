@@ -6,7 +6,7 @@ MeshHarbor is currently distributed as a source checkout. A successful embedded 
 
 - Confirm the first-party [MIT grant](../LICENSE) and preserve all [third-party notices](../THIRD-PARTY-NOTICES.md). Review the exact vendored source scope against [source provenance](source-provenance.md), especially DINOv3-derived code. If the terms or lineage of a component cannot be confirmed, resolve them or exclude the affected files from the distribution, including any Git history distributed with it.
 - Scan the intended Git history and release files for secrets, user data, and unlicensed assets. Check absolute paths and identifiers in sample logs and generated evidence as well as tracked files.
-- Build and start Studio from a clean checkout using the public instructions. Confirm the [security reporting](../SECURITY.md) link works for a non-maintainer by enabling [private vulnerability reporting](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/configure-vulnerability-reporting/configure-for-a-repository).
+- Build and start Studio from a clean checkout without building the frontend. Rebuild separately from the frozen pnpm lockfile and confirm the checked-in bundle matches. Confirm the [security reporting](../SECURITY.md) link works for a non-maintainer by enabling [private vulnerability reporting](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/configure-vulnerability-reporting/configure-for-a-repository).
 
 ## Executables and installers
 

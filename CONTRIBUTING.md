@@ -4,17 +4,22 @@ Use [GitHub Issues](https://github.com/syi0808/meshharbor/issues) for bugs, feat
 
 ## Develop locally
 
-Follow the [quick start](README.md#quick-start) for an embedded Studio build or the [Studio development guide](apps/studio/README.md#local-development) for live UI changes. The core test suite does not need model weights, a model-host account, or a GPU.
+Follow the [quick start](README.md#quick-start) to run the checked-in Studio bundle without a JavaScript toolchain. For live UI changes, see the [Studio development guide](apps/studio/README.md#local-development). The core test suite does not need model weights, a model-host account, or a GPU.
 
 From the repository root:
 
 ```sh
 cargo fmt --all -- --check
 cargo test --locked --workspace
+```
+
+For Studio changes, use Node.js 24 and the pnpm version pinned in `apps/studio/package.json`:
+
+```sh
 cd apps/studio
-npm ci --ignore-scripts --no-audit --no-fund
-npm test
-npm run build
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm test
+pnpm build
 ```
 
 For changes to rendering, the Studio/API boundary, or packaging, see the [browser regression](apps/studio/README.md#browser-regression) and [embedded Studio smoke tests](docs/embedded-studio-package-smoke.md).
@@ -23,6 +28,7 @@ For changes to rendering, the Studio/API boundary, or packaging, see the [browse
 
 - Keep the change focused. Explain the problem, the behavior change, and the checks you ran.
 - Add focused tests and update user-facing docs when behavior changes. Use synthetic fixtures or samples that can be redistributed, with attribution where required.
+- If a Studio change affects the bundle, commit both the source and the regenerated `apps/studio/dist` files, including removed and added hashed assets. CI rebuilds the bundle and checks it against Git.
 - Keep credentials, local data directories, private logs, model weights, and confidential assets out of commits and attachments.
 - For a new dependency or vendored file, record its source, revision, and license, and update the relevant [notice](THIRD-PARTY-NOTICES.md). Do not modify pinned Pixal3D snapshots without updating the [bundle and provenance records](docs/source-provenance.md#runtime-bundle-build-allowlist).
 - Submit only material you are authorized to contribute. Project contributions are under the [MIT license](LICENSE); third-party material retains its own terms.

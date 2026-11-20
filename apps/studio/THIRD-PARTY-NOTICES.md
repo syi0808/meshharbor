@@ -1,5 +1,7 @@
 # Studio third-party assets
 
+See [the bundled dependency license texts](THIRD-PARTY-LICENSES.txt) for the other third-party modules included in `dist`. Keep both notice files with the bundle when redistributing it.
+
 ## Inter and Noto Sans variable fonts
 
 Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter) Inter-Italic[opsz,wght].ttf: Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)

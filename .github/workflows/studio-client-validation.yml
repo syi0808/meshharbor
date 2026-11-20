@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - feat/studio-npm-lockfile
     paths:
       - "apps/studio/**"
       - ".github/workflows/studio-client-validation.yml"
@@ -20,20 +19,29 @@ permissions:
 
 jobs:
   verify-studio:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Install Node.js 24
+      - name: Install pinned Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 24
+          node-version: 24.22.3
+      - name: Install pinned pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
+        with:
+          package_json_file: apps/studio/package.json
       - name: Install locked Studio dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: pnpm install --frozen-lockfile --ignore-scripts
         working-directory: apps/studio
       - name: Run Studio API and security tests
-        run: npm test
+        run: pnpm test
         working-directory: apps/studio
-      - name: Build Studio bundle
-        run: npm run build
+      - name: Rebuild Studio bundle
+        run: pnpm build
         working-directory: apps/studio
+      - name: Verify the checked-in bundle is current
+        run: |
+          git ls-files --error-unmatch apps/studio/dist/index.html apps/studio/dist/.vite/manifest.json
+          git status --short --untracked-files=all -- apps/studio/dist
+          test -z "$(git status --porcelain --untracked-files=all -- apps/studio/dist)"

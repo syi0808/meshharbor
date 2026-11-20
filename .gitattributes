@@ -6,3 +6,5 @@ runtimes/pixal3d/cuda/managed/** -text
 runtimes/pixal3d/cuda/upstream/** -text
 runtimes/pixal3d/mlx/managed/** -text
 runtimes/pixal3d/mlx/upstream/** -text
+apps/studio/dist/** -text linguist-generated=true
+apps/studio/dist/assets/*.js -whitespace

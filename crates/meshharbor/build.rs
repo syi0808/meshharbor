@@ -15,7 +15,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support/studio_assets.rs");
-    for path in ["package.json", "package-lock.json", "vite.config.ts"] {
+    for path in ["package.json", "pnpm-lock.yaml", "vite.config.ts"] {
         emit_rerun_if_changed(&manifest_dir, &studio_dir.join(path));
     }
 

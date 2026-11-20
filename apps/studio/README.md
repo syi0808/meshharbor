@@ -50,11 +50,11 @@ Use **Stop job** in the workbench or Dashboard to cancel queued jobs and running
    cargo run --bin meshharbor -- serve --listen 127.0.0.1:7432
    ```
 
-2. In `apps/studio`, install the pinned JavaScript dependencies from the official npm registry, then run:
+2. Use Node.js 24 and the pnpm version pinned in `package.json`. In `apps/studio`, install the locked dependencies and start the dev server:
 
    ```sh
-   npm ci --ignore-scripts --no-audit --no-fund
-   npm run dev
+   pnpm install --frozen-lockfile --ignore-scripts
+   pnpm dev
    ```
 
 3. Open `http://127.0.0.1:5173`. Studio connects to the local engine automatically without an engine API token. The Vite development server accepts API proxy requests only from that exact local Studio origin and forwards the dashboard marker to the Rust loopback API.
@@ -76,32 +76,33 @@ The first-time flow is **Models → set up environment → Connections → sign 
 
 ## Build
 
+You do not need to build the client to use Studio from a checkout. Rebuild it only when changing the frontend:
+
 ```sh
-npm run build
+pnpm build
 ```
 
-Vite writes static files to `apps/studio/dist`. The Rust build script embeds that directory into the MeshHarbor binary, and `meshharbor serve` serves it at `/` on its loopback listener. Rebuild the Rust binary after rebuilding the client. If no `dist` is present at Rust build time, `/` returns a local “Studio assets are not built” notice; it does not start a separate UI server. This is not yet a cross-platform desktop installer.
+Vite writes the production assets and their manifest to `apps/studio/dist`. Commit the regenerated bundle alongside frontend changes. The Rust build script embeds the checked-in bundle, and `meshharbor serve` serves it at `/` on its loopback listener. Rebuild the Rust binary to embed newly rebuilt client assets.
 
-Run `npm run test:security` to exercise the Vite middleware's anti-framing headers, exact local-origin guard, and rejection of originless writes/cross-origin preflights/POSTs/untrusted Hosts.
+When changing bundled dependencies, update the [Studio notices](THIRD-PARTY-NOTICES.md) and [third-party license texts](THIRD-PARTY-LICENSES.txt) for the resulting bundle.
+
+Run `pnpm run test:security` to exercise the Vite middleware's anti-framing headers, exact local-origin guard, and rejection of originless writes/cross-origin preflights/POSTs/untrusted Hosts.
 
 The preview uses Three.js and the browser's WebGL implementation. No remote fonts, images, or model-viewer scripts are loaded by the Studio page.
 
 ## Browser regression
 
-From the repository root, build the client before compiling the binary:
+From the repository root, build the binary with the checked-in bundle and install the browser test tools:
 
 ```sh
-cd apps/studio
-npm ci --ignore-scripts --no-audit --no-fund
-npm run build
-npx --no playwright install --only-shell chromium
-cd ../..
 cargo build --locked --package meshharbor --bin meshharbor
 cd apps/studio
-npm run test:e2e
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm exec playwright install --only-shell chromium
+pnpm run test:e2e
 ```
 
-On Linux, add `--with-deps` to the Chromium install command if system libraries are missing. Set `MESHHARBOR_BINARY` to test a different embedded build. The test starts and stops a loopback engine with a temporary data directory; no model setup or account is needed.
+If testing local UI edits, rebuild the client before building the binary. On Linux, add `--with-deps` to the Chromium install command if system libraries are missing. Set `MESHHARBOR_BINARY` to test a different embedded build. The test starts and stops a loopback engine with a temporary data directory; no model setup or account is needed.
 
 Headless Chromium imports a generated two-material GLB via the file picker, runs **Optimize**, switches between **Original** and **Result**, and downloads both. It checks that both material views render the same four color patches and that the result wireframe shows the simplified mesh. The original download must match the input byte for byte, and the result must have fewer triangles with identical material bindings, UVs, normals, and embedded base-color and metallic/roughness PNG bytes. A separate test runs **UV atlas rebake** with a supported single-material GLB and checks that both new maps decode. Browser checks cover the Mira dimensions, icon rail, panel resizing and persistence, long filenames at narrow widths, and a narrow-screen setup flow with a mocked runtime job. They do not fetch packages or weights or cover cross-browser visual QA.
 
@@ -114,10 +115,10 @@ This test must run against a binary built with the **reviewed, signed production
 After rebuilding the embedded binary as in the browser regression instructions, run the following from `apps/studio`, substituting the actual approved release tag:
 
 ```sh
-MESHHARBOR_QUADRIFLOW_RELEASE_TAG=quadriflow-vX.Y.Z npm run test:e2e:quadriflow-release
+MESHHARBOR_QUADRIFLOW_RELEASE_TAG=quadriflow-vX.Y.Z pnpm run test:e2e:quadriflow-release
 ```
 
-The test fails at the installer status gate when the bundled manifest has no approved release for the host. It is not part of `npm run test:e2e`. For evidence requirements and the separate local rehearsal, see [the packaging notes](../../docs/quadriflow-sidecar-packaging.md).
+The test fails at the installer status gate when the bundled manifest has no approved release for the host. It is not part of `pnpm run test:e2e`. For evidence requirements and the separate local rehearsal, see [the packaging notes](../../docs/quadriflow-sidecar-packaging.md).
 
 ## Persisted job history
 

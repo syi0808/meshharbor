@@ -1,18 +1,14 @@
 # Building and smoke-testing the embedded Studio binary
 
-The Rust `meshharbor` executable embeds `apps/studio/dist` at compile time when that directory exists. Build the locked Studio bundle before Cargo; otherwise the server serves a local “assets are not built” notice.
+The checkout ships the built Studio client in `apps/studio/dist`. Cargo validates its Vite manifest and embeds the assets into the `meshharbor` executable. A fresh clone needs neither Node.js nor pnpm to build and run Studio.
 
 ## Pinned CI build
 
-The package smoke workflow uses GitHub-hosted Ubuntu 24.04, macOS 15, and Windows Server 2022 runners, Node.js 24.22.3, and Rust 1.88.0. On Windows it downloads the official NASM 3.02 x64 archive, verifies its SHA-256 before extracting it, and supplies `CFLAGS=/std:c11` for AWS-LC's MSVC C11 feature probe.
+The package smoke workflow builds the checked-in client on GitHub-hosted Ubuntu 24.04, macOS 15, and Windows Server 2022 runners with Rust 1.88.0. Node.js 24.22.3 runs the smoke script after Cargo; only the Linux browser-test step installs pnpm and Studio test dependencies. On Windows CI downloads the official NASM 3.02 x64 archive, verifies its SHA-256 before extracting it, and supplies `CFLAGS=/std:c11` for AWS-LC's MSVC C11 feature probe.
 
 The workflow then runs:
 
 ~~~sh
-cd apps/studio
-npm ci --ignore-scripts --no-audit --no-fund
-npm run build
-cd ../..
 cargo build --locked --release --package meshharbor --bin meshharbor
 node scripts/smoke_embedded_studio.mjs target/release/meshharbor
 ~~~
@@ -24,6 +20,8 @@ $env:CFLAGS = '/std:c11'
 cargo build --locked --release --package meshharbor --bin meshharbor
 node scripts/smoke_embedded_studio.mjs target/release/meshharbor.exe
 ~~~
+
+The separate Studio validation workflow installs from the frozen pnpm lockfile, runs the frontend tests, and verifies that regenerating `apps/studio/dist` produces no Git changes. See the [Studio build guide](../apps/studio/README.md#build) to update the checked-in bundle.
 
 ## What the smoke covers
 
