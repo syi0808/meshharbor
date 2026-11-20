@@ -13,6 +13,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use clap::{Parser, Subcommand};
+use job_scheduler::JobScheduler;
 use meshharbor_core::{
     CoreError, GenerationOptions, MAX_ASSET_BYTES, OperationCore, Pixal3dCudaRuntimeManager,
     Pixal3dProfile, Pixal3dRuntimeManager, RuntimeDoctor,
@@ -25,13 +26,14 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::{fs, io::AsyncReadExt, net::TcpListener, sync::Semaphore, task};
+use tokio::{fs, io::AsyncReadExt, net::TcpListener, task};
 use tracing_subscriber::EnvFilter;
 
 include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
 
 mod browser_login;
 mod data_dir_lock;
+mod job_scheduler;
 
 /// Prevents fork/exec lock tests from inheriting another test's live advisory-lock descriptor.
 #[cfg(test)]
@@ -210,13 +212,13 @@ enum RuntimeCommand {
 #[derive(Clone)]
 struct AppState {
     core: OperationCore,
-    scheduler: Arc<Semaphore>,
+    scheduler: Arc<JobScheduler>,
 }
 
 #[derive(Clone)]
 struct McpServer {
     core: OperationCore,
-    scheduler: Arc<Semaphore>,
+    scheduler: Arc<JobScheduler>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -350,7 +352,7 @@ impl From<CoreError> for ApiError {
 
 #[tool_router]
 impl McpServer {
-    fn new(core: OperationCore, scheduler: Arc<Semaphore>) -> Self {
+    fn new(core: OperationCore, scheduler: Arc<JobScheduler>) -> Self {
         Self {
             core,
             scheduler,
@@ -668,7 +670,7 @@ impl McpServer {
         description = "Cancel a queued job or request a permanent stop for a running asset job before its result is saved. Mesh processing stops at a safe checkpoint. Running runtime setup and downloads cannot be stopped."
     )]
     async fn cancel_job(&self, params: Parameters<JobIdArgs>) -> String {
-        match self.core.store().cancel_job(&params.0.job_id) {
+        match cancel_job(&self.core, &self.scheduler, &params.0.job_id, false) {
             Ok(job) => serde_json::to_string_pretty(&job)
                 .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
             Err(error) => json!({"error": error.to_string()}).to_string(),
@@ -727,7 +729,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let app = api_router(
                 AppState {
                     core,
-                    scheduler: Arc::new(Semaphore::new(1)),
+                    scheduler: Arc::new(JobScheduler::default()),
                 },
                 token.value.clone(),
             );
@@ -740,7 +742,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Mcp => {
             let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_service(&root)?;
-            let server = McpServer::new(OperationCore::open(&root)?, Arc::new(Semaphore::new(1)));
+            let server = McpServer::new(
+                OperationCore::open(&root)?,
+                Arc::new(JobScheduler::default()),
+            );
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }
@@ -1059,6 +1064,12 @@ fn api_router(state: AppState, token: String) -> Router {
             post(api_retopology_preflight).layer(DefaultBodyLimit::max(1024)),
         )
         .route("/api/v1/jobs", get(api_list_jobs).post(api_create_job))
+        .route(
+            "/api/v1/jobs/generation-queue",
+            get(api_generation_queue)
+                .post(api_swap_generation_queue)
+                .layer(DefaultBodyLimit::max(1024)),
+        )
         .route("/api/v1/jobs/{job_id}", get(api_get_job))
         .route("/api/v1/jobs/{job_id}/cancel", post(api_cancel_job))
         .route("/api/v1/artifacts/{artifact_id}", get(api_read_artifact))
@@ -1264,7 +1275,7 @@ fn retopology_options(target_quads: Option<u32>) -> meshharbor_core::QuadRetopol
 
 async fn run_retopology_preflight(
     core: OperationCore,
-    scheduler: Arc<Semaphore>,
+    scheduler: Arc<JobScheduler>,
     asset_id: String,
     options: meshharbor_core::QuadRetopologyOptions,
 ) -> Result<meshharbor_core::QuadRetopologyPreflight, CoreError> {
@@ -1753,11 +1764,57 @@ async fn api_get_job(
     Ok(Json(read_job_record(&state.core, &job_id)?))
 }
 
+#[derive(Deserialize)]
+struct CancelJobQuery {
+    #[serde(default)]
+    queued_only: bool,
+}
+
 async fn api_cancel_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
+    Query(query): Query<CancelJobQuery>,
 ) -> Result<Json<meshharbor_core::Job>, ApiError> {
-    Ok(Json(state.core.store().cancel_job(&job_id)?))
+    Ok(Json(cancel_job(
+        &state.core,
+        &state.scheduler,
+        &job_id,
+        query.queued_only,
+    )?))
+}
+
+fn cancel_job(
+    core: &OperationCore,
+    scheduler: &JobScheduler,
+    job_id: &str,
+    queued_only: bool,
+) -> Result<meshharbor_core::Job, CoreError> {
+    let job = core.store().request_job_cancellation(job_id, queued_only)?;
+    if job.state == meshharbor_core::JobState::Cancelled {
+        scheduler.remove(job_id);
+    }
+    Ok(job)
+}
+
+#[derive(Deserialize)]
+struct GenerationQueueSwap {
+    job_id: String,
+    swap_with: String,
+}
+
+async fn api_generation_queue(State(state): State<AppState>) -> Json<Vec<String>> {
+    Json(state.scheduler.generation_queue())
+}
+
+async fn api_swap_generation_queue(
+    State(state): State<AppState>,
+    Json(payload): Json<GenerationQueueSwap>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    Ok(Json(
+        state
+            .scheduler
+            .swap_generation(&payload.job_id, &payload.swap_with)?,
+    ))
 }
 
 fn finish_asset_job(
@@ -1788,7 +1845,7 @@ fn finish_asset_job(
 
 async fn start_simplify_job(
     core: OperationCore,
-    scheduler: Arc<Semaphore>,
+    scheduler: Arc<JobScheduler>,
     asset_id: &str,
     target_triangles: u64,
     max_error: f32,
@@ -1809,10 +1866,10 @@ async fn start_simplify_job(
         &json!({"target_triangles":target_triangles,"max_error":max_error}),
     )?;
     let job_id = job.id.clone();
+    scheduler.enqueue(&job_id, &job.operation);
     tokio::spawn(async move {
-        let permit = match scheduler.acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => return,
+        let Some(permit) = scheduler.acquire(&job_id).await else {
+            return;
         };
         let current = match core.store().get_job(&job_id) {
             Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued => job,
@@ -1846,7 +1903,7 @@ async fn start_simplify_job(
 
 async fn start_mesh_operation_job(
     core: OperationCore,
-    scheduler: Arc<Semaphore>,
+    scheduler: Arc<JobScheduler>,
     asset_id: &str,
     operation: &str,
     parameters: Value,
@@ -1879,10 +1936,10 @@ async fn start_mesh_operation_job(
         .create_job(operation, Some(asset_id), &parameters)?;
     let job_id = job.id.clone();
     let worker_operation = operation.to_string();
+    scheduler.enqueue(&job_id, &job.operation);
     tokio::spawn(async move {
-        let permit = match scheduler.acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => return,
+        let Some(permit) = scheduler.acquire(&job_id).await else {
+            return;
         };
         let current = match core.store().get_job(&job_id) {
             Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued => job,
@@ -1918,7 +1975,7 @@ async fn start_mesh_operation_job(
 
 async fn start_generation_job(
     core: OperationCore,
-    scheduler: Arc<Semaphore>,
+    scheduler: Arc<JobScheduler>,
     asset_id: &str,
     options: GenerationOptions,
 ) -> Result<meshharbor_core::Job, CoreError> {
@@ -1957,10 +2014,10 @@ async fn start_generation_job(
         .store()
         .create_job("image.generate", Some(asset_id), &parameters)?;
     let job_id = job.id.clone();
+    scheduler.enqueue(&job_id, &job.operation);
     tokio::spawn(async move {
-        let permit = match scheduler.acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => return,
+        let Some(permit) = scheduler.acquire(&job_id).await else {
+            return;
         };
         let current = match core.store().get_job(&job_id) {
             Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued => job,
@@ -2069,7 +2126,7 @@ fn acquire_generation_runtime_lock(
 
 async fn start_runtime_job(
     core: OperationCore,
-    scheduler: Arc<Semaphore>,
+    scheduler: Arc<JobScheduler>,
     kind: RuntimeJobKind,
 ) -> Result<meshharbor_core::Job, CoreError> {
     let job = core.store().create_job(
@@ -2078,10 +2135,10 @@ async fn start_runtime_job(
         &json!({"backend_id":kind.backend_id()}),
     )?;
     let job_id = job.id.clone();
+    scheduler.enqueue(&job_id, &job.operation);
     tokio::spawn(async move {
-        let permit = match scheduler.acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => return,
+        let Some(permit) = scheduler.acquire(&job_id).await else {
+            return;
         };
         if !matches!(core.store().get_job(&job_id), Ok(Some(job)) if job.state == meshharbor_core::JobState::Queued)
         {
@@ -2902,7 +2959,7 @@ mod tests {
         let app = api_router(
             AppState {
                 core: core.clone(),
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "token".into(),
         );
@@ -2975,7 +3032,7 @@ mod tests {
         let app = api_router(
             AppState {
                 core: core.clone(),
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "token".into(),
         );
@@ -3068,7 +3125,7 @@ mod tests {
         let app = api_router(
             AppState {
                 core,
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "token".into(),
         );
@@ -3096,12 +3153,101 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
+    async fn generation_queue_api_swaps_only_live_waiting_generation_jobs() {
+        let root = std::env::temp_dir().join(format!("meshharbor-queue-{}", uuid::Uuid::new_v4()));
+        let scheduler = Arc::new(JobScheduler::default());
+        let core = OperationCore::open(&root).unwrap();
+        let first = core
+            .store()
+            .create_job("image.generate", None, &json!({}))
+            .unwrap();
+        let mesh = core
+            .store()
+            .create_job("mesh.cleanup", None, &json!({}))
+            .unwrap();
+        let second = core
+            .store()
+            .create_job("image.generate", None, &json!({}))
+            .unwrap();
+        let interrupted = core
+            .store()
+            .create_job("image.generate", None, &json!({}))
+            .unwrap();
+        for job in [&first, &mesh, &second] {
+            scheduler.enqueue(&job.id, &job.operation);
+        }
+        let app = api_router(
+            AppState {
+                core,
+                scheduler: scheduler.clone(),
+            },
+            "queue-token".into(),
+        );
+        let request = |method, path: &str, body: Body| {
+            axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::HOST, "localhost:7432")
+                .header(header::AUTHORIZATION, "Bearer queue-token")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .unwrap()
+        };
+        let endpoint = "/api/v1/jobs/generation-queue";
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, endpoint, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!([first.id, second.id])
+        );
+        let swap = |other: &str| {
+            request(
+                Method::POST,
+                endpoint,
+                Body::from(json!({"job_id":first.id,"swap_with":other}).to_string()),
+            )
+        };
+        for unavailable in [&interrupted.id, &mesh.id] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(swap(unavailable))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::CONFLICT
+            );
+        }
+        let response = app.clone().oneshot(swap(&second.id)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!([second.id, first.id])
+        );
+        let cancel_path = format!("/api/v1/jobs/{}/cancel?queued_only=true", second.id);
+        assert_eq!(
+            app.oneshot(request(Method::POST, &cancel_path, Body::empty()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(scheduler.generation_queue(), [first.id]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn mcp_backend_tools_report_clean_store_without_side_effects() {
         let root =
             std::env::temp_dir().join(format!("meshharbor-mcp-backend-{}", uuid::Uuid::new_v4()));
         let server = McpServer::new(
             OperationCore::open(&root).unwrap(),
-            Arc::new(Semaphore::new(1)),
+            Arc::new(JobScheduler::default()),
         );
         let status: Value =
             serde_json::from_str(&server.quadriflow_backend_status().await).unwrap();
@@ -3520,7 +3666,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let server = McpServer::new(core.clone(), Arc::new(Semaphore::new(1)));
+        let server = McpServer::new(core.clone(), Arc::new(JobScheduler::default()));
 
         let response = server
             .list_jobs(Parameters(JobListArgs { limit: 200 }))
@@ -3700,7 +3846,7 @@ mod tests {
         let app = api_router(
             AppState {
                 core: core.clone(),
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "private-test-token".into(),
         );
@@ -3794,7 +3940,7 @@ mod tests {
         let app = api_router(
             AppState {
                 core: core.clone(),
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "private-test-token".into(),
         );
@@ -3873,7 +4019,7 @@ mod tests {
         let asset = core
             .import_asset("open-triangle.glb", &minimal_triangle_glb())
             .unwrap();
-        let scheduler = Arc::new(Semaphore::new(1));
+        let scheduler = Arc::new(JobScheduler::default());
         assert!(!core.quadriflow_backend_status().available);
         let app = api_router(
             AppState {
@@ -3955,7 +4101,7 @@ mod tests {
         let app = api_router(
             AppState {
                 core,
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "correct horse".into(),
         );
@@ -4257,7 +4403,7 @@ mod tests {
         let bad_origin = api_router(
             AppState {
                 core: OperationCore::open(&root).unwrap(),
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "correct horse".into(),
         )
@@ -4283,7 +4429,7 @@ mod tests {
         let app = api_router(
             AppState {
                 core,
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "secret".into(),
         );
@@ -4414,7 +4560,7 @@ mod tests {
         let app = api_router(
             AppState {
                 core: core.clone(),
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "token".into(),
         );
@@ -4508,7 +4654,7 @@ mod tests {
         let app = api_router(
             AppState {
                 core,
-                scheduler: Arc::new(Semaphore::new(1)),
+                scheduler: Arc::new(JobScheduler::default()),
             },
             "token".into(),
         );

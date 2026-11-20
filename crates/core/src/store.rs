@@ -1055,21 +1055,29 @@ impl Store {
     }
 
     pub fn cancel_job(&self, id: &str) -> CoreResult<Job> {
+        self.request_job_cancellation(id, false)
+    }
+
+    pub fn request_job_cancellation(&self, id: &str, queued_only: bool) -> CoreResult<Job> {
         let conn = self.connection.lock().expect("SQLite mutex poisoned");
         conn.execute(
             "UPDATE jobs SET state=CASE state WHEN 'queued' THEN 'cancelled' ELSE 'cancelling' END,updated_at=?2
-             WHERE id=?1 AND (state='queued' OR (state='running' AND
+             WHERE id=?1 AND (state='queued' OR (NOT ?3 AND state='running' AND
                 (operation LIKE 'mesh.%' OR operation IN ('image.generate','uv.unwrap','render.optimize'))))",
-            params![id, timestamp()?],
+            params![id, timestamp()?, queued_only],
         )?;
         drop(conn);
         let job = self
             .get_job(id)?
             .ok_or_else(|| CoreError::NotFound(format!("Job '{id}' was not found.")))?;
         match job.state {
-            JobState::Cancelling | JobState::Cancelled => Ok(job),
+            JobState::Cancelled => Ok(job),
+            JobState::Cancelling if !queued_only => Ok(job),
             JobState::Succeeded | JobState::Failed => Err(CoreError::Conflict(
                 "A completed job cannot be cancelled.".into(),
+            )),
+            _ if queued_only => Err(CoreError::Conflict(
+                "The job is no longer waiting in the queue.".into(),
             )),
             _ => Err(CoreError::Conflict(
                 "This job cannot be stopped safely at its current stage.".into(),
@@ -2004,6 +2012,11 @@ mod tests {
         store
             .update_job(&active.id, JobState::Running, 10, None, None)
             .unwrap();
+        assert!(store.request_job_cancellation(&active.id, true).is_err());
+        assert_eq!(
+            store.get_job(&active.id).unwrap().unwrap().state,
+            JobState::Running
+        );
         assert_eq!(
             store.cancel_job(&active.id).unwrap().state,
             JobState::Cancelling
