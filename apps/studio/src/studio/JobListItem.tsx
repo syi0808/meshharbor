@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Item, ItemActions, ItemContent, ItemDescription, ItemTitle } from '@/components/ui/item';
+import { notify } from './notify';
 import type { Job } from './types';
 
 export function JobListItem({ job, title, selected = false, showUpdated, detail, children }: {
@@ -18,10 +20,11 @@ export function JobListItem({ job, title, selected = false, showUpdated, detail,
       <ItemTitle className="max-w-full wrap-anywhere">{title}</ItemTitle>
       {detail}
       {showUpdated && <ItemDescription>Updated {Number.isNaN(updatedAt.getTime()) ? 'time unavailable' : updatedAt.toLocaleString()}</ItemDescription>}
-      {job.error?.message && <ItemDescription className="line-clamp-none wrap-anywhere text-destructive">{job.error.message}</ItemDescription>}
     </ItemContent>
     <ItemActions className="ml-auto flex-wrap justify-end gap-1">
       <Badge variant={job.state === 'failed' ? 'destructive' : job.state === 'succeeded' ? 'secondary' : 'outline'}>{state}</Badge>
+      {job.state === 'failed' && <Button variant="ghost" size="sm" aria-label={`Show error for ${title}`}
+        onClick={() => notify('error', 'Job failed.', job.error?.message)}>Details</Button>}
       {children}
     </ItemActions>
   </Item>;

@@ -43,7 +43,7 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   await expect(page.getByRole('complementary', { name: 'Generate model' })).toBeVisible();
 });
 
-test('Jobs and storage activity share accessible item rows with failure details', async ({ page, studioOrigin }) => {
+test('Jobs and storage activity show saved failures in toasts', async ({ page, studioOrigin }) => {
   const recorded = {
     id: 'failed-download', operation: 'runtime.pixal3d.install_models', state: 'failed', progress: 0,
     created_at: '1', updated_at: '2', error: { message: 'Local cache is unavailable.' },
@@ -54,13 +54,17 @@ test('Jobs and storage activity share accessible item rows with failure details'
   const jobsRow = page.getByRole('complementary', { name: 'Jobs' }).getByRole('listitem');
   await expect(jobsRow).toHaveAttribute('data-slot', 'item');
   await expect(jobsRow.getByText('Failed', { exact: true })).toBeVisible();
-  await expect(jobsRow.getByText(recorded.error.message)).toBeVisible();
-  await expect(jobsRow.getByRole('button', { name: 'View' })).toBeVisible();
+  await expect(jobsRow.getByText(recorded.error.message)).toHaveCount(0);
+  await jobsRow.getByRole('button', { name: /Show error for/ }).click();
+  const toasts = page.getByRole('region', { name: /Notifications/ });
+  await expect(toasts.getByText(recorded.error.message)).toBeVisible();
   await page.goto(studioOrigin + '/settings/storage');
   const activityRow = page.getByRole('region', { name: 'Recent activity' }).getByRole('listitem');
   await expect(activityRow).toHaveAttribute('data-slot', 'item');
   await expect(activityRow.getByText('Download MLX models')).toBeVisible();
-  await expect(activityRow.getByText(recorded.error.message)).toBeVisible();
+  await expect(activityRow.getByText(recorded.error.message)).toHaveCount(0);
+  await activityRow.getByRole('button', { name: /Show error for/ }).click();
+  await expect(toasts.getByText(recorded.error.message)).toBeVisible();
 });
 
 test('the icon-only rail always shows one panel and exposes mesh tools without a model', async ({ page, studioOrigin }) => {
@@ -329,7 +333,8 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(storage.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
   await expect(download).toBeDisabled();
   await expect(consent).toBeDisabled();
-  await expect(storage.getByText(/7 more can be reused/)).toBeVisible();
+  await storage.getByRole('button', { name: 'About the checkpoint cache' }).hover();
+  await expect(page.getByRole('tooltip')).toContainText('7 more can be reused');
   expect(modelAccessChecks).toBe(0);
   await storage.getByRole('button', { name: 'Manage Hugging Face connection' }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
@@ -425,7 +430,8 @@ test('browser sign-in leaves DINOv3 to storage, which rechecks access on return'
   const storage = page.getByRole('main', { name: 'Downloads & storage' });
   const download = storage.getByRole('button', { name: 'Download model files' });
   await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toHaveCount(0);
-  await expect(storage.getByText('DINOv3 access denied.', { exact: false })).toBeVisible();
+  await expect(storage.getByText('Access required', { exact: true })).toBeVisible();
+  await expect(toasts.getByText('DINOv3 access denied.', { exact: true })).toBeVisible();
   await expect(download).toBeDisabled();
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
@@ -468,7 +474,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   await expect(storage.getByText('Installed', { exact: true })).toBeVisible();
   await uninstall.click();
   const remove = page.getByRole('alertdialog', { name: 'Remove model files?' });
-  await expect(remove).toContainText('all Studio assets stay in place');
+  await expect(remove).toContainText('assets stay intact');
   await expect(remove.getByRole('button', { name: 'Cancel' })).toBeFocused();
   await page.mouse.click(8, 8);
   await expect(remove).toBeVisible();
@@ -491,7 +497,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   await expect(connections.getByLabel('Backend', { exact: true })).toHaveCount(0);
   await connections.getByRole('button', { name: 'Disconnect locally' }).click();
   const disconnect = page.getByRole('alertdialog', { name: 'Disconnect Hugging Face?' });
-  await expect(disconnect).toContainText('does not revoke the token');
+  await expect(disconnect).toContainText('Your Hugging Face token and downloaded models stay intact.');
   await disconnect.getByRole('button', { name: 'Disconnect', exact: true }).click();
   await expect(toasts.getByText('Hugging Face disconnected on this computer.')).toBeVisible();
   await expect(connections.getByText('Not connected', { exact: true })).toBeVisible();

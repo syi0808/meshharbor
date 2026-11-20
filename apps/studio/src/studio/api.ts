@@ -798,10 +798,11 @@ export class MeshHarborApi {
     });
   }
 
-  preflightRetopology(assetId: string, targetQuads?: number): Promise<RetopologyPreflight> {
+  preflightRetopology(assetId: string, targetQuads?: number, signal?: AbortSignal): Promise<RetopologyPreflight> {
     return this.request(`/api/v1/assets/${encodeURIComponent(assetId)}/retopology-preflight`, {
       method: 'POST',
       body: JSON.stringify({ target_quads: targetQuads }),
+      signal,
     });
   }
 

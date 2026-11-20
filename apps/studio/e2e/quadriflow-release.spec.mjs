@@ -108,12 +108,14 @@ test('reviewed QuadriFlow release installs, retopologizes and exports GLB and OB
       ]);
       expect(response.ok(), await response.text()).toBe(true);
       expect(await response.json()).toMatchObject({ release_tag: releaseTag, already_installed: false });
-      await expect(page.getByText('A verified, manifest-matched managed QuadriFlow sidecar is available.', { exact: true })).toBeVisible();
+      const availability = page.getByRole('complementary', { name: 'Mesh tools' });
+      await availability.getByRole('button', { name: 'About the QuadriFlow backend' }).hover();
+      await expect(page.getByRole('tooltip')).toContainText('A verified, manifest-matched managed QuadriFlow sidecar is available.');
     }
 
-    await page.getByRole('button', { name: 'Quad retopology (experimental)', exact: true }).click();
+    const retopology = page.getByRole('button', { name: 'Quad retopology (experimental)', exact: true });
+    if (await retopology.getAttribute('aria-expanded') === 'false') await retopology.click();
     await page.getByRole('spinbutton', { name: 'Target quads' }).fill(textured ? '384' : '12');
-    await page.getByRole('button', { name: 'Check retopology input' }).click();
     await expect(page.getByText(textured ? 'Textured input passed' : 'Geometry-only input passed', { exact: false })).toBeVisible();
     const [completed] = await Promise.all([
       page.waitForResponse(async response => {

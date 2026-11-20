@@ -7,6 +7,7 @@ import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle }
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Spinner } from '@/components/ui/spinner';
 import type { MeshHarborApi } from './api';
+import { HelpTip } from './HelpTip';
 import { notify } from './notify';
 import type { Asset, ModelVersion, ModelVersionPage } from './types';
 
@@ -20,21 +21,24 @@ export function ModelVersionHistory({ api, model, viewingId, disabled, operation
 }) {
   const [open, setOpen] = useState(false);
   const [history, setHistory] = useState<ModelVersionPage | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   const [working, setWorking] = useState(false);
   const [retry, setRetry] = useState(0);
   const requests = useRef<AbortController | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
     requests.current = controller;
     setHistory(null);
-    setProblem(null);
+    setFailed(false);
     void api.modelVersions(model.id, undefined, controller.signal).then(page => {
       if (!controller.signal.aborted) setHistory(page);
     }).catch(cause => {
-      if (!controller.signal.aborted) setProblem(cause instanceof Error ? cause.message : 'Could not load version history.');
+      if (controller.signal.aborted) return;
+      setFailed(true);
+      notify('error', 'Could not load version history.', cause instanceof Error ? cause.message : undefined);
     });
     return () => controller.abort();
   }, [api, model.id, model.current_asset_id, open, retry]);
@@ -76,18 +80,18 @@ export function ModelVersionHistory({ api, model, viewingId, disabled, operation
       <Button variant="outline" size="sm" disabled={disabled}><ClockCounterClockwiseIcon aria-hidden="true" /> Version history</Button>
     </DialogTrigger>
     <DialogContent className="max-h-[calc(100dvh-2rem)] min-h-0 grid-rows-[auto_minmax(0,1fr)] sm:max-w-lg"
+      onOpenAutoFocus={event => { event.preventDefault(); heading.current?.focus(); }}
       onEscapeKeyDown={event => { if (working) event.preventDefault(); }}>
       <DialogHeader className="min-w-0 pr-6">
-        <DialogTitle>Version history</DialogTitle>
-        <DialogDescription className="wrap-anywhere">
-          {model.name}. Preview any version, or restore it as the current model. Restoring does not delete later versions.
-        </DialogDescription>
+        <div className="flex items-center gap-1">
+          <DialogTitle ref={heading} tabIndex={-1} className="outline-none">Version history</DialogTitle>
+          <HelpTip label="About restoring versions">Restoring a version makes it current without deleting later versions.</HelpTip>
+        </div>
+        <DialogDescription className="wrap-anywhere">{model.name}</DialogDescription>
       </DialogHeader>
       <ScrollArea type="auto" className="min-h-0 min-w-0" viewportProps={{ className: 'overscroll-contain [&>div]:block!' }}>
-        {problem ? <div className="grid justify-items-start gap-2">
-          <p role="alert" className="text-destructive">{problem}</p>
-          <Button variant="outline" size="sm" onClick={() => setRetry(current => current + 1)}>Retry</Button>
-        </div> : !history ? <p role="status" className="flex items-center gap-2"><Spinner aria-hidden="true" /> Loading versions…</p>
+        {failed ? <Button variant="outline" size="sm" onClick={() => setRetry(current => current + 1)}>Retry loading versions</Button>
+          : !history ? <p role="status" className="flex items-center gap-2"><Spinner aria-hidden="true" /> Loading versions…</p>
           : <div className="grid gap-3 pr-2">
             <ItemGroup aria-label="Model versions">
               {history.items.map(version => {

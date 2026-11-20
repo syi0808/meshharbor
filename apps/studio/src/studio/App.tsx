@@ -32,7 +32,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
-import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
+import { Field, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group';
 import { Item, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@/components/ui/item';
@@ -54,10 +54,12 @@ import { JOB_PAGE_SIZE, jobStage, mergeJobRecords } from './job-activity';
 import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
 import { buildPosedInput, defaultViews, newView, PosedReferences, SingleReference, type ViewDraft } from './GenerationReferences';
+import { HelpTip } from './HelpTip';
 import { notify } from './notify';
 import { SettingsPage, settingsSectionFromPath, type RuntimeAction, type SettingsSection } from './SettingsPage';
 import { applyStudioTheme, loadStudioTheme } from './theme';
 import { useWorkbenchSidebar, WorkbenchLayout } from './WorkbenchSidebar';
+import { useRetopologyPreflight } from './useRetopologyPreflight';
 import { formatVersionSizes, shouldHighlightExport, type Inspector } from './workbench-state';
 import type { Artifact, Asset, AssetKind, GenerationViewMode, Job, MeshOperationId, Operation, PosedViewMode, RuntimeBackendId, RuntimeInfo } from './types';
 
@@ -131,7 +133,7 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; descript
   {
     id: 'mesh.retopology',
     title: 'Quad retopology (experimental)',
-    description: 'QuadriFlow remeshes geometry. Supported embedded base-color/metallic-roughness PNGs are projected only into the triangulated GLB preview; the separate quad OBJ remains geometry-only. Unsupported inputs fail closed.',
+    description: 'Build a quad mesh with QuadriFlow. Supported PNG base color and metallic/roughness maps appear only in the GLB preview; the quad OBJ is geometry-only.',
   },
   {
     id: 'mesh.cleanup',
@@ -141,12 +143,12 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; descript
   {
     id: 'mesh.separate_parts',
     title: 'Separate connected parts',
-    description: 'Find connected surfaces across exact seams without welding. On fragmented meshes, small components share one primitive to stay within the output limit.',
+    description: 'Split connected surfaces without welding. Small fragments may share an output part.',
   },
   {
     id: 'uv.unwrap',
     title: 'UV atlas rebake',
-    description: 'Repack one textured mesh primitive with one material and rebake its embedded base-color and metallic/roughness PNGs. Zero-area faces are omitted from the result. This is not a high-to-low bake.',
+    description: 'Repack existing UVs and rebake embedded PNG base color and metallic/roughness on one primitive. Zero-area faces are dropped. This is not a high-to-low bake.',
   },
   {
     id: 'render.optimize',
@@ -156,7 +158,7 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; descript
   {
     id: 'mesh.compress',
     title: 'Compression',
-    description: 'Encode geometry with KHR_meshopt_compression. Other viewers need its decoder; Studio includes one.',
+    description: 'Shrink geometry with KHR_meshopt_compression. Other viewers need a compatible decoder.',
   },
 ];
 
@@ -177,7 +179,6 @@ export function App() {
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [operations, setOperations] = useState<Operation[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -193,7 +194,6 @@ export function App() {
   const assetPageRequestGuard = useRef(new LatestRequestGuard());
   const [jobSnapshot, setJobSnapshot] = useState<Job[]>([]);
   const [jobFeedLoaded, setJobFeedLoaded] = useState(false);
-  const [jobFeedError, setJobFeedError] = useState<string | null>(null);
   const jobFeedInFlight = useRef<Promise<boolean> | null>(null);
   const observedJobResults = useRef(new Set<string>());
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -239,7 +239,6 @@ export function App() {
   const importStartedAt = useRef(0);
   const backendInstallStartedAt = useRef(0);
   const exportStartedAt = useRef(0);
-  const [jobPollingIssue, setJobPollingIssue] = useState<{ jobId: string; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inventoryInputRef = useRef<HTMLInputElement>(null);
   const importBatchInFlight = useRef(false);
@@ -278,10 +277,12 @@ export function App() {
   const showLibraryFilters = assets.length > 0 || hasActiveAssetFilters;
   const quadArtifact = quadTopologyArtifact(selectedAsset);
   const quadriflowBackend = runtime?.quadriflow_backend;
-  const [checkingRetopology, setCheckingRetopology] = useState(false);
-  const [retopologyCheck, setRetopologyCheck] = useState<{ assetId: string; message: string } | null>(null);
+  const [meshTool, setMeshTool] = useState('');
   const [installingBackend, setInstallingBackend] = useState(false);
   const isRunning = isActiveJob(job);
+  const retopologyAssetId = inspector === 'tools' && meshTool === 'mesh.retopology' && !settingsSection && !dashboard
+    && connection === 'connected' && !isRunning && validQuadTarget && selectedAsset?.kind === 'mesh' ? selectedAsset.id : null;
+  const { checking: checkingRetopology, report: retopologyCheck } = useRetopologyPreflight(api, retopologyAssetId, requestedQuads);
   const recentJobs = useMemo(() => mergeJobRecords(jobSnapshot, job ? [job] : []), [job, jobSnapshot]);
   const pendingGenerationJobs = recentJobs.filter(saved => saved.operation === 'image.generate' && isActiveJob(saved));
   const referenceNames = new Map(assets.map(asset => [asset.id, asset.name]));
@@ -304,7 +305,6 @@ export function App() {
       startedAt: exportStartedAt.current,
     }] : []),
   ];
-  const backendStatus = (id: string) => runtime?.model_backends.find((backend) => backend.id === id)?.status.replaceAll('_', ' ') ?? 'Connect engine';
   const generationProfiles = useMemo(() => readyGenerationProfiles(runtime), [runtime]);
   const selectedGenerationProfile = generationProfiles.find(profile => profile.modelId === generationModelId) ?? generationProfiles[0];
   const viewMode = selectedGenerationProfile?.multiviewReady && selectedGenerationProfile.view_modes.includes(preferredViewMode)
@@ -438,7 +438,6 @@ export function App() {
         const merged = mergeJobRecords(jobs, current.filter(saved => known.has(saved.id) || saved.id === jobRef.current?.id));
         return [...merged.filter(isActiveJob), ...merged.filter(saved => !isActiveJob(saved)).slice(0, JOB_PAGE_SIZE)];
       });
-      setJobFeedError(null);
       setJobFeedLoaded(true);
       for (const saved of jobs) {
         const assetId = saved.state === 'succeeded' ? saved.result?.asset_id : undefined;
@@ -458,7 +457,6 @@ export function App() {
     }).catch(cause => {
       if (!recentJobsRequestGuard.current.isCurrent(requestId)) return false;
       const message = cause instanceof Error ? `Could not refresh recent job records. ${cause.message}` : 'Could not refresh recent job records.';
-      setJobFeedError(message);
       throw new Error(message);
     }).finally(() => {
       if (jobFeedInFlight.current === request) jobFeedInFlight.current = null;
@@ -471,10 +469,16 @@ export function App() {
     if (connection !== 'connected') return;
     let timer: number;
     let stopped = false;
+    let unavailable = false;
     const poll = async () => {
       window.clearTimeout(timer);
       if (document.visibilityState === 'visible') {
-        await refreshRecentJobs().catch(() => {});
+        try {
+          if (await refreshRecentJobs()) unavailable = false;
+        } catch (cause) {
+          if (!stopped && !unavailable) notify('error', cause instanceof Error ? cause.message : 'Could not refresh job history.');
+          unavailable = true;
+        }
       }
       if (!stopped) {
         window.clearTimeout(timer);
@@ -611,7 +615,6 @@ export function App() {
     setAssetPageLoading(true);
     setComparisonLoadingSide(null);
     setComparisonPair(null);
-    setConnectionError(null);
     setConnection('connecting');
     try {
       const health = await api.health();
@@ -639,7 +642,6 @@ export function App() {
         saved.state === 'succeeded' && saved.result?.asset_id ? [saved.result.asset_id] : []));
       setJobSnapshot(jobList);
       setJobFeedLoaded(true);
-      setJobFeedError(null);
       setSelectedId((current) => {
         const next = current && (assetPage.items.some((item) => item.id === current)
           || current === selectedIdRef.current)
@@ -655,8 +657,7 @@ export function App() {
       setAssetPageLoading(false);
       setConnection('disconnected');
       const message = cause instanceof Error ? cause.message : 'Could not connect to MeshHarbor.';
-      setConnectionError(message);
-      if (announce) notify('error', `Could not connect to the local engine. ${message}`);
+      notify('error', 'Could not connect to the local engine.', message);
     }
   }, [api]);
 
@@ -698,7 +699,6 @@ export function App() {
           return;
         }
         consecutiveFailures = 0;
-        setJobPollingIssue(null);
         if (latest.state === 'succeeded') {
           if (latest.operation.startsWith('runtime.')) {
             let refreshed: [RuntimeInfo, Operation[]] | null = null;
@@ -831,8 +831,9 @@ export function App() {
         if (!stopped) {
           consecutiveFailures += 1;
           const delay = jobPollRetryDelay(consecutiveFailures);
-          const detail = cause instanceof Error ? cause.message : 'The local engine could not be reached.';
-          setJobPollingIssue({ jobId: job.id, message: `Could not check job status. ${detail} Retrying in ${Math.ceil(delay / 1000)}s.` });
+          if (consecutiveFailures === 1) {
+            notify('warning', 'Job status unavailable. Retrying…', cause instanceof Error ? cause.message : undefined);
+          }
           timer = window.setTimeout(poll, delay);
         }
       }
@@ -1055,27 +1056,8 @@ export function App() {
     }
   }
 
-  async function checkRetopologyInput() {
-    if (!selectedAsset || selectedAsset.kind !== 'mesh' || checkingRetopology || !validQuadTarget) return;
-    const assetId = selectedAsset.id;
-    setCheckingRetopology(true);
-    setRetopologyCheck(null);
-    try {
-      const report = await api.preflightRetopology(assetId, requestedQuads);
-      const input = report.appearance_projection_required ? 'Textured input' : 'Geometry-only input';
-      const seams = report.coincident_boundary_vertices_joined ? ' Exact seams can be joined for the solver without changing the source.' : '';
-      setRetopologyCheck({ assetId, message: `${input} passed the input checks (${report.input_triangles.toLocaleString()} triangles).${seams} The solver was not run.` });
-      notify('success', 'Retopology input checks passed.');
-    } catch (cause) {
-      setRetopologyCheck({ assetId, message: cause instanceof Error ? cause.message : 'Could not check the retopology input.' });
-      notify('error', 'Retopology input checks failed.');
-    } finally {
-      setCheckingRetopology(false);
-    }
-  }
-
   async function runMeshOperation(operation: MeshOperationId) {
-    if (!selectedAsset || selectedAsset.kind !== 'mesh' || (operation === 'mesh.retopology' && !validQuadTarget)) return;
+    if (!selectedAsset || selectedAsset.kind !== 'mesh' || (operation === 'mesh.retopology' && !retopologyCheck)) return;
     invalidateHistoryRequests();
     setBusy(true);
     setReportJob(null);
@@ -1204,8 +1186,7 @@ export function App() {
         <strong>{job.state === 'queued' ? 'Queued' : job.state === 'validating' ? 'Validating' : job.state === 'cancelling' ? 'Stopping' : 'Working'}</strong>
         <span>{studioOperationLabel(job.operation)}</span>
       </div>
-      {jobPollingIssue?.jobId === job.id && <p className="wrap-anywhere text-muted-foreground">{jobPollingIssue.message}</p>}
-      <p className="text-muted-foreground">{jobStage(job)}{job.operation === 'image.generate' && job.state === 'running' ? '. Generation can take several minutes.' : ''}</p>
+      <p className="text-muted-foreground">{jobStage(job)}</p>
       {isJobCancellable(job) && <Button variant="outline" size="sm" className="justify-self-start" onClick={event => requestStop(job, event.currentTarget)}>Stop job</Button>}
     </CardContent></Card>
   ) : null;
@@ -1248,21 +1229,27 @@ export function App() {
     if (openInspector === 'jobs') return (
         <section className="grid min-w-0 grid-cols-1 gap-3 p-3 text-xs" aria-label="Recent jobs">
           <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
-            <span>Recent activity</span>
+            <div className="flex items-center gap-1">
+              <span>Recent activity</span>
+              {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
+                <HelpTip label="About interrupted jobs">
+                  Checking a record never resumes it. Stop all REST/MCP processes for this store before running <code>meshharbor jobs recover-interrupted --confirm-no-running-meshharbor</code>.
+                </HelpTip>}
+            </div>
             <Button variant="ghost" size="sm" onClick={() => void refreshJobHistory()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
           </div>
           <Button variant="outline" size="sm" onClick={() => openDashboard()}><ListChecksIcon aria-hidden="true" /> Open dashboard</Button>
-          {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
-            <Disclosure className="rounded-lg border p-2 wrap-anywhere text-muted-foreground" title="Recover an interrupted job">
-              <p>Checking a record does not resume it. If the engine exited unexpectedly, stop all REST/MCP processes for this data directory before running <code>meshharbor jobs recover-interrupted --confirm-no-running-meshharbor</code>.</p>
-            </Disclosure>}
           {recentJobs.length === 0
             ? <Empty><EmptyHeader><EmptyDescription>No saved jobs yet.</EmptyDescription></EmptyHeader></Empty>
             : <ItemGroup>{recentJobs.slice(0, 8).map((savedJob) => (
               <JobListItem key={savedJob.id} job={savedJob} title={studioOperationLabel(savedJob.operation)} showUpdated
                 selected={savedJob.id === job?.id}>
                 {isJobCancellable(savedJob) && <Button variant="ghost" size="sm" disabled={connection !== 'connected'} onClick={event => requestStop(savedJob, event.currentTarget)}>Stop job</Button>}
-                <Button variant="ghost" size="sm" onClick={() => void openRecentJob(savedJob.id)} disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>{isActiveJob(savedJob) ? 'Check' : 'View'}</Button>
+                {(savedJob.state !== 'failed' || savedJob.input_asset_id) &&
+                  <Button variant="ghost" size="sm" onClick={() => void openRecentJob(savedJob.id)}
+                    disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>
+                    {savedJob.state === 'failed' ? 'View input' : 'View'}
+                  </Button>}
               </JobListItem>
             ))}</ItemGroup>}
         </section>
@@ -1279,11 +1266,12 @@ export function App() {
         </div>
       )}
       {openInspector === 'optimize' && <div className="grid gap-4 p-4 text-xs/relaxed">
-        <p className="text-muted-foreground">Reduce polygon count while keeping the original file intact and preserving material references.</p>
         <Field>
-          <FieldLabel htmlFor="triangle-target">Triangle target</FieldLabel>
+          <div className="flex items-center gap-1">
+            <FieldLabel htmlFor="triangle-target">Triangle target</FieldLabel>
+            <HelpTip label="About the triangle target">The target is approximate. Optimization keeps the original GLB and preserves UV and material references.</HelpTip>
+          </div>
           <Input id="triangle-target" type="number" min="1" max="10000000" step="1" value={targetTriangles} onChange={(event) => setTargetTriangles(Number(event.target.value))} disabled={!hasSelectedMesh || isRunning || busy} />
-          <FieldDescription>Goal, not a guarantee</FieldDescription>
         </Field>
         <div className="flex items-center gap-2 text-muted-foreground [&>span]:shrink-0">
           <span>Smaller</span>
@@ -1295,26 +1283,31 @@ export function App() {
             <AccordionTrigger>Shape protection</AccordionTrigger>
             <AccordionContent>
               <div className="grid gap-3">
-                <div className="flex items-center justify-between gap-2"><span>Error tolerance</span><span className="font-mono tabular-nums">{maxError.toFixed(3)}</span></div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1"><span>Error tolerance</span>
+                    <HelpTip label="About error tolerance">Lower tolerance protects the shape but may keep more triangles than requested.</HelpTip>
+                  </div>
+                  <span className="font-mono tabular-nums">{maxError.toFixed(3)}</span>
+                </div>
                 <Slider aria-label="Maximum geometric error" min={0.001} max={0.08} step={0.001} value={[maxError]} onValueChange={([value]) => setMaxError(value)} disabled={!hasSelectedMesh || isRunning || busy} />
-                <p className="text-muted-foreground">A lower tolerance may stop above your target to protect shape.</p>
               </div>
             </AccordionContent>
           </AccordionItem>
         </Accordion>
-        <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 text-muted-foreground"><span className="text-primary">✓</span><span>Keeps the original file</span><span className="text-primary">✓</span><span>Keeps UV and material references</span></div>
         {!(isRunning && job.operation === 'mesh.simplify') && <Button className="w-full" disabled={!canSimplify || busy || connection !== 'connected' || isRunning} onClick={() => void simplify()}>{busy ? <><Spinner aria-hidden="true" /> Working…</> : <><SlidersHorizontalIcon aria-hidden="true" /> Optimize mesh</>}</Button>}
       </div>}
 
       {openInspector === 'generation' && <section className="grid gap-4 p-4 text-xs/relaxed" id="image-generation">
           {selectedGenerationProfile && <>
             <Field>
-              <FieldLabel htmlFor="generation-model">Generation model</FieldLabel>
+              <div className="flex items-center gap-1">
+                <FieldLabel htmlFor="generation-model">Generation model</FieldLabel>
+                <HelpTip label="About generation models">Only models ready to run locally appear here.</HelpTip>
+              </div>
               <NativeSelect className="w-full" id="generation-model" value={selectedGenerationProfile.modelId}
                 onChange={event => { setGenerationModelId(event.target.value); setPreferredViewMode('single'); }} disabled={busy || isRunning}>
                 {generationProfiles.map(profile => <NativeSelectOption key={profile.modelId} value={profile.modelId}>{profile.label}</NativeSelectOption>)}
               </NativeSelect>
-              <FieldDescription>Only ready local models are listed.</FieldDescription>
             </Field>
             {selectedGenerationProfile.view_modes.length > 1 && <Field>
               <FieldLabel htmlFor="generation-view-mode">View mode</FieldLabel>
@@ -1327,7 +1320,6 @@ export function App() {
                   disabled={mode !== 'single' && !selectedGenerationProfile.multiviewReady}>{viewLabels[mode]}</NativeSelectOption>)}
               </NativeSelect>
               {!selectedGenerationProfile.multiviewReady && <>
-                <FieldDescription>Install the additional weights to use multiple reference views.</FieldDescription>
                 <Button variant="outline" size="sm" className="self-start" onClick={() => openSettings('storage', 'pixal3d-cuda')}>Set up multiview</Button>
               </>}
             </Field>}
@@ -1358,49 +1350,53 @@ export function App() {
 
       {openInspector === 'tools' && <>
       <div className="grid gap-4 p-4 text-xs/relaxed" id="mesh-tools">
-        <p className="text-muted-foreground">Mesh processing creates a new asset. Input checks are read-only. Your source file is never overwritten.</p>
-        <Accordion type="single" collapsible>
+        <Accordion type="single" collapsible value={meshTool} onValueChange={setMeshTool}>
           {meshOperationOptions.map((tool) => {
             const available = operations.find((operation) => operation.id === tool.id)?.implemented === true;
             const processing = isRunning && job.operation === tool.id;
+            const retopology = tool.id === 'mesh.retopology';
             return (
               <AccordionItem key={tool.id} value={tool.id}>
-                <AccordionTrigger>{tool.title}</AccordionTrigger>
-                <AccordionContent>
-                <div className="grid gap-2">
-                <p className="text-muted-foreground">{tool.description}</p>
-                {tool.id === 'mesh.retopology' && (
-                  <>
-                    <Field>
-                      <FieldLabel htmlFor="quad-target">Target quads</FieldLabel>
-                      <Input id="quad-target" type="number" min="4" max="50000" step="1"
-                        value={targetQuads} aria-invalid={!validQuadTarget}
-                        onChange={(event) => { setTargetQuads(event.currentTarget.value); setRetopologyCheck(null); }}
-                        disabled={busy || isRunning || checkingRetopology} />
-                      <FieldDescription>4–50,000. This is a target, not a guaranteed count.</FieldDescription>
-                    </Field>
-                    <Button
-                      variant="secondary" size="sm" className="w-full"
-                      disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || !validQuadTarget || busy || checkingRetopology || connection !== 'connected' || isRunning}
-                      onClick={() => void checkRetopologyInput()}
-                    >
-                      {checkingRetopology ? 'Checking input…' : 'Check retopology input'}
-                    </Button>
-                    {retopologyCheck && retopologyCheck.assetId === selectedAsset?.id && (
-                      <p role="status">{retopologyCheck.message}</p>
-                    )}
-                  </>
-                )}
-                {!processing && (
-                  <Button
-                    className="w-full"
-                    disabled={!selectedAsset || selectedAsset.kind !== 'mesh' || !available || busy || checkingRetopology || connection !== 'connected' || isRunning || (tool.id === 'mesh.retopology' && !validQuadTarget)}
-                    onClick={() => void runMeshOperation(tool.id)}
-                  >
-                    Run {tool.title}
-                  </Button>
-                )}
+                <div className="flex items-center gap-1 pr-1.5">
+                  <div className="min-w-0 flex-1">
+                    <AccordionTrigger className="gap-2 focus-visible:border-ring">{tool.title}</AccordionTrigger>
+                  </div>
+                  <HelpTip label={`About ${tool.title}`}>{tool.description}</HelpTip>
                 </div>
+                <AccordionContent>
+                  <div className="grid gap-2">
+                    {retopology && <>
+                      <Field>
+                        <div className="flex items-center gap-1">
+                          <FieldLabel htmlFor="quad-target">Target quads</FieldLabel>
+                          <span id="quad-range" className="text-muted-foreground">4–50,000</span>
+                          <HelpTip label="About the quad target">The output count is approximate. Studio checks the input automatically without running the solver.</HelpTip>
+                        </div>
+                        <Input id="quad-target" type="number" min="4" max="50000" step="1"
+                          value={targetQuads} aria-invalid={!validQuadTarget} aria-describedby="quad-range"
+                          onChange={event => setTargetQuads(event.currentTarget.value)} disabled={busy || isRunning} />
+                      </Field>
+                      {(checkingRetopology || retopologyCheck) && <div className="flex items-center gap-1 text-muted-foreground">
+                        <span role="status" className="flex items-center gap-1">
+                          {checkingRetopology ? <><Spinner aria-hidden="true" /> Checking input…</>
+                            : retopologyCheck?.appearance_projection_required ? 'Textured input passed' : 'Geometry-only input passed'}
+                        </span>
+                        {retopologyCheck && <HelpTip label="About the input check">
+                          {retopologyCheck.input_triangles.toLocaleString()} triangles. The solver did not run.
+                          {retopologyCheck.coincident_boundary_vertices_joined && ' Exact seams can be joined without changing the source.'}
+                        </HelpTip>}
+                      </div>}
+                    </>}
+                    {!processing && (
+                      <Button
+                        className="w-full"
+                        disabled={!hasSelectedMesh || !available || busy || connection !== 'connected' || isRunning || (retopology && !retopologyCheck)}
+                        onClick={() => void runMeshOperation(tool.id)}
+                      >
+                        Run {tool.title}
+                      </Button>
+                    )}
+                  </div>
                 </AccordionContent>
               </AccordionItem>
             );
@@ -1408,14 +1404,18 @@ export function App() {
         </Accordion>
       </div>
 
-      <Disclosure className="mx-4 mb-4 border-y py-3 text-xs/relaxed" title="Retopology availability"
-        contentClassName="[&>p]:my-2 [&>p]:text-muted-foreground">
-        <p>General high-to-low texture baking remains unavailable. Experimental QuadriFlow retopology is unavailable until a signature-verified, manifest-matched managed sidecar is supported; adjacent binaries are intentionally ignored. Editable quads are preserved in a separate geometry-only OBJ, while supported base-color/metallic-roughness maps are projected only into the triangulated GLB preview. Mesh tools create derived assets and keep originals unchanged. The repository’s project license has not been selected; upstream model terms remain separate.</p>
-        <div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>QuadriFlow backend</span><span className="text-muted-foreground">{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span></div>
-        {quadriflowBackend && <><p>{quadriflowBackend.message}</p><p>{quadriflowBackend.next_step}</p></>}
+      <Disclosure className="mx-4 mb-4 border-y py-2 text-xs/relaxed" title="Retopology availability">
+        <div className="my-2 flex flex-wrap items-center justify-between gap-x-2">
+          <span>QuadriFlow backend</span>
+          <div className="flex items-center gap-1 text-muted-foreground">
+            <span>{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span>
+            <HelpTip label="About the QuadriFlow backend">
+              {quadriflowBackend ? <>{quadriflowBackend.message} {quadriflowBackend.next_step}</>
+                : 'Retopology needs a verified managed QuadriFlow backend.'}
+            </HelpTip>
+          </div>
+        </div>
         <Button onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</Button>
-        <div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>CUDA backend</span><span className="text-muted-foreground">{backendStatus('pixal3d-cuda')}</span></div>
-        <div className="my-2 flex flex-wrap justify-between gap-2 border-t pt-2"><span>Apple MLX backend</span><span className="text-muted-foreground">{backendStatus('pixal3d-mlx')}</span></div>
       </Disclosure>
       </>}
     </>;
@@ -1456,8 +1456,9 @@ export function App() {
   const toolInspector = (
     <aside className="flex h-full min-h-0 min-w-0 flex-col" id="workbench-inspector" data-tool={openInspector}
       aria-labelledby="workbench-inspector-title">
-      <SidebarHeader className="shrink-0 border-b px-4 py-2 font-heading text-sm font-medium">
+      <SidebarHeader className="shrink-0 flex-row items-center gap-1 border-b px-4 py-2 font-heading text-sm font-medium">
         <h2 id="workbench-inspector-title" tabIndex={-1}>{inspectorTitle}</h2>
+        {openInspector === 'tools' && <HelpTip label="About mesh tools">Tools create a new asset and never overwrite the original GLB.</HelpTip>}
       </SidebarHeader>
       {inspectorContent}
     </aside>
@@ -1469,7 +1470,7 @@ export function App() {
         offset={{ right: 12, bottom: sidebar.narrow ? 80 : 12 }}
         mobileOffset={{ left: 12, right: 12, bottom: 80 }} />
       <SettingsPage api={api} section={settingsSection} backendId={settingsBackend} runtime={runtime}
-        connection={connection} connectionError={connectionError} busy={busy || isRunning || installingBackend}
+        connection={connection} busy={busy || isRunning || installingBackend}
         jobFeedback={jobFeedback} jobs={recentJobs} operationLabel={studioOperationLabel}
         theme={theme} onThemeChange={setTheme}
         onVisit={openSettings} onProfileChange={setSettingsBackend} onClose={closeSettings}
@@ -1477,7 +1478,7 @@ export function App() {
         onReconnect={() => void connect(true)} onRefreshJobs={refreshRecentJobs} onRuntimeChange={setRuntime}
         onRuntimeAction={(backend, action) => void runRuntimeAction(backend, action)} />
       {dashboard && <JobsDashboard jobs={recentJobs} localActivities={localActivities} focusedJobId={dashboard.jobId}
-        connection={connection} problem={jobFeedError ?? connectionError} loaded={jobFeedLoaded} resultBlocked={isRunning}
+        connection={connection} loaded={jobFeedLoaded} resultBlocked={isRunning}
         operationLabel={studioOperationLabel} onBack={closeDashboard} onRefresh={refreshJobHistory} onReconnect={() => void connect(true)}
         onStop={requestStop}
         onLoadOlder={before => api.jobs(JOB_PAGE_SIZE, { before })}
@@ -1615,7 +1616,6 @@ export function App() {
                 <div className="m-auto grid w-full max-w-4xl items-center gap-4 p-4 @min-[42rem]:grid-cols-[minmax(0,22rem)_minmax(0,24rem)] @min-[42rem]:gap-8 sm:p-6">
                 <div className="order-2 grid min-w-0 gap-4 @min-[42rem]:order-first">
                   <h2 className="font-heading text-xl font-medium @min-[42rem]:text-3xl">Start with a model or an image</h2>
-                  <p className="text-sm text-muted-foreground">Inspect and refine a GLB, or turn a reference image into a 3D model on this computer.</p>
                   <div className="flex flex-wrap gap-2">
                     <Button onClick={() => {
                       if (assetFilters.kind !== 'mesh') applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS);
@@ -1753,9 +1753,9 @@ export function App() {
             <AlertDialogTitle>Stop this job?</AlertDialogTitle>
             <AlertDialogDescription>
               {stopTarget?.state === 'running' && stopTarget.operation !== 'image.generate'
-                ? 'Mesh processing stops at the next safe checkpoint. No result will be saved. '
+                ? 'Stops at the next safe checkpoint without saving a result. '
                 : ''}
-              A stopped job cannot be resumed. Start a new job to try again.
+              A stopped job cannot be resumed.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

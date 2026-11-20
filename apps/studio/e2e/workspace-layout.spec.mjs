@@ -101,7 +101,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   const tools = page.getByRole('group', { name: 'Model tools' });
   await tools.getByRole('button', { name: 'New model' }).click();
   const generate = page.getByRole('complementary', { name: 'Generate model' });
-  const model = generate.getByLabel('Generation model');
+  const model = generate.getByRole('combobox', { name: 'Generation model', exact: true });
   await expect(model.locator('option')).toHaveText(['Pixal3D', 'Second model']);
   expect((await model.boundingBox()).y).toBeLessThan((await generate.getByRole('region', { name: 'Reference image' }).boundingBox()).y);
   await expect(generate.getByRole('button', { name: 'Generate 3D' })).toBeDisabled();
@@ -130,8 +130,11 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   await seed.fill('17');
   await model.selectOption('second-model');
   await expect(seed).toHaveValue('7');
-  await expect(generate.getByLabel('Geometry resolution')).toHaveAttribute('readonly', '');
-  const texture = generate.getByLabel('Texture size');
+  await expect(generate.getByRole('spinbutton', { name: 'Geometry resolution', exact: true })).toHaveAttribute('readonly', '');
+  await generate.getByRole('button', { name: 'About Geometry resolution', exact: true }).focus();
+  await expect(page.getByRole('tooltip', { name: 'Fixed by the profile.' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  const texture = generate.getByRole('combobox', { name: 'Texture size', exact: true });
   await expect(texture.locator('option')).toHaveText(['1024', '2048']);
   await texture.selectOption('2048');
   const sampling = generate.getByRole('button', { name: 'Sampling', exact: true });
@@ -145,7 +148,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   await expect(seed).toBeVisible();
   await sampling.press('Enter');
   await expect(samplingSteps).toHaveValue('18');
-  const faces = generate.getByLabel('Soft face target');
+  const faces = generate.getByRole('spinbutton', { name: 'Soft face target', exact: true });
   await faces.fill('3');
   await expect(faces).toHaveAttribute('aria-invalid', 'true');
   await expect(generate.getByRole('button', { name: 'Generate 3D' })).toBeDisabled();
@@ -259,7 +262,7 @@ test('generation switches between posed presets and maps each custom image to it
   await expect(install).toBeDisabled();
   await page.getByRole('checkbox', { name: 'I approve installing the additional model files.' }).check();
   await install.click();
-  await expect(page.getByText('Installed. Multiple reference views are available in Generate model.')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Multiview model files' }).getByText('Installed', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Workbench', exact: true }).click();
   await expect(form.getByLabel('Camera field of view (°)')).toBeVisible();
   await mode.selectOption('four');

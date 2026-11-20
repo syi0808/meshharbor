@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Field, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { HelpTip } from './HelpTip';
 import { STUDIO_IMAGE_DRAG_TYPE } from './reference-drag';
 import type { Asset, OrbitCamera, PosedGenerationInput, PosedViewMode } from './types';
 
@@ -124,7 +125,6 @@ function ReferencePicker({ image, load, disabled, name, onPick, onDropImage, onC
       </Button>
       {image && <Button variant="ghost" size="sm" disabled={disabled} onClick={onClear}>Clear</Button>}
     </div>
-    {!image && <p className="hidden text-muted-foreground min-[761px]:block">Or drag an image here from Inventory.</p>}
   </div>;
 }
 
@@ -134,8 +134,10 @@ export function SingleReference({ image, load, disabled, onPick, onDropImage, on
 }) {
   return <Card size="sm" role="region" aria-label="Reference image" className="min-w-0 gap-2">
     <CardHeader>
-      <CardTitle className="text-xs"><h3>Reference image</h3></CardTitle>
-      {!image && <CardDescription>Choose a PNG or JPEG. Your current selection stays in the viewport.</CardDescription>}
+      <CardTitle className="flex items-center gap-1 text-xs"><h3>Reference image</h3>
+        <HelpTip label="About reference images">Choose a file or drag an image from Inventory. This keeps the current viewport selection.</HelpTip>
+      </CardTitle>
+      {!image && <CardDescription>PNG or JPEG</CardDescription>}
     </CardHeader>
     <CardContent><ReferencePicker image={image} load={load} disabled={disabled} onPick={onPick} onDropImage={onDropImage} onClear={onClear} /></CardContent>
   </Card>;
@@ -151,9 +153,15 @@ export function PosedReferences({ mode, views, maxViews, load, disabled, onPick,
   const custom = mode === 'custom';
   const hasDuplicate = new Set(views.flatMap(view => view.image ? [view.image.id] : [])).size < views.filter(view => view.image).length;
   return <section className="grid min-w-0 gap-3" aria-label="Reference views">
-    <h3 className="font-medium">Reference views</h3>
-    <p className="text-muted-foreground">{custom ? `Use 2–${maxViews} images and enter the camera for each. Start with the front-facing view.`
-      : 'Match each image to its direction. Presets assume the same framing, camera distance and 20° FOV.'} Masked PNGs with consistent framing work best.</p>
+    <div className="flex items-center gap-1">
+      <h3 className="font-medium">Reference views</h3>
+      <HelpTip label="About reference views">
+        {custom ? 'Start with the front view. Set the camera for each image.'
+          : 'Match each image to its direction. Presets use the same camera distance and a 20° field of view.'}{' '}
+        Masked PNGs with consistent framing work best.
+      </HelpTip>
+    </div>
+    {custom && <p className="text-muted-foreground">2–{maxViews} images</p>}
     <Input ref={bulkInput} type="file" hidden className="hidden" multiple accept="image/png,image/jpeg,.png,.jpg,.jpeg" onChange={event => {
       if (event.currentTarget.files?.length) onPick(event.currentTarget.files);
       event.currentTarget.value = '';

@@ -1,9 +1,10 @@
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field';
+import { Field, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { HelpTip } from './HelpTip';
 import type { GenerationModel, GenerationParameter, GenerationParameters, GenerationTuning, RuntimeInfo } from './types';
 
 type Draft = Record<string, string>;
@@ -98,14 +99,18 @@ export function GenerationParameterFields({ profile, draft, posed, disabled, onC
           const value = parameterValue(parameter, draft);
           const invalid = parseParameter(parameter, value) === null;
           const invalidInterval = hasInvalidInterval(parameter, value, profile.parameters, draft);
-          const describedBy = [parameter.description && `${id}-description`, (invalid || invalidInterval) && `${id}-error`].filter(Boolean).join(' ') || undefined;
+          const describedBy = invalid || invalidInterval ? `${id}-error` : undefined;
+          const label = <>
+            <FieldLabel htmlFor={id}>{parameter.label}</FieldLabel>
+            {parameter.description && <HelpTip label={`About ${parameter.label}`}>{parameter.description}</HelpTip>}
+          </>;
           return <Field key={parameter.id} data-invalid={invalid || invalidInterval || undefined}>
             {parameter.kind === 'boolean' ? <div className="flex items-center gap-2">
               <Checkbox id={id} checked={value === 'true'} disabled={disabled} aria-describedby={describedBy}
                 onCheckedChange={checked => onChange(parameter.id, String(checked === true))} />
-              <FieldLabel htmlFor={id}>{parameter.label}</FieldLabel>
+              {label}
             </div> : <>
-              <FieldLabel htmlFor={id}>{parameter.label}</FieldLabel>
+              <div className="flex items-center gap-1">{label}</div>
               {parameter.kind === 'choice' ? <NativeSelect id={id} className="w-full" value={value} disabled={disabled}
                 aria-invalid={invalid} aria-describedby={describedBy} onChange={event => onChange(parameter.id, event.target.value)}>
                 {parameter.values.map(option => <NativeSelectOption key={option} value={option}>{option}</NativeSelectOption>)}
@@ -115,7 +120,6 @@ export function GenerationParameterFields({ profile, draft, posed, disabled, onC
                 step={parameter.kind === 'number' ? 'any' : 1}
                 aria-invalid={invalid || invalidInterval} aria-describedby={describedBy} onChange={event => onChange(parameter.id, event.target.value)} />}
             </>}
-            {parameter.description && <FieldDescription id={`${id}-description`}>{parameter.description}</FieldDescription>}
             {(invalid || invalidInterval) && <FieldError id={`${id}-error`}>{invalidInterval ? 'Start must not exceed end.'
               : parameter.kind === 'integer' || parameter.kind === 'number'
                 ? `Enter ${parameter.kind === 'integer' ? 'a whole number' : 'a number'} from ${parameter.min.toLocaleString()} to ${(parameter.max ?? Number.MAX_SAFE_INTEGER).toLocaleString()}.`

@@ -1,6 +1,5 @@
 import { ArrowLeftIcon, ArrowUpRightIcon, ArrowsClockwiseIcon, CubeIcon, ListChecksIcon } from '@phosphor-icons/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -8,7 +7,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/
 import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@/components/ui/item';
 import { Spinner } from '@/components/ui/spinner';
 import { isActiveJob, isJobCancellable } from './api';
-import { Disclosure } from './Disclosure';
+import { HelpTip } from './HelpTip';
 import { JOB_PAGE_SIZE, formatDuration, jobStage, jobTiming, lastGenerationStage, mergeJobRecords } from './job-activity';
 import { JobListItem } from './JobListItem';
 import { notify } from './notify';
@@ -69,13 +68,12 @@ export function PendingGenerationCards({ jobs, sources, onOpen }: {
   </section>;
 }
 
-export function JobsDashboard({ jobs, localActivities, focusedJobId, connection, problem, loaded, resultBlocked,
+export function JobsDashboard({ jobs, localActivities, focusedJobId, connection, loaded, resultBlocked,
   operationLabel, onBack, onReconnect, onRefresh, onLoadOlder, onViewResult, onStop }: {
   jobs: Job[];
   localActivities: StudioActivity[];
   focusedJobId: string | null;
   connection: 'disconnected' | 'connecting' | 'connected';
-  problem: string | null;
   loaded: boolean;
   resultBlocked: boolean;
   operationLabel: (operation: string) => string;
@@ -130,13 +128,14 @@ export function JobsDashboard({ jobs, localActivities, focusedJobId, connection,
         <ItemDescription className="line-clamp-none wrap-anywhere">
           {jobStage(job)}{lastStage && ` · Last stage: ${lastStage}`}
         </ItemDescription>
-        {job.state === 'running' && job.operation.startsWith('runtime.') && <ItemDescription className="line-clamp-none">This job can only be stopped while queued.</ItemDescription>}
         <p className="flex flex-wrap gap-x-2 tabular-nums text-muted-foreground">
           <span>{label}: {duration}</span>
           {queuedFor && <span>Queued for: {queuedFor}</span>}
         </p>
       </div>}>
       {isJobCancellable(job) && <Button variant="outline" size="sm" disabled={connection !== 'connected'} onClick={event => onStop(job, event.currentTarget)}>Stop job</Button>}
+      {job.state === 'running' && job.operation.startsWith('runtime.') &&
+        <HelpTip label="About stopping setup jobs">Setup jobs can only be stopped while queued.</HelpTip>}
       {job.state === 'succeeded' && job.result?.asset_id && <Button variant="ghost" size="sm" onClick={() => onViewResult(job.id)}
         disabled={resultBlocked || connection !== 'connected'}>View result <ArrowUpRightIcon aria-hidden="true" /></Button>}
     </JobListItem>;
@@ -151,7 +150,6 @@ export function JobsDashboard({ jobs, localActivities, focusedJobId, connection,
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="grid gap-1">
           <h1 id="jobs-dashboard-title" ref={heading} tabIndex={-1} className="font-heading text-2xl font-medium outline-none sm:text-3xl">Jobs dashboard</h1>
-          <p className="text-sm text-muted-foreground">Follow local generation, mesh processing, and runtime jobs.</p>
         </div>
         <Button variant="outline" size="sm" disabled={refreshing || connection === 'connecting'} onClick={() => {
           if (connection === 'disconnected') onReconnect();
@@ -161,11 +159,13 @@ export function JobsDashboard({ jobs, localActivities, focusedJobId, connection,
           {connection === 'disconnected' ? 'Reconnect' : 'Refresh'}
         </Button>
       </div>
-      {problem && <Alert><AlertDescription>{problem} {loaded && 'Showing the last saved status.'}</AlertDescription></Alert>}
       <Card size="sm" role="region" aria-labelledby="jobs-active">
         <CardHeader>
           <CardTitle id="jobs-active" className="flex items-center gap-2" role="heading" aria-level={2}>
             In progress <Badge variant="secondary">{activeCount}</Badge>
+            {active.length > 0 && <HelpTip label="About interrupted jobs">
+              Jobs interrupted by an engine exit may appear here until recovered. Viewing this page never resumes them.
+            </HelpTip>}
           </CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3">
@@ -183,12 +183,8 @@ export function JobsDashboard({ jobs, localActivities, focusedJobId, connection,
             <EmptyHeader>
               <EmptyMedia variant="icon"><ListChecksIcon aria-hidden="true" /></EmptyMedia>
               <EmptyTitle>{loaded ? 'Nothing in progress' : connection === 'disconnected' ? 'Engine unavailable' : 'Checking the local engine…'}</EmptyTitle>
-              <EmptyDescription>Queued and running jobs will appear here.</EmptyDescription>
             </EmptyHeader>
           </Empty>}
-          {active.length > 0 && <Disclosure className="text-muted-foreground" title="About interrupted jobs">
-            <p>These are the last states recorded by the engine. A job interrupted by an unexpected engine exit may still appear here until it is recovered. Viewing this page never resumes a job.</p>
-          </Disclosure>}
         </CardContent>
       </Card>
       <Card size="sm" role="region" aria-labelledby="jobs-history">

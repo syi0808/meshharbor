@@ -7,6 +7,6 @@ const durations = {
   error: 9000,
 };
 
-export function notify(tone: keyof typeof durations, message: string) {
-  toast[tone](message, { id: `${tone}:${message}`, duration: durations[tone] });
+export function notify(tone: keyof typeof durations, message: string, description?: string) {
+  toast[tone](message, { id: `${tone}:${message}:${description ?? ''}`, duration: durations[tone], description });
 }

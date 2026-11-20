@@ -18,6 +18,10 @@ Pixal3D on Apple Silicon uses one reference. The NVIDIA profile also supports 4-
 
 **Optimize** and **More tools** target the selected GLB. Use **Material**, **Solid**, or **Wireframe** to inspect the model and **Fit view** to restore its framing. On a **Separate connected parts** result, **Parts** uses a different color for each output part. Click a part in the preview or choose it from the dropdown to dim the others, then toggle **Isolate** to hide them completely. Click empty space or choose **All parts** to clear the selection. Dragging still orbits the model. When small fragments share an output primitive, they appear together as **Grouped fragments**. These controls do not modify the GLB.
 
+Opening **Quad retopology (experimental)** checks the selected GLB and quad target automatically. Changing the model or target rechecks the input. The check does not run the solver or queue a job; **Run** also requires an available QuadriFlow backend.
+
+Operation failures appear as toasts. Use **Details** on a failed job to see its saved error again. Hover, focus, or tap a **?** icon for extra information.
+
 Each imported or generated model has one Inventory card. Edits such as Cleanup, Optimize, and part separation create numbered versions under that card. Use **Version history** below the preview to inspect an older version temporarily or **Restore** it as current without deleting later versions. Editing the current version advances the card; editing a historical version records a branch and leaves the current card unchanged until you restore that branch. Use **Original** and **Result** to compare the job input and output at the same angle, and **Export GLB** to download the version being viewed. Generation leaves an unrelated selected model in place and exposes **View generated model** when the new asset is ready. Opening a saved job does not restart it.
 
 ### Workspace review

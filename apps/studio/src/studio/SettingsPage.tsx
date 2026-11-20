@@ -14,6 +14,7 @@ import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Sidebar, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider } from '@/components/ui/sidebar';
 import { Disclosure } from './Disclosure';
+import { HelpTip } from './HelpTip';
 import { JobListItem } from './JobListItem';
 import type { StudioActivity } from './JobsDashboard';
 import { notify } from './notify';
@@ -23,10 +24,10 @@ import { runtimeSetupStage } from './workbench-state';
 import type { StudioTheme } from './theme';
 
 const sections = {
-  models: { title: 'Models', icon: CubeIcon, description: 'Browse the generation models supported by MeshHarbor and prepare them for this computer.' },
-  connections: { title: 'Connections', icon: KeyIcon, description: 'Manage local sign-in for external services.' },
-  storage: { title: 'Downloads & storage', icon: HardDrivesIcon, description: 'Install or remove local model files and review recent setup and download activity.' },
-  preferences: { title: 'Preferences', icon: PaintBrushIcon, description: 'Choose how Studio looks on this device.' },
+  models: { title: 'Models', icon: CubeIcon, description: 'Set up local generation.' },
+  connections: { title: 'Connections', icon: KeyIcon, description: 'Manage sign-in.' },
+  storage: { title: 'Downloads & storage', icon: HardDrivesIcon, description: 'Manage local model files.' },
+  preferences: { title: 'Preferences', icon: PaintBrushIcon, description: 'Customize Studio.' },
 };
 
 export type SettingsSection = keyof typeof sections;
@@ -57,7 +58,6 @@ interface Props {
   backendId: RuntimeBackendId | null;
   runtime: RuntimeInfo | null;
   connection: 'disconnected' | 'connecting' | 'connected';
-  connectionError: string | null;
   busy: boolean;
   jobFeedback: ReactNode;
   theme: StudioTheme;
@@ -75,7 +75,7 @@ interface Props {
   onRuntimeAction: (backend: RuntimeBackendId, action: RuntimeAction) => void;
 }
 
-export function SettingsPage({ api, section, backendId, runtime, connection, connectionError, busy, jobFeedback, theme, jobs, operationLabel, onVisit, onProfileChange, onClose, onOpenDashboard, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
+export function SettingsPage({ api, section, backendId, runtime, connection, busy, jobFeedback, theme, jobs, operationLabel, onVisit, onProfileChange, onClose, onOpenDashboard, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
   const heading = useRef<HTMLHeadingElement>(null);
   const removalTrigger = useRef<HTMLButtonElement | null>(null);
   const [accounts, setAccounts] = useState<Partial<Record<RuntimeBackendId, AccountStatus>>>({});
@@ -283,12 +283,9 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
             </NativeSelect>
           </Field>
           </CardContent>
-        </Card> : connection !== 'connected' ? <Alert role={connection === 'connecting' ? 'status' : 'alert'} className="justify-items-start gap-2 p-4">
+        </Card> : connection !== 'connected' ? <Alert role="status" className="justify-items-start gap-2 p-4">
           <AlertTitle><h2>{connection === 'connecting' ? 'Connecting to the local engine' : 'Local engine is offline'}</h2></AlertTitle>
-          <AlertDescription className="grid gap-2">
-            <p className="mb-0!">Start <code>meshharbor serve</code> to view and manage local models.</p>
-            {connectionError && <p className="wrap-anywhere">{connectionError}</p>}
-          </AlertDescription>
+          {connection === 'disconnected' && <AlertDescription>Start <code>meshharbor serve</code> to connect.</AlertDescription>}
           <Button disabled={connection === 'connecting'} onClick={onReconnect}>Retry connection</Button>
         </Alert> : <>
           {section === 'models' && (runtime?.model_catalog ?? []).map(model => <Card key={model.id}>
@@ -298,7 +295,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
                 <Badge variant="outline">Image to 3D</Badge>
                 {model.status === 'experimental_opt_in' && <Badge variant="outline">Experimental</Badge>}
               </CardTitle>
-              <CardDescription>Generate {model.output === 'geometry_glb' ? 'a geometry-only GLB' : 'a textured GLB'} from a reference image. Generation runs locally.</CardDescription>
+              <CardDescription>Output: {model.output === 'geometry_glb' ? 'geometry-only GLB' : 'textured GLB'}</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 lg:grid-cols-2">
               {model.backend_ids.map(backendId => {
@@ -306,18 +303,16 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
                 if (!backend) return null;
                 if (backend.manual_setup) return <Card key={backendId} role="article" size="sm" className="bg-background">
                   <CardHeader>
-                    <CardTitle className="min-w-0"><h3>{backend.accelerator ?? backendId}</h3></CardTitle>
+                    <CardTitle className="flex min-w-0 items-center gap-1"><h3>{backend.accelerator ?? backendId}</h3>
+                      <HelpTip label="About manual runtime setup">
+                        See <code>docs/external-generation-runtimes.md</code>. {backend.license_notice}
+                        {!backend.ready && backend.missing?.[0] && <span className="block">{backend.missing[0]}</span>}
+                      </HelpTip>
+                    </CardTitle>
                     <CardDescription>Operator-installed runtime</CardDescription>
                     <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend)}</Badge></CardAction>
                   </CardHeader>
-                  <CardContent className="grid gap-2 text-sm text-muted-foreground">
-                    {backend.license_notice && <p>{backend.license_notice}</p>}
-                    {backend.host_supported && <>
-                      <p>Follow <code>docs/external-generation-runtimes.md</code> in the MeshHarbor repository.</p>
-                      <code className="wrap-anywhere">{backend.runtime_root}</code>
-                      {!backend.ready && backend.missing?.[0] && <p className="wrap-anywhere">{backend.missing[0]}</p>}
-                    </>}
-                  </CardContent>
+                  {backend.host_supported && <CardContent><code className="wrap-anywhere text-muted-foreground">{backend.runtime_root}</code></CardContent>}
                 </Card>;
                 const id = profileIds.find(candidate => candidate === backendId);
                 if (!id) return null;
@@ -381,8 +376,8 @@ export function SettingsPage({ api, section, backendId, runtime, connection, con
         <AlertDialogHeader>
           <AlertDialogTitle>{removal?.scope === 'huggingface' ? 'Disconnect Hugging Face?' : 'Remove model files?'}</AlertDialogTitle>
           <AlertDialogDescription>{removal && (removal.scope === 'huggingface'
-            ? 'Remove the saved credentials used by this computer’s model runtime. This does not revoke the token on Hugging Face or remove downloaded models.'
-            : `Remove Pixal3D weights and transfer caches for ${profiles[removal.backend].title}. The Python environment, Hugging Face connection, and all Studio assets stay in place.`)}</AlertDialogDescription>
+            ? 'Remove saved local credentials. Your Hugging Face token and downloaded models stay intact.'
+            : `Remove ${profiles[removal.backend].title} weights and caches. Your environment, sign-in, and assets stay intact.`)}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
@@ -409,8 +404,8 @@ const accessMessages: Record<AccessStatus, string> = {
   checking: 'Checking DINOv3 file access…',
   verified: 'DINOv3 file access verified.',
   not_connected: 'Sign in to Hugging Face to check DINOv3 file access.',
-  access_denied: 'DINOv3 access denied. Request access on the model page with the same account, then return here.',
-  unavailable: 'Could not verify DINOv3 access. Select Refresh status to retry.',
+  access_denied: 'Access required',
+  unavailable: 'Access not verified',
 };
 
 const accountMessages: Record<AccountStatus, string> = {
@@ -440,20 +435,23 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
   }
   return <Card role="region" aria-label="Hugging Face connection">
     <CardHeader>
-      <CardTitle className="min-w-0 text-base"><h2>Hugging Face</h2></CardTitle>
-      <CardDescription>Sign-in is stored locally for the model runtime on this computer.</CardDescription>
+      <CardTitle className="flex min-w-0 items-center gap-1 text-base"><h2>Hugging Face</h2>
+        <HelpTip label="About Hugging Face sign-in">
+          Credentials stay in the local runtime. The first browser sign-in prepares a private Hugging Face CLI.
+          {local?.credentials_managed === false && ' Custom credential storage requires an access token instead of browser sign-in.'}
+        </HelpTip>
+      </CardTitle>
       <CardAction><Badge variant="outline">{account === 'connected' ? 'Signed in' : local?.token_saved ? 'Token saved' : local?.credentials_managed === false ? 'Custom storage' : 'Not connected'}</Badge></CardAction>
     </CardHeader>
     <CardContent className="grid gap-4">
     {canConnect ? <>
       <div className="grid gap-3">
-        <p className="text-muted-foreground">Sign in through Hugging Face without creating or copying a token. The first sign-in prepares a private Hugging Face CLI.</p>
         {browserSession?.state === 'preparing' && <p role="status">Preparing browser sign-in…</p>}
         {browserSession?.state === 'awaiting_authorization' && (
           <Card size="sm" className="bg-background"><CardContent className="grid justify-items-start gap-2">
             <p>Enter this one-time code on Hugging Face:</p>
             <code className="text-lg font-semibold tracking-widest select-all">{browserSession.user_code}</code>
-            <p className="text-xs text-muted-foreground">The code is valid for up to {Math.ceil(browserSession.expires_in / 60)} minutes. MeshHarbor waits for approval.</p>
+            <p className="text-xs text-muted-foreground">Valid for up to {Math.ceil(browserSession.expires_in / 60)} min.</p>
             <Button asChild><a href="https://huggingface.co/oauth/device" target="_blank" rel="noreferrer">Open Hugging Face</a></Button>
           </CardContent></Card>
         )}
@@ -466,7 +464,7 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
       </div>
       <Disclosure className="rounded-md border p-3" title="Use an access token instead">
         <form method="post" autoComplete="off" className="mt-3 grid justify-items-start gap-2" onSubmit={connectToken}>
-          <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Create a Hugging Face token</a> or use an existing one.</p>
+          <a className="text-primary underline underline-offset-4" href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Create a Hugging Face token</a>
           <Label htmlFor="huggingface-token">Hugging Face access token</Label>
           <Input id="huggingface-token" name="token" type="password" placeholder="hf_…" maxLength={512} required disabled={disabled} autoComplete="off" className="max-w-md" />
           <Button type="submit" disabled={disabled}>{local?.token_saved ? 'Replace token' : 'Connect token'}</Button>
@@ -475,7 +473,6 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
     </> : <p className="text-muted-foreground">{backend.installable ? 'Set up the Python environment in Models before connecting a token.' : 'Hugging Face sign-in is not available on this computer.'}</p>}
     {account === 'checking' && <p role="status" className="text-muted-foreground">{accountMessages.checking}</p>}
     {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={event => onDisconnect(event.currentTarget)}>Disconnect locally</Button></div>}
-    {local?.credentials_managed === false && <p className="text-muted-foreground">Browser sign-in and local disconnect require the default managed credential directory. For this profile, use an access token instead.</p>}
     </CardContent>
   </Card>;
 }
@@ -497,12 +494,21 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMul
     if (stage !== 'models' || !backend.downloads_enabled || disabled || needsConnection) return;
     const controller = new AbortController();
     let checking = false;
+    let previous: AccessStatus | undefined;
     async function check() {
       if (checking || controller.signal.aborted) return;
       checking = true;
       setAccess('checking');
       const result = await api.checkModelAccess(id, controller.signal).catch(() => 'unavailable' as const);
-      if (!controller.signal.aborted) setAccess(result);
+      if (!controller.signal.aborted) {
+        setAccess(result);
+        if (previous !== result && result === 'access_denied') {
+          notify('warning', 'DINOv3 access denied.', 'Request access on Hugging Face with the same account.');
+        } else if (previous !== result && result === 'unavailable') {
+          notify('error', 'Could not verify DINOv3 access.', 'Refresh status to retry.');
+        }
+        previous = result;
+      }
       checking = false;
     }
     const initialCheck = window.setTimeout(() => void check(), 0);
@@ -525,13 +531,15 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMul
     {stage === 'unsupported' && <p className="text-muted-foreground">This backend is not supported on this computer.</p>}
     {stage === 'environment' && <div className="flex flex-wrap items-center gap-2"><p className="text-muted-foreground">Set up the Python environment first.</p><Button variant="outline" onClick={() => onSettings('models')}>View model setup</Button></div>}
     {stage === 'models' && <div className="grid justify-items-start gap-3">
-      {cache && <p className="text-muted-foreground">
-        {cache.local_checkpoints}/{cache.total_checkpoints} Pixal3D checkpoints in this backend’s cache.
-        {cache.reusable_checkpoints > 0 && ` ${cache.reusable_checkpoints} more can be reused from your existing Hugging Face cache.`}
-        {' DINOv3 and NAF are handled separately.'}
-      </p>}
+      {cache && <div className="flex items-center gap-1 text-muted-foreground">
+        <span>{cache.local_checkpoints}/{cache.total_checkpoints} checkpoints cached</span>
+        <HelpTip label="About the checkpoint cache">
+          {cache.reusable_checkpoints > 0 && `${cache.reusable_checkpoints} more can be reused from the Hugging Face cache. `}
+          DINOv3 and NAF are handled separately.
+        </HelpTip>
+      </div>}
       <div className="grid gap-2">
-        <p className="text-muted-foreground"><a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a> on Hugging Face. Studio checks file access automatically.</p>
+        <a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a>
         {verificationRequired && accessStatus !== 'checking' && <Button className="justify-self-start" variant="outline" onClick={() => onSettings('connections', id)}>Manage Hugging Face connection</Button>}
       </div>
       <div role="status" className="text-muted-foreground">
@@ -545,17 +553,20 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMul
       <Button disabled={disabled || verificationRequired || !consent || !backend.downloads_enabled} onClick={() => { setConsent(false); onDownload(); }}>Download model files</Button>
     </div>}
     {stage === 'conversion' && <div className="grid justify-items-start gap-2">
-      <p className="text-muted-foreground">Finish the one-time NAF conversion before using this model.</p>
+      <p className="text-muted-foreground">NAF conversion required.</p>
       <Button disabled={disabled || !backend.conversion_enabled} onClick={onConvert}>Finish NAF conversion</Button>
     </div>}
-    {stage === 'incomplete' && <p className="text-muted-foreground">The files are present, but runtime checks have not passed. Run <code>meshharbor doctor</code> for details.</p>}
-    {stage === 'ready' && <p className="text-muted-foreground">Ready for offline generation in the workbench.</p>}
+    {stage === 'incomplete' && <div className="flex items-center gap-1 text-muted-foreground">
+      Runtime not ready <HelpTip label="About runtime checks">Files are present. Run <code>meshharbor doctor</code> for diagnostics.</HelpTip>
+    </div>}
+    {stage === 'ready' && <p className="text-muted-foreground">Ready for offline generation.</p>}
     {stage === 'ready' && backend.generation?.view_modes?.some(mode => mode !== 'single') &&
       <section className="grid justify-items-start gap-2 border-t pt-3" aria-label="Multiview model files">
-        <h3 className="font-medium">Multiview weights</h3>
-        {backend.multiview_ready ? <p className="text-muted-foreground">Installed. Multiple reference views are available in Generate model.</p>
+        <div className="flex items-center gap-1"><h3 className="font-medium">Multiview weights</h3>
+          <HelpTip label="About multiview weights">Enable multiple reference views. The separate download can be large; compatible cached files are reused.</HelpTip>
+        </div>
+        {backend.multiview_ready ? <p className="text-muted-foreground">Installed</p>
           : <>
-            <p className="text-muted-foreground">Uses a separate model snapshot. This may transfer several large files; compatible cached files are reused.</p>
             <div className="flex items-start gap-2">
               <Checkbox id="multiview-consent" checked={multiviewConsent} disabled={disabled} onCheckedChange={value => setMultiviewConsent(value === true)} />
               <Label htmlFor="multiview-consent">I approve installing the additional model files.</Label>
@@ -565,7 +576,6 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMul
           </>}
       </section>}
     {local?.remove_models_available && <div className="grid justify-items-start gap-2 border-t pt-3">
-      <p className="text-muted-foreground">Removing model files does not remove the Python environment, saved credentials, or assets.</p>
       <Button variant="destructive" disabled={disabled} onClick={event => onRemove(event.currentTarget)}>{backend.models_downloaded ? 'Uninstall model files' : 'Clear cached model files'}</Button>
     </div>}
     {local?.model_files_managed === false && <p className="text-muted-foreground">Studio cannot remove files from custom or linked model directories.</p>}

@@ -25,6 +25,30 @@ function partCenter(image, matches) {
   return { x: Math.round(sumX / count), y: Math.round(sumY / count) };
 }
 
+test('version history load errors use a toast and leave a retry action', async ({ page, studioOrigin }) => {
+  let unavailable = true;
+  await page.route('**/api/v1/models/*/versions?limit=20', route => unavailable
+    ? route.fulfill({ status: 503, json: { error: 'Version store unavailable.' } })
+    : route.continue());
+  await page.goto(studioOrigin);
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.getByRole('button', { name: 'Open GLB', exact: true }).click(),
+  ]);
+  await chooser.setFiles({ name: 'panels.glb', mimeType: 'model/gltf-binary', buffer: disconnectedPartsGlb() });
+
+  await page.getByRole('button', { name: 'Version history', exact: true }).click();
+  const history = page.getByRole('dialog', { name: 'Version history' });
+  const retry = history.getByRole('button', { name: 'Retry loading versions' });
+  await expect(retry).toBeVisible();
+  await expect(history).not.toContainText('Version store unavailable.');
+  await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Version store unavailable.')).toBeVisible();
+
+  unavailable = false;
+  await retry.click();
+  await expect(history.getByRole('button', { name: 'Preview version 1' })).toBeVisible();
+});
+
 test('edits stay on one inventory card and restored versions survive reload', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   const inventory = page.getByRole('complementary', { name: 'Inventory' });
