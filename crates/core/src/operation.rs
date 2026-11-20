@@ -454,7 +454,7 @@ impl OperationCore {
                 "runtime_root": readiness.runtime_root,
                 "python": readiness.python,
                 "missing": readiness.missing,
-                "license_notice": "The MeshHarbor project license has not been selected in this repository; upstream model/checkpoint terms are separate and remain pending review. User confirmation and gated access are required before model downloads.",
+                "license_notice": "MeshHarbor's MIT license covers its own code. Upstream runtime and checkpoint terms remain separate and pending review. User confirmation and gated access are required before model downloads.",
             }));
         }
         if let Some(readiness) = &mlx {
@@ -536,7 +536,7 @@ impl OperationCore {
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
                 "TRELLIS.2 and TripoSG are manual opt-in runtimes. MeshHarbor does not install or bundle their sources, dependencies, or models. Readiness checks the operator activation and local file layout, not licenses, hashes, GPU compatibility, or inference quality.".into(),
-                "The MeshHarbor project license has not been selected in this repository. Upstream model weights and separate DINOv3/NAF terms remain independent; gated access is user-controlled, and generated user inputs stay local to the worker.".into(),
+                "MeshHarbor's MIT license covers its own code. Third-party runtime and model terms, including DINOv3 and NAF, remain separate; gated access is user-controlled. See THIRD-PARTY-NOTICES.md.".into(),
             ],
         }
     }

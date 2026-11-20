@@ -6,6 +6,8 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/syi0808/meshharbor"
 
 [workspace.dependencies]
 axum = "0.8.9"

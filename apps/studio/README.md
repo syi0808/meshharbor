@@ -53,7 +53,7 @@ Use **Stop job** in the workbench or Dashboard to cancel queued jobs and running
 2. In `apps/studio`, install the pinned JavaScript dependencies from the official npm registry, then run:
 
    ```sh
-   npm install
+   npm ci --ignore-scripts --no-audit --no-fund
    npm run dev
    ```
 

@@ -2,7 +2,12 @@
 
 MeshHarbor's stdio MCP server uses the same `OperationCore`, asset store, job
 queue, and generation runtimes as the CLI and localhost REST API. The
-managed setup below is for Pixal3D. For TRELLIS.2 or TripoSG, follow the
+server runs as `meshharbor mcp`; stdout is reserved for the protocol and
+diagnostics go to stderr. For mesh-only work, start with `list_operations`,
+`list_assets` or `import_asset`, then use `start_simplification` or
+`start_mesh_processing` and poll `get_job`. No GPU runtime is required.
+
+The managed setup below is for Pixal3D. For TRELLIS.2 or TripoSG, follow the
 [manual runtime guide](external-generation-runtimes.md) locally, then pass
 its explicit backend ID to `start_image_generation`.
 

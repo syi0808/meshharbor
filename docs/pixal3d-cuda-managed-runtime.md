@@ -87,8 +87,9 @@ Select **Pixal3D** in **Generate model**, then choose 4 views (front, right, bac
 
 ## Limits and licensing
 
-The CUDA and MLX source ports are MIT-licensed, but that does **not** grant the
-same rights to upstream model/checkpoint weights. DINOv3 is separately gated;
+The CUDA and MLX source snapshots retain their MIT port notices and
+[separate third-party terms](../runtimes/pixal3d/THIRD-PARTY-NOTICES.md).
+Those notices do not grant the same rights to model weights. DINOv3 is separately gated;
 NAF checkpoint inference scope and other model terms remain flagged in
 `registry/models/pixal3d.json`. MeshHarbor does not accept model terms for the
 user. This implementation is an opt-in experimental route, not a claim that

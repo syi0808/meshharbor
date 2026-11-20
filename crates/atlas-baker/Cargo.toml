@@ -2,7 +2,8 @@
 name = "meshharbor-atlas-baker"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license.workspace = true
+repository.workspace = true
 publish = false
 description = "A bounded glTF GLB xatlas UV unwrap and texture rebake operation for MeshHarbor"
 

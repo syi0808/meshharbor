@@ -1,144 +1,50 @@
 # MeshHarbor
 
-MeshHarbor is an early Rust-first, local 3D asset processing application. Its shared Rust operation core is exposed through a CLI, a loopback REST API, and the official Rust MCP SDK. It supports importing PNG/JPEG/GLB files; simplifying, cleaning, and separating a bounded class of static GLB meshes; xatlas-based UV atlas generation with same-mesh embedded PBR rebaking; meshoptimizer render-order optimization and KHR_meshopt_compression; and opt-in Pixal3D, TRELLIS.2, and TripoSG image-to-GLB generation through MLX on Apple Silicon or CUDA on Linux/NVIDIA. An experimental QuadriFlow quad-remeshing path is wired through the operation core but unavailable in the current product build. CLI, REST, MCP, and Studio expose backend status and an install request. Runtime code ignores adjacent executables; a managed sidecar can be resolved only after an in-process verifier accepts its release attestation and the executable hash matches the trusted manifest. The in-process verifier is integrated, but the checked-in manifest is empty, so status reports the backend unavailable and install/rollback requests fail closed without downloads or backend-directory writes. Unsigned temporary Actions artifacts are never installed. For its narrowly supported textured inputs, base-color and metallic/roughness maps are projected only onto the triangulated GLB preview, with strict fail-closed gates; the editable quad OBJ remains geometry-only. Generic high-to-low texture baking remains unimplemented.
+[![MIT license for first-party code](https://img.shields.io/badge/first--party%20license-MIT-blue)](LICENSE)
+[![Embedded Studio smoke](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml/badge.svg)](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml)
 
-This is **not yet a complete M1 product or release build**. A React/TypeScript/Three.js Studio client exists under `apps/studio`. GitHub Actions checks the locked Studio build and launches a release-mode CLI with the bundle embedded on pinned Linux, macOS, and Windows runners. Linux also runs a Chromium regression of the textured GLB workflow. Broad visual QA, a desktop shell, an installer, code signing, and a published release package remain pending. The new TRELLIS.2 and TripoSG integrations have been tested with stub workers, not real GPU inference. Pixal3D CUDA still needs a fresh supported-GPU acceptance run. Model weights are not bundled. MeshHarbor's project license has not been selected; this repository deliberately has no root `LICENSE`.
+MeshHarbor is a local workbench for inspecting, editing, and exporting 3D assets. Use the browser-based Studio for interactive work, or drive the same Rust engine through the CLI, a loopback REST API, or stdio MCP.
 
-## Implemented now
+- **Inspect and edit GLB files.** Preview models, simplify meshes, clean degenerate faces, or separate connected parts. Compare before and after, revisit earlier versions, and export without overwriting the original.
+- **Prepare assets for rendering.** Reorder geometry, export meshopt-compressed GLBs, or rebuild a UV atlas and rebake supported embedded textures from the same mesh.
+- **Try local image-to-3D.** Pixal3D has opt-in Apple Silicon (MLX) and Linux/NVIDIA (CUDA) profiles. TRELLIS.2 and TripoSG require manually provisioned runtimes. Model weights are not bundled.
 
-- `crates/core`: GLB v2 parsing and inspection, source-immutable content-addressed artifact storage with bounded byte-size/SHA-256 verification, SQLite asset/job records, operation catalog, and meshoptimizer-based simplification, conservative face cleanup, seam-aware connected-part separation, vertex-cache/overdraw render optimization, KHR_meshopt_compression export, xatlas atlas UV generation with supported same-mesh texture rebaking, and a conditional QuadriFlow sidecar adapter.
-- `crates/meshharbor`: one executable with CLI commands, a local Axum REST API, and stdio MCP tools, all using the same `OperationCore`.
-- `apps/studio`: a source-only local Studio client for GLB and PNG/JPEG import, mesh preview, simplify/cleanup/part-separation/UV-rebake/render-optimize/compress jobs, conditional retopology, MLX/CUDA runtime setup and download jobs, backend selection, image-generation jobs, recent persisted-job history, and result download. The preview loads KHR_meshopt_compression with Three.js's local MeshoptDecoder. Python environments and checkpoint downloads are separate explicit actions. The Rust build embeds `apps/studio/dist` when present; without it, the server root serves a local “assets are not built” notice.
-- `crates/core/src/runtime.rs`, `cuda_runtime.rs`, and `generation.rs`: opt-in isolated uv-managed Python runtimes, separated Hugging Face homes, user-controlled gated access, and offline image-to-GLB wrappers. The source snapshots and adapters are embedded in the Rust executable and extracted under application data during setup; no checkout-relative source path is needed. Setup bootstraps pinned official uv if absent and verifies its SHA-256 before use. The CUDA profile is Linux x86_64/NVIDIA only and runs a PyTorch CUDA/SDPA smoke test. Upstream has no CUDA lock file, so explicit setup resolves and stores a per-install lock in app data rather than claiming a committed cross-machine lock.
-- `runtimes/pixal3d/{cuda,mlx}/upstream/`: byte-preserved source snapshots from the two pinned Pixal3D repositories, with per-file inventory and third-party notices. No model weights are bundled; model downloads require an explicit confirmation and gated DINOv3 access.
-- `registry/models/pixal3d.json`: records the experimental, non-release status and unresolved upstream model/checkpoint terms. The MeshHarbor project license has not been selected in this repository, and model-weight commercial use remains uncleared.
+**Status:** Early source build. There is no official installer or binary release. Mesh editing works without Python, model weights, or a Hugging Face account. Mesh operations support specific static GLB layouts; generic high-to-low baking is not implemented, and the experimental QuadriFlow operation is unavailable because there is no approved sidecar.
 
-The operations have explicit format and feature limits. Simplification, cleanup, render optimization, compression, and part separation work on bounded static indexed TRIANGLES data in embedded GLB buffers, reject unsupported animation/skin/morph/compression layouts, and keep the source asset immutable. Cleanup removes repeated-index, exactly zero-area, and same-winding duplicate faces only; it does not weld vertices or compact unused streams. Part separation accepts an embedded GLB up to 64 MiB total (JSON up to 4 MiB), 1,000,000 POSITION vertices, and 3,000,000 indices. It finds components by shared indices and unambiguous, oppositely directed edges with exact matching positions. If there are more than 256 components, it keeps the largest 255 in separate primitives and groups the rest without removing triangles, welding vertices, or making scene nodes. Render optimization uses meshoptimizer's vertex-cache and overdraw passes on opaque/masked primitives; translucent primitives are left in original order. Mesh compression emits the required `KHR_meshopt_compression` extension without an uncompressed geometry fallback, so the compressed GLB must be opened by an extension-aware viewer.
+## Quick start
 
-Atlas UV rebaking uses vendored MIT xatlas and supports exactly one static mesh/primitive/material with existing FLOAT UVs, embedded PNG base-color and metallic/roughness maps, and no unsupported extensions or tangent stream. It duplicates/remaps supported vertex streams, produces a new atlas, and rebakes those maps from the same mesh's prior UVs. Charting uses scale-normalized coordinates, but exported positions retain their original values. Exactly zero-area faces are omitted from the derived atlas asset and reported. Run `uv.unwrap` through REST, CLI, MCP, or **More tools → UV atlas rebake** in Studio. Retopology uses a separate xatlas projection path. This is not a generic high-to-low bake and does not handle arbitrary maps, external images, or multi-material assets. External image URIs are never fetched. The simplification triangle target is aspirational: its report gives the actual count and measured error.
+Install Rust/Cargo 1.88 or later, a C/C++ toolchain, and Node.js 24 for Studio. See the [build and smoke guide](docs/embedded-studio-package-smoke.md) for pinned CI versions and additional Windows build requirements.
 
-QuadriFlow retopology is implemented as an experimental, sidecar-dependent operation, but it is unavailable in the current product build. Adjacent executables are ignored; runtime readiness requires a managed sidecar accepted by an in-process signature/provenance verifier and matched to the trusted manifest. The verifier is integrated, but the manifest is empty and no approved sidecar is listed. It accepts one closed static triangle GLB. For textured input it requires existing FLOAT `TEXCOORD_0`, optional `NORMAL`, and one embedded PNG base-color and metallic/roughness map; the source may not have tangent/other vertex streams, unsupported extensions, transforms, external images, or extra meshes/materials. A bounded nearest-surface projection with a 2%-of-source-bounds distance cap, facing-normal gate, at-least-99.5% coverage requirement, and opposing-shell ambiguity rejection rebakes only those two maps into the triangulated GLB preview. The separate OBJ preserves editable quad topology but contains geometry only. UVs, colors, other maps, rigs, and animation are not transferred, and this does not certify visual texture quality, self-intersection freedom, or measured surface error. The sidecar is not included or auto-installed; its source build and any package must retain applicable upstream/dependency notices. See [the retopology candidate limits](docs/retopology-candidate.md). Generic high-to-low texture baking remains unavailable.
-
-External image URIs are never fetched. The simplification triangle target is aspirational: its report gives the actual count and measured error.
-
-See [architecture status](docs/architecture.md), [license/dependency status](docs/licensing-status.md), and [source provenance](docs/source-provenance.md) before using or redistributing this code.
-
-## Build and test
-
-Requirements: Rust/Cargo 1.88 or later and a C++ toolchain for meshoptimizer and the vendored xatlas wrapper; CI pins Rust 1.88.0. To build the embedded Studio bundle reproducibly, use Node.js 24.22.3. Windows source builds also need the MSVC C++ toolchain, NASM 3.02 on `PATH`, and `CFLAGS=/std:c11` for the AWS-LC MSVC feature probe. See [the embedded Studio build/smoke guide](docs/embedded-studio-package-smoke.md).
+Clone the repository, build Studio, then start the local server:
 
 ```sh
-cargo fmt --all -- --check
-cargo test --workspace
-cargo run --bin meshharbor -- --help
-cargo run --bin meshharbor -- doctor
+git clone https://github.com/syi0808/meshharbor.git
+cd meshharbor
+cd apps/studio
+npm ci --ignore-scripts --no-audit --no-fund
+npm run build
+cd ../..
+cargo run --locked --bin meshharbor -- serve --listen 127.0.0.1:7432
 ```
 
-Most tests cover synthetic GLB fixtures and the Rust API/core contracts. CI also builds and launches a release-mode MeshHarbor binary with its Studio bundle on Ubuntu 24.04, macOS 15, and Windows Server 2022; the smoke checks the local health endpoint and embedded HTML/JS/CSS assets. On Linux, a [Chromium regression](apps/studio/README.md#browser-regression) checks import, Optimize, Original/Result comparison, and export for a deterministic textured GLB, including material and texture preservation. It does not cover real-asset or cross-browser visual QA or model inference. The separate QuadriFlow source-build smoke uses only a synthetic cube; see [the retopology candidate notes](docs/retopology-candidate.md) for its platform limits.
+Open **http://127.0.0.1:7432**, choose **Inventory → 3D models → Open GLB**, and select a local static GLB. Try **Optimize**, compare **Original** and **Result**, then use **Export GLB**. The default server is single-user and loopback-only; do not expose it through a public proxy.
 
-The Studio client source is not part of the Rust unit tests. Run `npm ci --ignore-scripts --no-audit --no-fund` and `npm run build` in `apps/studio` before compiling MeshHarbor to embed the client. The committed npm lockfile keeps this install resolution deterministic.
+The Studio bundle is embedded at Rust build time. For the CLI alone, skip the npm steps and run `cargo run --locked --bin meshharbor -- --help`.
 
-## CLI
+## Documentation
 
-```sh
-# Import and inspect
-meshharbor import ./scene.glb
-meshharbor assets --limit 20
+| I want to… | Start here |
+| --- | --- |
+| Use Studio, version history, or job controls | [Studio guide](apps/studio/README.md) |
+| Process assets from a terminal | [CLI guide](docs/cli.md) |
+| Integrate with the local API or an MCP client | [REST API](docs/rest-api.md) · [MCP workflow](docs/mcp-workflow.md) |
+| Configure image-to-3D | [Pixal3D MLX](docs/pixal3d-mlx-manual-runtime.md) · [Pixal3D CUDA](docs/pixal3d-cuda-managed-runtime.md) · [TRELLIS.2 and TripoSG](docs/external-generation-runtimes.md) |
+| Understand format limits or work on the project | [Architecture](docs/architecture.md) · [Documentation index](docs/README.md) · [Contributing](CONTRIBUTING.md) |
 
-# Read persisted job history without resuming or modifying jobs
-meshharbor jobs list --limit 20
-meshharbor jobs show job_<id>
+## Contributing
 
-# Simplify an imported asset; the source stays intact
-meshharbor simplify asset_<id> --target-triangles 4000 --max-error 0.02 --output ./scene-simplified.glb
+[Issues and benchmarks](https://github.com/syi0808/meshharbor/issues) are welcome. Include the revision, platform, and a minimal shareable fixture when possible. Use the [contribution guide](CONTRIBUTING.md) for development checks and the [security policy](SECURITY.md) for private vulnerability reports.
 
-# Conservative cleanup, connected-part primitives, atlas UV rebake, render optimization, or required KHR_meshopt compression
-meshharbor process-mesh asset_<id> --operation mesh.cleanup --output ./scene-cleaned.glb
-meshharbor process-mesh asset_<id> --operation mesh.separate_parts --output ./scene-parts.glb
-meshharbor process-mesh asset_<id> --operation uv.unwrap --output ./scene-atlas.glb
-# Adjust atlas resolution (64–4,096; default 1,024) and chart padding (0–64; default 8)
-meshharbor process-mesh asset_<id> --operation uv.unwrap --resolution 2048 --padding 12 --output ./scene-atlas-hd.glb
-meshharbor process-mesh asset_<id> --operation render.optimize --output ./scene-render-optimized.glb
-# Optional overdraw threshold (1.0–1.5; default 1.05)
-meshharbor process-mesh asset_<id> --operation render.optimize --overdraw-threshold 1.2 --output ./scene-render-tuned.glb
-meshharbor process-mesh asset_<id> --operation mesh.compress --output ./scene-compressed.glb
+## License
 
-# Experimental retopology is currently unavailable; adjacent binaries are ignored.
-meshharbor process-mesh asset_<id> --operation mesh.retopology --target-quads 10000 --output ./quad-preview.glb --quad-output ./quad-topology.obj
-
-
-# If MeshHarbor exited unexpectedly, first stop every REST/MCP process using this data directory.
-# The command also refuses to run while a REST or MCP service holds the shared data-directory lock.
-meshharbor jobs recover-interrupted --confirm-no-running-meshharbor
-
-# Optional Apple Silicon MLX runtime setup (uv is installed automatically if missing)
-meshharbor runtime setup
-meshharbor runtime hf-login
-meshharbor runtime install-models --confirm-large-download --confirm-gated-access
-# Generate after the setup, gated access, and download steps complete
-meshharbor generate asset_<image-id> --backend-id pixal3d-mlx --output ./generated.glb
-
-# Optional Linux x86_64/NVIDIA CUDA runtime
-meshharbor runtime cuda-setup
-meshharbor runtime cuda-hf-login
-meshharbor runtime cuda-install-models --confirm-large-download --confirm-gated-access
-meshharbor generate asset_<image-id> --backend-id pixal3d-cuda --output ./generated.glb
-```
-
-TRELLIS.2 and TripoSG also expose experimental Apple MLX and NVIDIA CUDA profiles through CLI, REST, MCP, and Studio. They require [manual provisioning and authorization](docs/external-generation-runtimes.md); only first-party adapters are shipped. TRELLIS.2 produces textured GLB, while TripoSG produces geometry-only GLB. Neither new model has been qualified with real GPU inference in MeshHarbor.
-
-Imports and CLI inspection are bounded to 512 MiB. Standalone PNG/JPEG files are limited to 16 MiB and 16 megapixels; PNG chunk checksums and container structure, plus JPEG frame/scan markers, are validated before storing. Import checks structure and dimensions but does not decode image pixels. Generation rechecks stored image bytes with a bounded read and verifies their recorded SHA-256 digests before starting a generation worker. CLI `--output` and `--quad-output` destinations must be new files; MeshHarbor refuses to replace existing files or symlinks. When both retopology outputs are supplied, they must resolve to distinct paths (case-only aliases are also rejected on Windows). Create the parent directories first and choose a new destination if one already exists. If writing fails after file creation, an incomplete new file may remain; inspect or remove it before retrying.
-
-The app stores source assets, managed Python environments, and isolated Hugging Face caches under its local data directory. By default that is `%LOCALAPPDATA%\MeshHarbor` on Windows (falling back to `%USERPROFILE%\AppData\Local\MeshHarbor`), `~/Library/Application Support/MeshHarbor` on macOS, and `$XDG_DATA_HOME/meshharbor` or `~/.local/share/meshharbor` on Linux. Empty environment-variable values are ignored. Set `MESHHARBOR_HOME` to override the location. Use the same `--data-dir` or `MESHHARBOR_HOME` value for `serve` and the corresponding `*-hf-login` command. Review and accept any model-host terms in your own account before downloading. CUDA is limited to Linux x86_64/NVIDIA, requests roughly 25–30 GB of weights, uses a fixed camera and does not install MoGe/rembg. MLX retains its separate conversion step and profile. See [the Pixal3D MLX guide](docs/pixal3d-mlx-manual-runtime.md) and [CUDA guide](docs/pixal3d-cuda-managed-runtime.md).
-
-All processes using the same data directory coordinate through OS advisory locks. REST and MCP may run together; interrupted-job recovery refuses to run while either service is active. Pixal3D runtime setup, downloads, Hugging Face login, and conversion take an exclusive runtime lock, while image generation takes a compatible shared lock. This prevents those MeshHarbor actions from racing over managed Python environments or Hugging Face caches. If an incompatible operation is already active, the new operation fails fast with a retry message. The operating system releases locks when a process exits or crashes, and separate data directories do not block one another. This coordinates MeshHarbor processes only; it is not a lock on unrelated software that accesses the same files. After force-killing MeshHarbor during a managed uv/Python command, verify the spawned uv/Python child has exited before retrying; the OS releases the parent process's lock, and orphaned child supervision is not yet implemented.
-
-For image-to-3D setup without the terminal, open **Settings** in Studio. Browse supported models, connect or disconnect Hugging Face, and download or remove model files without removing the runtime or your assets. See [Studio settings](apps/studio/README.md#settings).
-
-## REST API
-
-Start only on loopback (non-loopback binds are rejected):
-
-```sh
-meshharbor serve --listen 127.0.0.1:7432
-```
-
-When `MESHHARBOR_API_TOKEN` is unset, a per-run temporary bearer token is generated and printed to stderr for non-dashboard API clients. A configured token must not be empty or whitespace-only, and its value is not written to logs. The built-in Studio connects automatically without a token. Dashboard calls require a non-simple marker and exact same-origin browser provenance; tokenless writes require an exact same-origin `Origin`. Safe dashboard reads may use browser `Sec-Fetch-Site: same-origin` only when browsers omit `Origin`. Non-browser clients with a valid bearer token may omit `Origin` on writes for REST compatibility; if supplied, `Origin` must still match the loopback `Host`. Cross-origin requests are rejected even if they carry a bearer token. The marker is not a secret or per-process credential: local processes running as the same OS user can forge request headers and are inside this single-user local trust boundary. This browser-origin check is intended to block hostile websites, cross-origin forms, and other local web origins, not malicious software running as the user. The server binds only to loopback and rejects untrusted Host or mismatched Origin values. The Studio page sends `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY` to prevent clickjacking. Current endpoints:
-
-- `GET /api/v1/health`, `/api/v1/runtime`, `/api/v1/operations`
-- `POST /api/v1/runtime/pixal3d-mlx/setup`, `/models`, `/convert-naf`; `/api/v1/runtime/pixal3d-cuda/setup` and `/models` for explicit asynchronous setup actions
-- `GET /api/v1/assets?limit=50`; `POST /api/v1/assets?filename=scene.glb` with raw file bytes
-- `GET /api/v1/assets/page?limit=50&cursor=<asset_id>&q=<filename>&kind=image|mesh&derived=true|false` returns `{items,next_cursor}` newest-first; filters are optional, and `next_cursor` can be sent back to load older assets
-- `GET /api/v1/assets/{asset_id}`; `POST /api/v1/assets/{asset_id}/simplify`
-- `GET /api/v1/assets/page?models_only=true` lists each mesh model once, returning its current asset; search, origin filters, and cursors use the original model record
-- `GET /api/v1/models/{model_id}/versions?limit=20&before=<version_number>` returns numbered versions, their parent version, and the current asset ID; `PUT /api/v1/models/{model_id}/current` with `{"asset_id":"..."}` restores a version of that model
-- `GET /api/v1/jobs?limit=20` (recent persisted jobs; read-only), `POST /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`, `POST /api/v1/jobs/{job_id}/cancel`
-- `GET /api/v1/artifacts/{artifact_id}`
-
-A mesh derived from another mesh is an immutable version of the same model. A GLB import or the result of image-to-3D generation starts a new model. A new edit advances the current version only if it was based on the current version; an edit from an older version creates a branch without replacing the current one. Restoring changes the current pointer, not any stored file. Existing data is grouped by its recorded source lineage on first open; the latest saved version becomes current. The existing asset endpoints, CLI, MCP, and job results still address individual assets.
-
-For `image.generate`, `GET /api/v1/runtime` exposes `model_backends[].generation.parameters`, `view_modes`, and `max_views`. Keep base fields such as `seed` at the top level of job parameters and put catalog fields marked `tuning: true` under `parameters.tuning`. The engine validates values against the selected backend before queuing the job.
-
-An ordinary single-image job uses `input.asset_id` only. For a ready multiview backend, send `parameters.view_input` with `mode` (`four`, `six`, or `custom`) and an ordered `references` array. Each entry contains an imported image's `asset_id`; the first must match `input.asset_id`. Presets use front/right/back/left order (then top/bottom for six). Custom entries each add a `camera` object with `azimuth_degrees`, `elevation_degrees`, `distance`, and `fov_degrees`. No client filesystem paths are accepted. The CUDA profile exposes `multiview_ready` once the separately approved snapshot is installed.
-
-`GET /api/v1/jobs?limit=20` lists the newest updated persisted job records (default 50, capped at 200). Studio polls with `include_active=true` to list all active jobs plus up to the requested number of terminal records. Use `before=<terminal_job_id>` to page through older terminal records. New jobs include a `started_at` timestamp once running; generation jobs also report the latest known worker `stage` when available. The CLI exposes job history through `jobs list` and `jobs show <job_id>`; MCP exposes `list_jobs` and `get_job`. These queries are read-only: listing or checking a saved job never resumes or restarts work. After an unexpected engine exit, a saved active state may be stale; use the explicit recovery command only after stopping every REST/MCP process that uses that data directory.
-
-`GET /api/v1/jobs/generation-queue` returns the IDs of waiting generation jobs in execution order. `POST` to the same endpoint with `job_id` and `swap_with` to swap two adjacent generation jobs; other operations retain their positions. A job that has started or was left behind by an interrupted engine cannot be reordered. Use `POST /api/v1/jobs/{job_id}/cancel?queued_only=true` to remove a waiting job without stopping it if it has just started.
-
-Job requests support `mesh.simplify`, `mesh.cleanup`, `mesh.separate_parts`, `uv.unwrap`, `render.optimize`, `mesh.compress`, conditional `mesh.retopology`, `image.generate` (with an optional `backend_id` from the runtime doctor; `auto` keeps the platform Pixal3D default), and explicit runtime jobs. `uv.unwrap` accepts an optional `resolution` hint (64–4096, default 1024) and `padding` (0–64, default 8); Studio uses the defaults. `mesh.retopology` is rejected unless a signature-verified, manifest-matched managed `quadriflow` sidecar is available; adjacent executables are ignored and this build has no verified release; it accepts optional `target_quads` (4–50,000, default 10,000) and produces both a geometry-only `quad_topology` OBJ artifact and a triangulated GLB preview. When the supported embedded PNG maps are present, only base-color and metallic/roughness textures are projected into that preview with distance/facing/coverage/ambiguity gates. `render.optimize` accepts `overdraw_threshold` (1.0–1.5, default 1.05). Generic high-to-low texture baking is not available. Model-install endpoints require explicit large-download and gated-access confirmation. The single operation slot serializes local work. Queued jobs can be cancelled immediately. Running asset jobs can be permanently stopped before their result is committed: image generation terminates its worker process group, and native mesh processing stops at the next safe checkpoint without storing a result. Running runtime setup and downloads are not interruptible. A stopped job cannot be resumed. Job state is persisted. After an unexpected exit, stop every REST/MCP process using the same data directory and run `meshharbor jobs recover-interrupted --confirm-no-running-meshharbor` to mark nonterminal jobs as failed. The command does not resume work or delete assets/download caches; inspect existing assets before retrying. The flag is an operator acknowledgement and MeshHarbor cannot verify that other processes are stopped. Image generation requires a ready backend and local model files; readiness does not prove quality or general GPU-memory fit.
-## MCP
-
-Run `meshharbor mcp` to start the stdio MCP server. Its output is the MCP protocol stream; diagnostics go to stderr. Tools include `list_operations`, `list_assets`, `import_asset`, `start_simplification`, `start_mesh_processing`, `start_image_generation`, MLX and CUDA runtime setup/model-download actions, `get_job`, `cancel_job`, `runtime_doctor`, `export_glb`, and `export_quad_obj`. `mesh.retopology` requires a signature-verified, manifest-matched managed QuadriFlow sidecar, which is unavailable in this build; adjacent executables are ignored; its OBJ export writes only inside the configured export directory and refuses existing files. MCP asset import accepts base64-encoded local file bytes and does not fetch files or weights. Model tools require explicit large-download and gated-access confirmations. Hugging Face credentials are never accepted by MCP; authenticate through the corresponding `meshharbor runtime *-hf-login` command in a local terminal. `export_glb` writes only inside the configured export directory (defaulting to the app data `exports` folder), refuses existing files, and does not transmit the GLB to the MCP client. See [the MCP workflow guide](docs/mcp-workflow.md).
-
-
-## Help benchmark MeshHarbor
-
-MeshHarbor is early and has not been benchmarked across a broad range of hardware. If you can test it with a public sample or an asset you are allowed to process, share a report in a GitHub issue with:
-
-- MeshHarbor commit or revision
-- OS and version; CPU; GPU and VRAM; system RAM
-- Backend and relevant settings
-- Cold-start time, warm-run time, and peak RAM/VRAM, if available
-- Whether the run completed, plus a brief output-quality observation
-
-Please do not attach private or confidential assets, model weights, access tokens, or logs containing secrets. A successful setup or preflight only means those checks passed; it does not establish end-to-end generation success, output quality, or general hardware readiness.
+MeshHarbor's first-party code and documentation are licensed under [MIT](LICENSE). Vendored code, bundled Studio dependencies, fonts, and model/runtime components retain their own terms. See [third-party notices](THIRD-PARTY-NOTICES.md) and the [licensing status](docs/licensing-status.md) before redistribution; this is not a blanket license for all components or model weights.

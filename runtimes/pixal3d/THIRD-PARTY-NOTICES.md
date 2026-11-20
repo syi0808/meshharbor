@@ -24,4 +24,4 @@ License copies are preserved in `THIRD-PARTY-LICENSES/`. The referenced source p
 
 The MLX tree also retains C++ source for its CGAL bridge, but no CGAL library/header/binary. Building or distributing that separate helper requires resolving CGAL's GPL-3.0-or-later or commercial licensing and the full native dependency closure. The code stays dormant and is not part of the MeshHarbor runtime.
 
-No model weights, checkouts, DINOv3 files, NAF checkpoints, generated meshes/images, credentials, or Python wheels were copied. Do not run the vendored installation/download/deployment instructions or activate nested CI/workflows as part of MeshHarbor setup. See [`docs/licensing-status.md`](../../docs/licensing-status.md) for remaining runtime and release gates.
+No model weights (including DINOv3 and NAF checkpoints), additional upstream checkouts, generated meshes/images, credentials, or Python wheels were copied. Do not run the vendored installation/download/deployment instructions or activate nested CI/workflows as part of MeshHarbor setup. See [`docs/licensing-status.md`](../../docs/licensing-status.md) for remaining runtime and release gates.
