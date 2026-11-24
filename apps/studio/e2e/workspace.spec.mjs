@@ -76,7 +76,11 @@ test('Jobs and model logs show saved failures in a details popup', async ({ page
 });
 
 test('Models aligns accelerator cards and installs a catalog model after consent', async ({ page, studioOrigin }) => {
-  const path = '/local/meshharbor/runtimes/trellis-text-mlx-managed/weights';
+  const paths = [
+    `/local/meshharbor/${'nested-runtime-directory/'.repeat(8)}trellis-text-mlx-managed/weights`,
+    '/local/meshharbor/manual/trellis-text-mlx/weights',
+  ];
+  const notice = 'Review the terms for the local CLIP encoder.';
   let installed = false;
   const job = {
     id: 'catalog-install', operation: 'runtime.models.install', state: 'running', progress: 5,
@@ -86,7 +90,8 @@ test('Models aligns accelerator cards and installs a catalog model after consent
     platform: 'macos',
     model_catalog: [{ id: 'trellis-text', title: 'TRELLIS Text Large', backend_ids: ['trellis-text-cuda', 'trellis-text-mlx'] }],
     model_backends: [
-      { id: 'trellis-text-mlx', model_paths: [path], managed_install: true, installable: true, downloads_enabled: !installed, ready: installed,
+      { id: 'trellis-text-mlx', model_paths: paths, managed_install: true, installable: true, downloads_enabled: !installed, ready: installed,
+        license_notice: notice, source: { repository: 'https://github.com/example/text-model', revision: 'fixed-revision' },
         local_files: { remove_models_available: installed, model_files_managed: true } },
       { id: 'trellis-text-cuda', managed_install: true, installable: false },
     ],
@@ -100,20 +105,46 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   await page.route('**/api/v1/jobs/catalog-install', route => route.fulfill({ json: {
     ...job, state: 'succeeded', progress: 100, updated_at: '2',
   } }));
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: studioOrigin });
   await page.goto(studioOrigin + '/settings/models');
   const mlx = page.getByRole('article', { name: 'TRELLIS Text Large · Apple MLX' });
   const cuda = page.getByRole('article', { name: 'TRELLIS Text Large · NVIDIA CUDA' });
-  await expect(mlx.getByText(path)).toBeVisible();
+  const pathLine = mlx.locator('code');
+  await expect(pathLine).toHaveText(paths.join(' · '));
+  await expect(pathLine).toHaveCSS('white-space', 'nowrap');
+  await expect(pathLine).toHaveCSS('text-overflow', 'ellipsis');
+  expect(await pathLine.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
+  await mlx.getByRole('button', { name: 'Copy model file locations' }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(paths.join('\n'));
+  await expect(mlx.getByText('Available to download')).toBeVisible();
+  await expect(mlx.getByText(notice)).toHaveCount(0);
+  await expect(mlx.getByRole('checkbox')).toHaveCount(0);
   const install = mlx.getByRole('button', { name: 'Install model' });
-  await expect(install).toBeDisabled();
+  await expect(install).toBeEnabled();
   await expect(cuda.getByText('Not supported here')).toBeVisible();
   await expect(cuda.getByRole('button', { name: 'Install model' })).toHaveCount(0);
   const mlxLogs = await mlx.getByRole('button', { name: 'Recent logs' }).boundingBox();
   const cudaLogs = await cuda.getByRole('button', { name: 'Recent logs' }).boundingBox();
   expect(mlxLogs.x).toBeLessThan(cudaLogs.x);
   expect(mlxLogs.y).toEqual(cudaLogs.y);
-  await mlx.getByRole('checkbox', { name: 'I reviewed the terms and approve installation and download.' }).check();
   await install.click();
+  const installDialog = page.getByRole('alertdialog', { name: 'Install model?' });
+  const consent = installDialog.getByRole('checkbox', { name: 'I reviewed the terms and approve installation and download.' });
+  const confirm = installDialog.getByRole('button', { name: 'Install model' });
+  await expect(installDialog).toContainText('TRELLIS Text Large · Apple MLX');
+  await expect(installDialog).toContainText(notice);
+  await expect(installDialog.getByRole('link', { name: 'Review upstream source and terms' })).toHaveAttribute('href', 'https://github.com/example/text-model/tree/fixed-revision');
+  await expect(confirm).toBeDisabled();
+  await consent.check();
+  await expect(confirm).toBeEnabled();
+  await installDialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(install).toBeFocused();
+  expect(installed).toBe(false);
+  await install.click();
+  await expect(confirm).toBeDisabled();
+  await consent.check();
+  await confirm.click();
+  await expect(installDialog).toBeHidden();
   await expect(mlx.getByText('Ready', { exact: true })).toBeVisible();
   await expect(mlx.getByRole('button', { name: 'Delete model files' })).toBeEnabled();
 });
@@ -373,18 +404,22 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(main.getByRole('progressbar', { name: 'Job progress' })).toHaveCount(0);
   await expect(setup).toBeDisabled();
   finishSetup = true;
-  await expect(main.getByText('Download required')).toBeVisible();
+  await expect(main.getByText('Available to download')).toBeVisible();
   const storage = main.getByRole('article', { name: 'Pixal3D · Apple MLX' });
   const toasts = page.getByRole('region', { name: /Notifications/ });
   const download = storage.getByRole('button', { name: 'Download model files' });
-  const consent = storage.getByRole('checkbox', { name: 'I reviewed the model terms and approve this download.' });
-  await expect(storage.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
-  await expect(download).toBeDisabled();
+  const downloadDialog = page.getByRole('alertdialog', { name: 'Download model files?' });
+  const confirm = downloadDialog.getByRole('button', { name: 'Download model files' });
+  const consent = downloadDialog.getByRole('checkbox', { name: 'I reviewed the model terms and approve this download.' });
+  await expect(storage.getByRole('checkbox')).toHaveCount(0);
+  await download.click();
+  await expect(downloadDialog).toContainText('Up to 24 GB');
+  await expect(downloadDialog.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
+  await expect(confirm).toBeDisabled();
   await expect(consent).toBeDisabled();
-  await storage.getByRole('button', { name: 'About the checkpoint cache' }).hover();
-  await expect(page.getByRole('tooltip')).toContainText('7 more can be reused');
+  await expect(downloadDialog).toContainText('7 more can be reused');
   expect(modelAccessChecks).toBe(0);
-  await storage.getByRole('button', { name: 'Manage Hugging Face connection' }).click();
+  await downloadDialog.getByRole('button', { name: 'Manage Hugging Face connection' }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
   await expect(connections).not.toContainText('DINOv3');
   await expect(connections.getByRole('button', { name: 'Sign in with browser' })).toBeEnabled();
@@ -404,20 +439,23 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(toasts.getByText('Hugging Face account verified.')).toBeVisible();
   await expect(token).toHaveValue('');
   await page.getByRole('button', { name: 'Models', exact: true }).click();
-  await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toHaveCount(0);
-  await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
-  expect(modelAccessChecks).toBeGreaterThan(0);
-  await expect(download).toBeDisabled();
-  await consent.check();
   await expect(download).toBeEnabled();
+  expect(modelAccessChecks).toBe(0);
+  await download.click();
+  await expect(downloadDialog.getByText('DINOv3 file access verified.')).toBeVisible();
+  expect(modelAccessChecks).toBeGreaterThan(0);
+  await expect(confirm).toBeDisabled();
+  await consent.check();
+  await expect(confirm).toBeEnabled();
   expect(downloads).toBe(0);
   expect(await page.locator('html').evaluate(element => element.scrollWidth)).toBe(390);
+  await downloadDialog.getByRole('button', { name: 'Cancel' }).click();
   await page.getByRole('button', { name: 'Workbench', exact: true }).click();
   await expect(page).toHaveURL(studioOrigin + '/');
   await expect(settings).toBeFocused();
 });
 
-test('browser sign-in leaves DINOv3 to Models, which rechecks access on return', async ({ page, studioOrigin }) => {
+test('the download dialog checks DINOv3 access and rechecks it on window focus', async ({ page, studioOrigin }) => {
   let sessionNumber = 0;
   let cancelled = false;
   let approved = false;
@@ -476,14 +514,17 @@ test('browser sign-in leaves DINOv3 to Models, which rechecks access on return',
   await expect(connections).not.toContainText('DINOv3');
   await page.getByRole('button', { name: 'Models', exact: true }).click();
   const storage = page.getByRole('article', { name: 'Pixal3D · Apple MLX' });
-  const download = storage.getByRole('button', { name: 'Download model files' });
-  await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toHaveCount(0);
-  await expect(storage.getByText('Access required', { exact: true })).toBeVisible();
-  await expect(toasts.getByText('DINOv3 access denied.', { exact: true })).toBeVisible();
-  await expect(download).toBeDisabled();
+  await expect(storage.getByText('Available to download')).toBeVisible();
+  expect(modelAccessChecks).toBe(0);
+  await storage.getByRole('button', { name: 'Download model files' }).click();
+  const downloadDialog = page.getByRole('alertdialog', { name: 'Download model files?' });
+  const confirm = downloadDialog.getByRole('button', { name: 'Download model files' });
+  await expect(downloadDialog.getByText('Access required', { exact: true })).toBeVisible();
+  await expect(page.getByText('DINOv3 access denied.', { exact: true })).toBeVisible();
+  await expect(confirm).toBeDisabled();
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
-  await expect(download).toBeDisabled();
+  await expect(downloadDialog.getByText('DINOv3 file access verified.')).toBeVisible();
+  await expect(confirm).toBeDisabled();
 });
 
 test('settings deep links and confirmations manage one local profile at a time', async ({ page, studioOrigin }) => {
@@ -537,8 +578,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   await expect(remove).toBeVisible();
   finishModelRemoval();
   await expect(toasts.getByText('Model files removed for Pixal3D · Apple MLX.')).toBeVisible();
-  await expect(storage.getByText('Download required', { exact: true })).toBeVisible();
-  await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
+  await expect(storage.getByText('Available to download', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
   await expect(connections.getByText('Token saved', { exact: true })).toBeVisible();
@@ -551,7 +591,9 @@ test('settings deep links and confirmations manage one local profile at a time',
   await expect(connections.getByText('Not connected', { exact: true })).toBeVisible();
   expect(calls).toEqual(['model-files', 'huggingface']);
   await page.goBack();
-  await expect(storage.getByText('Download required', { exact: true })).toBeVisible();
-  await expect(storage.getByText('Sign in to Hugging Face to check DINOv3 file access.')).toBeVisible();
-  await expect(storage.getByRole('button', { name: 'Download model files' })).toBeDisabled();
+  await expect(storage.getByText('Available to download', { exact: true })).toBeVisible();
+  await storage.getByRole('button', { name: 'Download model files' }).click();
+  const downloadDialog = page.getByRole('alertdialog', { name: 'Download model files?' });
+  await expect(downloadDialog.getByText('Sign in to Hugging Face to check DINOv3 file access.')).toBeVisible();
+  await expect(downloadDialog.getByRole('button', { name: 'Download model files' })).toBeDisabled();
 });

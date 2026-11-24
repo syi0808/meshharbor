@@ -1,7 +1,7 @@
-import { ArrowLeftIcon, ArrowsClockwiseIcon, CaretRightIcon, CubeIcon, KeyIcon, ListChecksIcon, PaintBrushIcon, TrashIcon } from '@phosphor-icons/react';
+import { ArrowLeftIcon, ArrowsClockwiseIcon, CaretRightIcon, CopyIcon, CubeIcon, KeyIcon, ListChecksIcon, PaintBrushIcon, TrashIcon } from '@phosphor-icons/react';
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -314,17 +314,13 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                     <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend)}</Badge></CardAction>
                   </CardHeader>
                   <CardContent className="grid gap-3">
-                    {modelPaths.length > 0 && <dl className="grid min-w-0 gap-1">
-                      <dt className="font-medium">Model file locations</dt>
-                      {modelPaths.map(path => <dd key={path} className="wrap-anywhere text-muted-foreground"><code>{path}</code></dd>)}
-                    </dl>}
+                    {modelPaths.length > 0 && <ModelFileLocations paths={modelPaths} />}
                     {backend.managed_install
-                      ? <CatalogInstall backend={backend} disabled={disabled} account={connectionBackendFor(id, runtime)}
+                      ? <CatalogInstall label={label} backend={backend} disabled={disabled} account={connectionBackendFor(id, runtime)}
                           onConnections={() => onVisit('connections', kind === 'cuda' ? 'pixal3d-cuda' : 'pixal3d-mlx')}
                           onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />
-                      : <PixalModelFiles key={id} api={api} backend={backend} id={id} disabled={disabled}
+                      : <PixalModelFiles label={label} api={api} backend={backend} id={id} disabled={disabled}
                           onAction={action => onRuntimeAction(id, action)} onSettings={onVisit} />}
-                    {backend.local_files?.model_files_managed === false && <p className="text-muted-foreground">Studio cannot remove files from custom or linked model directories.</p>}
                   </CardContent>
                   <CardFooter className="mt-auto grid gap-2 border-t">
                     <RuntimeLogs api={api} id={id} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
@@ -376,14 +372,33 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
 function profileStatus(backend: Backend) {
   if (backend.ready) return 'Ready';
   if (!backend.installable) return 'Not supported here';
-  if (backend.managed_install) return 'Install required';
-  if (!backend.environment_ready) return 'Setup required';
+  if (!backend.managed_install && !backend.environment_ready) return 'Setup required';
   if (backend.models_downloaded) return 'Files present';
-  return 'Download required';
+  return backend.downloads_enabled ? 'Available to download' : 'Unavailable';
 }
 
 function connectionBackendFor(id: RuntimeBackendId, runtime: RuntimeInfo | null) {
   return runtime?.model_backends.find(backend => backend.id === `pixal3d-${accelerator(id)}`);
+}
+
+function ModelFileLocations({ paths }: { paths: string[] }) {
+  async function copyPaths() {
+    try {
+      await navigator.clipboard.writeText(paths.join('\n'));
+      notify('success', 'Model file locations copied.');
+    } catch {
+      notify('error', 'Could not copy model file locations.');
+    }
+  }
+
+  return <dl className="grid min-w-0 gap-1">
+    <dt className="font-medium">Model file locations</dt>
+    <dd className="flex min-w-0 items-center gap-2">
+      <code className="min-w-0 flex-1 truncate text-muted-foreground">{paths.join(' · ')}</code>
+      <Button type="button" variant="ghost" size="icon-sm" aria-label="Copy model file locations" title="Copy model file locations"
+        onClick={() => void copyPaths()}><CopyIcon aria-hidden="true" /></Button>
+    </dd>
+  </dl>;
 }
 
 function RuntimeLogs({ api, id, jobs, operationLabel, onJobDetails, action }: {
@@ -425,30 +440,62 @@ function RuntimeLogs({ api, id, jobs, operationLabel, onJobDetails, action }: {
   </Collapsible>;
 }
 
-function CatalogInstall({ backend, account, disabled, onConnections, onInstall }: {
-  backend: Backend; account?: Backend; disabled: boolean; onConnections: () => void; onInstall: () => void;
+function ModelInstallDialog({ label, action, description, consentLabel, disabled, blocked = false, onOpenChange, onConfirm, children }: {
+  label: string; action: string; description: string; consentLabel: string;
+  disabled: boolean; blocked?: boolean; onOpenChange?: (open: boolean) => void;
+  onConfirm: () => void; children?: ReactNode;
 }) {
   const consentId = useId();
   const [consent, setConsent] = useState(false);
+  return <AlertDialog onOpenChange={open => {
+    if (!open) setConsent(false);
+    onOpenChange?.(open);
+  }}>
+    <AlertDialogTrigger asChild><Button className="justify-self-start" disabled={disabled}>{action}</Button></AlertDialogTrigger>
+    <AlertDialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] data-[size=default]:sm:max-w-md">
+      <AlertDialogHeader>
+        <AlertDialogTitle>{action}?</AlertDialogTitle>
+        <AlertDialogDescription><span className="block font-medium text-foreground">{label}</span>{description}</AlertDialogDescription>
+      </AlertDialogHeader>
+      <div className="grid min-h-0 justify-items-start gap-3 overflow-y-auto overscroll-contain px-1 py-1 text-xs/relaxed">
+        {children}
+        <div className="flex items-start gap-2">
+          <Checkbox id={consentId} checked={consent} disabled={disabled || blocked} onCheckedChange={value => setConsent(value === true)} />
+          <Label htmlFor={consentId} className="leading-relaxed">{consentLabel}</Label>
+        </div>
+      </div>
+      <AlertDialogFooter>
+        <AlertDialogCancel>Cancel</AlertDialogCancel>
+        <AlertDialogAction disabled={disabled || blocked || !consent} onClick={onConfirm}>{action}</AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>;
+}
+
+const dinoAccessUrl = 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m';
+
+function DinoAccessLink() {
+  return <a className="text-primary underline underline-offset-4" href={dinoAccessUrl} target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a>;
+}
+
+function CatalogInstall({ label, backend, account, disabled, onConnections, onInstall }: {
+  label: string; backend: Backend; account?: Backend; disabled: boolean; onConnections: () => void; onInstall: () => void;
+}) {
+  if (!backend.downloads_enabled) return null;
   const gated = backend.gated_model_access_required;
   const needsSignIn = gated && !account?.local_files?.token_saved && account?.local_files?.credentials_managed !== false;
-  if (!backend.downloads_enabled) return <p className="text-muted-foreground">{backend.ready ? 'Ready for offline generation.' : 'This backend is not supported on this computer.'}</p>;
-  return <div className="grid justify-items-start gap-2">
+  return <ModelInstallDialog label={label} action="Install model"
+    description="MeshHarbor installs a private Python environment and downloads the model weights for local generation."
+    consentLabel={gated ? 'I have DINOv3 access, reviewed the terms, and approve installation and download.' : 'I reviewed the terms and approve installation and download.'}
+    disabled={disabled} blocked={needsSignIn} onConfirm={onInstall}>
     {backend.ready && !backend.managed_ready && <p className="text-muted-foreground">Using existing files. A managed install keeps them intact.</p>}
     {backend.license_notice && <p className="text-muted-foreground">{backend.license_notice}</p>}
     {backend.source && <a className="text-primary underline underline-offset-4" href={`${backend.source.repository}/tree/${backend.source.revision}`} target="_blank" rel="noreferrer">Review upstream source and terms</a>}
     {gated && <>
-      <a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a>
+      <DinoAccessLink />
       {needsSignIn && <Button variant="outline" onClick={onConnections}>Manage Hugging Face connection</Button>}
     </>}
-    <div className="flex items-start gap-2">
-      <Checkbox id={consentId} checked={consent} disabled={disabled || needsSignIn} onCheckedChange={value => setConsent(value === true)} />
-      <Label htmlFor={consentId} className="leading-relaxed">
-        {gated ? 'I have DINOv3 access, reviewed the terms, and approve installation and download.' : 'I reviewed the terms and approve installation and download.'}
-      </Label>
-    </div>
-    <Button disabled={disabled || needsSignIn || !consent} onClick={() => { setConsent(false); onInstall(); }}>Install model</Button>
-  </div>;
+  </ModelInstallDialog>;
 }
 
 const accessMessages: Record<AccessStatus, string> = {
@@ -529,23 +576,38 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
   </Card>;
 }
 
-function PixalModelFiles({ api, backend, id, disabled, onAction, onSettings }: {
-  api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
+function PixalModelFiles({ label, api, backend, id, disabled, onAction, onSettings }: {
+  label: string; api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
   onAction: (action: RuntimeAction) => void; onSettings: VisitSettings;
 }) {
-  const consentId = useId();
-  const multiviewId = useId();
-  const [consent, setConsent] = useState(false);
-  const [multiviewConsent, setMultiviewConsent] = useState(false);
-  const [access, setAccess] = useState<AccessStatus>('checking');
   const stage = runtimeSetupStage(backend);
+  if (stage === 'environment') return <Button className="justify-self-start" disabled={disabled} onClick={() => onAction('setup')}>Set up {id === 'pixal3d-cuda' ? 'CUDA' : 'Python'} environment</Button>;
+  if (stage === 'models' && backend.downloads_enabled) return <PixalDownloadDialog label={label} api={api} backend={backend} id={id} disabled={disabled}
+    onConnections={() => onSettings('connections', id)} onDownload={() => onAction('download')} />;
+  if (stage === 'conversion') return <Button className="justify-self-start" disabled={disabled || !backend.conversion_enabled} onClick={() => onAction('convert')}>Finish NAF conversion</Button>;
+  if (stage === 'incomplete') return <div className="flex items-center gap-1 text-muted-foreground">
+    Runtime not ready <HelpTip label="About runtime checks">Files are present. Run <code>meshharbor doctor</code> for diagnostics.</HelpTip>
+  </div>;
+  if (stage !== 'ready' || !backend.generation?.view_modes?.some(mode => mode !== 'single')) return null;
+  if (backend.multiview_ready) return <Badge variant="outline">Multiview installed</Badge>;
+  return <ModelInstallDialog label={label} action="Install multiview weights"
+    description="Adds support for multiple reference views. This separate download can be large; MeshHarbor reuses compatible cached files."
+    consentLabel="I approve installing the additional model files." disabled={disabled} onConfirm={() => onAction('multiview')} />;
+}
+
+function PixalDownloadDialog({ label, api, backend, id, disabled, onConnections, onDownload }: {
+  label: string; api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
+  onConnections: () => void; onDownload: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [access, setAccess] = useState<AccessStatus>('checking');
   const local = backend.local_files;
   const needsConnection = local?.credentials_managed === true && !local.token_saved;
   const accessStatus = needsConnection ? 'not_connected' : access;
   const verificationRequired = accessStatus !== 'verified';
   const cache = backend.pixal3d_cache;
   useEffect(() => {
-    if (stage !== 'models' || !backend.downloads_enabled || disabled || needsConnection) return;
+    if (!open || disabled || needsConnection) return;
     const controller = new AbortController();
     let checking = false;
     let previous: AccessStatus | undefined;
@@ -573,56 +635,20 @@ function PixalModelFiles({ api, backend, id, disabled, onAction, onSettings }: {
       window.removeEventListener('focus', onFocus);
       controller.abort();
     };
-  }, [api, backend, disabled, id, needsConnection, stage]);
+  }, [api, backend, disabled, id, needsConnection, open]);
 
-  return <div className="grid gap-4">
-    {stage === 'unsupported' && <p className="text-muted-foreground">This backend is not supported on this computer.</p>}
-    {stage === 'environment' && <Button className="justify-self-start" disabled={disabled} onClick={() => onAction('setup')}>Set up {id === 'pixal3d-cuda' ? 'CUDA' : 'Python'} environment</Button>}
-    {stage === 'models' && <div className="grid justify-items-start gap-3">
-      <p className="text-muted-foreground">Up to {accelerators[accelerator(id)].download} without cached files</p>
-      {cache && <div className="flex items-center gap-1 text-muted-foreground">
-        <span>{cache.local_checkpoints}/{cache.total_checkpoints} checkpoints cached</span>
-        <HelpTip label="About the checkpoint cache">
-          {cache.reusable_checkpoints > 0 && `${cache.reusable_checkpoints} more can be reused from the Hugging Face cache. `}
-          DINOv3 and NAF are handled separately.
-        </HelpTip>
-      </div>}
-      <div className="grid gap-2">
-        <a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a>
-        {verificationRequired && accessStatus !== 'checking' && <Button className="justify-self-start" variant="outline" onClick={() => onSettings('connections', id)}>Manage Hugging Face connection</Button>}
-      </div>
-      <div role="status" className="text-muted-foreground">
-        {accessStatus === 'verified' ? <Badge variant="secondary">{accessMessages.verified}</Badge> : accessMessages[accessStatus]}
-      </div>
-      <div className="flex items-start gap-2">
-        <Checkbox id={consentId} checked={consent}
-          disabled={disabled || verificationRequired || !backend.downloads_enabled} onCheckedChange={value => setConsent(value === true)} />
-        <Label htmlFor={consentId} className="leading-relaxed">I reviewed the model terms and approve this download.</Label>
-      </div>
-      <Button disabled={disabled || verificationRequired || !consent || !backend.downloads_enabled} onClick={() => { setConsent(false); onAction('download'); }}>Download model files</Button>
-    </div>}
-    {stage === 'conversion' && <div className="grid justify-items-start gap-2">
-      <p className="text-muted-foreground">NAF conversion required.</p>
-      <Button disabled={disabled || !backend.conversion_enabled} onClick={() => onAction('convert')}>Finish NAF conversion</Button>
-    </div>}
-    {stage === 'incomplete' && <div className="flex items-center gap-1 text-muted-foreground">
-      Runtime not ready <HelpTip label="About runtime checks">Files are present. Run <code>meshharbor doctor</code> for diagnostics.</HelpTip>
-    </div>}
-    {stage === 'ready' && <p className="text-muted-foreground">Ready for offline generation.</p>}
-    {stage === 'ready' && backend.generation?.view_modes?.some(mode => mode !== 'single') &&
-      <section className="grid justify-items-start gap-2 border-t pt-3" aria-label="Multiview model files">
-        <div className="flex items-center gap-1"><h3 className="font-medium">Multiview weights</h3>
-          <HelpTip label="About multiview weights">Enable multiple reference views. The separate download can be large; compatible cached files are reused.</HelpTip>
-        </div>
-        {backend.multiview_ready ? <p className="text-muted-foreground">Installed</p>
-          : <>
-            <div className="flex items-start gap-2">
-              <Checkbox id={multiviewId} checked={multiviewConsent} disabled={disabled} onCheckedChange={value => setMultiviewConsent(value === true)} />
-              <Label htmlFor={multiviewId}>I approve installing the additional model files.</Label>
-            </div>
-            <Button variant="outline" disabled={disabled || !multiviewConsent}
-              onClick={() => { setMultiviewConsent(false); onAction('multiview'); }}>Install multiview weights</Button>
-          </>}
-      </section>}
-  </div>;
+  return <ModelInstallDialog label={label} action="Download model files"
+    description={`Up to ${accelerators[accelerator(id)].download} without cached files. DINOv3 access is required.`}
+    consentLabel="I reviewed the model terms and approve this download." disabled={disabled} blocked={verificationRequired}
+    onOpenChange={next => { if (next) setAccess('checking'); setOpen(next); }} onConfirm={onDownload}>
+    {cache && <p className="text-muted-foreground">
+      {cache.local_checkpoints}/{cache.total_checkpoints} checkpoints cached.
+      {cache.reusable_checkpoints > 0 && ` ${cache.reusable_checkpoints} more can be reused from the Hugging Face cache.`}
+    </p>}
+    <DinoAccessLink />
+    {verificationRequired && accessStatus !== 'checking' && <Button variant="outline" onClick={onConnections}>Manage Hugging Face connection</Button>}
+    <div role="status" className="text-muted-foreground">
+      {accessStatus === 'verified' ? <Badge variant="secondary">{accessMessages.verified}</Badge> : accessMessages[accessStatus]}
+    </div>
+  </ModelInstallDialog>;
 }

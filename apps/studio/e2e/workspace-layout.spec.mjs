@@ -437,11 +437,13 @@ test('generation switches between posed presets and maps each custom image to it
   await expect(mode.locator('option')).toHaveText(['1 view', '4 views', '6 views', 'Custom views']);
   await expect(mode.locator('option[value="four"]')).toBeDisabled();
   await form.getByRole('button', { name: 'Set up multiview' }).click();
-  const install = page.getByRole('button', { name: 'Install multiview weights' });
+  await page.getByRole('button', { name: 'Install multiview weights' }).click();
+  const dialog = page.getByRole('alertdialog', { name: 'Install multiview weights?' });
+  const install = dialog.getByRole('button', { name: 'Install multiview weights' });
   await expect(install).toBeDisabled();
-  await page.getByRole('checkbox', { name: 'I approve installing the additional model files.' }).check();
+  await dialog.getByRole('checkbox', { name: 'I approve installing the additional model files.' }).check();
   await install.click();
-  await expect(page.getByRole('region', { name: 'Multiview model files' }).getByText('Installed', { exact: true })).toBeVisible();
+  await expect(page.getByText('Multiview installed', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Workbench', exact: true }).click();
   await expect(form.getByLabel('Camera field of view (°)')).toBeVisible();
   await mode.selectOption('four');

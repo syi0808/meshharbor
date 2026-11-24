@@ -6,7 +6,7 @@ The backend outputs a geometry-only GLB. It uses the original CLIP context (77 t
 
 ## Install in Studio
 
-In **Settings → Models → TRELLIS Text Large → Apple MLX**, review the terms and select **Install model**. MeshHarbor prepares private Python 3.12 and downloads the pinned source and weights. No Hugging Face sign-in is required for these public weights.
+In **Settings → Models → TRELLIS Text Large → Apple MLX**, select **Install model** and review the terms in the confirmation dialog. After you confirm, MeshHarbor prepares private Python 3.12 and downloads the pinned source and weights. No Hugging Face sign-in is required for these public weights.
 
 ## Optional manual setup
 
