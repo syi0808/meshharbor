@@ -19,6 +19,8 @@ MeshHarbor is a local-first alternative to [Tripo](https://www.tripo3d.ai/) and 
 
 ## Quick start
 
+### From source
+
 Install Rust/Cargo 1.88 or later and a C/C++ toolchain. The checkout includes the built Studio client, so you don't need Node.js, pnpm, or a separate frontend build to run it. See the [build and smoke guide](docs/embedded-studio-package-smoke.md) for additional Windows build requirements.
 
 Clone the repository and start the local server:
@@ -35,6 +37,21 @@ Open **http://127.0.0.1:7432**. The server is single-user and loopback-only; do 
 - **Try Studio without a model download:** Select **Inventory → 3D models → Open GLB**. Use **Optimize**, compare **Original** and **Result**, then **Export GLB**.
 
 For the CLI, run `cargo run --locked --bin meshharbor -- --help`.
+
+### Docker
+
+From the repository root, build and start MeshHarbor:
+
+```sh
+docker build -t meshharbor .
+docker run --rm --init --network host --name meshharbor -v meshharbor-data:/data meshharbor
+```
+
+Open **http://127.0.0.1:7432**. The named volume keeps imported assets, jobs, and settings when the container is removed. Stop the container with `docker stop meshharbor`.
+
+MeshHarbor still listens only on loopback, so use [host networking](https://docs.docker.com/engine/network/drivers/host/) rather than `-p`. On Docker Desktop 4.34 or later, enable **Settings → Resources → Network → Enable host networking**, then apply and restart. Do not expose Studio through a public proxy.
+
+The image includes Studio, the API, and CPU mesh editing. It does not include GPU generation runtimes or model weights; use the native setup guides for MLX or CUDA generation.
 
 ## Documentation
 
