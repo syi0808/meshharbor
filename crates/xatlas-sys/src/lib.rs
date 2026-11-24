@@ -279,7 +279,7 @@ fn unwrap_and_bake_internal(
         .map(|(source, distance, coverage)| (source.indices, *distance, *coverage))
         .unwrap_or((&[][..], 0.0, 0.0));
     let mut raw = RawResult::default();
-    let mut error = [0_i8; 1024];
+    let mut error: [c_char; 1024] = [0; 1024];
     // SAFETY: all slices remain alive for the duration of the synchronous C++ call;
     // the returned buffers are owned by the native result and released below.
     let status = unsafe {
