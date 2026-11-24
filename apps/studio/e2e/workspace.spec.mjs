@@ -48,6 +48,11 @@ test('Jobs and model logs show saved failures in a details popup', async ({ page
     id: 'failed-download', operation: 'runtime.pixal3d.install_models', state: 'failed', progress: 0,
     created_at: '1', updated_at: '2', error: { message: 'Local cache is unavailable.' },
   };
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
+    platform: 'macos',
+    model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', backend_ids: ['pixal3d-mlx'] }],
+    model_backends: [{ id: 'pixal3d-mlx', installable: true }],
+  } }));
   await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [recorded] }));
   await page.route('**/api/v1/runtime/pixal3d-mlx/jobs', route => route.fulfill({ json: [recorded] }));
   await page.goto(studioOrigin);
@@ -86,6 +91,14 @@ test('Models aligns accelerator cards and installs a catalog model after consent
     id: 'catalog-install', operation: 'runtime.models.install', state: 'running', progress: 5,
     parameters: { backend_id: 'trellis-text-mlx' }, created_at: '1', updated_at: '1',
   };
+  const unsupportedJob = { ...job, id: 'unsupported-install', state: 'succeeded', parameters: { backend_id: 'trellis-text-cuda' } };
+  let unsupportedLogRequests = 0;
+  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [unsupportedJob] }));
+  await page.route('**/api/v1/runtime/trellis-text-mlx/jobs', route => route.fulfill({ json: [] }));
+  await page.route('**/api/v1/runtime/trellis-text-cuda/jobs', route => {
+    unsupportedLogRequests++;
+    return route.fulfill({ json: [unsupportedJob] });
+  });
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
     platform: 'macos',
     model_catalog: [{ id: 'trellis-text', title: 'TRELLIS Text Large', backend_ids: ['trellis-text-cuda', 'trellis-text-mlx'] }],
@@ -106,7 +119,9 @@ test('Models aligns accelerator cards and installs a catalog model after consent
     ...job, state: 'succeeded', progress: 100, updated_at: '2',
   } }));
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: studioOrigin });
+  const logsLoaded = page.waitForResponse('**/api/v1/runtime/trellis-text-mlx/jobs');
   await page.goto(studioOrigin + '/settings/models');
+  await logsLoaded;
   const mlx = page.getByRole('article', { name: 'TRELLIS Text Large · Apple MLX' });
   const cuda = page.getByRole('article', { name: 'TRELLIS Text Large · NVIDIA CUDA' });
   const pathLine = mlx.locator('code');
@@ -123,10 +138,14 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   await expect(install).toBeEnabled();
   await expect(cuda.getByText('Not supported here')).toBeVisible();
   await expect(cuda.getByRole('button', { name: 'Install model' })).toHaveCount(0);
-  const mlxLogs = await mlx.getByRole('button', { name: 'Recent logs' }).boundingBox();
-  const cudaLogs = await cuda.getByRole('button', { name: 'Recent logs' }).boundingBox();
-  expect(mlxLogs.x).toBeLessThan(cudaLogs.x);
-  expect(mlxLogs.y).toEqual(cudaLogs.y);
+  const mlxCard = await mlx.boundingBox();
+  const cudaCard = await cuda.boundingBox();
+  expect(mlxCard.x).toBeLessThan(cudaCard.x);
+  expect(mlxCard.y).toEqual(cudaCard.y);
+  await expect(page.getByRole('button', { name: 'Recent logs' })).toHaveCount(0);
+  await expect(mlx.locator('[data-slot="card-footer"]')).toHaveCount(0);
+  await expect(cuda.locator('[data-slot="card-footer"]')).toHaveCount(0);
+  expect(unsupportedLogRequests).toBe(0);
   await install.click();
   const installDialog = page.getByRole('alertdialog', { name: 'Install model?' });
   const consent = installDialog.getByRole('checkbox', { name: 'I reviewed the terms and approve installation and download.' });
@@ -147,6 +166,62 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   await expect(installDialog).toBeHidden();
   await expect(mlx.getByText('Ready', { exact: true })).toBeVisible();
   await expect(mlx.getByRole('button', { name: 'Delete model files' })).toBeEnabled();
+  await expect(mlx.getByRole('button', { name: 'Recent logs' })).toBeVisible();
+  await expect(cuda.getByRole('button', { name: 'Recent logs' })).toHaveCount(0);
+});
+
+test('a gated catalog install verifies DINOv3 each time its dialog opens', async ({ page, studioOrigin }) => {
+  let checks = 0;
+  let finishCheck;
+  const job = {
+    id: 'gated-install', operation: 'runtime.models.install', state: 'queued', progress: 0,
+    parameters: { backend_id: 'trellis2-mlx' }, created_at: '1', updated_at: '1',
+  };
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
+    platform: 'macos',
+    model_catalog: [{ id: 'trellis2', title: 'TRELLIS.2', backend_ids: ['trellis2-mlx'] }],
+    model_backends: [
+      { id: 'trellis2-mlx', managed_install: true, installable: true, downloads_enabled: true, gated_model_access_required: true },
+      { id: 'pixal3d-mlx', installable: true, local_files: { token_saved: true, credentials_managed: true } },
+    ],
+  } }));
+  await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', async route => {
+    expect(route.request().method()).toBe('POST');
+    if (++checks === 1) return route.fulfill({ json: 'access_denied' });
+    await new Promise(resolve => { finishCheck = resolve; });
+    return route.fulfill({ json: 'verified' });
+  });
+  await page.route('**/api/v1/runtime/trellis2-mlx/install', route => {
+    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: true });
+    return route.fulfill({ status: 202, json: job });
+  });
+  await page.route('**/api/v1/jobs/gated-install', route => route.fulfill({ json: job }));
+  await page.goto(studioOrigin + '/settings/models');
+  const install = page.getByRole('article', { name: 'TRELLIS.2 · Apple MLX' }).getByRole('button', { name: 'Install model' });
+  await expect(install).toBeEnabled();
+  expect(checks).toBe(0);
+  await install.click();
+  const dialog = page.getByRole('alertdialog', { name: 'Install model?' });
+  const title = dialog.getByRole('heading', { name: 'Install model?' });
+  const confirm = dialog.getByRole('button', { name: 'Install model' });
+  const consent = dialog.getByRole('checkbox', { name: /I have DINOv3 access/ });
+  await expect(title).toHaveCSS('font-size', '18px');
+  await expect(dialog.getByText('Access required', { exact: true })).toBeVisible();
+  await expect(consent).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(install).toBeFocused();
+  await install.click();
+  await expect(dialog.getByText('Checking DINOv3 file access…')).toBeVisible();
+  await expect(confirm).toBeDisabled();
+  await expect.poll(() => typeof finishCheck).toBe('function');
+  finishCheck();
+  await expect(dialog.getByText('DINOv3 file access verified.')).toBeVisible();
+  await expect(confirm).toBeDisabled();
+  await consent.check();
+  const request = page.waitForRequest('**/api/v1/runtime/trellis2-mlx/install');
+  await confirm.click();
+  await request;
+  await expect(dialog).toBeHidden();
 });
 
 test('the icon-only rail always shows one panel and exposes mesh tools without a model', async ({ page, studioOrigin }) => {

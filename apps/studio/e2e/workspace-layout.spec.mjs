@@ -357,8 +357,7 @@ test('generation can be queued, reordered and selected before its preview is rea
 
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const models = page.getByRole('main', { name: 'Models' });
-  await models.getByRole('button', { name: 'Recent logs' }).click();
-  await expect(models.getByText('No install or setup logs for this backend.')).toBeVisible();
+  await expect(models.getByRole('button', { name: 'Recent logs' })).toHaveCount(0);
   await expect(models.getByText(/Generate model|Waiting for an engine slot/)).toHaveCount(0);
   await page.getByRole('button', { name: 'Workbench', exact: true }).click();
   await preview.getByRole('button', { name: 'View in dashboard' }).click();

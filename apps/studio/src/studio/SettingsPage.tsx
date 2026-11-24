@@ -306,6 +306,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                 const backend = runtime?.model_backends.find(item => item.id === id);
                 if (!id || !backend) return null;
                 const label = `${model.title} · ${accelerators[kind].title}`;
+                const authBackend: RuntimeBackendId = `pixal3d-${kind}`;
                 const modelPaths = backend.model_paths ?? (backend.runtime_root ? [backend.runtime_root] : []);
                 return <Card key={id} role="article" aria-label={label} size="sm" className="min-w-0 bg-background">
                   <CardHeader>
@@ -316,18 +317,17 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                   <CardContent className="grid gap-3">
                     {modelPaths.length > 0 && <ModelFileLocations paths={modelPaths} />}
                     {backend.managed_install
-                      ? <CatalogInstall label={label} backend={backend} disabled={disabled} account={connectionBackendFor(id, runtime)}
-                          onConnections={() => onVisit('connections', kind === 'cuda' ? 'pixal3d-cuda' : 'pixal3d-mlx')}
+                      ? <CatalogInstall label={label} api={api} backend={backend} disabled={disabled} authBackend={authBackend}
+                          credentials={runtime?.model_backends.find(item => item.id === authBackend)?.local_files}
+                          onConnections={() => onVisit('connections', authBackend)}
                           onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />
                       : <PixalModelFiles label={label} api={api} backend={backend} id={id} disabled={disabled}
                           onAction={action => onRuntimeAction(id, action)} onSettings={onVisit} />}
                   </CardContent>
-                  <CardFooter className="mt-auto grid gap-2 border-t">
-                    <RuntimeLogs api={api} id={id} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
-                      action={backend.local_files?.remove_models_available && <Button variant="destructive" size="sm" onClick={event => openRemoval(id, 'model-files', event.currentTarget, label)} disabled={disabled}>
-                        <TrashIcon aria-hidden="true" /> Delete model files
-                      </Button>} />
-                  </CardFooter>
+                  <RuntimeActions api={api} id={id} backend={backend} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
+                    action={backend.local_files?.remove_models_available && <Button variant="destructive" size="sm" onClick={event => openRemoval(id, 'model-files', event.currentTarget, label)} disabled={disabled}>
+                      <TrashIcon aria-hidden="true" /> Delete model files
+                    </Button>} />
                 </Card>;
               })}
             </CardContent>
@@ -377,10 +377,6 @@ function profileStatus(backend: Backend) {
   return backend.downloads_enabled ? 'Available to download' : 'Unavailable';
 }
 
-function connectionBackendFor(id: RuntimeBackendId, runtime: RuntimeInfo | null) {
-  return runtime?.model_backends.find(backend => backend.id === `pixal3d-${accelerator(id)}`);
-}
-
 function ModelFileLocations({ paths }: { paths: string[] }) {
   async function copyPaths() {
     try {
@@ -401,16 +397,15 @@ function ModelFileLocations({ paths }: { paths: string[] }) {
   </dl>;
 }
 
-function RuntimeLogs({ api, id, jobs, operationLabel, onJobDetails, action }: {
-  api: MeshHarborApi; id: RuntimeBackendId; jobs: Job[];
+function RuntimeActions({ api, id, backend, jobs, operationLabel, onJobDetails, action }: {
+  api: MeshHarborApi; id: RuntimeBackendId; backend: Backend; jobs: Job[];
   operationLabel: Props['operationLabel']; onJobDetails: Props['onJobDetails']; action: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
-  const [saved, setSaved] = useState<Job[] | null>(null);
+  const [saved, setSaved] = useState<Job[]>([]);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    if (!open) return;
+    if (!backend.installable) return;
     const controller = new AbortController();
     void api.runtimeJobs(id, controller.signal).then(records => {
       if (!controller.signal.aborted) {
@@ -419,46 +414,63 @@ function RuntimeLogs({ api, id, jobs, operationLabel, onJobDetails, action }: {
       }
     }).catch(() => { if (!controller.signal.aborted) setFailed(true); });
     return () => controller.abort();
-  }, [api, id, open, attempt]);
-  const records = mergeJobRecords(jobs.filter(job =>
-    job.operation.startsWith('runtime.') && job.parameters?.backend_id === id), saved ?? []).slice(0, 6);
-  return <Collapsible open={open} onOpenChange={setOpen} className="min-w-0">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <CollapsibleTrigger asChild>
-        <Button variant="outline" size="sm"><CaretRightIcon className="transition-transform group-aria-expanded/button:rotate-90 motion-reduce:transition-none" aria-hidden="true" /> Recent logs</Button>
-      </CollapsibleTrigger>
-      {action}
-    </div>
-    <CollapsibleContent className="min-w-0 pt-2">
-      {records.length > 0 && <ItemGroup>
-        {records.map(job => <JobListItem key={job.id} job={job} title={operationLabel(job.operation)} onDetails={onJobDetails} />)}
-      </ItemGroup>}
-      {failed ? <p className="text-muted-foreground">Could not load recent logs. <button type="button" className="underline" onClick={() => { setFailed(false); setAttempt(current => current + 1); }}>Retry</button></p>
-        : !saved ? <p role="status" className="text-muted-foreground">Loading recent logs…</p>
-          : records.length === 0 && <p className="text-muted-foreground">No install or setup logs for this backend.</p>}
-    </CollapsibleContent>
-  </Collapsible>;
+  }, [api, id, backend, attempt]);
+  const records = backend.installable ? mergeJobRecords(jobs.filter(job =>
+    job.operation.startsWith('runtime.') && job.parameters?.backend_id === id), saved).slice(0, 6) : [];
+  if (!records.length && !action) return null;
+  return <CardFooter className="mt-auto grid gap-2 border-t">
+    {records.length > 0 ? <Collapsible className="min-w-0" onOpenChange={open => { if (open) setAttempt(current => current + 1); }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <CollapsibleTrigger asChild>
+          <Button variant="outline" size="sm"><CaretRightIcon className="transition-transform group-aria-expanded/button:rotate-90 motion-reduce:transition-none" aria-hidden="true" /> Recent logs</Button>
+        </CollapsibleTrigger>
+        {action}
+      </div>
+      <CollapsibleContent className="min-w-0 pt-2">
+        <ItemGroup>
+          {records.map(job => <JobListItem key={job.id} job={job} title={operationLabel(job.operation)} onDetails={onJobDetails} />)}
+        </ItemGroup>
+        {failed && <p className="text-muted-foreground">Could not refresh recent logs. <button type="button" className="underline" onClick={() => { setFailed(false); setAttempt(current => current + 1); }}>Retry</button></p>}
+      </CollapsibleContent>
+    </Collapsible> : <div className="flex justify-end">{action}</div>}
+  </CardFooter>;
 }
 
-function ModelInstallDialog({ label, action, description, consentLabel, disabled, blocked = false, onOpenChange, onConfirm, children }: {
+type DinoAccess = {
+  api: MeshHarborApi;
+  backendId: RuntimeBackendId;
+  credentials?: Backend['local_files'];
+  onConnections: () => void;
+};
+
+function ModelInstallDialog({ label, action, description, consentLabel, disabled, dino, onConfirm, children }: {
   label: string; action: string; description: string; consentLabel: string;
-  disabled: boolean; blocked?: boolean; onOpenChange?: (open: boolean) => void;
+  disabled: boolean; dino?: DinoAccess;
   onConfirm: () => void; children?: ReactNode;
 }) {
   const consentId = useId();
   const [consent, setConsent] = useState(false);
+  const { status: access, setDialogOpen } = useDinoAccess(dino, disabled);
+  const blocked = dino !== undefined && access !== 'verified';
   return <AlertDialog onOpenChange={open => {
     if (!open) setConsent(false);
-    onOpenChange?.(open);
+    setDialogOpen(open);
   }}>
     <AlertDialogTrigger asChild><Button className="justify-self-start" disabled={disabled}>{action}</Button></AlertDialogTrigger>
     <AlertDialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] data-[size=default]:sm:max-w-md">
       <AlertDialogHeader>
-        <AlertDialogTitle>{action}?</AlertDialogTitle>
+        <AlertDialogTitle className="text-lg font-semibold">{action}?</AlertDialogTitle>
         <AlertDialogDescription><span className="block font-medium text-foreground">{label}</span>{description}</AlertDialogDescription>
       </AlertDialogHeader>
       <div className="grid min-h-0 justify-items-start gap-3 overflow-y-auto overscroll-contain px-1 py-1 text-xs/relaxed">
         {children}
+        {dino && <>
+          <DinoAccessLink />
+          <div role="status" className="text-muted-foreground">
+            {access === 'verified' ? <Badge variant="secondary">{accessMessages.verified}</Badge> : accessMessages[access]}
+          </div>
+          {blocked && access !== 'checking' && <Button variant="outline" onClick={dino.onConnections}>Manage Hugging Face connection</Button>}
+        </>}
         <div className="flex items-start gap-2">
           <Checkbox id={consentId} checked={consent} disabled={disabled || blocked} onCheckedChange={value => setConsent(value === true)} />
           <Label htmlFor={consentId} className="leading-relaxed">{consentLabel}</Label>
@@ -478,23 +490,19 @@ function DinoAccessLink() {
   return <a className="text-primary underline underline-offset-4" href={dinoAccessUrl} target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a>;
 }
 
-function CatalogInstall({ label, backend, account, disabled, onConnections, onInstall }: {
-  label: string; backend: Backend; account?: Backend; disabled: boolean; onConnections: () => void; onInstall: () => void;
+function CatalogInstall({ label, api, backend, authBackend, credentials, disabled, onConnections, onInstall }: {
+  label: string; api: MeshHarborApi; backend: Backend; authBackend: RuntimeBackendId; credentials?: Backend['local_files'];
+  disabled: boolean; onConnections: () => void; onInstall: () => void;
 }) {
   if (!backend.downloads_enabled) return null;
   const gated = backend.gated_model_access_required;
-  const needsSignIn = gated && !account?.local_files?.token_saved && account?.local_files?.credentials_managed !== false;
   return <ModelInstallDialog label={label} action="Install model"
     description="MeshHarbor installs a private Python environment and downloads the model weights for local generation."
     consentLabel={gated ? 'I have DINOv3 access, reviewed the terms, and approve installation and download.' : 'I reviewed the terms and approve installation and download.'}
-    disabled={disabled} blocked={needsSignIn} onConfirm={onInstall}>
+    disabled={disabled} dino={gated ? { api, backendId: authBackend, credentials, onConnections } : undefined} onConfirm={onInstall}>
     {backend.ready && !backend.managed_ready && <p className="text-muted-foreground">Using existing files. A managed install keeps them intact.</p>}
     {backend.license_notice && <p className="text-muted-foreground">{backend.license_notice}</p>}
     {backend.source && <a className="text-primary underline underline-offset-4" href={`${backend.source.repository}/tree/${backend.source.revision}`} target="_blank" rel="noreferrer">Review upstream source and terms</a>}
-    {gated && <>
-      <DinoAccessLink />
-      {needsSignIn && <Button variant="outline" onClick={onConnections}>Manage Hugging Face connection</Button>}
-    </>}
   </ModelInstallDialog>;
 }
 
@@ -505,6 +513,54 @@ const accessMessages: Record<AccessStatus, string> = {
   access_denied: 'Access required',
   unavailable: 'Access not verified',
 };
+
+function useDinoAccess(dino: DinoAccess | undefined, disabled: boolean) {
+  const [open, setOpen] = useState(false);
+  const [access, setAccess] = useState<AccessStatus>('checking');
+  const api = dino?.api;
+  const backendId = dino?.backendId;
+  const credentials = dino?.credentials;
+  const needsConnection = credentials?.credentials_managed === true && !credentials.token_saved;
+  useEffect(() => {
+    if (!api || !backendId || !open || disabled || needsConnection) return;
+    const controller = new AbortController();
+    let checking = false;
+    let previous: AccessStatus | undefined;
+    async function check(api: MeshHarborApi, id: RuntimeBackendId) {
+      if (checking || controller.signal.aborted) return;
+      checking = true;
+      setAccess('checking');
+      const result = await api.checkModelAccess(id, controller.signal).catch(() => 'unavailable' as const);
+      if (!controller.signal.aborted) {
+        setAccess(result);
+        if (previous !== result && result === 'access_denied') {
+          notify('warning', 'DINOv3 access denied.', 'Request access on Hugging Face with the same account.');
+        } else if (previous !== result && result === 'unavailable') {
+          notify('error', 'Could not verify DINOv3 access.', 'Reopen this dialog to retry.');
+        }
+        previous = result;
+      }
+      checking = false;
+    }
+    const onFocus = () => void check(api, backendId);
+    const initialCheck = window.setTimeout(onFocus, 0);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearTimeout(initialCheck);
+      window.removeEventListener('focus', onFocus);
+      controller.abort();
+    };
+  }, [api, backendId, disabled, needsConnection, open]);
+
+  return {
+    status: needsConnection ? 'not_connected' as const : access,
+    setDialogOpen(next: boolean) {
+      if (!dino) return;
+      if (next) setAccess('checking');
+      setOpen(next);
+    },
+  };
+}
 
 const accountMessages: Record<AccountStatus, string> = {
   checking: 'Checking Hugging Face sign-in…',
@@ -599,56 +655,14 @@ function PixalDownloadDialog({ label, api, backend, id, disabled, onConnections,
   label: string; api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
   onConnections: () => void; onDownload: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [access, setAccess] = useState<AccessStatus>('checking');
-  const local = backend.local_files;
-  const needsConnection = local?.credentials_managed === true && !local.token_saved;
-  const accessStatus = needsConnection ? 'not_connected' : access;
-  const verificationRequired = accessStatus !== 'verified';
   const cache = backend.pixal3d_cache;
-  useEffect(() => {
-    if (!open || disabled || needsConnection) return;
-    const controller = new AbortController();
-    let checking = false;
-    let previous: AccessStatus | undefined;
-    async function check() {
-      if (checking || controller.signal.aborted) return;
-      checking = true;
-      setAccess('checking');
-      const result = await api.checkModelAccess(id, controller.signal).catch(() => 'unavailable' as const);
-      if (!controller.signal.aborted) {
-        setAccess(result);
-        if (previous !== result && result === 'access_denied') {
-          notify('warning', 'DINOv3 access denied.', 'Request access on Hugging Face with the same account.');
-        } else if (previous !== result && result === 'unavailable') {
-          notify('error', 'Could not verify DINOv3 access.', 'Refresh status to retry.');
-        }
-        previous = result;
-      }
-      checking = false;
-    }
-    const initialCheck = window.setTimeout(() => void check(), 0);
-    const onFocus = () => void check();
-    window.addEventListener('focus', onFocus);
-    return () => {
-      window.clearTimeout(initialCheck);
-      window.removeEventListener('focus', onFocus);
-      controller.abort();
-    };
-  }, [api, backend, disabled, id, needsConnection, open]);
-
   return <ModelInstallDialog label={label} action="Download model files"
     description={`Up to ${accelerators[accelerator(id)].download} without cached files. DINOv3 access is required.`}
-    consentLabel="I reviewed the model terms and approve this download." disabled={disabled} blocked={verificationRequired}
-    onOpenChange={next => { if (next) setAccess('checking'); setOpen(next); }} onConfirm={onDownload}>
+    consentLabel="I reviewed the model terms and approve this download." disabled={disabled}
+    dino={{ api, backendId: id, credentials: backend.local_files, onConnections }} onConfirm={onDownload}>
     {cache && <p className="text-muted-foreground">
       {cache.local_checkpoints}/{cache.total_checkpoints} checkpoints cached.
       {cache.reusable_checkpoints > 0 && ` ${cache.reusable_checkpoints} more can be reused from the Hugging Face cache.`}
     </p>}
-    <DinoAccessLink />
-    {verificationRequired && accessStatus !== 'checking' && <Button variant="outline" onClick={onConnections}>Manage Hugging Face connection</Button>}
-    <div role="status" className="text-muted-foreground">
-      {accessStatus === 'verified' ? <Badge variant="secondary">{accessMessages.verified}</Badge> : accessMessages[accessStatus]}
-    </div>
   </ModelInstallDialog>;
 }
