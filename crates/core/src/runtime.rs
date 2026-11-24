@@ -38,6 +38,7 @@ pub enum RuntimeJobKind {
     CudaSetup,
     CudaInstallModels,
     CudaInstallMultiview,
+    InstallCatalogModel(&'static str),
 }
 
 impl RuntimeJobKind {
@@ -49,6 +50,7 @@ impl RuntimeJobKind {
             Self::CudaSetup => "runtime.pixal3d.cuda_setup",
             Self::CudaInstallModels => "runtime.pixal3d.cuda_install_models",
             Self::CudaInstallMultiview => "runtime.pixal3d.cuda_install_multiview",
+            Self::InstallCatalogModel(_) => "runtime.models.install",
         }
     }
 
@@ -58,6 +60,7 @@ impl RuntimeJobKind {
             Self::CudaSetup | Self::CudaInstallModels | Self::CudaInstallMultiview => {
                 "pixal3d-cuda"
             }
+            Self::InstallCatalogModel(backend) => backend,
         }
     }
 }
@@ -136,14 +139,14 @@ impl Pixal3dRuntimeManager {
 
     fn huggingface_command(&self) -> CoreResult<Command> {
         self.ensure_apple_silicon()?;
-        let python = self.python_path();
+        let python = access_python(&self.runtime_root).unwrap_or_else(|| self.python_path());
         if !python.is_file() {
             return Err(CoreError::OperationUnavailable(
-                "Set up the MLX Python environment before connecting Hugging Face.".into(),
+                "Prepare browser sign-in or set up the MLX environment before connecting a token."
+                    .into(),
             ));
         }
-        let access_python = access_python(&self.runtime_root).unwrap_or(python);
-        Ok(self.python_command(&access_python))
+        Ok(self.python_command(&python))
     }
 
     /// Provision a managed Python 3.12 and the source-pinned, locked MLX

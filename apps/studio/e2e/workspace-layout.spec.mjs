@@ -115,15 +115,19 @@ test('a backend can advertise text input without requiring an image asset', asyn
   await expect(prompt).toHaveAttribute('aria-invalid', 'true');
   await expect(submit).toBeDisabled();
   await prompt.fill('  a ceramic cup  ');
+  await page.setViewportSize({ width: 390, height: 680 });
   await submit.click();
+  const inventory = page.getByRole('dialog', { name: 'Inventory' });
+  await expect(inventory.getByRole('button', { name: 'Select pending model New model' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Text-to-3D generation queued.')).toBeVisible();
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const models = page.getByRole('main', { name: 'Models' });
   await expect(models.getByText('Text to 3D', { exact: true })).toHaveCount(2);
   await expect(models.getByText('Image to 3D', { exact: true })).toHaveCount(2);
 });
 
-test('generation uses its explicit reference and leaves the inspected GLB selected until review', async ({ page, studioOrigin }) => {
+test('generation uses its explicit reference and opens and selects the new inventory card', async ({ page, studioOrigin }) => {
   const parameters = (textureOptions, seedDefault) => [
     { id: 'resolution', kind: 'fixed', label: 'Geometry resolution', description: 'Fixed by the profile.', default: 512 },
     { id: 'texture_size', kind: 'choice', label: 'Texture size', description: 'Texture resolution.', default: textureOptions[0], values: textureOptions },
@@ -257,10 +261,17 @@ test('generation uses its explicit reference and leaves the inspected GLB select
     { id: 1, state: 'running', stage: 'texture_flow', at: job.created_at, message: null, commands: [] },
   ] }));
   await page.route('**/api/v1/assets/asset_generation_layout', route => route.fulfill({ json: derived }));
-  await generateAction.click();
+  const inventoryToggle = page.getByRole('button', { name: 'Inventory', exact: true });
   const inventory = page.getByRole('complementary', { name: 'Inventory' });
+  await inventory.getByRole('tab', { name: 'Images' }).click();
+  await inventoryToggle.click();
+  await expect(inventoryToggle).toHaveAttribute('aria-expanded', 'false');
+  await generateAction.click();
+  await expect(inventoryToggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(inventory.getByRole('tab', { name: '3D models' })).toHaveAttribute('aria-selected', 'true');
   const pending = inventory.getByRole('region', { name: 'Models in progress' });
   await expect(pending.getByText('Generating textures', { exact: true })).toBeVisible();
+  await expect(pending.getByRole('button', { name: /Select pending model/ })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Image-to-3D generation started.')).toBeVisible();
   await expect(generate.getByRole('progressbar', { name: 'Job progress' })).toHaveCount(0);
   await expect(generateAction).toBeEnabled();
@@ -280,9 +291,7 @@ test('generation uses its explicit reference and leaves the inspected GLB select
   generationState = 'succeeded';
   await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Image-to-3D generation complete.', { exact: false })).toBeVisible();
   await expect(pending).toHaveCount(0);
-  await expect(page.locator('#asset-library').getByTitle(derived.name)).toBeVisible();
-  await expect(selected.getByTitle(active.name)).toBeVisible();
-  await generate.getByRole('button', { name: 'View generated model' }).click();
+  await expect(inventory.getByRole('button', { name: /new-model\.glb/ })).toHaveAttribute('aria-pressed', 'true');
   await expect(selected.getByTitle(derived.name)).toBeVisible();
 });
 
@@ -347,10 +356,10 @@ test('generation can be queued, reordered and selected before its preview is rea
   await expect(preview.getByText('Waiting for an engine slot')).toBeVisible();
 
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
-  const storage = page.getByRole('main', { name: 'Downloads & storage' });
-  await expect(storage.getByText('No finished storage jobs for this backend.')).toBeVisible();
-  await expect(storage.getByText(/Generate model|Waiting for an engine slot/)).toHaveCount(0);
+  const models = page.getByRole('main', { name: 'Models' });
+  await models.getByRole('button', { name: 'Recent logs' }).click();
+  await expect(models.getByText('No install or setup logs for this backend.')).toBeVisible();
+  await expect(models.getByText(/Generate model|Waiting for an engine slot/)).toHaveCount(0);
   await page.getByRole('button', { name: 'Workbench', exact: true }).click();
   await preview.getByRole('button', { name: 'View in dashboard' }).click();
   const queue = page.getByRole('region', { name: /Generation queue/ });

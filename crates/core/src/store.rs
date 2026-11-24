@@ -893,6 +893,22 @@ impl Store {
         self.read_jobs(limit, true, before)
     }
 
+    pub fn list_runtime_jobs(&self, backend: &str) -> CoreResult<Vec<Job>> {
+        let ids = {
+            let conn = self.connection.lock().expect("SQLite mutex poisoned");
+            let mut statement = conn.prepare(
+                "SELECT id FROM jobs WHERE operation GLOB 'runtime.*' AND json_extract(parameters_json, '$.backend_id') = ?1
+                 ORDER BY updated_at DESC, id DESC LIMIT 6",
+            )?;
+            statement
+                .query_map([backend], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        ids.iter()
+            .filter_map(|id| self.get_job(id).transpose())
+            .collect()
+    }
+
     fn read_jobs(
         &self,
         limit: usize,

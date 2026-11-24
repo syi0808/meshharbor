@@ -60,8 +60,9 @@ inherit ambient tokens or user Python packages.
 
 ## Studio, REST, and MCP
 
-Studio **Settings** shows MLX and CUDA as Pixal3D execution profiles and has
-separate Connections and Downloads & storage sections. The workbench shows model
+Studio **Settings → Models** shows installation, downloads, file paths, and
+recent logs for the Pixal3D MLX and CUDA profiles. Use **Connections** for
+Hugging Face sign-in. The workbench shows model
 names and automatically selects a locally ready runtime. The same
 generation option (`backend_id: "auto" | "pixal3d-mlx" | "pixal3d-cuda"`) is
 accepted by the CLI, `POST /api/v1/jobs` `model.generate`, and MCP
@@ -82,7 +83,7 @@ overwrites an existing file.
 
 ## Posed generation in Studio
 
-After the base model is ready, open **Settings → Downloads & storage** and approve **Install multiview weights**. The engine prepares the separate pinned Pixal3D multiview snapshot `b0cb2e1b794cab9aa0ac38a95d794a4d9337437f`, reusing matching local Hub files. The base model and the gated DINOv3/NAF files are not reinstalled. No weights are fetched during generation.
+After the base model is ready, open the Pixal3D CUDA card in **Settings → Models** and approve **Install multiview weights**. The engine prepares the separate pinned Pixal3D multiview snapshot `b0cb2e1b794cab9aa0ac38a95d794a4d9337437f`, reusing matching local Hub files. The base model and the gated DINOv3/NAF files are not reinstalled. No weights are fetched during generation.
 
 Select **Pixal3D** in **Generate model**, then choose 4 views (front, right, back, left), 6 views (adds top and bottom), or Custom views. Presets use an assumed 20° FOV and a shared camera distance; use 2–8 custom views to enter an actual camera orientation, distance, and FOV for each. The first image defines the front frame and job lineage. Use masked, consistently framed inputs.
 

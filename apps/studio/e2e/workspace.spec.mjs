@@ -43,12 +43,13 @@ test('Jobs opens on the left without replacing the resizable Inventory', async (
   await expect(page.getByRole('complementary', { name: 'Generate model' })).toBeVisible();
 });
 
-test('Jobs and storage show saved failures in a details popup', async ({ page, studioOrigin }) => {
+test('Jobs and model logs show saved failures in a details popup', async ({ page, studioOrigin }) => {
   const recorded = {
     id: 'failed-download', operation: 'runtime.pixal3d.install_models', state: 'failed', progress: 0,
     created_at: '1', updated_at: '2', error: { message: 'Local cache is unavailable.' },
   };
   await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [recorded] }));
+  await page.route('**/api/v1/runtime/pixal3d-mlx/jobs', route => route.fulfill({ json: [recorded] }));
   await page.goto(studioOrigin);
   await page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs' }).click();
   const jobsRow = page.getByRole('complementary', { name: 'Jobs' }).getByRole('listitem');
@@ -64,12 +65,57 @@ test('Jobs and storage show saved failures in a details popup', async ({ page, s
   await page.keyboard.press('Escape');
   await expect(detailsButton).toBeFocused();
   await page.goto(studioOrigin + '/settings/storage');
-  const activityRow = page.getByRole('region', { name: 'Recent activity' }).getByRole('listitem');
+  const backend = page.getByRole('article', { name: 'Pixal3D · Apple MLX' });
+  await backend.getByRole('button', { name: 'Recent logs' }).click();
+  const activityRow = backend.getByRole('listitem');
   await expect(activityRow).toHaveAttribute('data-slot', 'item');
   await expect(activityRow.getByText('Download MLX models')).toBeVisible();
   await expect(activityRow.getByText(recorded.error.message)).toHaveCount(0);
   await activityRow.getByRole('button', { name: 'View details for Download MLX models' }).click();
   await expect(details.getByText(recorded.error.message)).toBeVisible();
+});
+
+test('Models aligns accelerator cards and installs a catalog model after consent', async ({ page, studioOrigin }) => {
+  const path = '/local/meshharbor/runtimes/trellis-text-mlx-managed/weights';
+  let installed = false;
+  const job = {
+    id: 'catalog-install', operation: 'runtime.models.install', state: 'running', progress: 5,
+    parameters: { backend_id: 'trellis-text-mlx' }, created_at: '1', updated_at: '1',
+  };
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
+    platform: 'macos',
+    model_catalog: [{ id: 'trellis-text', title: 'TRELLIS Text Large', backend_ids: ['trellis-text-cuda', 'trellis-text-mlx'] }],
+    model_backends: [
+      { id: 'trellis-text-mlx', model_paths: [path], managed_install: true, installable: true, downloads_enabled: !installed, ready: installed,
+        local_files: { remove_models_available: installed, model_files_managed: true } },
+      { id: 'trellis-text-cuda', managed_install: true, installable: false },
+    ],
+  } }));
+  await page.route('**/api/v1/runtime/trellis-text-mlx/install', route => {
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: false });
+    installed = true;
+    return route.fulfill({ status: 202, json: job });
+  });
+  await page.route('**/api/v1/jobs/catalog-install', route => route.fulfill({ json: {
+    ...job, state: 'succeeded', progress: 100, updated_at: '2',
+  } }));
+  await page.goto(studioOrigin + '/settings/models');
+  const mlx = page.getByRole('article', { name: 'TRELLIS Text Large · Apple MLX' });
+  const cuda = page.getByRole('article', { name: 'TRELLIS Text Large · NVIDIA CUDA' });
+  await expect(mlx.getByText(path)).toBeVisible();
+  const install = mlx.getByRole('button', { name: 'Install model' });
+  await expect(install).toBeDisabled();
+  await expect(cuda.getByText('Not supported here')).toBeVisible();
+  await expect(cuda.getByRole('button', { name: 'Install model' })).toHaveCount(0);
+  const mlxLogs = await mlx.getByRole('button', { name: 'Recent logs' }).boundingBox();
+  const cudaLogs = await cuda.getByRole('button', { name: 'Recent logs' }).boundingBox();
+  expect(mlxLogs.x).toBeLessThan(cudaLogs.x);
+  expect(mlxLogs.y).toEqual(cudaLogs.y);
+  await mlx.getByRole('checkbox', { name: 'I reviewed the terms and approve installation and download.' }).check();
+  await install.click();
+  await expect(mlx.getByText('Ready', { exact: true })).toBeVisible();
+  await expect(mlx.getByRole('button', { name: 'Delete model files' })).toBeEnabled();
 });
 
 test('the icon-only rail always shows one panel and exposes mesh tools without a model', async ({ page, studioOrigin }) => {
@@ -187,8 +233,7 @@ test('workbench and settings controls keep the official Mira dimensions', async 
   await expect(page.getByRole('banner')).not.toContainText('Engine connected');
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(page.getByLabel('Backend', { exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
-  await expect(page.getByLabel('Backend')).toHaveCSS('height', '28px');
+  await expect(page.getByRole('button', { name: 'Downloads & storage', exact: true })).toHaveCount(0);
   expect(await page.locator('html').evaluate(element => getComputedStyle(element).getPropertyValue('--primary').trim())).toBe('#82d7b8');
 });
 
@@ -329,8 +374,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(setup).toBeDisabled();
   finishSetup = true;
   await expect(main.getByText('Download required')).toBeVisible();
-  await main.getByRole('button', { name: 'View downloads' }).click();
-  const storage = page.getByRole('main', { name: 'Downloads & storage' });
+  const storage = main.getByRole('article', { name: 'Pixal3D · Apple MLX' });
   const toasts = page.getByRole('region', { name: /Notifications/ });
   const download = storage.getByRole('button', { name: 'Download model files' });
   const consent = storage.getByRole('checkbox', { name: 'I reviewed the model terms and approve this download.' });
@@ -359,7 +403,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await connect.click();
   await expect(toasts.getByText('Hugging Face account verified.')).toBeVisible();
   await expect(token).toHaveValue('');
-  await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
+  await page.getByRole('button', { name: 'Models', exact: true }).click();
   await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toHaveCount(0);
   await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
   expect(modelAccessChecks).toBeGreaterThan(0);
@@ -373,7 +417,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(settings).toBeFocused();
 });
 
-test('browser sign-in leaves DINOv3 to storage, which rechecks access on return', async ({ page, studioOrigin }) => {
+test('browser sign-in leaves DINOv3 to Models, which rechecks access on return', async ({ page, studioOrigin }) => {
   let sessionNumber = 0;
   let cancelled = false;
   let approved = false;
@@ -430,8 +474,8 @@ test('browser sign-in leaves DINOv3 to storage, which rechecks access on return'
   await expect(toasts.getByText('Hugging Face account verified.')).toBeVisible();
   expect(modelAccessChecks).toBe(0);
   await expect(connections).not.toContainText('DINOv3');
-  await page.getByRole('button', { name: 'Downloads & storage', exact: true }).click();
-  const storage = page.getByRole('main', { name: 'Downloads & storage' });
+  await page.getByRole('button', { name: 'Models', exact: true }).click();
+  const storage = page.getByRole('article', { name: 'Pixal3D · Apple MLX' });
   const download = storage.getByRole('button', { name: 'Download model files' });
   await expect(storage.getByRole('button', { name: 'Check DINOv3 access' })).toHaveCount(0);
   await expect(storage.getByText('Access required', { exact: true })).toBeVisible();
@@ -472,10 +516,10 @@ test('settings deep links and confirmations manage one local profile at a time',
     });
   }
   await page.goto(studioOrigin + '/settings/storage');
-  const storage = page.getByRole('main', { name: 'Downloads & storage' });
+  const storage = page.getByRole('main', { name: 'Models' }).getByRole('article', { name: 'Pixal3D · Apple MLX' });
   const toasts = page.getByRole('region', { name: /Notifications/ });
-  const uninstall = storage.getByRole('button', { name: 'Uninstall model files' });
-  await expect(storage.getByText('Installed', { exact: true })).toBeVisible();
+  const uninstall = storage.getByRole('button', { name: 'Delete model files' });
+  await expect(storage.getByText('Ready', { exact: true })).toBeVisible();
   await uninstall.click();
   const remove = page.getByRole('alertdialog', { name: 'Remove model files?' });
   await expect(remove).toContainText('assets stay intact');
@@ -492,8 +536,8 @@ test('settings deep links and confirmations manage one local profile at a time',
   await page.keyboard.press('Escape');
   await expect(remove).toBeVisible();
   finishModelRemoval();
-  await expect(toasts.getByText('Pixal3D model files removed for Apple MLX.')).toBeVisible();
-  await expect(storage.getByText('Not installed', { exact: true })).toBeVisible();
+  await expect(toasts.getByText('Model files removed for Pixal3D · Apple MLX.')).toBeVisible();
+  await expect(storage.getByText('Download required', { exact: true })).toBeVisible();
   await expect(storage.getByText('DINOv3 file access verified.')).toBeVisible();
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
@@ -507,7 +551,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   await expect(connections.getByText('Not connected', { exact: true })).toBeVisible();
   expect(calls).toEqual(['model-files', 'huggingface']);
   await page.goBack();
-  await expect(storage.getByText('Not installed', { exact: true })).toBeVisible();
+  await expect(storage.getByText('Download required', { exact: true })).toBeVisible();
   await expect(storage.getByText('Sign in to Hugging Face to check DINOv3 file access.')).toBeVisible();
   await expect(storage.getByRole('button', { name: 'Download model files' })).toBeDisabled();
 });

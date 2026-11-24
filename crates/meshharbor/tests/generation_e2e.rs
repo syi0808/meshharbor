@@ -230,7 +230,7 @@ fn external_triposg_requires_activation_and_runs_an_offline_worker() {
     ];
     let declined = execute(&generation);
     assert!(!declined.status.success());
-    assert!(String::from_utf8_lossy(&declined.stderr).contains("activate.json"));
+    assert!(String::from_utf8_lossy(&declined.stderr).contains("Settings → Models"));
     assert!(!root.exists());
 
     let write = |path: &Path, bytes: &[u8]| {
@@ -291,8 +291,9 @@ cp "$6/fixture.glb" "$9"
     ] {
         let backend = backends.iter().find(|backend| backend["id"] == id).unwrap();
         assert_eq!(backend["generation"]["view_modes"], json!(["single"]));
-        assert_eq!(backend["manual_setup"], true);
-        assert_eq!(backend["downloads_enabled"], false);
+        assert_eq!(backend["managed_install"], true);
+        assert_eq!(backend["downloads_enabled"], backend["installable"]);
+        assert!(backend["model_paths"].is_array());
         assert_eq!(backend["ready"], id == backend_id);
     }
     assert!(
@@ -343,7 +344,7 @@ fn trellis_text_cli_uses_prompt_stdin_and_path_checked_runtime() {
             );
             return;
         };
-    assert!(String::from_utf8_lossy(&declined.stderr).contains("activate.json"));
+    assert!(String::from_utf8_lossy(&declined.stderr).contains("Settings → Models"));
 
     let root = data_dir.join("runtimes").join(backend);
     let write = |relative: &str, bytes: &[u8]| {

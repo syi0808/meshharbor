@@ -1,11 +1,12 @@
-import { ArrowLeftIcon, ArrowsClockwiseIcon, CubeIcon, HardDrivesIcon, KeyIcon, ListChecksIcon, PaintBrushIcon } from '@phosphor-icons/react';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { ArrowLeftIcon, ArrowsClockwiseIcon, CaretRightIcon, CubeIcon, KeyIcon, ListChecksIcon, PaintBrushIcon, TrashIcon } from '@phosphor-icons/react';
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
@@ -19,28 +20,27 @@ import { JobListItem } from './JobListItem';
 import type { StudioActivity } from './JobsDashboard';
 import { NotificationHistory } from './NotificationHistory';
 import { notify } from './notify';
-import { isActiveJob, type MeshHarborApi } from './api';
+import type { MeshHarborApi } from './api';
+import { mergeJobRecords } from './job-activity';
 import type { HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, RuntimeBackendId, RuntimeInfo } from './types';
 import { runtimeSetupStage } from './workbench-state';
 import type { StudioTheme } from './theme';
 
 const sections = {
-  models: { title: 'Models', icon: CubeIcon, description: 'Set up local generation.' },
+  models: { title: 'Models', icon: CubeIcon, description: 'Install models and manage local files for generation.' },
   connections: { title: 'Connections', icon: KeyIcon, description: 'Manage sign-in.' },
-  storage: { title: 'Downloads & storage', icon: HardDrivesIcon, description: 'Manage local model files.' },
   preferences: { title: 'Preferences', icon: PaintBrushIcon, description: 'Customize Studio.' },
 };
 
 export type SettingsSection = keyof typeof sections;
-export type RuntimeAction = 'setup' | 'download' | 'convert' | 'multiview';
+export type RuntimeAction = 'setup' | 'download' | 'convert' | 'multiview' | 'install' | 'install-gated';
 
-const sectionIds: SettingsSection[] = ['models', 'connections', 'storage', 'preferences'];
-const profiles = {
-  'pixal3d-mlx': { title: 'Apple MLX', platform: 'macOS · Apple Silicon', download: '24 GB' },
-  'pixal3d-cuda': { title: 'NVIDIA CUDA', platform: 'Linux x86-64 · NVIDIA GPU', download: '30 GB' },
-} satisfies Record<RuntimeBackendId, object>;
-
-const profileIds: RuntimeBackendId[] = ['pixal3d-mlx', 'pixal3d-cuda'];
+const sectionIds: SettingsSection[] = ['models', 'connections', 'preferences'];
+const accelerators = {
+  mlx: { title: 'Apple MLX', platform: 'macOS · Apple Silicon', download: '24 GB' },
+  cuda: { title: 'NVIDIA CUDA', platform: 'Linux x86-64 · NVIDIA GPU', download: '30 GB' },
+};
+const accelerator = (id: string) => id.endsWith('-cuda') ? 'cuda' : 'mlx';
 type Backend = RuntimeInfo['model_backends'][number];
 type RemovalScope = 'huggingface' | 'model-files';
 type AccessStatus = HuggingFaceAccess | 'checking' | 'unavailable';
@@ -65,7 +65,6 @@ interface Props {
   operationLabel: (operation: string) => string;
   onJobDetails: (job: Job, trigger: HTMLButtonElement) => void;
   onVisit: VisitSettings;
-  onProfileChange: (backend: RuntimeBackendId) => void;
   onClose: () => void;
   onOpenDashboard: () => void;
   onActivityChange: (activity: StudioActivity | null) => void;
@@ -76,34 +75,31 @@ interface Props {
   onRuntimeAction: (backend: RuntimeBackendId, action: RuntimeAction) => void;
 }
 
-export function SettingsPage({ api, section, backendId, runtime, connection, busy, theme, jobs, operationLabel, onJobDetails, onVisit, onProfileChange, onClose, onOpenDashboard, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
+export function SettingsPage({ api, section, backendId, runtime, connection, busy, theme, jobs, operationLabel, onJobDetails, onVisit, onClose, onOpenDashboard, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
   const heading = useRef<HTMLHeadingElement>(null);
   const removalTrigger = useRef<HTMLButtonElement | null>(null);
   const [accounts, setAccounts] = useState<Partial<Record<RuntimeBackendId, AccountStatus>>>({});
   const [pending, setPending] = useState(false);
-  const [removal, setRemoval] = useState<{ backend: RuntimeBackendId; scope: RemovalScope } | null>(null);
+  const [removal, setRemoval] = useState<{ backend: RuntimeBackendId; scope: RemovalScope; label?: string } | null>(null);
   const [browserLogin, setBrowserLogin] = useState<{ backend: RuntimeBackendId; session: HuggingFaceBrowserLogin } | null>(null);
   const platformId: RuntimeBackendId = runtime?.platform === 'linux' ? 'pixal3d-cuda' : 'pixal3d-mlx';
-  const connectionChoices: RuntimeBackendId[] = [platformId, ...profileIds];
-  const connectionId = connectionChoices.find(id =>
-    runtime?.model_backends.some(backend => backend.id === id && backend.installable)) ?? platformId;
+  const connectionId = section === 'connections' && backendId?.startsWith('pixal3d-') ? backendId : platformId;
   const connectionBackend = runtime?.model_backends.find(backend => backend.id === connectionId);
-  const selectedId = backendId ?? platformId;
-  const selected = runtime?.model_backends.find(backend => backend.id === selectedId);
   const browserBackend = browserLogin?.backend;
   const browserSessionId = browserLogin?.session.id;
   const browserActive = browserLogin && browserLoginIsActive(browserLogin.session);
   const disabled = pending || busy || Boolean(browserActive);
-  const storageJobs = jobs.filter(job => {
-    const action = job.operation.replace(/^runtime\.pixal3d\./, '');
-    const cuda = action.startsWith('cuda_');
-    return !isActiveJob(job) && cuda === (selectedId === 'pixal3d-cuda')
-      && (action === 'install_models' || action === 'convert_naf' || action === 'cuda_install_models' || action === 'cuda_install_multiview');
-  }).slice(0, 6);
   useEffect(() => {
+    if (section === 'models' && backendId) {
+      const cardHeading = document.getElementById(`runtime-${backendId}`);
+      if (cardHeading) {
+        cardHeading.focus();
+        return;
+      }
+    }
     if (section) heading.current?.focus();
     else setRemoval(null);
-  }, [section]);
+  }, [section, backendId]);
   useEffect(() => {
     if (!browserBackend || !browserSessionId) return;
     let stopped = false;
@@ -202,7 +198,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
     void perform(async () => {
       if (scope === 'model-files') onActivityChange({
         title: 'Remove model files',
-        stage: `Removing local weights for ${profiles[backend].title}`,
+        stage: `Removing local weights for ${removal.label}`,
         startedAt: Date.now(),
       });
       if (scope === 'model-files') notify('info', 'Removing local model files.');
@@ -213,7 +209,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
         }
         notify('success', scope === 'huggingface'
           ? 'Hugging Face disconnected on this computer.'
-          : `Pixal3D model files removed for ${profiles[backend].title}.`);
+          : `Model files removed for ${removal.label}.`);
       } finally {
         if (scope === 'model-files') onActivityChange(null);
         setRemoval(null);
@@ -221,9 +217,9 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
     });
   }
 
-  function openRemoval(backend: RuntimeBackendId, scope: RemovalScope, trigger: HTMLButtonElement) {
+  function openRemoval(backend: RuntimeBackendId, scope: RemovalScope, trigger: HTMLButtonElement, label?: string) {
     removalTrigger.current = trigger;
-    setRemoval({ backend, scope });
+    setRemoval({ backend, scope, label });
   }
 
   if (!section) return null;
@@ -305,49 +301,42 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
               <CardDescription>Output: {model.output === 'geometry_glb' ? 'geometry-only GLB' : 'textured GLB'}</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 lg:grid-cols-2">
-              {model.backend_ids.map(backendId => {
-                const backend = runtime?.model_backends.find(item => item.id === backendId);
-                if (!backend) return null;
-                if (backend.manual_setup) return <Card key={backendId} role="article" size="sm" className="bg-background">
+              {(['mlx', 'cuda'] as const).map(kind => {
+                const id = model.backend_ids.find(candidate => candidate.endsWith(`-${kind}`)) as RuntimeBackendId | undefined;
+                const backend = runtime?.model_backends.find(item => item.id === id);
+                if (!id || !backend) return null;
+                const label = `${model.title} · ${accelerators[kind].title}`;
+                const modelPaths = backend.model_paths ?? (backend.runtime_root ? [backend.runtime_root] : []);
+                return <Card key={id} role="article" aria-label={label} size="sm" className="min-w-0 bg-background">
                   <CardHeader>
-                    <CardTitle className="flex min-w-0 items-center gap-1"><h3>{backend.accelerator ?? backendId}</h3>
-                      <HelpTip label="About manual runtime setup">
-                        See <code>docs/external-generation-runtimes.md</code>. {backend.license_notice}
-                        {!backend.ready && backend.missing?.[0] && <span className="block">{backend.missing[0]}</span>}
-                      </HelpTip>
-                    </CardTitle>
-                    <CardDescription>Operator-installed runtime</CardDescription>
+                    <CardTitle className="min-w-0"><h3 id={`runtime-${id}`} tabIndex={-1} className="outline-none">{accelerators[kind].title}</h3></CardTitle>
+                    <CardDescription>{accelerators[kind].platform}</CardDescription>
                     <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend)}</Badge></CardAction>
                   </CardHeader>
-                  {backend.host_supported && <CardContent><code className="wrap-anywhere text-muted-foreground">{backend.runtime_root}</code></CardContent>}
-                </Card>;
-                const id = profileIds.find(candidate => candidate === backendId);
-                if (!id) return null;
-                return <Card key={id} role="article" size="sm" className="bg-background">
-                  <CardHeader>
-                    <CardTitle className="min-w-0"><h3>{profiles[id].title}</h3></CardTitle>
-                    <CardDescription>{profiles[id].platform}</CardDescription>
-                    <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend)}</Badge></CardAction>
-                  </CardHeader>
-                  <CardFooter className="flex-wrap gap-2">
-                    {runtimeSetupStage(backend) === 'environment' && <Button onClick={() => onRuntimeAction(id, 'setup')} disabled={disabled}>Set up {id === 'pixal3d-cuda' ? 'CUDA' : 'Python'} environment</Button>}
-                    {(backend.installable || backend.local_files?.remove_models_available) && <Button variant="outline" onClick={() => onVisit('storage', id)}>{backend.ready ? 'Manage files' : 'View downloads'}</Button>}
+                  <CardContent className="grid gap-3">
+                    {modelPaths.length > 0 && <dl className="grid min-w-0 gap-1">
+                      <dt className="font-medium">Model file locations</dt>
+                      {modelPaths.map(path => <dd key={path} className="wrap-anywhere text-muted-foreground"><code>{path}</code></dd>)}
+                    </dl>}
+                    {backend.managed_install
+                      ? <CatalogInstall backend={backend} disabled={disabled} account={connectionBackendFor(id, runtime)}
+                          onConnections={() => onVisit('connections', kind === 'cuda' ? 'pixal3d-cuda' : 'pixal3d-mlx')}
+                          onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />
+                      : <PixalModelFiles key={id} api={api} backend={backend} id={id} disabled={disabled}
+                          onAction={action => onRuntimeAction(id, action)} onSettings={onVisit} />}
+                    {backend.local_files?.model_files_managed === false && <p className="text-muted-foreground">Studio cannot remove files from custom or linked model directories.</p>}
+                  </CardContent>
+                  <CardFooter className="mt-auto grid gap-2 border-t">
+                    <RuntimeLogs api={api} id={id} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
+                      action={backend.local_files?.remove_models_available && <Button variant="destructive" size="sm" onClick={event => openRemoval(id, 'model-files', event.currentTarget, label)} disabled={disabled}>
+                        <TrashIcon aria-hidden="true" /> Delete model files
+                      </Button>} />
                   </CardFooter>
                 </Card>;
               })}
             </CardContent>
           </Card>)}
           {section === 'models' && !runtime?.model_catalog?.length && <Empty><EmptyHeader><EmptyDescription>No generation models reported by the local engine.</EmptyDescription></EmptyHeader></Empty>}
-          {section === 'storage' && <Field className="max-w-xs">
-            <FieldLabel htmlFor="settings-backend">Backend</FieldLabel>
-            <NativeSelect id="settings-backend" className="w-full" value={selectedId} onChange={event => {
-              const choice = profileIds.find(id => id === event.target.value);
-              if (choice) onProfileChange(choice);
-            }} disabled={Boolean(browserActive)}>
-              {profileIds.map(id => <NativeSelectOption value={id} key={id}>{profiles[id].title}</NativeSelectOption>)}
-            </NativeSelect>
-          </Field>}
-          {section === 'storage' && !selected && <Empty><EmptyHeader><EmptyDescription>The local engine did not report this backend.</EmptyDescription></EmptyHeader></Empty>}
           {section === 'connections' && (connectionBackend ? <HuggingFaceConnection key={connectionId}
             backend={connectionBackend} account={accounts[connectionId]} disabled={disabled}
             browserSession={browserLogin?.backend === connectionId && browserActive ? browserLogin.session : null}
@@ -355,20 +344,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
             onCheck={token => verifyConnection(connectionId, token)}
             onDisconnect={trigger => openRemoval(connectionId, 'huggingface', trigger)} />
             : <Empty><EmptyHeader><EmptyDescription>Hugging Face sign-in is not available on this computer.</EmptyDescription></EmptyHeader></Empty>)}
-          {section === 'storage' && selected && <ModelStorage key={selectedId} api={api} backend={selected} id={selectedId}
-            disabled={disabled}
-            onDownload={() => onRuntimeAction(selectedId, 'download')} onConvert={() => onRuntimeAction(selectedId, 'convert')}
-            onMultiview={() => onRuntimeAction(selectedId, 'multiview')}
-            onSettings={onVisit}
-            onRemove={trigger => openRemoval(selectedId, 'model-files', trigger)} />}
-          {section === 'storage' && <Card role="region" aria-labelledby="runtime-activity-heading">
-            <CardHeader><CardTitle className="text-base"><h2 id="runtime-activity-heading">Recent activity</h2></CardTitle></CardHeader>
-            <CardContent>
-              {storageJobs.length ? <ItemGroup>
-                {storageJobs.map(job => <JobListItem key={job.id} job={job} title={operationLabel(job.operation)} onDetails={onJobDetails} />)}
-              </ItemGroup> : <Empty className="p-3"><EmptyHeader><EmptyDescription>No finished storage jobs for this backend.</EmptyDescription></EmptyHeader></Empty>}
-            </CardContent>
-          </Card>}
         </>}
       </main>
     </div>
@@ -384,7 +359,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
           <AlertDialogTitle>{removal?.scope === 'huggingface' ? 'Disconnect Hugging Face?' : 'Remove model files?'}</AlertDialogTitle>
           <AlertDialogDescription>{removal && (removal.scope === 'huggingface'
             ? 'Remove saved local credentials. Your Hugging Face token and downloaded models stay intact.'
-            : `Remove ${profiles[removal.backend].title} weights and caches. Your environment, sign-in, and assets stay intact.`)}</AlertDialogDescription>
+            : `Remove managed weights and caches for ${removal.label}. Your environment, sign-in, and assets stay intact.`)}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
@@ -400,11 +375,80 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
 
 function profileStatus(backend: Backend) {
   if (backend.ready) return 'Ready';
-  if (backend.manual_setup && backend.host_supported) return 'Manual setup required';
   if (!backend.installable) return 'Not supported here';
+  if (backend.managed_install) return 'Install required';
   if (!backend.environment_ready) return 'Setup required';
   if (backend.models_downloaded) return 'Files present';
   return 'Download required';
+}
+
+function connectionBackendFor(id: RuntimeBackendId, runtime: RuntimeInfo | null) {
+  return runtime?.model_backends.find(backend => backend.id === `pixal3d-${accelerator(id)}`);
+}
+
+function RuntimeLogs({ api, id, jobs, operationLabel, onJobDetails, action }: {
+  api: MeshHarborApi; id: RuntimeBackendId; jobs: Job[];
+  operationLabel: Props['operationLabel']; onJobDetails: Props['onJobDetails']; action: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const [saved, setSaved] = useState<Job[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    void api.runtimeJobs(id, controller.signal).then(records => {
+      if (!controller.signal.aborted) {
+        setSaved(records);
+        setFailed(false);
+      }
+    }).catch(() => { if (!controller.signal.aborted) setFailed(true); });
+    return () => controller.abort();
+  }, [api, id, open, attempt]);
+  const records = mergeJobRecords(jobs.filter(job =>
+    job.operation.startsWith('runtime.') && job.parameters?.backend_id === id), saved ?? []).slice(0, 6);
+  return <Collapsible open={open} onOpenChange={setOpen} className="min-w-0">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <CollapsibleTrigger asChild>
+        <Button variant="outline" size="sm"><CaretRightIcon className="transition-transform group-aria-expanded/button:rotate-90 motion-reduce:transition-none" aria-hidden="true" /> Recent logs</Button>
+      </CollapsibleTrigger>
+      {action}
+    </div>
+    <CollapsibleContent className="min-w-0 pt-2">
+      {records.length > 0 && <ItemGroup>
+        {records.map(job => <JobListItem key={job.id} job={job} title={operationLabel(job.operation)} onDetails={onJobDetails} />)}
+      </ItemGroup>}
+      {failed ? <p className="text-muted-foreground">Could not load recent logs. <button type="button" className="underline" onClick={() => { setFailed(false); setAttempt(current => current + 1); }}>Retry</button></p>
+        : !saved ? <p role="status" className="text-muted-foreground">Loading recent logs…</p>
+          : records.length === 0 && <p className="text-muted-foreground">No install or setup logs for this backend.</p>}
+    </CollapsibleContent>
+  </Collapsible>;
+}
+
+function CatalogInstall({ backend, account, disabled, onConnections, onInstall }: {
+  backend: Backend; account?: Backend; disabled: boolean; onConnections: () => void; onInstall: () => void;
+}) {
+  const consentId = useId();
+  const [consent, setConsent] = useState(false);
+  const gated = backend.gated_model_access_required;
+  const needsSignIn = gated && !account?.local_files?.token_saved && account?.local_files?.credentials_managed !== false;
+  if (!backend.downloads_enabled) return <p className="text-muted-foreground">{backend.ready ? 'Ready for offline generation.' : 'This backend is not supported on this computer.'}</p>;
+  return <div className="grid justify-items-start gap-2">
+    {backend.ready && !backend.managed_ready && <p className="text-muted-foreground">Using existing files. A managed install keeps them intact.</p>}
+    {backend.license_notice && <p className="text-muted-foreground">{backend.license_notice}</p>}
+    {backend.source && <a className="text-primary underline underline-offset-4" href={`${backend.source.repository}/tree/${backend.source.revision}`} target="_blank" rel="noreferrer">Review upstream source and terms</a>}
+    {gated && <>
+      <a className="text-primary underline underline-offset-4" href="https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a>
+      {needsSignIn && <Button variant="outline" onClick={onConnections}>Manage Hugging Face connection</Button>}
+    </>}
+    <div className="flex items-start gap-2">
+      <Checkbox id={consentId} checked={consent} disabled={disabled || needsSignIn} onCheckedChange={value => setConsent(value === true)} />
+      <Label htmlFor={consentId} className="leading-relaxed">
+        {gated ? 'I have DINOv3 access, reviewed the terms, and approve installation and download.' : 'I reviewed the terms and approve installation and download.'}
+      </Label>
+    </div>
+    <Button disabled={disabled || needsSignIn || !consent} onClick={() => { setConsent(false); onInstall(); }}>Install model</Button>
+  </div>;
 }
 
 const accessMessages: Record<AccessStatus, string> = {
@@ -433,7 +477,8 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
   onCheck: (token?: string) => void; onDisconnect: (trigger: HTMLButtonElement) => void;
 }) {
   const local = backend.local_files;
-  const canConnect = backend.installable && backend.environment_ready;
+  const canConnect = backend.installable;
+  const canVerify = backend.account_tools_ready ?? backend.environment_ready;
   function connectToken(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const token = new FormData(event.currentTarget).get('token');
@@ -466,28 +511,30 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
           {browserSession
             ? <Button variant="outline" disabled={cancelling} onClick={onCancelBrowser}>Cancel sign-in</Button>
             : <Button disabled={disabled || local?.credentials_managed === false} onClick={onStartBrowser}>{local?.token_saved ? 'Sign in again in browser' : 'Sign in with browser'}</Button>}
-          <Button type="button" variant="outline" disabled={disabled} onClick={() => onCheck()}>Check sign-in</Button>
+          <Button type="button" variant="outline" disabled={disabled || !canVerify} onClick={() => onCheck()}>Check sign-in</Button>
         </div>
       </div>
-      <Disclosure className="rounded-md border p-3" title="Use an access token instead">
+      {canVerify && <Disclosure className="rounded-md border p-3" title="Use an access token instead">
         <form method="post" autoComplete="off" className="mt-3 grid justify-items-start gap-2" onSubmit={connectToken}>
           <a className="text-primary underline underline-offset-4" href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Create a Hugging Face token</a>
           <Label htmlFor="huggingface-token">Hugging Face access token</Label>
           <Input id="huggingface-token" name="token" type="password" placeholder="hf_…" maxLength={512} required disabled={disabled} autoComplete="off" className="max-w-md" />
           <Button type="submit" disabled={disabled}>{local?.token_saved ? 'Replace token' : 'Connect token'}</Button>
         </form>
-      </Disclosure>
-    </> : <p className="text-muted-foreground">{backend.installable ? 'Set up the Python environment in Models before connecting a token.' : 'Hugging Face sign-in is not available on this computer.'}</p>}
+      </Disclosure>}
+    </> : <p className="text-muted-foreground">Hugging Face sign-in is not available on this computer.</p>}
     {account === 'checking' && <p role="status" className="text-muted-foreground">{accountMessages.checking}</p>}
     {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={event => onDisconnect(event.currentTarget)}>Disconnect locally</Button></div>}
     </CardContent>
   </Card>;
 }
 
-function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMultiview, onSettings, onRemove }: {
+function PixalModelFiles({ api, backend, id, disabled, onAction, onSettings }: {
   api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
-  onDownload: () => void; onConvert: () => void; onMultiview: () => void; onSettings: VisitSettings; onRemove: (trigger: HTMLButtonElement) => void;
+  onAction: (action: RuntimeAction) => void; onSettings: VisitSettings;
 }) {
+  const consentId = useId();
+  const multiviewId = useId();
   const [consent, setConsent] = useState(false);
   const [multiviewConsent, setMultiviewConsent] = useState(false);
   const [access, setAccess] = useState<AccessStatus>('checking');
@@ -528,16 +575,11 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMul
     };
   }, [api, backend, disabled, id, needsConnection, stage]);
 
-  return <Card role="region" aria-label="Model files">
-    <CardHeader>
-      <CardTitle className="min-w-0 text-base"><h2>Pixal3D · {profiles[id].title}</h2></CardTitle>
-      <CardDescription>Up to {profiles[id].download} without cached files</CardDescription>
-      <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{backend.ready ? 'Installed' : backend.models_downloaded ? 'Files present' : local?.remove_models_available ? 'Cached files present' : 'Not installed'}</Badge></CardAction>
-    </CardHeader>
-    <CardContent className="grid gap-4">
+  return <div className="grid gap-4">
     {stage === 'unsupported' && <p className="text-muted-foreground">This backend is not supported on this computer.</p>}
-    {stage === 'environment' && <div className="flex flex-wrap items-center gap-2"><p className="text-muted-foreground">Set up the Python environment first.</p><Button variant="outline" onClick={() => onSettings('models')}>View model setup</Button></div>}
+    {stage === 'environment' && <Button className="justify-self-start" disabled={disabled} onClick={() => onAction('setup')}>Set up {id === 'pixal3d-cuda' ? 'CUDA' : 'Python'} environment</Button>}
     {stage === 'models' && <div className="grid justify-items-start gap-3">
+      <p className="text-muted-foreground">Up to {accelerators[accelerator(id)].download} without cached files</p>
       {cache && <div className="flex items-center gap-1 text-muted-foreground">
         <span>{cache.local_checkpoints}/{cache.total_checkpoints} checkpoints cached</span>
         <HelpTip label="About the checkpoint cache">
@@ -553,15 +595,15 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMul
         {accessStatus === 'verified' ? <Badge variant="secondary">{accessMessages.verified}</Badge> : accessMessages[accessStatus]}
       </div>
       <div className="flex items-start gap-2">
-        <Checkbox id="model-download-consent" checked={consent}
+        <Checkbox id={consentId} checked={consent}
           disabled={disabled || verificationRequired || !backend.downloads_enabled} onCheckedChange={value => setConsent(value === true)} />
-        <Label htmlFor="model-download-consent" className="leading-relaxed">I reviewed the model terms and approve this download.</Label>
+        <Label htmlFor={consentId} className="leading-relaxed">I reviewed the model terms and approve this download.</Label>
       </div>
-      <Button disabled={disabled || verificationRequired || !consent || !backend.downloads_enabled} onClick={() => { setConsent(false); onDownload(); }}>Download model files</Button>
+      <Button disabled={disabled || verificationRequired || !consent || !backend.downloads_enabled} onClick={() => { setConsent(false); onAction('download'); }}>Download model files</Button>
     </div>}
     {stage === 'conversion' && <div className="grid justify-items-start gap-2">
       <p className="text-muted-foreground">NAF conversion required.</p>
-      <Button disabled={disabled || !backend.conversion_enabled} onClick={onConvert}>Finish NAF conversion</Button>
+      <Button disabled={disabled || !backend.conversion_enabled} onClick={() => onAction('convert')}>Finish NAF conversion</Button>
     </div>}
     {stage === 'incomplete' && <div className="flex items-center gap-1 text-muted-foreground">
       Runtime not ready <HelpTip label="About runtime checks">Files are present. Run <code>meshharbor doctor</code> for diagnostics.</HelpTip>
@@ -575,17 +617,12 @@ function ModelStorage({ api, backend, id, disabled, onDownload, onConvert, onMul
         {backend.multiview_ready ? <p className="text-muted-foreground">Installed</p>
           : <>
             <div className="flex items-start gap-2">
-              <Checkbox id="multiview-consent" checked={multiviewConsent} disabled={disabled} onCheckedChange={value => setMultiviewConsent(value === true)} />
-              <Label htmlFor="multiview-consent">I approve installing the additional model files.</Label>
+              <Checkbox id={multiviewId} checked={multiviewConsent} disabled={disabled} onCheckedChange={value => setMultiviewConsent(value === true)} />
+              <Label htmlFor={multiviewId}>I approve installing the additional model files.</Label>
             </div>
             <Button variant="outline" disabled={disabled || !multiviewConsent}
-              onClick={() => { setMultiviewConsent(false); onMultiview(); }}>Install multiview weights</Button>
+              onClick={() => { setMultiviewConsent(false); onAction('multiview'); }}>Install multiview weights</Button>
           </>}
       </section>}
-    {local?.remove_models_available && <div className="grid justify-items-start gap-2 border-t pt-3">
-      <Button variant="destructive" disabled={disabled} onClick={event => onRemove(event.currentTarget)}>{backend.models_downloaded ? 'Uninstall model files' : 'Clear cached model files'}</Button>
-    </div>}
-    {local?.model_files_managed === false && <p className="text-muted-foreground">Studio cannot remove files from custom or linked model directories.</p>}
-    </CardContent>
-  </Card>;
+  </div>;
 }

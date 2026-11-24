@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::{
     CoreError, CoreResult, GenerationInputMode, GenerationOptions,
     generation::run_generation_command_with_input, generation_catalog::generation_profile,
-    job_execution::JobExecution,
+    job_execution::JobExecution, model_storage::model_path,
 };
 
 pub(crate) const TRELLIS_TEXT_CUDA_ID: &str = "trellis-text-cuda";
@@ -28,8 +28,8 @@ pub(crate) struct ExternalProfile {
     pub accelerator: &'static str,
     pub textured: bool,
     pub input_mode: GenerationInputMode,
-    repository: &'static str,
-    revision: &'static str,
+    pub repository: &'static str,
+    pub revision: &'static str,
     entry: &'static str,
     notice: &'static str,
 }
@@ -83,7 +83,7 @@ pub(crate) const PROFILES: &[ExternalProfile] = &[
         repository: "https://github.com/microsoft/TRELLIS",
         revision: "193e0502b5cb3eb5997ec457d5340e95d09b158e",
         entry: "trellis/pipelines/trellis_text_to_3d.py",
-        notice: "TRELLIS v1 Text Large exports geometry only. The runtime and weights are manually provisioned; review the CLIP and CUDA dependency terms in docs/trellis-text-cuda.md.",
+        notice: "TRELLIS v1 Text Large exports geometry only. Review the CLIP and CUDA dependency terms in docs/trellis-text-cuda.md.",
     },
     ExternalProfile {
         id: TRELLIS_TEXT_MLX_ID,
@@ -97,7 +97,7 @@ pub(crate) const PROFILES: &[ExternalProfile] = &[
     },
 ];
 
-const TRELLIS_CHECKPOINTS: &[&str] = &[
+pub(crate) const TRELLIS_CHECKPOINTS: &[&str] = &[
     "ckpts/ss_flow_img_dit_1_3B_64_bf16",
     "ckpts/shape_dec_next_dc_f16c32_fp16",
     "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16",
@@ -108,7 +108,7 @@ const TRELLIS_CHECKPOINTS: &[&str] = &[
     "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16",
 ];
 
-const TRIPOSG_CUDA_FILES: &[&str] = &[
+pub(crate) const TRIPOSG_CUDA_FILES: &[&str] = &[
     "model_index.json",
     "feature_extractor_dinov2/preprocessor_config.json",
     "image_encoder_dinov2/config.json",
@@ -127,7 +127,7 @@ const TRIPOSG_MLX_FILES: &[&str] = &[
     "vae.safetensors",
 ];
 
-const TRELLIS_TEXT_MODEL_FILES: &[&str] = &[
+pub(crate) const TRELLIS_TEXT_MODEL_FILES: &[&str] = &[
     "model/pipeline.json",
     "model/ckpts/ss_flow_txt_dit_L_16l8_fp16.json",
     "model/ckpts/ss_flow_txt_dit_L_16l8_fp16.safetensors",
@@ -170,7 +170,7 @@ impl ExternalProfile {
         PROFILES.iter().find(|profile| profile.id == id)
     }
 
-    fn host_supported(&self) -> bool {
+    pub fn host_supported(&self) -> bool {
         matches!(
             (
                 self.id.ends_with("-mlx"),
@@ -181,11 +181,25 @@ impl ExternalProfile {
         )
     }
 
-    fn root(&self, data_root: &Path) -> PathBuf {
+    fn legacy_root(&self, data_root: &Path) -> PathBuf {
         data_root.join("runtimes").join(self.id)
     }
 
-    fn required_model_files(&self) -> Vec<String> {
+    fn active_root(&self, data_root: &Path) -> PathBuf {
+        let managed = self.managed_root(data_root);
+        let owned = self.check_owner(data_root).unwrap_or(false);
+        if owned && self.check_local_files(&managed).ready() {
+            return managed;
+        }
+        let legacy = self.legacy_root(data_root);
+        if !owned || self.check_local_files(&legacy).ready() {
+            legacy
+        } else {
+            managed
+        }
+    }
+
+    pub(crate) fn required_model_files(&self) -> Vec<String> {
         if matches!(self.id, TRELLIS_TEXT_CUDA_ID | TRELLIS_TEXT_MLX_ID) {
             TRELLIS_TEXT_MODEL_FILES
                 .iter()
@@ -212,7 +226,7 @@ impl ExternalProfile {
         }
     }
 
-    fn needs_dinov3(&self) -> bool {
+    pub(crate) fn needs_dinov3(&self) -> bool {
         matches!(self.id, "trellis2-mlx" | "trellis2-cuda")
     }
 
@@ -290,42 +304,64 @@ impl ExternalProfile {
     }
 
     pub fn is_ready(&self, data_root: &Path) -> bool {
-        self.readiness(&self.root(data_root)).ready()
+        self.host_supported() && self.check_local_files(&self.active_root(data_root)).ready()
     }
 
-    pub fn status(&self, data_root: &Path) -> Value {
-        let root = self.root(data_root);
+    pub fn status(&self, data_root: &Path, cuda_supported: bool) -> Value {
+        let root = self.active_root(data_root);
+        let managed = self.managed_root(data_root);
         let readiness = self.readiness(&root);
+        let supported = self.host_supported() && (self.id.ends_with("-mlx") || cuda_supported);
+        let managed_ready = root == managed && readiness.ready();
+        let removable = self.removable_model_files(data_root);
         json!({
             "id": self.id,
             "generation": generation_profile(self.id),
             "accelerator": self.accelerator,
-            "manual_setup": true,
-            "host_supported": self.host_supported(),
+            "managed_install": true,
+            "managed_ready": managed_ready,
+            "host_supported": supported,
             "ready": readiness.ready(),
-            "status": readiness.status,
-            "validation_level": "operator_activation_and_required_paths_only",
-            "runtime_root": root,
-            "installable": false,
+            "status": if readiness.ready() { readiness.status } else if supported { "installation_required" } else { "unsupported_host" },
+            "validation_level": if managed_ready { "environment_preflight_and_required_paths" } else { "operator_activation_and_required_paths_only" },
+            "runtime_root": if readiness.ready() { &root } else { &managed },
+            "model_paths": if readiness.ready() && root != managed { vec![model_path(root.join("weights")), model_path(managed.join("weights"))] } else { vec![model_path(managed.join("weights"))] },
+            "installable": supported,
             "weights_included": false,
-            "downloads_enabled": false,
+            "downloads_enabled": supported && !managed_ready,
+            "models_downloaded": managed_ready,
+            "local_files": {
+                "model_files_managed": removable.is_ok(),
+                "remove_models_available": removable.unwrap_or(false),
+            },
             "gated_model_access_required": self.needs_dinov3(),
             "source": { "repository": self.repository, "revision": self.revision },
             "license_notice": self.notice,
-            "missing": readiness.missing,
+            "missing": if supported && !readiness.ready() { vec![] } else { readiness.missing },
         })
     }
 
     pub fn require_ready(&self, data_root: &Path) -> CoreResult<()> {
-        let readiness = self.readiness(&self.root(data_root));
+        let readiness = self.readiness(&self.active_root(data_root));
         if readiness.ready() {
             return Ok(());
         }
+        let legacy = self.legacy_root(data_root);
+        let details = if !self.host_supported() {
+            readiness.missing.join(" ")
+        } else if legacy.is_dir() {
+            self.check_local_files(&legacy).missing.join(" ")
+        } else {
+            String::new()
+        };
+        let guidance = if details.is_empty() {
+            " ".to_owned()
+        } else {
+            format!(" {details} ")
+        };
         Err(CoreError::OperationUnavailable(format!(
-            "{} is not ready: {} {} See docs/external-generation-runtimes.md for manual setup.",
-            self.id,
-            readiness.missing.join("; "),
-            self.notice
+            "{} is not ready.{guidance}Install it in Studio → Settings → Models. {}",
+            self.id, self.notice,
         )))
     }
 
@@ -338,7 +374,7 @@ impl ExternalProfile {
         execution: JobExecution<'_>,
     ) -> CoreResult<u128> {
         self.require_ready(data_root)?;
-        let root = self.root(data_root).canonicalize()?;
+        let root = self.active_root(data_root).canonicalize()?;
         let (input_arg, stdin) = match (self.input_mode, input) {
             (GenerationInputMode::Image, ExternalInput::Image(path)) => {
                 (path.canonicalize()?, None)

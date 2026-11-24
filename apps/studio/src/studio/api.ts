@@ -686,6 +686,17 @@ export class MeshHarborApi {
     });
   }
 
+  installCatalogModel(backend: RuntimeBackendId, gated: boolean): Promise<Job> {
+    return this.request(`/api/v1/runtime/${backend}/install`, {
+      method: 'POST',
+      body: JSON.stringify({ confirmed: true, confirm_gated_access: gated }),
+    });
+  }
+
+  runtimeJobs(backend: RuntimeBackendId, signal: AbortSignal): Promise<Job[]> {
+    return this.request(`/api/v1/runtime/${backend}/jobs`, { signal });
+  }
+
   installQuadriflowBackend(): Promise<{ release_tag: string; executable: string; already_installed: boolean }> {
     return this.request('/api/v1/backends/quadriflow/install', { method: 'POST' });
   }

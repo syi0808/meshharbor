@@ -20,6 +20,8 @@ Selected endpoints:
 
 - `GET /api/v1/health`, `/api/v1/runtime`, `/api/v1/operations`
 - `POST /api/v1/runtime/pixal3d-mlx/setup`, `/models`, `/convert-naf`; `/api/v1/runtime/pixal3d-cuda/setup` and `/models` for explicit asynchronous setup actions
+- `GET /api/v1/runtime/{backend}/jobs` returns the six most recent setup or install jobs for that backend. The runtime status includes model file paths.
+- Studio-only: `POST /api/v1/runtime/{backend}/install` queues a managed TRELLIS.2, TripoSG, or TRELLIS Text install with `confirmed: true`; TRELLIS.2 also requires `confirm_gated_access: true`. `DELETE /api/v1/runtime/{backend}/model-files` with `confirmed: true` removes only that backend's managed model files.
 - `GET /api/v1/assets?limit=50`; `POST /api/v1/assets?filename=scene.glb` with raw file bytes
 - `GET /api/v1/assets/page?limit=50&cursor=<asset_id>&q=<filename>&kind=image|mesh&derived=true|false` returns `{items,next_cursor}` newest-first; filters are optional, and `next_cursor` can be sent back to load older assets
 - `GET /api/v1/assets/{asset_id}`; `POST /api/v1/assets/{asset_id}/simplify`

@@ -76,14 +76,14 @@ impl Pixal3dCudaRuntimeManager {
 
     fn huggingface_command(&self) -> CoreResult<Command> {
         self.ensure_supported_host()?;
-        let python = self.python_path();
+        let python = access_python(&self.runtime_root).unwrap_or_else(|| self.python_path());
         if !python.is_file() {
             return Err(CoreError::OperationUnavailable(
-                "Set up the CUDA Python environment before connecting Hugging Face.".into(),
+                "Prepare browser sign-in or set up the CUDA environment before connecting a token."
+                    .into(),
             ));
         }
-        let access_python = access_python(&self.runtime_root).unwrap_or(python);
-        Ok(self.python_command(&access_python))
+        Ok(self.python_command(&python))
     }
 
     fn hf_home(&self) -> PathBuf {

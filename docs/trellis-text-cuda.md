@@ -1,6 +1,6 @@
 # TRELLIS Text Large on CUDA
 
-`trellis-text-cuda` is an experimental, manually provisioned text-to-3D backend for Linux x86_64 with an NVIDIA GPU. It runs the original Microsoft TRELLIS text pipeline, not TRELLIS.2. The adapter exports a geometry-only GLB with a configurable seed and soft face target. It does not bake textures or expose a resolution control. The CLIP encoder truncates input to its 77-token context.
+`trellis-text-cuda` is an experimental text-to-3D backend for Linux x86_64 with an NVIDIA GPU. Install it under **Settings → Models → TRELLIS Text Large → NVIDIA CUDA**, or follow the manual recipe below. It runs the original Microsoft TRELLIS text pipeline, not TRELLIS.2. The adapter exports a geometry-only GLB with a configurable seed and soft face target. It does not bake textures or expose a resolution control. The CLIP encoder truncates input to its 77-token context.
 
 ## Upstream and terms
 
@@ -9,7 +9,7 @@
 - The local text encoder uses [OpenAI CLIP ViT-L/14](https://huggingface.co/openai/clip-vit-large-patch14); [OpenAI's CLIP code](https://github.com/openai/CLIP/blob/main/LICENSE) is MIT. Review the checkpoint's terms and the separate terms for CUDA and Python dependencies before use or redistribution. MeshHarbor includes only its adapter, not any of these components or weights.
 - On Apple Silicon, use [MeshHarbor's native MLX port](trellis-text-mlx.md) with the same checkpoints. TRELLIS.2 MLX is a different, image-conditioned model.
 
-## Prepare a local runtime
+## Optional manual setup
 
 Set `DATA_DIR` to the absolute data directory you will use for MeshHarbor. These instructions use Python 3.10, an NVIDIA driver compatible with the CUDA 12.1 wheels, Git, and the Hugging Face CLI (`hf`). This is a setup recipe based on the pinned source, not a complete dependency lock or a tested GPU compatibility matrix. Obtain and run only trusted packages and checkpoints you are authorized to use.
 

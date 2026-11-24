@@ -1053,6 +1053,11 @@ fn api_router(state: AppState, token: String) -> Router {
             delete(api_remove_model_files).layer(DefaultBodyLimit::max(1024)),
         )
         .route(
+            "/api/v1/runtime/{backend}/install",
+            post(api_start_catalog_install).layer(DefaultBodyLimit::max(1024)),
+        )
+        .route("/api/v1/runtime/{backend}/jobs", get(api_runtime_jobs))
+        .route(
             "/api/v1/backends/quadriflow",
             get(api_quadriflow_backend_status),
         )
@@ -1195,6 +1200,7 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
     let dashboard_only = path.starts_with("/api/v1/runtime/")
         && (path.ends_with("/huggingface")
             || path.ends_with("/model-files")
+            || path.ends_with("/install")
             || path.ends_with("/model-access")
             || path.ends_with("/huggingface/browser")
             || path.contains("/huggingface/browser/"));
@@ -1307,6 +1313,13 @@ async fn api_health() -> Json<Value> {
 }
 async fn api_runtime(State(state): State<AppState>) -> Json<meshharbor_core::RuntimeDoctor> {
     Json(state.core.runtime_doctor())
+}
+
+async fn api_runtime_jobs(
+    State(state): State<AppState>,
+    Path(backend): Path<String>,
+) -> Result<Json<Vec<meshharbor_core::Job>>, ApiError> {
+    Ok(Json(state.core.store().list_runtime_jobs(&backend)?))
 }
 
 fn retopology_options(target_quads: Option<u32>) -> meshharbor_core::QuadRetopologyOptions {
@@ -1427,12 +1440,10 @@ async fn api_disconnect_huggingface(
     Path(backend): Path<String>,
     Json(confirmation): Json<RuntimeRemovalConfirmation>,
 ) -> Result<Json<RuntimeDoctor>, ApiError> {
-    remove_runtime_files(
-        state.core,
-        &backend,
-        confirmation,
-        Pixal3dProfile::disconnect_huggingface,
-    )
+    let profile = Pixal3dProfile::from_backend(&backend)?;
+    remove_runtime_files(state.core, confirmation, move |core| {
+        profile.disconnect_huggingface(core.store().root())
+    })
     .await
 }
 
@@ -1441,22 +1452,17 @@ async fn api_remove_model_files(
     Path(backend): Path<String>,
     Json(confirmation): Json<RuntimeRemovalConfirmation>,
 ) -> Result<Json<RuntimeDoctor>, ApiError> {
-    remove_runtime_files(
-        state.core,
-        &backend,
-        confirmation,
-        Pixal3dProfile::remove_models,
-    )
+    remove_runtime_files(state.core, confirmation, move |core| {
+        core.remove_model_files(&backend)
+    })
     .await
 }
 
 async fn remove_runtime_files(
     core: OperationCore,
-    backend: &str,
     confirmation: RuntimeRemovalConfirmation,
-    remove: fn(Pixal3dProfile, &std::path::Path) -> Result<(), CoreError>,
+    remove: impl FnOnce(&OperationCore) -> Result<(), CoreError> + Send + 'static,
 ) -> Result<Json<RuntimeDoctor>, ApiError> {
-    let profile = Pixal3dProfile::from_backend(backend)?;
     if !confirmation.confirmed {
         return Err(CoreError::InvalidInput(
             "Confirm removal before changing local runtime files.".into(),
@@ -1466,7 +1472,7 @@ async fn remove_runtime_files(
     let runtime = task::spawn_blocking(move || {
         let root = core.store().root();
         let _runtime_lock = acquire_runtime_write_lock(root)?;
-        remove(profile, root)?;
+        remove(&core)?;
         Ok::<_, CoreError>(core.runtime_doctor())
     })
     .await
@@ -1474,6 +1480,32 @@ async fn remove_runtime_files(
         CoreError::OperationUnavailable("Local runtime file removal worker failed.".into())
     })??;
     Ok(Json(runtime))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogInstallConfirmation {
+    confirmed: bool,
+    #[serde(default)]
+    confirm_gated_access: bool,
+}
+
+async fn api_start_catalog_install(
+    State(state): State<AppState>,
+    Path(backend): Path<String>,
+    Json(confirmation): Json<CatalogInstallConfirmation>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    if !confirmation.confirmed {
+        return Err(CoreError::InvalidInput(
+            "Review the model terms and confirm installation first.".into(),
+        )
+        .into());
+    }
+    let kind = state
+        .core
+        .catalog_install_job(&backend, confirmation.confirm_gated_access)?;
+    let job = start_runtime_job(state.core, state.scheduler, kind).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
 async fn api_start_runtime_setup(
@@ -2135,8 +2167,7 @@ async fn start_runtime_job(
                 .store()
                 .update_running_job_stage(&worker_job_id, "check_runtime")?;
             let _runtime_lock = acquire_runtime_write_lock(&worker_data_dir)?;
-            let report = worker_core.run_runtime_job(kind, &worker_job_id)?;
-            Ok::<_, CoreError>(serde_json::to_value(report)?)
+            worker_core.run_runtime_job(kind, &worker_job_id)
         })
         .await;
 
@@ -3859,6 +3890,53 @@ mod tests {
                 let body = response.into_body().collect().await.unwrap().to_bytes();
                 assert!(!String::from_utf8_lossy(&body).contains("hf_secret_fixture"));
             }
+        }
+        assert!(core.store().list_jobs(20).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn catalog_installs_require_studio_and_confirmation() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-catalog-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: Arc::new(JobScheduler::default()),
+            },
+            "private-test-token".into(),
+        );
+        for (backend, confirmed, dashboard, expected) in [
+            ("trellis2-mlx", true, false, StatusCode::UNAUTHORIZED),
+            ("trellis2-mlx", false, true, StatusCode::BAD_REQUEST),
+            ("trellis2-mlx", true, true, StatusCode::BAD_REQUEST),
+            ("unknown-mlx", true, true, StatusCode::BAD_REQUEST),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/runtime/{backend}/install"))
+                .header(header::HOST, "127.0.0.1:7432")
+                .header(header::ORIGIN, "http://127.0.0.1:7432")
+                .header(header::CONTENT_TYPE, "application/json");
+            if dashboard {
+                request = request.header("x-meshharbor-dashboard", "local-ui-v1");
+            } else {
+                request = request.header(header::AUTHORIZATION, "Bearer private-test-token");
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(
+                            json!({"confirmed": confirmed, "confirm_gated_access": false})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
         }
         assert!(core.store().list_jobs(20).unwrap().is_empty());
         std::fs::remove_dir_all(root).unwrap();

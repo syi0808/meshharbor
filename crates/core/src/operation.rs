@@ -10,7 +10,7 @@ use crate::{
     Pixal3dRuntimeManager, QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport,
     SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb, external_generation,
     inspect_asset, install_bundled_quadriflow_sidecar, job_execution::JobExecution,
-    optimize_render_glb, separate_components, simplify_glb,
+    model_storage::model_path, optimize_render_glb, separate_components, simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -432,15 +432,11 @@ impl OperationCore {
         Pixal3dRuntimeManager::new(self.store.root()).setup_environment()
     }
 
-    pub fn run_runtime_job(
-        &self,
-        kind: crate::RuntimeJobKind,
-        job_id: &str,
-    ) -> CoreResult<RuntimeSetupReport> {
+    pub fn run_runtime_job(&self, kind: crate::RuntimeJobKind, job_id: &str) -> CoreResult<Value> {
         use crate::RuntimeJobKind;
         let root = self.store.root();
         let execution = JobExecution::for_job(&self.store, job_id);
-        match kind {
+        let report = match kind {
             RuntimeJobKind::Setup => {
                 Pixal3dRuntimeManager::new(root).setup_environment_tracked(execution)
             }
@@ -458,7 +454,45 @@ impl OperationCore {
             }
             RuntimeJobKind::CudaInstallMultiview => Pixal3dCudaRuntimeManager::new(root)
                 .install_multiview_models_tracked(true, execution),
+            RuntimeJobKind::InstallCatalogModel(backend) => {
+                return external_generation::ExternalProfile::find(backend)
+                    .ok_or_else(|| CoreError::InvalidInput("Unknown generation backend.".into()))?
+                    .install(root, execution);
+            }
+        }?;
+        Ok(serde_json::to_value(report)?)
+    }
+
+    pub fn catalog_install_job(
+        &self,
+        backend: &str,
+        confirm_gated_access: bool,
+    ) -> CoreResult<crate::RuntimeJobKind> {
+        let profile = external_generation::ExternalProfile::find(backend)
+            .ok_or_else(|| CoreError::InvalidInput("Unknown generation backend.".into()))?;
+        if profile.needs_dinov3() && !confirm_gated_access {
+            return Err(CoreError::InvalidInput(
+                "Confirm access to DINOv3 before installing TRELLIS.2.".into(),
+            ));
         }
+        if !profile.host_supported()
+            || (profile.id.ends_with("-cuda")
+                && !Pixal3dCudaRuntimeManager::new(self.store.root()).host_supported())
+        {
+            return Err(CoreError::OperationUnavailable(format!(
+                "{} is not supported on this host.",
+                profile.accelerator
+            )));
+        }
+        Ok(crate::RuntimeJobKind::InstallCatalogModel(profile.id))
+    }
+
+    pub fn remove_model_files(&self, backend: &str) -> CoreResult<()> {
+        let root = self.store.root();
+        if let Some(profile) = external_generation::ExternalProfile::find(backend) {
+            return profile.remove_models(root);
+        }
+        Pixal3dProfile::from_backend(backend)?.remove_models(root)
     }
 
     pub fn install_pixal3d_mlx_models(
@@ -551,6 +585,7 @@ impl OperationCore {
             .map(|item| item.id)
             .collect();
         let cuda_manager = Pixal3dCudaRuntimeManager::new(self.store.root());
+        let cuda_supported = cuda_manager.host_supported();
         let cuda = Some(cuda_manager.readiness());
         let mlx_runtime = Pixal3dMlxRuntime::discover(self.store.root());
         let mlx = Some(mlx_runtime.readiness());
@@ -561,16 +596,17 @@ impl OperationCore {
                 "id": readiness.backend_id,
                 "generation": crate::generation_catalog::generation_profile(&readiness.backend_id),
                 "local_files": Pixal3dProfile::Cuda.local_files(self.store.root()),
+                "account_tools_ready": readiness.environment_ready || crate::huggingface_browser::access_python(cuda_manager.runtime_root()).is_some(),
                 "pixal3d_cache": crate::huggingface_download::pixal_cache_status(&cuda_manager.home_path(), shared_cache.as_deref()),
                 "multiview_ready": readiness.ready && crate::huggingface_download::multiview_files_present(&cuda_manager.home_path()),
                 "ready": readiness.ready,
                 "status": if readiness.ready { "ready_paths_unverified" }
-                    else if !cuda_manager.host_supported() { "unsupported_host_or_nvidia_gpu_missing" }
+                    else if !cuda_supported { "unsupported_host_or_nvidia_gpu_missing" }
                     else if !readiness.environment_ready { "environment_setup_required" }
                     else if readiness.models_downloaded { "model_files_present_environment_unverified" }
                     else { "model_download_required" },
                 "validation_level": readiness.validation_level,
-                "installable": cuda_manager.host_supported(),
+                "installable": cuda_supported,
                 "weights_included": false,
                 "downloads_enabled": readiness.downloads_enabled,
                 "environment_ready": readiness.environment_ready,
@@ -578,6 +614,7 @@ impl OperationCore {
                 "models_downloaded": readiness.models_downloaded,
                 "gated_model_access_required": readiness.gated_model_access_required,
                 "runtime_root": readiness.runtime_root,
+                "model_paths": [model_path(cuda_manager.home_path().join(".cache/huggingface/hub"))],
                 "python": readiness.python,
                 "missing": readiness.missing,
                 "license_notice": "MeshHarbor's MIT license covers its own code. Upstream runtime and checkpoint terms remain separate and pending review. User confirmation and gated access are required before model downloads.",
@@ -588,6 +625,7 @@ impl OperationCore {
                 "id": readiness.backend_id,
                 "generation": crate::generation_catalog::generation_profile(&readiness.backend_id),
                 "local_files": Pixal3dProfile::Mlx.local_files(self.store.root()),
+                "account_tools_ready": readiness.environment_ready || crate::huggingface_browser::access_python(Pixal3dRuntimeManager::new(self.store.root()).runtime_root()).is_some(),
                 "pixal3d_cache": crate::huggingface_download::pixal_cache_status(&mlx_runtime.home, shared_cache.as_deref()),
                 "ready": readiness.ready,
                 "status": if readiness.ready {
@@ -613,6 +651,7 @@ impl OperationCore {
                 "naf_conversion_required": readiness.naf_conversion_required,
                 "conversion_enabled": readiness.conversion_enabled,
                 "runtime_root": readiness.runtime_root,
+                "model_paths": [model_path(mlx_runtime.weights.clone()), model_path(mlx_runtime.home.join(".cache/huggingface/hub"))],
                 "python": readiness.python,
                 "gated_model_access_required": readiness.gated_model_access_required,
                 "missing": readiness.missing,
@@ -621,7 +660,7 @@ impl OperationCore {
         model_backends.extend(
             external_generation::PROFILES
                 .iter()
-                .map(|profile| profile.status(self.store.root())),
+                .map(|profile| profile.status(self.store.root(), cuda_supported)),
         );
         let pixal3d: Value =
             serde_json::from_str(include_str!("../../../registry/models/pixal3d.json"))
@@ -666,7 +705,7 @@ impl OperationCore {
                 "QuadriFlow retopology is unavailable in this build: adjacent executables are ignored, and the in-process signature/provenance verifier has no approved sidecar to accept because the trusted manifest is empty. Backend status and an install request are exposed, but readiness and installation stay fail-closed until a verified managed release is available. It accepts one closed static triangle mesh; textured input needs POSITION, TEXCOORD_0, optional NORMAL, and the supported embedded base-color/metallic-roughness PNG maps. Supported maps are projected with distance, facing-normal, coverage, and opposing-shell ambiguity gates into the triangulated GLB preview only; the separate OBJ retains quad topology without UVs or appearance. Other maps/attributes are rejected, and self-intersection freedom or measured surface-error tolerance is not certified.".into(),
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
-                "TRELLIS Text, TRELLIS.2, and TripoSG are manual opt-in runtimes. MeshHarbor does not install or bundle their sources, dependencies, or models. Readiness checks the operator activation and local file layout, not licenses, hashes, GPU compatibility, or inference quality.".into(),
+                "TRELLIS Text, TRELLIS.2, and TripoSG are opt-in installs in Studio. The engine provisions an isolated environment and downloads pinned snapshots after explicit consent. Existing operator-provisioned runtimes are kept separately; readiness does not prove license compliance, memory fit, or inference quality.".into(),
                 "MeshHarbor's MIT license covers its own code. Third-party runtime and model terms, including DINOv3 and NAF, remain separate; gated access is user-controlled. See THIRD-PARTY-NOTICES.md.".into(),
             ],
         }

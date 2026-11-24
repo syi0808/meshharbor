@@ -342,7 +342,7 @@ export function App() {
   const generationPayload = selectedGenerationProfile
     ? generationParameters(selectedGenerationProfile, generationDraft, viewMode !== 'single') : null;
   function openSettings(section: SettingsSection, backendId?: RuntimeBackendId) {
-    if (backendId) setSettingsBackend(backendId);
+    setSettingsBackend(backendId ?? null);
     if (sidebar.narrow && sidebar.open) sidebar.setOpen(false);
     const path = `/settings/${section}`;
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
@@ -743,14 +743,19 @@ export function App() {
     setSelectedId(assetId);
   }, []);
 
-  function selectPendingModel(pending: Job) {
+  function selectPendingModel(pending: Job, reveal = false) {
     invalidateHistoryRequests();
     selectAssetId(null);
     pendingSelectionRef.current = pending;
     setPendingSelection(pending);
     setComparisonPair(null);
     setReportJob(null);
-    if (sidebar.narrow) sidebar.setOpen(false);
+    if (reveal) {
+      if (assetFiltersRef.current.kind !== 'mesh' || hasActiveAssetFilters || assetSearchInputRef.current) {
+        applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS);
+      }
+      sidebar.setOpen(true);
+    } else if (sidebar.narrow) sidebar.setOpen(false);
   }
 
   const pendingPreviewJobId = selectedPendingJob?.id;
@@ -808,7 +813,9 @@ export function App() {
             setReportJob(null);
             setRuntime(runtimeInfo);
             setOperations(operationList);
-            notify('success', latest.operation === 'runtime.pixal3d.setup'
+            notify('success', latest.operation === 'runtime.models.install'
+              ? 'Model installed and ready for offline generation.'
+              : latest.operation === 'runtime.pixal3d.setup'
               ? 'The isolated Python environment is ready. Connect Hugging Face in Settings before downloading model files.'
               : latest.operation === 'runtime.pixal3d.install_models'
                 ? 'Pinned model files are ready. MeshHarbor completed the one-time NAF conversion in an isolated tool environment.'
@@ -1167,11 +1174,22 @@ export function App() {
         ...generationPayload,
         ...(posedInput ? { view_input: posedInput } : {}),
       });
-      localGenerations.current.add(nextJob.id);
+      if (isActiveJob(nextJob)) localGenerations.current.add(nextJob.id);
       if (!observedJobStates.current.has(nextJob.id)) observedJobStates.current.set(nextJob.id, nextJob.state);
       setJobSnapshot(current => mergeJobRecords([nextJob], current));
-      notify('info', `${generationLabel(generationInput.kind)} ${nextJob.state === 'queued' ? 'queued' : 'started'}.`,
-        nextJob.input_asset_name ?? (generationInput.kind === 'image' ? referenceNames.get(generationInput.asset_id) : undefined));
+      selectPendingModel(nextJob, true);
+      const label = generationLabel(generationInput.kind);
+      if (nextJob.state === 'succeeded') {
+        setGenerationResult(nextJob);
+        notify('success', `${label} complete.`);
+      } else if (nextJob.state === 'failed') {
+        notify('error', `${label} failed.`, nextJob.error?.message);
+      } else if (nextJob.state === 'cancelled') {
+        notify('info', cancelJobNotice(nextJob));
+      } else {
+        notify('info', `${label} ${nextJob.state === 'queued' ? 'queued' : 'started'}.`,
+          nextJob.input_asset_name ?? (generationInput.kind === 'image' ? referenceNames.get(generationInput.asset_id) : undefined));
+      }
     } catch (cause) {
       notify('error', cause instanceof Error ? cause.message : 'Could not start generation.');
     } finally {
@@ -1185,7 +1203,8 @@ export function App() {
     setBusy(true);
     try {
       const cuda = backend === 'pixal3d-cuda';
-      const nextJob = action === 'multiview' ? await api.installPixal3dMultiview() : action === 'setup'
+      const nextJob = action === 'install' || action === 'install-gated' ? await api.installCatalogModel(backend, action === 'install-gated')
+        : action === 'multiview' ? await api.installPixal3dMultiview() : action === 'setup'
         ? await (cuda ? api.setupPixal3dCudaRuntime() : api.setupPixal3dRuntime())
         : action === 'download'
           ? await (cuda ? api.installPixal3dCudaModels() : api.installPixal3dModels())
@@ -1415,7 +1434,7 @@ export function App() {
                   disabled={mode !== 'single' && !selectedGenerationProfile.multiviewReady}>{viewLabels[mode]}</NativeSelectOption>)}
               </NativeSelect>
               {!selectedGenerationProfile.multiviewReady && <>
-                <Button variant="outline" size="sm" className="self-start" onClick={() => openSettings('storage', 'pixal3d-cuda')}>Set up multiview</Button>
+                <Button variant="outline" size="sm" className="self-start" onClick={() => openSettings('models', 'pixal3d-cuda')}>Set up multiview</Button>
               </>}
             </Field>}
             {inputMode === 'text' ? <Field>
@@ -1572,7 +1591,7 @@ export function App() {
         connection={connection} busy={busy || isRunning || installingBackend}
         jobs={recentJobs} operationLabel={studioOperationLabel} onJobDetails={showJobDetails}
         theme={theme} onThemeChange={setTheme}
-        onVisit={openSettings} onProfileChange={setSettingsBackend} onClose={closeSettings}
+        onVisit={openSettings} onClose={closeSettings}
         onOpenDashboard={() => openDashboard()} onActivityChange={setSettingsActivity}
         onReconnect={() => void connect(true)} onRefreshJobs={refreshRecentJobs} onRuntimeChange={setRuntime}
         onRuntimeAction={(backend, action) => void runRuntimeAction(backend, action)} />
@@ -1685,7 +1704,7 @@ export function App() {
                 </div>
                 <div className="grid min-w-0 gap-3 px-3 py-3">
                 {assetFilters.kind === 'mesh' && <PendingGenerationCards jobs={visiblePendingGenerationJobs} sources={referenceNames}
-                  selectedId={pendingSelection?.id ?? null} onSelect={selectPendingModel} />}
+                  selectedId={pendingSelection?.id ?? null} onSelect={pending => selectPendingModel(pending)} />}
                 {matchingAssets.length > 0 && <p className="text-xs text-muted-foreground" aria-live="polite">
                   {assetPageLoading ? 'Loading assets…' : `${matchingAssets.length} loaded ${hasActiveAssetFilters ? 'result' : 'asset'}${matchingAssets.length === 1 ? '' : 's'}`}
                 </p>}
@@ -1897,6 +1916,7 @@ function studioOperationLabel(operation: string): string {
     case 'runtime.pixal3d.cuda_install_models': return 'Download CUDA models';
     case 'runtime.pixal3d.cuda_install_multiview': return 'Install multiview weights';
     case 'runtime.pixal3d.convert_naf': return 'Convert NAF checkpoint';
+    case 'runtime.models.install': return 'Install model';
     default: return meshOperationOptions.find(tool => tool.id === operation)?.title ?? operation;
   }
 }

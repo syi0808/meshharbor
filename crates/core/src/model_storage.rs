@@ -23,7 +23,7 @@ impl Pixal3dProfile {
         }
     }
 
-    fn backend(self) -> &'static str {
+    pub(crate) fn backend(self) -> &'static str {
         match self {
             Self::Mlx => "pixal3d-mlx",
             Self::Cuda => "pixal3d-cuda",
@@ -118,6 +118,23 @@ pub(crate) struct RuntimeLocalFiles {
     remove_models_available: bool,
     credentials_managed: bool,
     model_files_managed: bool,
+}
+
+pub(crate) fn managed_directory(root: &Path, relative: &str) -> CoreResult<bool> {
+    Ok(inspect_entry(&fs::canonicalize(root)?, relative.split('/'), Directory)?.is_some())
+}
+
+pub(crate) fn model_path(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
+}
+
+pub(crate) fn remove_managed_directories(root: &Path, relative: &[&str]) -> CoreResult<()> {
+    let root = fs::canonicalize(root)?;
+    let entries = relative
+        .iter()
+        .filter_map(|path| inspect_entry(&root, path.split('/'), Directory).transpose())
+        .collect::<CoreResult<_>>()?;
+    remove_entries(entries)
 }
 
 #[derive(Clone, Copy)]

@@ -4,9 +4,13 @@
 
 The backend outputs a geometry-only GLB. It uses the original CLIP context (77 tokens), default 25 + 25 flow steps, weighted dual vertices, and learned triangulation. It has no texture baking or adjustable resolution. The CLI and job inputs support a seed and a soft face target. MLX and CUDA do not share an RNG, so the same seed does not imply identical models. The worker rejects samples over 32,768 occupied cells rather than silently truncating detail.
 
-## Prepare a local runtime
+## Install in Studio
 
-Set `DATA_DIR` to your absolute MeshHarbor data directory. Use Python 3.12, Git, and the Hugging Face CLI (`hf`). Only install reviewed dependencies and checkpoints you are authorized to use. Nothing is downloaded automatically by MeshHarbor.
+In **Settings → Models → TRELLIS Text Large → Apple MLX**, review the terms and select **Install model**. MeshHarbor prepares private Python 3.12 and downloads the pinned source and weights. No Hugging Face sign-in is required for these public weights.
+
+## Optional manual setup
+
+Set `DATA_DIR` to your absolute MeshHarbor data directory. Use Python 3.12, Git, and the Hugging Face CLI (`hf`). Only install reviewed dependencies and checkpoints you are authorized to use.
 
 ```sh
 RUNTIME="$DATA_DIR/runtimes/trellis-text-mlx"

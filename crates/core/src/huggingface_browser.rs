@@ -14,14 +14,14 @@ use crate::{
 };
 
 const TOOL_DIR: &str = "hf-browser-cli-1.20.1";
-const PACKAGE: &str = "huggingface-hub==1.20.1";
+pub(crate) const PACKAGE: &str = "huggingface-hub==1.20.1";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct HuggingFaceBrowserTool {
     profile: Pixal3dProfile,
     data_root: PathBuf,
     runtime_root: PathBuf,
-    base_python: PathBuf,
+    base_python: Option<PathBuf>,
     home: PathBuf,
 }
 
@@ -55,11 +55,8 @@ impl HuggingFaceBrowserTool {
             }
             _ => return Err(unsupported()),
         };
-        if !base_python.is_file() {
-            return Err(CoreError::OperationUnavailable(
-                "Set up the backend's Python environment before starting browser sign-in.".into(),
-            ));
-        }
+        fs::create_dir_all(&home)?;
+        let base_python = base_python.is_file().then_some(base_python);
         Ok(Self {
             profile,
             data_root,
@@ -91,17 +88,21 @@ impl HuggingFaceBrowserTool {
                 .env_clear()
                 .env("HOME", &self.home)
                 .env("UV_CACHE_DIR", self.runtime_root.join("uv-cache"))
+                .env("UV_PYTHON_INSTALL_DIR", self.runtime_root.join("python"))
                 .env("UV_NO_CONFIG", "1")
                 .env("UV_NO_PROGRESS", "1")
                 .env("UV_HTTP_TIMEOUT", "20")
-                .env("UV_PYTHON_DOWNLOADS", "never")
                 .current_dir(&self.runtime_root);
             command
         };
         let mut venv = uv_command();
-        venv.args(["venv", "--no-project", "--allow-existing", "--python"])
-            .arg(&self.base_python)
-            .arg(&directory);
+        venv.args(["venv", "--no-project", "--allow-existing"]);
+        if let Some(python) = &self.base_python {
+            venv.arg("--python").arg(python);
+        } else {
+            venv.args(["--managed-python", "--python", "3.12"]);
+        }
+        venv.arg(&directory);
         install_step(venv).await?;
         let mut pip = uv_command();
         pip.args(["pip", "install", "--python"])

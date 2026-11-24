@@ -1,6 +1,8 @@
 # External generation runtimes
 
-These are experimental, manually provisioned backends. MeshHarbor ships only its Python adapter: it does not fork, vendor, or download the upstream source, dependencies, or weights. Studio's **Settings → Models** and `meshharbor doctor` report local readiness. Setup and license acknowledgments are never exposed as REST or MCP actions.
+These experimental backends can be installed in **Settings → Models** after you review the model and dependency terms. The engine checks out pinned source and installs packages and model snapshots in a private runtime. TRELLIS.2 requires Hugging Face sign-in and DINOv3 access first. You need Git, disk space for the downloads, and any system build prerequisites: Apple command-line build tools for native MLX extensions, or an NVIDIA driver and a matching CUDA toolkit/compiler for native CUDA extensions. MeshHarbor does not install system prerequisites. Use **Recent logs** on the backend card to inspect setup failures.
+
+Existing manually provisioned backends still work and are not changed by the installer. Managed installations use `<data-dir>/runtimes/<backend>-managed`; **Delete model files** removes only the managed weights and model-transfer cache.
 
 This page covers image-conditioned TRELLIS.2 and TripoSG. For the original TRELLIS text checkpoint, use the separate [Apple MLX](trellis-text-mlx.md) or [NVIDIA CUDA](trellis-text-cuda.md) guide.
 
@@ -25,7 +27,7 @@ These integrations take images:
 - [TRELLIS.2-4B](https://huggingface.co/microsoft/TRELLIS.2-4B) takes images. The separate [TRELLIS Text Large](trellis-text-cuda.md) backend is from the original TRELLIS family, not a mode of TRELLIS.2.
 - [TripoSG](https://huggingface.co/VAST-AI/TripoSG) takes images. The separate [TripoSG-scribble](https://huggingface.co/VAST-AI/TripoSG-scribble) checkpoint takes both a scribble image and a text prompt; it is not the integrated checkpoint or a text-only workflow.
 
-## Prepare Files
+## Optional manual provisioning
 
 Use the same data directory for setup and for CLI, REST, or MCP. These commands are manual setup recipes, not a tested lockfile or hardware compatibility promise. Do not run the upstream download-on-inference demos. Use only trusted local Python packages, checkouts, and checkpoints you are authorized to run.
 

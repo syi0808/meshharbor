@@ -14,6 +14,11 @@ export function generationJobName(job: Job, sources: ReadonlyMap<string, string>
 const stageLabels: Partial<Record<string, string>> = {
   check_runtime: 'Checking runtime availability',
   prepare_runtime: 'Preparing local runtime',
+  prepare_source: 'Checking out pinned source',
+  install_dependencies: 'Installing model dependencies',
+  download_models: 'Downloading pinned model files',
+  convert_models: 'Converting model weights',
+  verify_models: 'Verifying model files',
   prepare_uv: 'Preparing uv',
   prepare_python: 'Checking existing Python environment',
   install_python: 'Installing managed Python',

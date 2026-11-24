@@ -58,7 +58,7 @@ export interface Operation {
 
 export type HuggingFaceAccess = 'not_connected' | 'access_denied' | 'verified';
 export type HuggingFaceConnectionStatus = 'not_connected' | 'invalid_token' | 'connected';
-export type RuntimeBackendId = 'pixal3d-mlx' | 'pixal3d-cuda';
+export type RuntimeBackendId = `${'pixal3d' | 'trellis2' | 'triposg' | 'trellis-text'}-${'mlx' | 'cuda'}`;
 export type HuggingFaceBrowserLogin = { id: string } & (
   | { state: 'preparing' | 'signed_in' | 'cancelled' | 'expired' }
   | { state: 'awaiting_authorization'; user_code: string; expires_in: number }
@@ -132,7 +132,9 @@ export interface RuntimeInfo {
     ready?: boolean;
     status: string;
     accelerator?: string;
-    manual_setup?: boolean;
+    managed_install?: boolean;
+    managed_ready?: boolean;
+    account_tools_ready?: boolean;
     host_supported?: boolean;
     validation_level?: string;
     missing?: string[];
@@ -145,21 +147,23 @@ export interface RuntimeInfo {
     naf_conversion_required?: boolean;
     conversion_enabled?: boolean;
     runtime_root?: string;
+    model_paths?: string[];
     python?: string;
     gated_model_access_required?: boolean;
     license_notice?: string;
+    source?: { repository: string; revision: string };
     pixal3d_cache?: {
       local_checkpoints: number;
       reusable_checkpoints: number;
       total_checkpoints: number;
     };
-    local_files?: {
+    local_files?: Partial<{
       token_saved: boolean;
       disconnect_available: boolean;
       remove_models_available: boolean;
       credentials_managed: boolean;
       model_files_managed: boolean;
-    };
+    }>;
   }>;
   notes: string[];
 }
@@ -170,7 +174,7 @@ export interface Job {
   state: 'queued' | 'running' | 'validating' | 'succeeded' | 'failed' | 'cancelling' | 'cancelled';
   input_asset_id?: string | null;
   input_asset_name?: string | null;
-  parameters?: { input_mode?: GenerationInputMode };
+  parameters?: { input_mode?: GenerationInputMode; backend_id?: string };
   progress: number;
   result?: {
     asset_id?: string;
