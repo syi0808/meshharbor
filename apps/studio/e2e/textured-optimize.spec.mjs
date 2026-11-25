@@ -205,11 +205,14 @@ test('Studio optimizes a textured GLB without changing its materials or textures
     await page.mouse.move(x + 56, y, { steps: 6 });
     await page.mouse.up();
     await expect.poll(inspectorWidth).toBeGreaterThan(initialWidth);
-    const targetInput = page.getByRole('spinbutton', { name: 'Triangle target' });
+    const targetInput = page.getByRole('spinbutton', { name: 'Triangle limit' });
+    const run = page.getByRole('button', { name: 'Optimize mesh' });
     await expect(targetInput).toHaveCSS('height', '28px');
-    await expect(page.getByRole('slider', { name: 'Triangle target' })).toBeVisible();
+    await expect(page.getByRole('slider', { name: 'Triangle limit' })).toBeVisible();
+    await targetInput.fill('0');
+    await expect(run).toBeDisabled();
     await targetInput.fill('240');
-    await page.getByRole('button', { name: 'Optimize mesh' }).click();
+    await run.click();
     await expect(result).toHaveAttribute('aria-selected', 'true', { timeout: 20_000 });
     await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
     const library = page.locator('#workbench-sidebar-dock');
@@ -243,10 +246,35 @@ test('Studio optimizes a textured GLB without changing its materials or textures
     const output = inspectTexturedGlb(await exportSelectedGlb(page, resultName));
     expect(input.triangles).toBe(fixtureTriangles);
     expect(output.triangles).toBeGreaterThan(0);
+    expect(output.triangles).toBeLessThanOrEqual(240);
     expect(output.triangles).toBeLessThan(input.triangles);
     testInfo.annotations.push({ type: 'Triangles', description: `${input.triangles} → ${output.triangles}` });
     await expect(page.getByRole('group', { name: 'Original to result comparison' }))
       .toContainText(`${input.triangles} → ${output.triangles}`);
     expect(output.appearance).toEqual(input.appearance);
   });
+});
+
+test('Studio cleanup reduces a textured GLB without a triangle limit', async ({ page, studioOrigin }) => {
+  const sourceName = 'cleanup-source.glb';
+  const resultName = 'cleanup-source-cleaned.glb';
+  const source = texturedGlb();
+  await page.goto(studioOrigin);
+  await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.getByRole('button', { name: 'Open GLB', exact: true }).click(),
+  ]);
+  await chooser.setFiles({ name: sourceName, mimeType: 'model/gltf-binary', buffer: source });
+  const selected = page.getByRole('region', { name: 'Selected asset' });
+  await expect(selected.getByTitle(sourceName, { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Cleanup', exact: true }).click();
+  await page.getByRole('button', { name: 'Run Cleanup' }).click();
+  await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
+
+  const input = inspectTexturedGlb(source);
+  const output = inspectTexturedGlb(await exportSelectedGlb(page, resultName));
+  expect(output.triangles).toBeGreaterThan(0);
+  expect(output.triangles).toBeLessThan(input.triangles);
+  expect(output.appearance).toEqual(input.appearance);
 });

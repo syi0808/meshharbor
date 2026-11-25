@@ -356,7 +356,7 @@ const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
     metrics: [
       { key: 'triangles_before', label: 'Triangles before', formatter: 'count' },
       { key: 'triangles_after', label: 'Triangles after', formatter: 'count' },
-      { key: 'target_triangles', label: 'Target triangles', formatter: 'count' },
+      { key: 'target_triangles', label: 'Triangle limit', formatter: 'count' },
       { key: 'geometric_error', label: 'Geometric error', formatter: 'decimal' },
       { key: 'optimized_primitives', label: 'Optimized primitives', formatter: 'count' },
     ],
@@ -370,6 +370,7 @@ const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
       { key: 'repeated_index_triangles_removed', label: 'Repeated-index triangles removed', formatter: 'count' },
       { key: 'zero_area_triangles_removed', label: 'Zero-area triangles removed', formatter: 'count' },
       { key: 'duplicate_triangles_removed', label: 'Duplicate triangles removed', formatter: 'count' },
+      { key: 'simplified_triangles_removed', label: 'Triangles removed by simplification', formatter: 'count' },
       { key: 'modified_primitives', label: 'Modified primitives', formatter: 'count' },
     ],
     lists: [{ key: 'preserved', label: 'Preserved data', formatter: 'text-list' }],

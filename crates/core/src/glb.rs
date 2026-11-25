@@ -446,6 +446,8 @@ pub struct MeshCleanupReport {
     pub repeated_index_triangles_removed: u64,
     pub zero_area_triangles_removed: u64,
     pub duplicate_triangles_removed: u64,
+    #[serde(default)]
+    pub simplified_triangles_removed: u64,
     pub modified_primitives: u64,
     pub preserved: Vec<String>,
     pub warnings: Vec<String>,
@@ -1291,9 +1293,11 @@ fn ensure_extension(document: &mut Value, list_name: &str, extension: &str) {
 }
 
 /// Removes repeated-index and exactly zero-area triangles plus duplicate
-/// same-winding faces from indexed, static GLB triangle primitives. It does
-/// not weld vertices, compact vertex streams, or cross material/seam boundaries.
+/// same-winding faces from indexed, static GLB triangle primitives, then tries
+/// low-error simplification within supported primitives without welding or
+/// compacting vertex streams.
 pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreError> {
+    const CLEANUP_MAX_ERROR: f32 = 0.001;
     let mut glb = GlbFile::parse(bytes)?;
     validate_static_glb(&glb.document)?;
     let binary = glb
@@ -1312,6 +1316,7 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
     let mut repeated_removed = 0u64;
     let mut zero_area_removed = 0u64;
     let mut duplicate_removed = 0u64;
+    let mut simplified_removed = 0u64;
     let mut per_primitive = Vec::new();
 
     for (mesh_index, mesh) in meshes.iter().enumerate() {
@@ -1326,7 +1331,7 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
             total_before = total_before
                 .checked_add((indices.len() / 3) as u64)
                 .ok_or_else(|| CoreError::InvalidInput("Triangle count overflowed.".into()))?;
-            let positions = read_cleanup_positions(&glb.document, binary, primitive)?;
+            let positions = read_primitive_positions(&glb.document, binary, primitive)?;
             if indices
                 .iter()
                 .any(|index| *index as usize >= positions.len())
@@ -1338,6 +1343,7 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
 
             let mut seen_faces = HashSet::with_capacity(indices.len() / 3);
             let mut cleaned = Vec::with_capacity(indices.len());
+            let mut has_opposite_winding = false;
             for face in indices.chunks_exact(3) {
                 let [a, b, c] = [face[0], face[1], face[2]];
                 if a == b || b == c || c == a {
@@ -1356,12 +1362,41 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
                     duplicate_removed += 1;
                     continue;
                 }
+                has_opposite_winding |= seen_faces.contains(&canonical_oriented_triangle(a, c, b));
                 cleaned.extend_from_slice(&[a, b, c]);
             }
             if cleaned.is_empty() {
                 return Err(CoreError::OperationUnavailable(format!(
                     "Cleanup would remove every triangle from mesh {mesh_index} primitive {primitive_index}; the source asset was left unchanged."
                 )));
+            }
+            if cleaned.len() > 3
+                && !has_opposite_winding
+                && primitive["attributes"]
+                    .as_object()
+                    .is_some_and(|attributes| {
+                        attributes.keys().all(|semantic| {
+                            matches!(semantic.as_str(), "POSITION" | "NORMAL" | "TEXCOORD_0")
+                        })
+                    })
+                && !primitive_uses_blending(&glb.document, primitive)?
+            {
+                match reduce_primitive_indices(
+                    &glb.document,
+                    binary,
+                    primitive,
+                    &positions,
+                    &cleaned,
+                    0,
+                    CLEANUP_MAX_ERROR,
+                ) {
+                    Ok(Some((reduced, _))) => {
+                        simplified_removed += ((cleaned.len() - reduced.len()) / 3) as u64;
+                        cleaned = reduced;
+                    }
+                    Ok(None) | Err(CoreError::OperationUnavailable(_)) => {}
+                    Err(error) => return Err(error),
+                }
             }
             if cleaned.len() != indices.len() {
                 per_primitive.push((mesh_index, primitive_index, cleaned));
@@ -1381,7 +1416,8 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
             json!(accessor_index);
     }
 
-    let total_removed = repeated_removed + zero_area_removed + duplicate_removed;
+    let total_removed =
+        repeated_removed + zero_area_removed + duplicate_removed + simplified_removed;
     let encoded = if total_removed == 0 {
         bytes.to_vec()
     } else {
@@ -1401,6 +1437,7 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
             repeated_index_triangles_removed: repeated_removed,
             zero_area_triangles_removed: zero_area_removed,
             duplicate_triangles_removed: duplicate_removed,
+            simplified_triangles_removed: simplified_removed,
             modified_primitives,
             preserved: vec![
                 "vertex streams, including UV seams".into(),
@@ -1410,7 +1447,7 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
             ],
             warnings: vec![
                 "Cleanup intentionally does not weld vertices or compact unused vertex data.".into(),
-                "Zero-area detection is exact in decoded FLOAT POSITION space; near-degenerate faces are retained.".into(),
+                "Defect removal detects exact zero area in decoded FLOAT POSITION space, not near-zero area.".into(),
             ],
         },
     ))
@@ -1476,7 +1513,7 @@ pub fn optimize_render_glb(
                 continue;
             }
 
-            let positions = read_cleanup_positions(&glb.document, binary, primitive)?;
+            let positions = read_primitive_positions(&glb.document, binary, primitive)?;
             if indices
                 .iter()
                 .any(|index| *index as usize >= positions.len())
@@ -1558,7 +1595,7 @@ pub fn optimize_render_glb(
     ))
 }
 
-fn read_cleanup_positions(
+fn read_primitive_positions(
     document: &Value,
     binary: &[u8],
     primitive: &Value,
@@ -1659,9 +1696,10 @@ fn simulate_vertex_cache_misses(indices: &[u32], cache_size: usize) -> u64 {
 }
 
 /// Simplifies triangle primitives in a GLB with meshoptimizer and returns an
-/// independently encoded derived GLB plus an auditable summary. Positions,
-/// normals, UVs, materials, textures, and the rest of each vertex stream stay
-/// byte-for-byte unchanged; only primitive index references are replaced.
+/// independently encoded derived GLB plus an auditable summary. Returns an
+/// error if the hard triangle limit across all primitives cannot be met.
+/// Vertex streams, materials, and textures stay byte-for-byte unchanged;
+/// only primitive index references are replaced.
 pub fn simplify_glb(
     bytes: &[u8],
     target_triangles: u64,
@@ -1725,108 +1763,79 @@ pub fn simplify_glb(
             "target_triangles ({target_triangles}) must be lower than the input triangle count ({total_triangles})."
         )));
     }
-
-    let mut report_error = 0.0f32;
-    let mut actual_triangles = 0u64;
-    let mut optimized_primitives = 0u64;
-    let mut per_primitive = Vec::with_capacity(primitives.len());
-    for (mesh_index, primitive_index, original_count) in &primitives {
-        let target_for_primitive = ((*original_count as u128 * target_triangles as u128)
-            / total_triangles as u128)
-            .max(1)
-            .min(*original_count as u128) as u64;
-        let indices = {
-            let primitive = &glb.document["meshes"][*mesh_index]["primitives"][*primitive_index];
-            read_primitive_indices(&glb.document, binary, primitive)?
-        };
-        let primitive = &glb.document["meshes"][*mesh_index]["primitives"][*primitive_index];
-        let position_index = primitive
-            .get("attributes")
-            .and_then(|a| a.get("POSITION"))
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                CoreError::InvalidInput("Triangle primitive is missing POSITION.".into())
-            })? as usize;
-        let position_accessor = array(&glb.document, "accessors")
-            .get(position_index)
-            .ok_or_else(|| CoreError::InvalidInput("POSITION accessor does not exist.".into()))?;
-        if position_accessor
-            .get("componentType")
-            .and_then(Value::as_u64)
-            != Some(5126)
-            || position_accessor
-                .get("normalized")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
-            return Err(CoreError::OperationUnavailable(
-                "POSITION must use unnormalized FLOAT components.".into(),
-            ));
-        }
-        let positions =
-            decode_float_vectors(&glb.document, binary, position_index, "VEC3", "POSITION")?;
-        if indices
-            .iter()
-            .any(|index| *index as usize >= positions.len())
-        {
-            return Err(CoreError::InvalidInput(
-                "Primitive index refers to a vertex outside POSITION.".into(),
-            ));
-        }
-        let mut position_bytes = Vec::with_capacity(positions.len() * 12);
-        for position in &positions {
-            for component in position {
-                if !component.is_finite() {
-                    return Err(CoreError::InvalidInput(
-                        "POSITION contains a non-finite value.".into(),
-                    ));
-                }
-                position_bytes.extend_from_slice(&component.to_le_bytes());
-            }
-        }
-        let adapter = VertexDataAdapter::new(&position_bytes, 12, 0)
-            .map_err(|e| CoreError::InvalidInput(format!("Invalid POSITION data: {e}")))?;
-        let (attributes, weights) =
-            decode_simplification_attributes(&glb.document, binary, primitive, positions.len())?;
-        let mut error = 0.0f32;
-        let locks = vec![SimplifyVertex::None; positions.len()];
-        let reduced = if attributes.is_empty() {
-            meshopt::simplify(
-                &indices,
-                &adapter,
-                target_for_primitive as usize * 3,
-                max_error,
-                SimplifyOptions::LockBorder,
-                Some(&mut error),
-            )
-        } else {
-            meshopt::simplify_with_attributes_and_locks(
-                &indices,
-                &adapter,
-                &attributes,
-                &weights,
-                // meshoptimizer needs a byte stride, not a count of f32s.
-                weights.len() * size_of::<f32>(),
-                &locks,
-                target_for_primitive as usize * 3,
-                max_error,
-                SimplifyOptions::LockBorder,
-                Some(&mut error),
-            )
-        };
-        if reduced.is_empty() || reduced.len() % 3 != 0 {
-            return Err(CoreError::OperationUnavailable("meshoptimizer could not produce a valid triangle index buffer under the requested error limit.".into()));
-        }
-        let actual = (reduced.len() / 3) as u64;
-        actual_triangles = actual_triangles.checked_add(actual).ok_or_else(|| {
-            CoreError::InvalidInput("Simplified triangle count overflowed.".into())
-        })?;
-        optimized_primitives += 1;
-        report_error = report_error.max(error);
-        per_primitive.push((*mesh_index, *primitive_index, reduced));
+    let primitive_count = primitives.len() as u64;
+    if target_triangles < primitive_count {
+        return Err(CoreError::OperationUnavailable(format!(
+            "The {target_triangles}-triangle limit is below the minimum of {primitive_count} needed to keep every primitive. Increase the triangle limit. No result was saved."
+        )));
     }
 
-    for (mesh_index, primitive_index, indices) in per_primitive {
+    let simplify_primitive = |mesh_index, primitive_index, triangle_budget, max_error| {
+        let primitive = &array(&meshes[mesh_index], "primitives")[primitive_index];
+        let indices = read_primitive_indices(&glb.document, binary, primitive)?;
+        let positions = read_primitive_positions(&glb.document, binary, primitive)?;
+        reduce_primitive_indices(
+            &glb.document,
+            binary,
+            primitive,
+            &positions,
+            &indices,
+            triangle_budget,
+            max_error,
+        )
+    };
+    let extra_budget = u128::from(target_triangles - primitive_count);
+    let extra_triangles = u128::from(total_triangles - primitive_count);
+    let mut accumulated_triangles = 0u128;
+    let mut allocated_budget = 0u128;
+    let mut actual_triangles = 0u64;
+    let mut per_primitive = Vec::with_capacity(primitives.len());
+    for (mesh_index, primitive_index, original_count) in primitives {
+        accumulated_triangles += u128::from(original_count - 1);
+        let cumulative_budget = accumulated_triangles * extra_budget / extra_triangles;
+        let budget = (1 + cumulative_budget - allocated_budget) as usize;
+        allocated_budget = cumulative_budget;
+        let result = simplify_primitive(mesh_index, primitive_index, budget, max_error)?;
+        let actual = result.as_ref().map_or(original_count, reduction_count);
+        actual_triangles += actual;
+        per_primitive.push((mesh_index, primitive_index, budget, actual, result));
+    }
+
+    for (mesh_index, primitive_index, budget, actual, result) in &mut per_primitive {
+        if actual_triangles <= target_triangles {
+            break;
+        }
+        let revised_budget = actual
+            .saturating_sub(actual_triangles - target_triangles)
+            .max(1);
+        if revised_budget >= *actual || revised_budget >= *budget as u64 {
+            continue;
+        }
+        if let Some(reduced) = simplify_primitive(
+            *mesh_index,
+            *primitive_index,
+            revised_budget as usize,
+            max_error,
+        )? && reduction_count(&reduced) < *actual
+        {
+            actual_triangles -= *actual - reduction_count(&reduced);
+            *result = Some(reduced);
+        }
+    }
+    if actual_triangles > target_triangles {
+        return Err(CoreError::OperationUnavailable(format!(
+            "Could not meet the {target_triangles}-triangle limit with the current error tolerance and locked borders (reached {actual_triangles}). Increase the triangle limit or the error tolerance. No result was saved."
+        )));
+    }
+
+    let mut report_error = 0.0f32;
+    let mut optimized_primitives = 0;
+    for (mesh_index, primitive_index, _, _, result) in per_primitive {
+        let Some((indices, error)) = result else {
+            continue;
+        };
+        report_error = report_error.max(error);
+        optimized_primitives += 1;
         let accessor_index = append_index_accessor(&mut glb.document, binary, &indices)?;
         glb.document["meshes"][mesh_index]["primitives"][primitive_index]["indices"] =
             json!(accessor_index);
@@ -1853,15 +1862,75 @@ pub fn simplify_glb(
                 "materials and textures".into(),
                 "primitive and node hierarchy".into(),
             ],
-            warnings: if actual_triangles > target_triangles {
-                vec![format!(
-                    "The requested target of {target_triangles} triangles was not reached under the configured error and border constraints; output contains {actual_triangles} triangles."
-                )]
-            } else {
-                Vec::new()
-            },
+            warnings: Vec::new(),
         },
     ))
+}
+
+fn reduction_count(reduction: &(Vec<u32>, f32)) -> u64 {
+    (reduction.0.len() / 3) as u64
+}
+
+fn reduce_primitive_indices(
+    document: &Value,
+    binary: &[u8],
+    primitive: &Value,
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    target_triangles: usize,
+    max_error: f32,
+) -> Result<Option<(Vec<u32>, f32)>, CoreError> {
+    if indices
+        .iter()
+        .any(|index| *index as usize >= positions.len())
+    {
+        return Err(CoreError::InvalidInput(
+            "Primitive index refers to a vertex outside POSITION.".into(),
+        ));
+    }
+    let target_indices = target_triangles * 3;
+    if target_indices >= indices.len() {
+        return Ok(None);
+    }
+    let mut position_bytes = Vec::with_capacity(positions.len() * 12);
+    for position in positions {
+        for component in position {
+            position_bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    let adapter = VertexDataAdapter::new(&position_bytes, 12, 0)
+        .map_err(|error| CoreError::InvalidInput(format!("Invalid POSITION data: {error}")))?;
+    let (attributes, weights) =
+        decode_simplification_attributes(document, binary, primitive, positions.len())?;
+    let mut error = 0.0;
+    let reduced = if attributes.is_empty() {
+        meshopt::simplify(
+            indices,
+            &adapter,
+            target_indices,
+            max_error,
+            SimplifyOptions::LockBorder,
+            Some(&mut error),
+        )
+    } else {
+        meshopt::simplify_with_attributes_and_locks(
+            indices,
+            &adapter,
+            &attributes,
+            &weights,
+            weights.len() * size_of::<f32>(),
+            &vec![SimplifyVertex::None; positions.len()],
+            target_indices,
+            max_error,
+            SimplifyOptions::LockBorder,
+            Some(&mut error),
+        )
+    };
+    Ok((!reduced.is_empty()
+        && reduced.len() < indices.len()
+        && reduced.len().is_multiple_of(3)
+        && error <= max_error)
+        .then_some((reduced, error)))
 }
 
 const MAX_RETOPOLOGY_INPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -3105,7 +3174,8 @@ mod tests {
         let original = grid_glb(12);
         let (reduced, report) = simplify_glb(&original, 80, 1.0).unwrap();
         let descriptor = inspect_asset("reduced.glb", &reduced).unwrap();
-        assert!(report.triangles_after < report.triangles_before);
+        assert!(report.triangles_after <= 80);
+        assert_eq!(descriptor.metadata["triangles"], report.triangles_after);
         assert_eq!(descriptor.metadata["material_count"], 1);
         let parsed = GlbFile::parse(&reduced).unwrap();
         assert_eq!(parsed.document["meshes"][0]["primitives"][0]["material"], 0);
@@ -3163,10 +3233,58 @@ mod tests {
     }
 
     #[test]
-    fn simplify_reports_target_that_cannot_be_reached() {
+    fn simplify_rejects_zero_limit() {
         let original = grid_glb(4);
         let error = simplify_glb(&original, 0, 0.1).unwrap_err();
         assert!(error.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn simplify_returns_no_output_when_locked_borders_prevent_meeting_the_limit() {
+        let error = simplify_glb(&grid_glb(2), 1, 1.0).unwrap_err();
+        assert!(matches!(error, CoreError::OperationUnavailable(_)));
+        assert!(error.to_string().contains("1-triangle limit"));
+        assert!(error.to_string().contains("reached 2"));
+    }
+
+    #[test]
+    fn simplify_redistributes_the_budget_to_keep_a_constrained_primitive() {
+        let mut glb = GlbFile::parse(&grid_glb(12)).unwrap();
+        let mut rigid_indices = Vec::new();
+        for row in (0..12).step_by(2) {
+            for column in (0..12).step_by(2) {
+                let first = row * 12 + column;
+                rigid_indices.extend([first, first + 12, first + 1]);
+            }
+        }
+        let binary = glb.binary.as_mut().unwrap();
+        let accessor = append_index_accessor(&mut glb.document, binary, &rigid_indices).unwrap();
+        glb.document["meshes"][0]["primitives"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"attributes": {"POSITION": 0}, "indices": accessor, "material": 0}));
+        glb.document["buffers"][0]["byteLength"] = json!(binary.len());
+        let original = glb.write().unwrap();
+
+        let (output, report) = simplify_glb(&original, 90, 0.001).unwrap();
+        assert_eq!(report.triangles_before, 278);
+        assert!(report.triangles_after <= 90);
+        assert_eq!(report.optimized_primitives, 1);
+        let parsed = GlbFile::parse(&output).unwrap();
+        assert_eq!(
+            parsed.document["meshes"][0]["primitives"][1]["indices"],
+            accessor
+        );
+        assert_eq!(
+            inspect_asset("output.glb", &output).unwrap().metadata["triangles"],
+            report.triangles_after
+        );
+        assert!(
+            simplify_glb(&original, 1, 1.0)
+                .unwrap_err()
+                .to_string()
+                .contains("minimum of 2")
+        );
     }
 
     #[test]
@@ -3209,6 +3327,7 @@ mod tests {
         assert_eq!(report.duplicate_triangles_removed, 1);
         assert_eq!(report.zero_area_triangles_removed, 1);
         assert_eq!(report.repeated_index_triangles_removed, 1);
+        assert_eq!(report.simplified_triangles_removed, 0);
         let glb = GlbFile::parse(&cleaned).unwrap();
         let indices = read_primitive_indices(
             &glb.document,
@@ -3217,6 +3336,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(indices.len(), 6);
+    }
+
+    #[test]
+    fn cleanup_simplifies_redundant_faces_without_a_triangle_target() {
+        let original = grid_glb(12);
+        let (output, report) = cleanup_glb(&original).unwrap();
+        assert!(report.simplified_triangles_removed > 0);
+        assert_eq!(
+            report.triangles_after + report.simplified_triangles_removed,
+            242
+        );
+        assert_eq!(report.modified_primitives, 1);
+        let parsed = GlbFile::parse(&output).unwrap();
+        let source = GlbFile::parse(&original).unwrap();
+        assert_eq!(parsed.document["materials"], source.document["materials"]);
+        assert_eq!(
+            parsed.document["accessors"][0],
+            source.document["accessors"][0]
+        );
+        assert_eq!(
+            inspect_asset("output.glb", &output).unwrap().metadata["triangles"],
+            report.triangles_after
+        );
+    }
+
+    #[test]
+    fn cleanup_preserves_detail_and_skips_order_dependent_or_unmeasured_appearance() {
+        let curved = tetrahedron_glb();
+        let mut blended = GlbFile::parse(&grid_glb(12)).unwrap();
+        blended.document["materials"][0]["alphaMode"] = json!("BLEND");
+        let mut custom = GlbFile::parse(&grid_glb(12)).unwrap();
+        custom.document["meshes"][0]["primitives"][0]["attributes"]["_CUSTOM"] = json!(0);
+        for original in [curved, blended.write().unwrap(), custom.write().unwrap()] {
+            let (output, report) = cleanup_glb(&original).unwrap();
+            assert_eq!(output, original);
+            assert_eq!(report.simplified_triangles_removed, 0);
+            assert_eq!(report.modified_primitives, 0);
+        }
     }
 
     #[test]

@@ -4749,31 +4749,42 @@ mod tests {
     }
 
     fn minimal_triangle_glb() -> Vec<u8> {
+        planar_patch_glb(false)
+    }
+
+    fn planar_patch_glb(subdivided: bool) -> Vec<u8> {
         let mut binary = Vec::new();
-        for position in [
+        let mut positions = vec![
             [0.0f32, 0.0, 0.0],
             [1.0, 0.0, 0.0],
             [0.0, 0.0, 1.0],
             [1.0, 0.0, 1.0],
-        ] {
+        ];
+        let indices: &[u16] = if subdivided {
+            positions.push([0.5, 0.0, 0.5]);
+            &[0, 2, 4, 2, 3, 4, 3, 1, 4, 1, 0, 4]
+        } else {
+            &[0, 2, 1, 1, 2, 3]
+        };
+        for position in &positions {
             for component in position {
                 binary.extend_from_slice(&component.to_le_bytes());
             }
         }
         let index_offset = binary.len();
-        for index in [0u16, 2, 1, 1, 2, 3] {
+        for index in indices {
             binary.extend_from_slice(&index.to_le_bytes());
         }
         let document = json!({
             "asset":{"version":"2.0"},
             "buffers":[{"byteLength":binary.len()}],
             "bufferViews":[
-                {"buffer":0,"byteOffset":0,"byteLength":48,"byteStride":12,"target":34962},
-                {"buffer":0,"byteOffset":index_offset,"byteLength":12,"target":34963}
+                {"buffer":0,"byteOffset":0,"byteLength":index_offset,"byteStride":12,"target":34962},
+                {"buffer":0,"byteOffset":index_offset,"byteLength":indices.len() * 2,"target":34963}
             ],
             "accessors":[
-                {"bufferView":0,"componentType":5126,"count":4,"type":"VEC3"},
-                {"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"}
+                {"bufferView":0,"componentType":5126,"count":positions.len(),"type":"VEC3"},
+                {"bufferView":1,"componentType":5123,"count":indices.len(),"type":"SCALAR"}
             ],
             "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}]
         });
@@ -4799,11 +4810,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unreachable_simplification_limit_fails_the_job_without_creating_an_asset() {
+        let root = std::env::temp_dir().join(format!("meshharbor-cap-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let source = core
+            .import_asset("square.glb", &minimal_triangle_glb())
+            .unwrap();
+        let submitted = start_simplify_job(
+            core.clone(),
+            Arc::new(JobScheduler::default()),
+            &source.id,
+            1,
+            1.0,
+        )
+        .await
+        .unwrap();
+        let mut job = submitted;
+        for _ in 0..100 {
+            job = core.store().get_job(&job.id).unwrap().unwrap();
+            if job.state.is_terminal() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(job.state, meshharbor_core::JobState::Failed);
+        assert!(job.result.is_none());
+        assert!(
+            job.error.unwrap()["message"]
+                .as_str()
+                .unwrap()
+                .contains("1-triangle limit")
+        );
+        assert_eq!(core.store().list_assets(10).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn api_job_returns_accepted_and_completes_against_the_shared_core() {
         let root = std::env::temp_dir().join(format!("meshharbor-job-{}", uuid::Uuid::new_v4()));
         let core = OperationCore::open(&root).unwrap();
         let source = core
-            .import_asset("square.glb", &minimal_triangle_glb())
+            .import_asset("square.glb", &planar_patch_glb(true))
             .unwrap();
         let app = api_router(
             AppState {
@@ -4815,7 +4862,7 @@ mod tests {
         let body = json!({
             "operation":"mesh.simplify",
             "input":{"asset_id":source.id},
-            "parameters":{"target_triangles":1,"max_error":1.0}
+            "parameters":{"target_triangles":2,"max_error":1.0}
         })
         .to_string();
         let response = app
@@ -4854,13 +4901,9 @@ mod tests {
             meshharbor_core::JobState::Succeeded,
             "job details: {final_job:?}"
         );
-        assert!(
-            final_job
-                .result
-                .as_ref()
-                .and_then(|value| value.get("asset_id"))
-                .is_some()
-        );
+        let result = final_job.result.as_ref().unwrap();
+        assert!(result["asset_id"].is_string());
+        assert_eq!(result["report"]["triangles_after"], 2);
         assert_eq!(core.store().list_assets(10).unwrap().len(), 2);
 
         let step_request = |authenticated| {

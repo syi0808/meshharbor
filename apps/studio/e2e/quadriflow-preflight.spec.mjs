@@ -26,6 +26,7 @@ test('Studio automatically preflights the open retopology tool without queuing a
   await tool.click();
   await expect(tools).toContainText('the quad OBJ is geometry-only');
   await expect(tools.getByRole('status')).toHaveText('Geometry-only input passed');
+  await expect(tools.getByText('This build does not include an approved QuadriFlow release artifact.')).toBeVisible();
   await expect(tools.getByRole('button', { name: 'Check retopology input' })).toHaveCount(0);
   const target = page.getByRole('spinbutton', { name: 'Target quads' });
   const run = page.getByRole('button', { name: 'Run Quad retopology (experimental)', exact: true });

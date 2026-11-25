@@ -32,7 +32,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
-import { Field, FieldLabel } from '@/components/ui/field';
+import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group';
 import { Item, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@/components/ui/item';
@@ -145,7 +145,7 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; label?: 
     id: 'mesh.cleanup',
     title: 'Cleanup',
     icon: BroomIcon,
-    description: 'Remove repeated-index, exact zero-area, and same-winding duplicate faces.',
+    description: 'Remove invalid and duplicate faces, then reduce redundant triangles within a small shape and UV error tolerance. No triangle target is needed.',
   },
   {
     id: 'mesh.separate_parts',
@@ -158,13 +158,13 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; label?: 
     id: 'uv.unwrap',
     title: 'UV atlas rebake',
     icon: BoundingBoxIcon,
-    description: 'Repack existing UVs and rebake embedded PNG base color and metallic/roughness on one primitive. Zero-area faces are dropped. This is not a high-to-low bake.',
+    description: 'Lay out a new UV atlas and copy the existing embedded PNG base color and metallic/roughness into it. This works on one supported primitive and does not transfer detail from a different mesh.',
   },
   {
     id: 'render.optimize',
     title: 'Render optimization',
     icon: GaugeIcon,
-    description: 'Reorder opaque and masked triangles for cache and overdraw; preserve translucent order.',
+    description: 'Reorder triangles so the GPU can reuse vertices and avoid shading hidden pixels. The shape and triangle count stay the same; blended triangles keep their order.',
   },
   {
     id: 'mesh.compress',
@@ -856,8 +856,9 @@ export function App() {
               0,
               Number(resultReport.triangles_before ?? 0) - Number(resultReport.triangles_after ?? 0),
             );
+            const simplified = Number(resultReport.simplified_triangles_removed ?? 0);
             notify('success', removed > 0
-              ? `Cleanup complete. Removed ${removed.toLocaleString()} invalid or duplicate triangles.`
+              ? `Cleanup complete. Removed ${removed.toLocaleString()} triangles (${simplified.toLocaleString()} by simplification).`
               : 'Cleanup complete. No removable triangles were found.');
           } else if (latest.operation === 'render.optimize') {
             const before = Number(resultReport.vertex_cache_misses_before ?? 0);
@@ -1133,13 +1134,13 @@ export function App() {
   }
 
   async function simplify() {
-    if (!selectedAsset) return;
+    if (!selectedAsset || !canSimplify) return;
     invalidateHistoryRequests();
     setBusy(true);
     setReportJob(null);
     setComparisonPair(null);
     try {
-      const nextJob = await api.createSimplifyJob(selectedAsset.id, Math.max(1, Math.floor(targetTriangles)), maxError);
+      const nextJob = await api.createSimplifyJob(selectedAsset.id, targetTriangles, maxError);
       setJob(nextJob);
       notify('info', `Mesh simplification ${nextJob.state === 'queued' ? 'queued' : 'started'}.`);
     } catch (cause) {
@@ -1313,7 +1314,11 @@ export function App() {
   }
 
   const triangleCount = Number(selectedAsset?.metadata.triangles ?? 0);
-  const canSimplify = !!selectedAsset && selectedAsset.kind === 'mesh' && !!operations.find((operation) => operation.id === 'mesh.simplify')?.implemented;
+  const triangleInputMax = triangleCount ? Math.min(10_000_000, triangleCount - 1) : 10_000_000;
+  const triangleSliderMax = Math.max(2, triangleCount ? triangleInputMax : 20_000);
+  const validTriangleLimit = Number.isInteger(targetTriangles) && targetTriangles >= 1 && targetTriangles <= triangleInputMax;
+  const canSimplify = selectedAsset?.kind === 'mesh' && validTriangleLimit
+    && operations.some(operation => operation.id === 'mesh.simplify' && operation.implemented);
   const canGenerate = !!operations.find((operation) => operation.id === 'model.generate')?.implemented
     && selectedGenerationProfile !== undefined;
   const isComparingResult = selectedComparisonPair
@@ -1381,14 +1386,23 @@ export function App() {
       {openInspector === 'optimize' && <div className="grid gap-4 p-4 text-xs/relaxed">
         <Field>
           <div className="flex items-center gap-1">
-            <FieldLabel htmlFor="triangle-target">Triangle target</FieldLabel>
-            <HelpTip label="About the triangle target">The target is approximate. Optimization keeps the original GLB and preserves UV and material references.</HelpTip>
+            <FieldLabel htmlFor="triangle-target">Triangle limit</FieldLabel>
+            <HelpTip label="About the triangle limit">Set a limit below the source triangle count. If the result cannot meet that limit, no result is saved.</HelpTip>
           </div>
-          <Input id="triangle-target" type="number" min="1" max="10000000" step="1" value={targetTriangles} onChange={(event) => setTargetTriangles(Number(event.target.value))} disabled={!hasSelectedMesh || isRunning || busy} />
+          <Input id="triangle-target" type="number" min="1" max={Math.max(1, triangleInputMax)} step="1" value={targetTriangles}
+            aria-invalid={hasSelectedMesh && !validTriangleLimit} aria-describedby={hasSelectedMesh && !validTriangleLimit ? 'triangle-limit-description' : undefined}
+            onChange={(event) => setTargetTriangles(Number(event.target.value))} disabled={!hasSelectedMesh || triangleInputMax < 1 || isRunning || busy} />
+          {hasSelectedMesh && !validTriangleLimit && <FieldDescription id="triangle-limit-description">
+            {triangleInputMax < 1 ? 'This mesh already has one triangle.'
+              : triangleInputMax === 1 ? 'Enter 1 as the triangle limit.'
+              : `Enter a whole number from 1 to ${triangleInputMax.toLocaleString()}.`}
+          </FieldDescription>}
         </Field>
         <div className="flex items-center gap-2 text-muted-foreground [&>span]:shrink-0">
           <span>Smaller</span>
-          <Slider className="min-w-0 flex-1" aria-label="Triangle target" min={1} max={Math.max(4, triangleCount || 20000)} step={1} value={[Math.max(1, Math.min(targetTriangles, Math.max(4, triangleCount || 20000)))]} onValueChange={([value]) => setTargetTriangles(value)} disabled={!hasSelectedMesh || isRunning || busy} />
+          <Slider className="min-w-0 flex-1" aria-label="Triangle limit" min={1} max={triangleSliderMax} step={1}
+            value={[Math.max(1, Math.min(targetTriangles, triangleSliderMax))]} onValueChange={([value]) => setTargetTriangles(value)}
+            disabled={!hasSelectedMesh || triangleInputMax <= 1 || isRunning || busy} />
           <span>More detail</span>
         </div>
         <Accordion type="single" collapsible>
@@ -1398,7 +1412,7 @@ export function App() {
               <div className="grid gap-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1"><span>Error tolerance</span>
-                    <HelpTip label="About error tolerance">Lower tolerance protects the shape but may keep more triangles than requested.</HelpTip>
+                    <HelpTip label="About error tolerance">Lower tolerance protects the shape but may prevent the mesh from reaching the triangle limit. The limit is never exceeded.</HelpTip>
                   </div>
                   <span className="font-mono tabular-nums">{maxError.toFixed(3)}</span>
                 </div>
@@ -1480,6 +1494,9 @@ export function App() {
 
       {meshTool && <section className="grid gap-4 p-4 text-xs/relaxed" aria-label={meshTool.title}>
         <p className="text-muted-foreground">{meshTool.description}</p>
+        {isRetopology && !meshToolAvailable && quadriflowBackend && (
+          <p className="text-muted-foreground">{quadriflowBackend.message}</p>
+        )}
         <div className="grid gap-2">
           {isRetopology && <>
             <Field>

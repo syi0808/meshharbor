@@ -679,21 +679,22 @@ test('operation result cards expose operation-specific metrics and every report 
     {
       operation: 'mesh.simplify',
       report: {
-        triangles_before: 100, triangles_after: 60, target_triangles: 55,
+        triangles_before: 100, triangles_after: 55, target_triangles: 55,
         geometric_error: 0.0123, optimized_primitives: 2, preserved: ['positions'],
         warnings: ['Simplification note.', '<b>warning-looking markup</b>'],
       },
-      labels: ['Triangles before', 'Triangles after', 'Target triangles', 'Geometric error', 'Optimized primitives'],
+      labels: ['Triangles before', 'Triangles after', 'Triangle limit', 'Geometric error', 'Optimized primitives'],
       expectedWarnings: ['Simplification note.', '<b>warning-looking markup</b>'],
     },
     {
       operation: 'mesh.cleanup',
       report: {
-        triangles_before: 100, triangles_after: 95, repeated_index_triangles_removed: 1,
-        zero_area_triangles_removed: 2, duplicate_triangles_removed: 2, modified_primitives: 1,
+        triangles_before: 100, triangles_after: 90, repeated_index_triangles_removed: 1,
+        zero_area_triangles_removed: 2, duplicate_triangles_removed: 2, simplified_triangles_removed: 5,
+        modified_primitives: 1,
         preserved: ['materials'], warnings: ['Cleanup warning.'],
       },
-      labels: ['Repeated-index triangles removed', 'Zero-area triangles removed', 'Duplicate triangles removed', 'Modified primitives'],
+      labels: ['Repeated-index triangles removed', 'Zero-area triangles removed', 'Duplicate triangles removed', 'Triangles removed by simplification', 'Modified primitives'],
       expectedWarnings: ['Cleanup warning.'],
     },
     {
