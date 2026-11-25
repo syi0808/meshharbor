@@ -9,6 +9,7 @@ mod generation;
 mod generation_catalog;
 mod generation_tuning;
 mod generation_views;
+mod geosam2_install;
 mod glb;
 mod huggingface_access;
 mod huggingface_browser;

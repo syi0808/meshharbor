@@ -811,6 +811,10 @@ export function App() {
             setOperations(operationList);
             notify('success', latest.operation === 'runtime.models.install'
               ? 'Model installed and ready for offline generation.'
+              : latest.operation === 'runtime.geosam2.install_backend'
+              ? 'GeoSAM2 backend installed for the command-line prototype.'
+              : latest.operation === 'runtime.geosam2.download_weights'
+              ? 'GeoSAM2 weights downloaded and verified.'
               : latest.operation === 'runtime.pixal3d.setup'
               ? 'The isolated Python environment is ready. Connect Hugging Face in Settings before downloading model files.'
               : latest.operation === 'runtime.pixal3d.install_models'
@@ -1194,6 +1198,8 @@ export function App() {
     try {
       const cuda = backend === 'pixal3d-cuda';
       const nextJob = action === 'install' || action === 'install-gated' ? await api.installCatalogModel(backend, action === 'install-gated')
+        : action === 'repart-backend' || action === 'repart-weights'
+        ? await api.installRepartComponent(backend, action === 'repart-backend' ? 'backend' : 'weights')
         : action === 'multiview' ? await api.installPixal3dMultiview() : action === 'setup'
         ? await (cuda ? api.setupPixal3dCudaRuntime() : api.setupPixal3dRuntime())
         : action === 'download'
@@ -1939,6 +1945,8 @@ function studioOperationLabel(operation: string): string {
     case 'runtime.pixal3d.cuda_install_multiview': return 'Install multiview weights';
     case 'runtime.pixal3d.convert_naf': return 'Convert NAF checkpoint';
     case 'runtime.models.install': return 'Install model';
+    case 'runtime.geosam2.install_backend': return 'Install GeoSAM2 backend';
+    case 'runtime.geosam2.download_weights': return 'Download GeoSAM2 weights';
     default: return meshOperationOptions.find(tool => tool.id === operation)?.title ?? operation;
   }
 }

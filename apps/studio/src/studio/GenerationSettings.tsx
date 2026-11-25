@@ -12,6 +12,7 @@ type Draft = Record<string, string>;
 export function readyGenerationProfiles(runtime: RuntimeInfo | null): GenerationModel[] {
   const preferred = runtime?.platform === 'linux' ? 'pixal3d-cuda' : 'pixal3d-mlx';
   return (runtime?.model_catalog ?? []).flatMap(model => {
+    if (model.category === 'repart') return [];
     const backends = (runtime?.model_backends ?? []).filter(backend =>
       model.backend_ids.includes(backend.id) && backend.ready && backend.generation?.id === backend.id);
     const selected = backends.find(backend => backend.id === preferred) ?? backends[0];

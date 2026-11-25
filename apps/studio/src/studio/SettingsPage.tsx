@@ -28,13 +28,19 @@ import { runtimeSetupStage } from './workbench-state';
 import type { StudioTheme } from './theme';
 
 const sections = {
-  models: { title: 'Models', icon: CubeIcon, description: 'Install models and manage local files for generation.' },
+  models: { title: 'Models', icon: CubeIcon, description: 'Install models and manage local files for generation and mesh separation.' },
   connections: { title: 'Connections', icon: KeyIcon, description: 'Manage sign-in.' },
   preferences: { title: 'Preferences', icon: PaintBrushIcon, description: 'Customize Studio.' },
 };
 
 export type SettingsSection = keyof typeof sections;
-export type RuntimeAction = 'setup' | 'download' | 'convert' | 'multiview' | 'install' | 'install-gated';
+type RepartAction = 'repart-backend' | 'repart-weights';
+export type RuntimeAction = 'setup' | 'download' | 'convert' | 'multiview' | 'install' | 'install-gated' | RepartAction;
+
+const modelCategories = [
+  { id: 'generation', title: '3D Generation', empty: 'No generation models reported by the local engine.' },
+  { id: 'repart', title: 'Repart', empty: 'No mesh separation models reported by the local engine.' },
+] as const;
 
 const sectionIds: SettingsSection[] = ['models', 'connections', 'preferences'];
 const accelerators = {
@@ -304,56 +310,66 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
           {connection === 'disconnected' && <AlertDescription>Start <code>meshharbor serve</code> to connect.</AlertDescription>}
           <Button disabled={connection === 'connecting'} onClick={onReconnect}>Retry connection</Button>
         </Alert> : <>
-          {section === 'models' && (runtime?.model_catalog ?? []).map(model => <Card key={model.id}>
-            <CardHeader>
-              <CardTitle className="flex flex-wrap items-center gap-2 text-lg">
-                <h2>{model.title}</h2>
-                {(['image', 'text'] as const).filter(mode => runtime?.model_backends.some(backend =>
-                  model.backend_ids.includes(backend.id) && (backend.generation?.input_modes ?? ['image']).includes(mode)
-                )).map(mode => <Badge key={mode} variant="outline">{mode === 'image' ? 'Image to 3D' : 'Text to 3D'}</Badge>)}
-                {model.status === 'experimental_opt_in' && <Badge variant="outline">Experimental</Badge>}
-              </CardTitle>
-              <CardDescription>Output: {model.output === 'geometry_glb' ? 'geometry-only GLB' : 'textured GLB'}</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-3 lg:grid-cols-2">
-              {(['mlx', 'cuda'] as const).map(kind => {
-                const id = model.backend_ids.find(candidate => candidate.endsWith(`-${kind}`)) as RuntimeBackendId | undefined;
-                const backend = runtime?.model_backends.find(item => item.id === id);
-                if (!id || !backend) return null;
-                const label = `${model.title} · ${accelerators[kind].title}`;
-                const authBackend: RuntimeBackendId = `pixal3d-${kind}`;
-                const access = runtime?.model_backends.find(item => item.id === authBackend)?.huggingface?.model_access;
-                const dino = {
-                  status: access ?? 'unavailable' as const,
-                  onRecheck: () => recheckModelAccess(authBackend),
-                  onConnections: () => onVisit('connections', authBackend),
-                };
-                const modelPaths = backend.ready || backend.models_downloaded
-                  ? backend.model_paths ?? (backend.runtime_root ? [backend.runtime_root] : [])
-                  : [];
-                return <Card key={id} role="article" aria-label={label} size="sm" className="min-w-0 bg-background">
-                  <CardHeader>
-                    <CardTitle className="min-w-0"><h3 id={`runtime-${id}`} tabIndex={-1} className="outline-none">{accelerators[kind].title}</h3></CardTitle>
-                    <CardDescription>{accelerators[kind].platform}</CardDescription>
-                    <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend)}</Badge></CardAction>
-                  </CardHeader>
-                  <CardContent className="grid gap-3">
-                    {modelPaths.length > 0 && <ModelFileLocations paths={modelPaths} />}
-                    {backend.managed_install
-                      ? <CatalogInstall label={label} backend={backend} disabled={disabled} dino={dino}
-                          onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />
-                      : <PixalModelFiles label={label} backend={backend} id={id} disabled={disabled} dino={dino}
-                          onAction={action => onRuntimeAction(id, action)} />}
-                  </CardContent>
-                  <RuntimeActions api={api} id={id} backend={backend} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
-                    action={backend.local_files?.remove_models_available && <Button variant="destructive" size="sm" onClick={event => openRemoval(id, 'model-files', event.currentTarget, label)} disabled={disabled}>
-                      <TrashIcon aria-hidden="true" /> Delete model files
-                    </Button>} />
-                </Card>;
-              })}
-            </CardContent>
-          </Card>)}
-          {section === 'models' && !runtime?.model_catalog?.length && <Empty><EmptyHeader><EmptyDescription>No generation models reported by the local engine.</EmptyDescription></EmptyHeader></Empty>}
+          {section === 'models' && modelCategories.map(category => {
+            const models = (runtime?.model_catalog ?? []).filter(model => (model.category ?? 'generation') === category.id);
+            const repart = category.id === 'repart';
+            return <section key={category.id} aria-labelledby={`models-${category.id}`} className="grid min-w-0 gap-3">
+              <h2 id={`models-${category.id}`} className="text-base font-semibold">{category.title}</h2>
+              {!models.length && <Empty><EmptyHeader><EmptyDescription>{category.empty}</EmptyDescription></EmptyHeader></Empty>}
+              {models.map(model => <Card key={model.id}>
+                <CardHeader>
+                  <CardTitle className="flex flex-wrap items-center gap-2 text-lg">
+                    <h3>{model.title}</h3>
+                    {!repart && (['image', 'text'] as const).filter(mode => runtime?.model_backends.some(backend =>
+                      model.backend_ids.includes(backend.id) && (backend.generation?.input_modes ?? ['image']).includes(mode)
+                    )).map(mode => <Badge key={mode} variant="outline">{mode === 'image' ? 'Image to 3D' : 'Text to 3D'}</Badge>)}
+                    {model.status === 'experimental_opt_in' && <Badge variant="outline">Experimental</Badge>}
+                  </CardTitle>
+                  <CardDescription>{repart
+                    ? 'Guided mesh separation. These files are for the command-line prototype; Studio does not run Repart yet.'
+                    : `Output: ${model.output === 'geometry_glb' ? 'geometry-only GLB' : 'textured GLB'}`}</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-3 lg:grid-cols-2">
+                  {(['mlx', 'cuda'] as const).map(kind => {
+                    const id = model.backend_ids.find(candidate => candidate.endsWith(`-${kind}`)) as RuntimeBackendId | undefined;
+                    const backend = runtime?.model_backends.find(item => item.id === id);
+                    if (!id || !backend) return null;
+                    const label = `${model.title} · ${accelerators[kind].title}`;
+                    const authBackend: RuntimeBackendId = `pixal3d-${kind}`;
+                    const access = runtime?.model_backends.find(item => item.id === authBackend)?.huggingface?.model_access;
+                    const dino = {
+                      status: access ?? 'unavailable' as const,
+                      onRecheck: () => recheckModelAccess(authBackend),
+                      onConnections: () => onVisit('connections', authBackend),
+                    };
+                    const modelPaths = backend.ready || backend.models_downloaded
+                      ? backend.model_paths ?? (backend.runtime_root ? [backend.runtime_root] : [])
+                      : [];
+                    return <Card key={id} role="article" aria-label={label} size="sm" className="min-w-0 bg-background">
+                      <CardHeader>
+                        <CardTitle className="min-w-0"><h4 id={`runtime-${id}`} tabIndex={-1} className="outline-none">{accelerators[kind].title}</h4></CardTitle>
+                        <CardDescription>{accelerators[kind].platform}</CardDescription>
+                        <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend, repart)}</Badge></CardAction>
+                      </CardHeader>
+                      <CardContent className="grid gap-3">
+                        {modelPaths.length > 0 && <ModelFileLocations paths={modelPaths} />}
+                        {repart ? <RepartInstall label={label} backend={backend} disabled={disabled} onAction={action => onRuntimeAction(id, action)} />
+                          : backend.managed_install
+                          ? <CatalogInstall label={label} backend={backend} disabled={disabled} dino={dino}
+                              onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />
+                          : <PixalModelFiles label={label} backend={backend} id={id} disabled={disabled} dino={dino}
+                              onAction={action => onRuntimeAction(id, action)} />}
+                      </CardContent>
+                      <RuntimeActions api={api} id={id} backend={backend} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
+                        action={backend.local_files?.remove_models_available && <Button variant="destructive" size="sm" onClick={event => openRemoval(id, 'model-files', event.currentTarget, label)} disabled={disabled}>
+                          <TrashIcon aria-hidden="true" /> Delete model files
+                        </Button>} />
+                    </Card>;
+                  })}
+                </CardContent>
+              </Card>)}
+            </section>;
+          })}
           {section === 'connections' && (connectionBackend ? <HuggingFaceConnection key={connectionId}
             backend={connectionBackend} account={checkingAccount ? 'checking' : connectionBackend.huggingface?.account} disabled={disabled}
             browserSession={browserLogin?.backend === connectionId && browserActive ? browserLogin.session : null}
@@ -376,6 +392,8 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
           <AlertDialogTitle>{removal?.scope === 'huggingface' ? 'Disconnect Hugging Face?' : 'Remove model files?'}</AlertDialogTitle>
           <AlertDialogDescription>{removal && (removal.scope === 'huggingface'
             ? 'Remove saved local credentials. Your Hugging Face token and downloaded models stay intact.'
+            : removal.backend.startsWith('geosam2-')
+            ? 'Remove the GeoSAM2 weights shared by MLX and CUDA. The installed backends and your assets stay intact.'
             : `Remove managed weights and caches for ${removal.label}. Your environment, sign-in, and assets stay intact.`)}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -390,7 +408,11 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
   </div>;
 }
 
-function profileStatus(backend: Backend) {
+function profileStatus(backend: Backend, repart: boolean) {
+  if (repart) {
+    if (!backend.installable) return 'Not supported here';
+    return backend.environment_ready && backend.models_downloaded ? 'Files installed' : 'Available to install';
+  }
   if (backend.ready) return 'Ready';
   if (!backend.installable) return 'Not supported here';
   if (!backend.managed_install && !backend.environment_ready) return 'Setup required';
@@ -533,6 +555,29 @@ function CatalogInstall({ label, backend, dino, disabled, onInstall }: {
     {backend.license_notice && <p className="text-muted-foreground">{backend.license_notice}</p>}
     {backend.source && <a className="text-primary underline underline-offset-4" href={`${backend.source.repository}/tree/${backend.source.revision}`} target="_blank" rel="noreferrer">Review upstream source and terms</a>}
   </ModelInstallDialog>;
+}
+
+function RepartInstall({ label, backend, disabled, onAction }: {
+  label: string; backend: Backend; disabled: boolean; onAction: (action: RepartAction) => void;
+}) {
+  if (!backend.installable) return null;
+  return <div className="grid gap-3">
+    {backend.environment_ready ? <span className="text-muted-foreground">Backend installed</span>
+      : <ModelInstallDialog label={label} action="Install GeoSAM2 backend"
+          description="Downloads the runtime source and sets up a private Python environment. Model weights are downloaded separately."
+          consentLabel="I reviewed the upstream terms and approve backend installation."
+          disabled={disabled} onConfirm={() => onAction('repart-backend')}>
+          <a className="text-primary underline underline-offset-4" href="https://github.com/VAST-AI-Research/GeoSAM2" target="_blank" rel="noreferrer">Review GeoSAM2 source and terms</a>
+          {backend.id.endsWith('-mlx') && <a className="text-primary underline underline-offset-4" href="https://github.com/eisneim/sam2.1_mlx" target="_blank" rel="noreferrer">Review SAM2.1 MLX source and terms</a>}
+        </ModelInstallDialog>}
+    {backend.models_downloaded ? <span className="text-muted-foreground">Weights downloaded</span>
+      : <ModelInstallDialog label={label} action="Download GeoSAM2 weights"
+          description="Downloads one shared 616 MB checkpoint for MLX and CUDA. Hugging Face sign-in is not required."
+          consentLabel="I reviewed the model terms and approve the download."
+          disabled={disabled} onConfirm={() => onAction('repart-weights')}>
+          <a className="text-primary underline underline-offset-4" href="https://huggingface.co/VAST-AI/GeoSAM2" target="_blank" rel="noreferrer">Review GeoSAM2 model terms</a>
+        </ModelInstallDialog>}
+  </div>;
 }
 
 const accessMessages: Record<AccessStatus, string> = {

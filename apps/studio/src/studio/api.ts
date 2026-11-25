@@ -228,8 +228,10 @@ export function isJobCancellable(job: Job | null): boolean {
 
 export function isJobRetryable(job: Job): boolean {
   if (job.operation === 'mesh.separate_parts') return false;
+  const requiresBackend = job.operation === 'runtime.models.install'
+    || job.operation === 'runtime.geosam2.install_backend' || job.operation === 'runtime.geosam2.download_weights';
   return (job.state === 'failed' || job.state === 'cancelled') && (
-    Boolean(job.input_asset_id) || (job.operation === 'runtime.models.install' ? typeof job.parameters?.backend_id === 'string'
+    Boolean(job.input_asset_id) || (requiresBackend ? typeof job.parameters?.backend_id === 'string'
       : job.operation.startsWith('runtime.pixal3d.'))
   );
 }
@@ -696,6 +698,13 @@ export class MeshHarborApi {
     return this.request(`/api/v1/runtime/${backend}/install`, {
       method: 'POST',
       body: JSON.stringify({ confirmed: true, confirm_gated_access: gated }),
+    });
+  }
+
+  installRepartComponent(backend: RuntimeBackendId, component: 'backend' | 'weights'): Promise<Job> {
+    return this.request(`/api/v1/runtime/${backend}/repart/${component}`, {
+      method: 'POST',
+      body: JSON.stringify({ confirmed: true }),
     });
   }
 

@@ -124,6 +124,10 @@ pub(crate) fn managed_directory(root: &Path, relative: &str) -> CoreResult<bool>
     Ok(inspect_entry(&fs::canonicalize(root)?, relative.split('/'), Directory)?.is_some())
 }
 
+pub(crate) fn managed_file_size(root: &Path, relative: &str) -> CoreResult<Option<u64>> {
+    Ok(inspect_entry(&fs::canonicalize(root)?, relative.split('/'), File)?.map(|entry| entry.size))
+}
+
 pub(crate) fn model_path(path: PathBuf) -> PathBuf {
     std::path::absolute(&path).unwrap_or(path)
 }

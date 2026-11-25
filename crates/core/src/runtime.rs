@@ -39,6 +39,8 @@ pub enum RuntimeJobKind {
     CudaInstallModels,
     CudaInstallMultiview,
     InstallCatalogModel(&'static str),
+    GeoSam2Backend(&'static str),
+    GeoSam2Weights(&'static str),
 }
 
 impl RuntimeJobKind {
@@ -51,6 +53,8 @@ impl RuntimeJobKind {
             Self::CudaInstallModels => "runtime.pixal3d.cuda_install_models",
             Self::CudaInstallMultiview => "runtime.pixal3d.cuda_install_multiview",
             Self::InstallCatalogModel(_) => "runtime.models.install",
+            Self::GeoSam2Backend(_) => "runtime.geosam2.install_backend",
+            Self::GeoSam2Weights(_) => "runtime.geosam2.download_weights",
         }
     }
 
@@ -60,7 +64,9 @@ impl RuntimeJobKind {
             Self::CudaSetup | Self::CudaInstallModels | Self::CudaInstallMultiview => {
                 "pixal3d-cuda"
             }
-            Self::InstallCatalogModel(backend) => backend,
+            Self::InstallCatalogModel(backend)
+            | Self::GeoSam2Backend(backend)
+            | Self::GeoSam2Weights(backend) => backend,
         }
     }
 }

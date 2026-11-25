@@ -217,11 +217,7 @@ impl ExternalProfile {
         }
         fs::create_dir_all(runtime.join("home"))?;
         let uv = ensure_uv_tracked(&root, execution)?;
-        let installer = Installer {
-            runtime: &runtime,
-            uv: &uv,
-            execution,
-        };
+        let installer = Installer::new(&runtime, &uv, execution);
         let version = if matches!(self.id, "triposg-mlx" | TRELLIS_TEXT_MLX_ID) {
             "3.12"
         } else {
@@ -418,14 +414,22 @@ mod tests {
     }
 }
 
-struct Installer<'a> {
+pub(crate) struct Installer<'a> {
     runtime: &'a Path,
     uv: &'a Path,
     execution: JobExecution<'a>,
 }
 
-impl Installer<'_> {
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
+impl<'a> Installer<'a> {
+    pub(crate) fn new(runtime: &'a Path, uv: &'a Path, execution: JobExecution<'a>) -> Self {
+        Self {
+            runtime,
+            uv,
+            execution,
+        }
+    }
+
+    pub(crate) fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let home = self.runtime.join("home");
         let bin = self.runtime.join(".venv/bin");
         let mut command = Command::new(program);
@@ -461,7 +465,7 @@ impl Installer<'_> {
         command
     }
 
-    fn checkout(
+    pub(crate) fn checkout(
         &self,
         path: &Path,
         repo: &str,
@@ -508,7 +512,7 @@ impl Installer<'_> {
         Ok(())
     }
 
-    fn venv(&self, destination: &Path, version: &str) -> CoreResult<()> {
+    pub(crate) fn venv(&self, destination: &Path, version: &str) -> CoreResult<()> {
         let mut command = self.command(self.uv);
         command
             .args([
@@ -524,7 +528,7 @@ impl Installer<'_> {
             .visible(command, "Could not prepare managed Python")
     }
 
-    fn pip(&self, python: &Path, args: &[&str]) -> CoreResult<()> {
+    pub(crate) fn pip(&self, python: &Path, args: &[&str]) -> CoreResult<()> {
         let mut command = self.command(self.uv);
         command
             .args(["pip", "install", "--python"])

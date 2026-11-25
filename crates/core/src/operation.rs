@@ -9,8 +9,8 @@ use crate::{
     MODEL_GENERATION_OPERATION, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dProfile,
     Pixal3dRuntimeManager, QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport,
     SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb, external_generation,
-    inspect_asset, install_bundled_quadriflow_sidecar, job_execution::JobExecution,
-    model_storage::model_path, optimize_render_glb, simplify_glb,
+    geosam2_install, inspect_asset, install_bundled_quadriflow_sidecar,
+    job_execution::JobExecution, model_storage::model_path, optimize_render_glb, simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,6 +451,12 @@ impl OperationCore {
                     .ok_or_else(|| CoreError::InvalidInput("Unknown generation backend.".into()))?
                     .install(root, execution);
             }
+            RuntimeJobKind::GeoSam2Backend(backend) => {
+                return geosam2_profile(backend)?.install_backend(root, execution);
+            }
+            RuntimeJobKind::GeoSam2Weights(backend) => {
+                return geosam2_profile(backend)?.install_weights(root, execution);
+            }
         }?;
         Ok(serde_json::to_value(report)?)
     }
@@ -479,8 +485,26 @@ impl OperationCore {
         Ok(crate::RuntimeJobKind::InstallCatalogModel(profile.id))
     }
 
+    pub fn geosam2_install_job(
+        &self,
+        backend: &str,
+        component: &str,
+    ) -> CoreResult<crate::RuntimeJobKind> {
+        let profile = geosam2_profile(backend)?;
+        let kind = match component {
+            "backend" => crate::RuntimeJobKind::GeoSam2Backend(profile.id()),
+            "weights" => crate::RuntimeJobKind::GeoSam2Weights(profile.id()),
+            _ => return Err(CoreError::InvalidInput("Unknown GeoSAM2 component.".into())),
+        };
+        profile.require_supported(self.store.root())?;
+        Ok(kind)
+    }
+
     pub fn remove_model_files(&self, backend: &str) -> CoreResult<()> {
         let root = self.store.root();
+        if geosam2_install::Profile::find(backend).is_some() {
+            return geosam2_install::remove_weights(root);
+        }
         if let Some(profile) = external_generation::ExternalProfile::find(backend) {
             return profile.remove_models(root);
         }
@@ -653,6 +677,11 @@ impl OperationCore {
                 .iter()
                 .map(|profile| profile.status(self.store.root(), cuda_supported)),
         );
+        model_backends.extend(
+            geosam2_install::PROFILES
+                .into_iter()
+                .map(|profile| profile.status(self.store.root(), cuda_supported)),
+        );
         let pixal3d: Value =
             serde_json::from_str(include_str!("../../../registry/models/pixal3d.json"))
                 .expect("bundled Pixal3D registry must be valid JSON");
@@ -673,20 +702,25 @@ impl OperationCore {
                     "id": pixal3d["id"],
                     "title": pixal3d["title"],
                     "status": pixal3d["status"],
+                    "category": "generation",
                     "backend_ids": pixal3d_backends,
                 }),
                 json!({
                     "id": "trellis2", "title": "TRELLIS.2", "status": "experimental_opt_in",
-                    "backend_ids": ["trellis2-mlx", "trellis2-cuda"], "output": "textured_glb",
+                    "category": "generation", "backend_ids": ["trellis2-mlx", "trellis2-cuda"], "output": "textured_glb",
                 }),
                 json!({
                     "id": "triposg", "title": "TripoSG", "status": "experimental_opt_in",
-                    "backend_ids": ["triposg-mlx", "triposg-cuda"], "output": "geometry_glb",
+                    "category": "generation", "backend_ids": ["triposg-mlx", "triposg-cuda"], "output": "geometry_glb",
                 }),
                 json!({
                     "id": "trellis-text", "title": "TRELLIS Text Large", "status": "experimental_opt_in",
                     "backend_ids": [external_generation::TRELLIS_TEXT_MLX_ID, external_generation::TRELLIS_TEXT_CUDA_ID],
-                    "output": "geometry_glb",
+                    "category": "generation", "output": "geometry_glb",
+                }),
+                json!({
+                    "id": "geosam2", "title": "GeoSAM2", "status": "experimental_opt_in",
+                    "category": "repart", "backend_ids": geosam2_install::PROFILES.map(geosam2_install::Profile::id),
                 }),
             ],
             quadriflow_backend: self.quadriflow_backend_status(),
@@ -696,10 +730,16 @@ impl OperationCore {
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
                 "TRELLIS Text, TRELLIS.2, and TripoSG are opt-in installs in Studio. The engine provisions an isolated environment and downloads pinned snapshots after explicit consent. Existing operator-provisioned runtimes are kept separately; readiness does not prove license compliance, memory fit, or inference quality.".into(),
+                "GeoSAM2 provides opt-in, independent backend and shared checkpoint installs for the guided repart prototype. Installed files do not enable a repart operation in Studio.".into(),
                 "MeshHarbor's MIT license covers its own code. Third-party runtime and model terms, including DINOv3 and NAF, remain separate; gated access is user-controlled. See THIRD-PARTY-NOTICES.md.".into(),
             ],
         }
     }
+}
+
+fn geosam2_profile(backend: &str) -> CoreResult<geosam2_install::Profile> {
+    geosam2_install::Profile::find(backend)
+        .ok_or_else(|| CoreError::InvalidInput("Unknown repart backend.".into()))
 }
 
 #[derive(Debug, Deserialize)]

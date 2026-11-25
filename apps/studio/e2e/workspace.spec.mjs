@@ -173,6 +173,86 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   await expect(cuda.getByRole('button', { name: 'Recent logs' })).toHaveCount(0);
 });
 
+test('Repart keeps GeoSAM2 backend and weights as independent installs', async ({ page, studioOrigin }) => {
+  const requested = [];
+  const saved = {};
+  const checkpoint = '/local/runtimes/geosam2-managed/weights/geosam2.pt';
+  const runtime = () => ({
+    platform: 'macos',
+    model_catalog: [
+      { id: 'pixal3d', title: 'Pixal3D', category: 'generation', backend_ids: ['pixal3d-mlx'] },
+      { id: 'geosam2', title: 'GeoSAM2', category: 'repart', backend_ids: ['geosam2-mlx', 'geosam2-cuda'], status: 'experimental_opt_in' },
+    ],
+    model_backends: [
+      { id: 'pixal3d-mlx', installable: false },
+      { id: 'geosam2-mlx', ready: false, installable: true, environment_ready: Boolean(saved.backend),
+        models_downloaded: Boolean(saved.weights), model_paths: saved.weights ? [checkpoint] : [],
+        local_files: { remove_models_available: Boolean(saved.weights) } },
+      { id: 'geosam2-cuda', ready: false, installable: false },
+    ],
+  });
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: runtime() }));
+  await page.route('**/api/v1/runtime/geosam2-mlx/jobs', route => route.fulfill({ json: Object.values(saved) }));
+  for (const [component, operation] of [
+    ['weights', 'runtime.geosam2.download_weights'],
+    ['backend', 'runtime.geosam2.install_backend'],
+  ]) {
+    const job = { id: `geosam2-${component}-job`, operation, state: 'queued', progress: 0,
+      parameters: { backend_id: 'geosam2-mlx' }, created_at: '1', updated_at: '1' };
+    await page.route(`**/api/v1/runtime/geosam2-mlx/repart/${component}`, route => {
+      expect(route.request().method()).toBe('POST');
+      expect(route.request().postDataJSON()).toEqual({ confirmed: true });
+      requested.push(component);
+      return route.fulfill({ status: 202, json: job });
+    });
+    await page.route(`**/api/v1/jobs/${job.id}`, route => {
+      saved[component] = { ...job, state: 'succeeded', progress: 100, updated_at: '2' };
+      return route.fulfill({ json: saved[component] });
+    });
+  }
+  await page.goto(studioOrigin + '/settings/models');
+  const generation = page.getByRole('region', { name: '3D Generation' });
+  const repart = page.getByRole('region', { name: 'Repart', exact: true });
+  await expect(generation.getByRole('heading', { name: 'Pixal3D' })).toBeVisible();
+  await expect(generation.getByRole('heading', { name: 'GeoSAM2' })).toHaveCount(0);
+  await expect(repart.getByRole('heading', { name: 'GeoSAM2' })).toBeVisible();
+  await expect(repart.getByText('Image to 3D')).toHaveCount(0);
+  await expect(repart.getByText(/Studio does not run Repart yet/)).toBeVisible();
+  const mlx = repart.getByRole('article', { name: 'GeoSAM2 · Apple MLX' });
+  const cuda = repart.getByRole('article', { name: 'GeoSAM2 · NVIDIA CUDA' });
+  await expect(cuda.getByText('Not supported here')).toBeVisible();
+  await expect(cuda.getByRole('button', { name: /GeoSAM2/ })).toHaveCount(0);
+  const weights = mlx.getByRole('button', { name: 'Download GeoSAM2 weights' });
+  const backend = mlx.getByRole('button', { name: 'Install GeoSAM2 backend' });
+  await expect(backend).toBeEnabled();
+  await weights.click();
+  const downloadDialog = page.getByRole('alertdialog', { name: 'Download GeoSAM2 weights?' });
+  const confirmDownload = downloadDialog.getByRole('button', { name: 'Download GeoSAM2 weights' });
+  await expect(downloadDialog).toContainText('616 MB');
+  await expect(confirmDownload).toBeDisabled();
+  expect(requested).toEqual([]);
+  await downloadDialog.getByRole('checkbox').check();
+  await confirmDownload.click();
+  await expect(mlx.getByText('Weights downloaded')).toBeVisible();
+  await expect(mlx.locator('code')).toHaveText(checkpoint);
+  await expect(backend).toBeEnabled();
+  await expect(mlx.getByText('Files installed')).toHaveCount(0);
+  expect(requested).toEqual(['weights']);
+  await backend.click();
+  const backendDialog = page.getByRole('alertdialog', { name: 'Install GeoSAM2 backend?' });
+  const confirmBackend = backendDialog.getByRole('button', { name: 'Install GeoSAM2 backend' });
+  await expect(backendDialog).toContainText('Model weights are downloaded separately.');
+  await expect(confirmBackend).toBeDisabled();
+  await backendDialog.getByRole('checkbox').check();
+  await confirmBackend.click();
+  await expect(mlx.getByText('Backend installed')).toBeVisible();
+  await expect(mlx.getByText('Files installed')).toBeVisible();
+  await expect(mlx.getByText('Ready', { exact: true })).toHaveCount(0);
+  expect(requested).toEqual(['weights', 'backend']);
+  await mlx.getByRole('button', { name: 'Delete model files' }).click();
+  await expect(page.getByRole('alertdialog')).toContainText('weights shared by MLX and CUDA');
+});
+
 test('a gated catalog install reads server access state and supports an explicit recheck', async ({ page, studioOrigin }) => {
   let checks = 0;
   let modelAccess = 'access_denied';

@@ -1173,6 +1173,10 @@ fn api_router_with_statuses(
             "/api/v1/runtime/{backend}/install",
             post(api_start_catalog_install).layer(DefaultBodyLimit::max(1024)),
         )
+        .route(
+            "/api/v1/runtime/{backend}/repart/{component}",
+            post(api_start_repart_install).layer(DefaultBodyLimit::max(1024)),
+        )
         .route("/api/v1/runtime/{backend}/jobs", get(api_runtime_jobs))
         .route(
             "/api/v1/backends/quadriflow",
@@ -1320,6 +1324,7 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         && (path.ends_with("/huggingface")
             || path.ends_with("/model-files")
             || path.ends_with("/install")
+            || path.contains("/repart/")
             || path.ends_with("/model-access")
             || path.ends_with("/huggingface/browser")
             || path.contains("/huggingface/browser/"));
@@ -1627,6 +1632,28 @@ struct CatalogInstallConfirmation {
     confirmed: bool,
     #[serde(default)]
     confirm_gated_access: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepartInstallConfirmation {
+    confirmed: bool,
+}
+
+async fn api_start_repart_install(
+    State(state): State<AppState>,
+    Path((backend, component)): Path<(String, String)>,
+    Json(confirmation): Json<RepartInstallConfirmation>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    if !confirmation.confirmed {
+        return Err(CoreError::InvalidInput(
+            "Review the model or backend terms and confirm installation first.".into(),
+        )
+        .into());
+    }
+    let kind = state.core.geosam2_install_job(&backend, &component)?;
+    let job = start_runtime_job(state.core, state.scheduler, kind).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
 async fn api_start_catalog_install(
@@ -1988,6 +2015,17 @@ async fn api_retry_job(
                 CoreError::Conflict("This record has no saved runtime backend.".into())
             })?;
             Some(state.core.catalog_install_job(backend, true)?)
+        }
+        "runtime.geosam2.install_backend" | "runtime.geosam2.download_weights" => {
+            let backend = saved.parameters["backend_id"].as_str().ok_or_else(|| {
+                CoreError::Conflict("This record has no saved runtime backend.".into())
+            })?;
+            let component = if saved.operation == "runtime.geosam2.install_backend" {
+                "backend"
+            } else {
+                "weights"
+            };
+            Some(state.core.geosam2_install_job(backend, component)?)
         }
         _ => None,
     };
@@ -4263,6 +4301,99 @@ mod tests {
             assert_eq!(response.status(), expected);
         }
         assert!(core.store().list_jobs(20).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn repart_installs_require_studio_and_confirm_known_components() {
+        let root = std::env::temp_dir().join(format!("meshharbor-repart-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: Arc::new(JobScheduler::default()),
+            },
+            "private-test-token".into(),
+        );
+        for (path, confirmed, dashboard, expected) in [
+            (
+                "geosam2-mlx/repart/backend",
+                true,
+                false,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "geosam2-mlx/repart/weights",
+                true,
+                false,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "geosam2-mlx/repart/backend",
+                false,
+                true,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "geosam2-mlx/repart/weights",
+                false,
+                true,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "geosam2-mlx/repart/unknown",
+                true,
+                true,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "pixal3d-mlx/repart/backend",
+                true,
+                true,
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/runtime/{path}"))
+                .header(header::HOST, "127.0.0.1:7432")
+                .header(header::ORIGIN, "http://127.0.0.1:7432")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, "Bearer private-test-token");
+            if dashboard {
+                request = request.header("x-meshharbor-dashboard", "local-ui-v1");
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(json!({"confirmed": confirmed}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        assert!(core.store().list_jobs(20).unwrap().is_empty());
+        let doctor = core.runtime_doctor();
+        let repart = doctor
+            .model_catalog
+            .iter()
+            .find(|model| model["id"] == "geosam2")
+            .unwrap();
+        assert_eq!(repart["category"], "repart");
+        assert_eq!(
+            repart["backend_ids"],
+            json!(["geosam2-mlx", "geosam2-cuda"])
+        );
+        for backend in doctor
+            .model_backends
+            .iter()
+            .filter(|backend| backend["id"].as_str().unwrap().starts_with("geosam2-"))
+        {
+            assert_eq!(backend["ready"], false);
+            assert!(backend.get("generation").is_none());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
