@@ -1,6 +1,6 @@
 # Semantic repart feasibility
 
-**Decision:** prototype guided separation with GeoSAM2. It can label meaningful regions inside a single connected mesh, but a label is not a cut, a complete part, or a joint. No AI repart backend is shipped. The previous connected-component operation has been retired; its saved outputs and job history remain readable.
+**Decision:** prototype guided separation with GeoSAM2. It can label meaningful regions inside a single connected mesh, but a label is not a cut, a complete part, or a joint. The [source-checkout prototype](../runtimes/geosam2/README.md) exports a selected part and remainder; no AI repart operation is shipped in Studio. The previous connected-component operation has been retired; its saved outputs and job history remain readable.
 
 ## Candidates
 
