@@ -1539,7 +1539,8 @@ export function App() {
         ...meshOperationOptions.map(tool => ({ key: tool.id, label: tool.label ?? tool.title, icon: tool.icon })),
       ] as const).map(({ key, label, icon: Icon }) => (
         <SidebarMenuItem key={key}>
-          <SidebarMenuButton type="button" isActive={openInspector === key} aria-label={label} title={label}
+          <SidebarMenuButton type="button" isActive={openInspector === key} aria-label={label}
+            tooltip={{ children: label, hidden: false, sideOffset: 8 }}
             className="size-9 justify-center p-0 data-active:text-primary [&_svg]:size-5"
             aria-current={openInspector === key ? true : undefined} aria-controls="workbench-inspector"
             onClick={() => setInspector(key)}>
