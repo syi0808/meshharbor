@@ -191,7 +191,9 @@ enum JobsCommand {
 
 #[derive(Debug, Subcommand)]
 enum RuntimeCommand {
-    /// Install isolated Python 3.12 and pinned backend dependencies, bootstrapping pinned uv if needed.
+    /// Set up shared Python, uv, and Hugging Face account tools for model installs.
+    EnvironmentSetup,
+    /// Install pinned Pixal3D MLX backend dependencies using the shared environment.
     Setup,
     /// Sign into Hugging Face inside MeshHarbor's isolated model cache using an interactive terminal prompt.
     HfLogin,
@@ -1086,6 +1088,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _runtime_lock = acquire_runtime_write_lock(&root)?;
             let core = OperationCore::open(&root)?;
             match command {
+                RuntimeCommand::EnvironmentSetup => {
+                    let report = core.setup_model_environment()?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
                 RuntimeCommand::Setup => {
                     let report = core.setup_pixal3d_mlx_environment()?;
                     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1147,6 +1153,10 @@ fn api_router_with_statuses(
     Router::new()
         .route("/api/v1/health", get(api_health))
         .route("/api/v1/runtime", get(api_runtime))
+        .route(
+            "/api/v1/runtime/environment/setup",
+            post(api_start_model_environment).layer(DefaultBodyLimit::max(1024)),
+        )
         .route(
             "/api/v1/runtime/{backend}/huggingface/browser",
             post(browser_login::start),
@@ -1320,6 +1330,7 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         && (path.ends_with("/huggingface")
             || path.ends_with("/model-files")
             || path.ends_with("/install")
+            || path == "/api/v1/runtime/environment/setup"
             || path.ends_with("/model-access")
             || path.ends_with("/huggingface/browser")
             || path.contains("/huggingface/browser/"));
@@ -1627,6 +1638,31 @@ struct CatalogInstallConfirmation {
     confirmed: bool,
     #[serde(default)]
     confirm_gated_access: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvironmentSetupConfirmation {
+    confirmed: bool,
+}
+
+async fn api_start_model_environment(
+    State(state): State<AppState>,
+    Json(confirmation): Json<EnvironmentSetupConfirmation>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    if !confirmation.confirmed {
+        return Err(CoreError::InvalidInput(
+            "Confirm before setting up the shared environment.".into(),
+        )
+        .into());
+    }
+    let job = start_runtime_job(
+        state.core,
+        state.scheduler,
+        RuntimeJobKind::EnvironmentSetup,
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
 async fn api_start_catalog_install(
@@ -1977,6 +2013,7 @@ async fn api_retry_job(
         );
     }
     let kind = match saved.operation.as_str() {
+        "runtime.environment.setup" => Some(RuntimeJobKind::EnvironmentSetup),
         "runtime.pixal3d.setup" => Some(RuntimeJobKind::Setup),
         "runtime.pixal3d.install_models" => Some(RuntimeJobKind::InstallModels),
         "runtime.pixal3d.convert_naf" => Some(RuntimeJobKind::ConvertNaf),
@@ -2344,6 +2381,7 @@ async fn start_runtime_job(
     scheduler: Arc<JobScheduler>,
     kind: RuntimeJobKind,
 ) -> Result<meshharbor_core::Job, CoreError> {
+    core.validate_runtime_job(kind)?;
     let (job, reserved) = scheduler.submit(
         core.store(),
         kind.operation(),
@@ -4274,6 +4312,50 @@ mod tests {
             assert_eq!(response.status(), expected);
         }
         assert!(core.store().list_jobs(20).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn environment_setup_requires_studio_and_explicit_confirmation() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-environment-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: Arc::new(JobScheduler::default()),
+            },
+            "private-test-token".into(),
+        );
+        for (confirmed, dashboard, expected) in [
+            (true, false, StatusCode::UNAUTHORIZED),
+            (false, true, StatusCode::BAD_REQUEST),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/runtime/environment/setup")
+                .header(header::HOST, "127.0.0.1:7432")
+                .header(header::ORIGIN, "http://127.0.0.1:7432")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, "Bearer private-test-token");
+            if dashboard {
+                request = request.header("x-meshharbor-dashboard", "local-ui-v1");
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(json!({"confirmed":confirmed}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        assert!(core.store().list_jobs(20).unwrap().is_empty());
+        assert!(!core.runtime_doctor().environment.ready);
+        drop(app);
+        drop(core);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -23,6 +23,8 @@ const stageLabels: Partial<Record<string, string>> = {
   prepare_uv: 'Preparing uv',
   prepare_python: 'Checking existing Python environment',
   install_python: 'Installing managed Python',
+  install_account_tools: 'Installing shared Hugging Face tools',
+  check_huggingface_login: 'Verifying Hugging Face sign-in',
   create_environment: 'Creating Python environment',
   resolve_dependencies: 'Resolving dependency lock',
   sync_dependencies: 'Synchronizing dependencies',

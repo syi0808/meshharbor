@@ -7,16 +7,15 @@ use std::{
 use serde_json::json;
 
 use crate::{
-    CoreError, CoreResult, Pixal3dCudaRuntimeManager, Pixal3dRuntimeManager,
+    CoreError, CoreResult, Pixal3dCudaRuntimeManager,
     external_generation::{
         ExternalProfile, TRELLIS_CHECKPOINTS, TRELLIS_TEXT_CUDA_ID, TRELLIS_TEXT_MLX_ID,
         TRELLIS_TEXT_MODEL_FILES, TRIPOSG_CUDA_FILES,
     },
     huggingface_access::{DINO_REVISION, HuggingFaceAccess, check_model_access},
-    huggingface_browser::PACKAGE as HF_PACKAGE,
     job_execution::JobExecution,
+    model_environment::ModelEnvironment,
     model_storage::{managed_directory, remove_managed_directories},
-    uv_bootstrap::ensure_uv_tracked,
 };
 
 const OWNER_FILE: &str = ".meshharbor-managed";
@@ -204,41 +203,22 @@ impl ExternalProfile {
             fs::write(runtime.join(OWNER_FILE), self.id)?;
         }
         self.removable_model_files(&root)?;
-        for directory in [
-            "source",
-            ".venv",
-            "home",
-            "python",
-            "uv-cache",
-            "hub-tool",
-            "hub-tool/.venv",
-        ] {
+        for directory in ["source", ".venv", "home", "uv-cache"] {
             managed_directory(&root, &format!("{}/{directory}", self.managed_relative()))?;
         }
         fs::create_dir_all(runtime.join("home"))?;
-        let uv = ensure_uv_tracked(&root, execution)?;
-        let installer = Installer::new(&runtime, &uv, execution);
+        let environment = ModelEnvironment::require(&root)?;
+        let installer = Installer::new(&runtime, &environment, execution);
         let version = if matches!(self.id, "triposg-mlx" | TRELLIS_TEXT_MLX_ID) {
             "3.12"
         } else {
             "3.10"
         };
-        let hub = runtime.join("hub-tool/.venv");
-        let hub_python = hub.join("bin/python");
-        installer.venv(&hub, version)?;
-        installer.pip(&hub_python, &[HF_PACKAGE])?;
-        let token = self.needs_dinov3().then(|| {
-            let home = if self.id.ends_with("-mlx") {
-                Pixal3dRuntimeManager::new(&root).home_path()
-            } else {
-                Pixal3dCudaRuntimeManager::new(&root).home_path()
-            };
-            home.join(".cache/huggingface/token")
-        });
-        if let Some(token) = &token {
+        let token = crate::Pixal3dProfile::for_accelerator(self.id).hf_token(&root);
+        if self.needs_dinov3() {
             execution.stage("check_model_access")?;
-            let mut command = installer.command(&hub_python);
-            command.env("HF_TOKEN_PATH", token);
+            let mut command = installer.command(environment.hf_python());
+            command.env("HF_TOKEN_PATH", &token);
             match check_model_access(command)? {
                 HuggingFaceAccess::Verified => {}
                 HuggingFaceAccess::NotConnected => return Err(CoreError::OperationUnavailable(
@@ -293,17 +273,13 @@ impl ExternalProfile {
                     managed_directory(&root, &format!("{relative}/{parent}"))?;
                 }
             }
-            let mut command = installer.command(hub.join("bin/hf"));
+            let mut command = installer.command(environment.hf_cli());
             command
+                .env("HF_TOKEN_PATH", &token)
                 .args(["download", snapshot.repo, "--revision", snapshot.revision])
                 .args(&snapshot.files)
                 .arg("--local-dir")
                 .arg(weights.join(snapshot.directory));
-            if let Some(token) = token.as_ref().filter(|_| snapshot.repo == DINO_REPO) {
-                command.env("HF_TOKEN_PATH", token);
-            } else {
-                command.env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1");
-            }
             execution.visible(command, "Could not download pinned model files")?;
         }
         if self.id == "triposg-mlx" && !model_files_present() {
@@ -416,15 +392,19 @@ mod tests {
 
 pub(crate) struct Installer<'a> {
     runtime: &'a Path,
-    uv: &'a Path,
+    environment: &'a ModelEnvironment,
     execution: JobExecution<'a>,
 }
 
 impl<'a> Installer<'a> {
-    pub(crate) fn new(runtime: &'a Path, uv: &'a Path, execution: JobExecution<'a>) -> Self {
+    pub(crate) fn new(
+        runtime: &'a Path,
+        environment: &'a ModelEnvironment,
+        execution: JobExecution<'a>,
+    ) -> Self {
         Self {
             runtime,
-            uv,
+            environment,
             execution,
         }
     }
@@ -443,7 +423,7 @@ impl<'a> Installer<'a> {
             .env("PATH", path)
             .env("HOME", &home)
             .env("UV_NO_CONFIG", "1")
-            .env("UV_PYTHON_INSTALL_DIR", self.runtime.join("python"))
+            .env("UV_PYTHON_DOWNLOADS", "never")
             .env("UV_CACHE_DIR", self.runtime.join("uv-cache"))
             .env("HF_HOME", home.join(".cache/huggingface"))
             .env("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -513,23 +493,17 @@ impl<'a> Installer<'a> {
     }
 
     pub(crate) fn venv(&self, destination: &Path, version: &str) -> CoreResult<()> {
-        let mut command = self.command(self.uv);
+        let mut command = self.command(self.environment.uv());
         command
-            .args([
-                "venv",
-                "--no-project",
-                "--allow-existing",
-                "--managed-python",
-                "--python",
-                version,
-            ])
+            .args(["venv", "--no-project", "--allow-existing", "--python"])
+            .arg(self.environment.python(version))
             .arg(destination);
         self.execution
             .visible(command, "Could not prepare managed Python")
     }
 
     pub(crate) fn pip(&self, python: &Path, args: &[&str]) -> CoreResult<()> {
-        let mut command = self.command(self.uv);
+        let mut command = self.command(self.environment.uv());
         command
             .args(["pip", "install", "--python"])
             .arg(python)

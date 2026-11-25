@@ -1,4 +1,4 @@
-import { ArrowLeftIcon, ArrowsClockwiseIcon, CaretRightIcon, CopyIcon, CubeIcon, KeyIcon, ListChecksIcon, PaintBrushIcon, TrashIcon } from '@phosphor-icons/react';
+import { ArrowLeftIcon, ArrowsClockwiseIcon, CaretRightIcon, CopyIcon, CubeIcon, KeyIcon, ListChecksIcon, PaintBrushIcon, TerminalWindowIcon, TrashIcon } from '@phosphor-icons/react';
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
@@ -24,24 +24,24 @@ import { notify } from './notify';
 import type { MeshHarborApi } from './api';
 import { mergeJobRecords } from './job-activity';
 import type { HuggingFaceAccess, HuggingFaceBrowserLogin, HuggingFaceConnectionStatus, Job, RuntimeBackendId, RuntimeInfo } from './types';
-import { runtimeSetupStage } from './workbench-state';
 import type { StudioTheme } from './theme';
 
 const sections = {
   models: { title: 'Models', icon: CubeIcon, description: 'Install models and manage local files for generation and mesh separation.' },
+  environment: { title: 'Environment', icon: TerminalWindowIcon, description: 'Set up the shared local tools required to install models.' },
   connections: { title: 'Connections', icon: KeyIcon, description: 'Manage sign-in.' },
   preferences: { title: 'Preferences', icon: PaintBrushIcon, description: 'Customize Studio.' },
 };
 
 export type SettingsSection = keyof typeof sections;
-export type RuntimeAction = 'setup' | 'download' | 'convert' | 'multiview' | 'install' | 'install-gated';
+export type RuntimeAction = 'multiview' | 'install' | 'install-gated';
 
 const modelCategories = [
   { id: 'generation', title: '3D Generation', empty: 'No generation models reported by the local engine.' },
   { id: 'repart', title: 'Repart', empty: 'No mesh separation models reported by the local engine.' },
 ] as const;
 
-const sectionIds: SettingsSection[] = ['models', 'connections', 'preferences'];
+const sectionIds: SettingsSection[] = ['models', 'environment', 'connections', 'preferences'];
 const accelerators = {
   mlx: { title: 'Apple MLX', platform: 'macOS · Apple Silicon', download: '24 GB' },
   cuda: { title: 'NVIDIA CUDA', platform: 'Linux x86-64 · NVIDIA GPU', download: '30 GB' },
@@ -79,9 +79,10 @@ interface Props {
   onThemeChange: (theme: StudioTheme) => void;
   onRuntimeChange: (runtime: RuntimeInfo) => void;
   onRuntimeAction: (backend: RuntimeBackendId, action: RuntimeAction) => void;
+  onSetupEnvironment: () => void;
 }
 
-export function SettingsPage({ api, section, backendId, runtime, connection, busy, theme, jobs, operationLabel, onJobDetails, onVisit, onClose, onOpenJobs, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
+export function SettingsPage({ api, section, backendId, runtime, connection, busy, theme, jobs, operationLabel, onJobDetails, onVisit, onClose, onOpenJobs, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction, onSetupEnvironment }: Props) {
   const heading = useRef<HTMLHeadingElement>(null);
   const removalTrigger = useRef<HTMLButtonElement | null>(null);
   const [checkingAccount, setCheckingAccount] = useState(false);
@@ -91,12 +92,13 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
   const platformId: RuntimeBackendId = runtime?.platform === 'linux' ? 'pixal3d-cuda' : 'pixal3d-mlx';
   const connectionId = section === 'connections' && backendId?.startsWith('pixal3d-') ? backendId : platformId;
   const connectionBackend = runtime?.model_backends.find(backend => backend.id === connectionId);
+  const environmentReady = runtime?.environment?.ready === true;
   const browserBackend = browserLogin?.backend;
   const browserSessionId = browserLogin?.session.id;
   const browserActive = browserLogin && browserLoginIsActive(browserLogin.session);
   const disabled = pending || busy || Boolean(browserActive);
   useEffect(() => {
-    if ((section !== 'models' && section !== 'connections') || connection !== 'connected' || disabled) return;
+    if ((section !== 'models' && section !== 'connections' && section !== 'environment') || connection !== 'connected' || disabled) return;
     let stopped = false;
     let timer = 0;
     async function poll() {
@@ -309,13 +311,20 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
           {connection === 'disconnected' && <AlertDescription>Start <code>meshharbor serve</code> to connect.</AlertDescription>}
           <Button disabled={connection === 'connecting'} onClick={onReconnect}>Retry connection</Button>
         </Alert> : <>
+          {section === 'environment' && <EnvironmentSetup
+            environment={runtime?.environment} disabled={disabled} onSetup={onSetupEnvironment} onConnections={() => onVisit('connections')} />}
+          {(section === 'models' || section === 'connections') && !environmentReady && <Alert className="justify-items-start gap-2">
+            <AlertTitle>Shared environment required</AlertTitle>
+            <AlertDescription>Set up Python and uv before connecting Hugging Face or installing models.</AlertDescription>
+            <Button variant="outline" size="sm" onClick={() => onVisit('environment')}>Go to Environment</Button>
+          </Alert>}
           {section === 'models' && modelCategories.map(category => {
             const models = (runtime?.model_catalog ?? []).filter(model => (model.category ?? 'generation') === category.id);
             const repart = category.id === 'repart';
             return <section key={category.id} aria-labelledby={`models-${category.id}`} className="grid min-w-0 gap-3">
               <h2 id={`models-${category.id}`} className="text-base font-semibold">{category.title}</h2>
               {!models.length && <Empty><EmptyHeader><EmptyDescription>{category.empty}</EmptyDescription></EmptyHeader></Empty>}
-              {models.map(model => <Card key={model.id}>
+              {models.map(model => <Card key={model.id} aria-disabled={!environmentReady || undefined} className={!environmentReady ? 'opacity-70' : undefined}>
                 <CardHeader>
                   <CardTitle className="flex flex-wrap items-center gap-2 text-lg">
                     <h3>{model.title}</h3>
@@ -335,40 +344,52 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                     if (!id || !backend) return null;
                     const label = `${model.title} · ${accelerators[kind].title}`;
                     const authBackend: RuntimeBackendId = `pixal3d-${kind}`;
-                    const access = runtime?.model_backends.find(item => item.id === authBackend)?.huggingface?.model_access;
+                    const auth = backend.huggingface ?? runtime?.model_backends.find(item => item.id === authBackend)?.huggingface;
+                    const signInRequired = backend.requires_huggingface_login === true && auth?.account !== 'connected';
                     const dino = {
-                      status: access ?? 'unavailable' as const,
+                      status: auth?.model_access ?? 'unavailable' as const,
                       onRecheck: () => recheckModelAccess(authBackend),
                       onConnections: () => onVisit('connections', authBackend),
                     };
                     const modelPaths = backend.ready || backend.models_downloaded
                       ? backend.model_paths ?? (backend.runtime_root ? [backend.runtime_root] : [])
                       : [];
-                    return <Card key={id} role="article" aria-label={label} size="sm" className="min-w-0 bg-background">
+                    const available = modelInstallAvailable(backend, repart);
+                    const canInstallMultiview = id === 'pixal3d-cuda' && backend.installable && backend.ready
+                      && backend.generation?.view_modes?.some(mode => mode !== 'single') && !backend.multiview_ready;
+                    const needsSignIn = environmentReady && signInRequired && (available || canInstallMultiview);
+                    return <Card key={id} role="article" aria-label={label} aria-disabled={!environmentReady || undefined} size="sm" className="min-w-0 bg-background">
                       <CardHeader>
                         <CardTitle className="min-w-0"><h4 id={`runtime-${id}`} tabIndex={-1} className="outline-none">{accelerators[kind].title}</h4></CardTitle>
                         <CardDescription>{accelerators[kind].platform}</CardDescription>
-                        <CardAction><Badge variant={backend.ready ? 'secondary' : 'outline'}>{profileStatus(backend, repart)}</Badge></CardAction>
+                        <CardAction><Badge variant={environmentReady && backend.ready ? 'secondary' : 'outline'}>{!backend.installable
+                          ? 'Not supported here' : !environmentReady ? 'Environment required'
+                            : needsSignIn ? 'Sign-in required' : profileStatus(backend, repart)}</Badge></CardAction>
                       </CardHeader>
                       <CardContent className="grid gap-3">
-                        {modelPaths.length > 0 && <ModelFileLocations paths={modelPaths} />}
-                        {repart || backend.managed_install
-                          ? <CatalogInstall label={label} backend={backend} repart={repart} disabled={disabled} dino={dino}
-                              onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />
-                          : <PixalModelFiles label={label} backend={backend} id={id} disabled={disabled} dino={dino}
-                              onAction={action => onRuntimeAction(id, action)} />}
+                        {environmentReady && modelPaths.length > 0 && <ModelFileLocations paths={modelPaths} />}
+                        {available && <CatalogInstall label={label} backend={backend} repart={repart}
+                          disabled={disabled || !environmentReady || signInRequired} dino={dino}
+                          onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />}
+                        {environmentReady && id === 'pixal3d-cuda' && backend.ready && backend.multiview_ready
+                          && <Badge variant="outline">Multiview installed</Badge>}
+                        {canInstallMultiview && <ModelInstallDialog label={label} action="Install multiview weights"
+                          description="Adds support for multiple reference views. This separate download can be large; MeshHarbor reuses compatible cached files."
+                          consentLabel="I approve installing the additional model files."
+                          disabled={disabled || !environmentReady || signInRequired} onConfirm={() => onRuntimeAction(id, 'multiview')} />}
+                        {needsSignIn && <Button variant="outline" size="sm" className="justify-self-start" onClick={() => onVisit('connections', authBackend)}>Go to Connections</Button>}
                       </CardContent>
-                      <RuntimeActions api={api} id={id} backend={backend} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
+                      {environmentReady && <RuntimeActions api={api} id={id} backend={backend} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
                         action={backend.local_files?.remove_models_available && <Button variant="destructive" size="sm" onClick={event => openRemoval(id, 'model-files', event.currentTarget, label)} disabled={disabled}>
                           <TrashIcon aria-hidden="true" /> Delete model files
-                        </Button>} />
+                        </Button>} />}
                     </Card>;
                   })}
                 </CardContent>
               </Card>)}
             </section>;
           })}
-          {section === 'connections' && (connectionBackend ? <HuggingFaceConnection key={connectionId}
+          {section === 'connections' && environmentReady && (connectionBackend ? <HuggingFaceConnection key={connectionId}
             backend={connectionBackend} account={checkingAccount ? 'checking' : connectionBackend.huggingface?.account} disabled={disabled}
             browserSession={browserLogin?.backend === connectionId && browserActive ? browserLogin.session : null}
             cancelling={pending} onStartBrowser={() => startBrowserLogin(connectionId)} onCancelBrowser={cancelBrowserLogin}
@@ -408,19 +429,42 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
 
 function profileStatus(backend: Backend, repart: boolean) {
   if (repart) {
-    if (!backend.installable) return 'Not supported here';
     if (backend.environment_ready && backend.models_downloaded) return 'Files installed';
     if (backend.environment_ready) return 'Backend installed';
     if (backend.models_downloaded) return 'Weights downloaded';
     return 'Available to install';
   }
   if (backend.ready) return 'Ready';
-  if (!backend.installable) return 'Not supported here';
-  if (!backend.managed_install && !backend.environment_ready) return 'Setup required';
   if (backend.models_downloaded) return 'Files present';
   return backend.downloads_enabled ? 'Available to download' : 'Unavailable';
 }
 
+function modelInstallAvailable(backend: Backend, repart: boolean) {
+  return backend.installable && (repart
+    ? !(backend.environment_ready && backend.models_downloaded)
+    : backend.downloads_enabled === true);
+}
+
+function EnvironmentSetup({ environment, disabled, onSetup, onConnections }: {
+  environment?: RuntimeInfo['environment']; disabled: boolean; onSetup: () => void; onConnections: () => void;
+}) {
+  const versions = (environment?.python_versions ?? []).join(' and ');
+  return <Card>
+    <CardHeader>
+      <CardTitle className="text-base"><h2>Shared model tools</h2></CardTitle>
+      <CardAction><Badge variant="outline">{environment?.ready ? 'Ready' : 'Setup required'}</Badge></CardAction>
+      <CardDescription>{versions ? `Python ${versions}, uv, and the Hugging Face sign-in tool.`
+        : 'Python, uv, and the Hugging Face sign-in tool.'}</CardDescription>
+    </CardHeader>
+    <CardContent className="grid justify-items-start gap-3">
+      <p className="text-muted-foreground">These tools are shared across model installs. Each model still uses its own isolated dependencies.</p>
+      {environment?.ready ? <Button variant="outline" onClick={onConnections}>Go to Connections</Button>
+        : <ModelInstallDialog label="Shared model tools" action="Set up environment"
+          description="Installs the shared tools in MeshHarbor’s local data directory. It does not install model runtimes or download model weights."
+          consentLabel="I approve installing the shared tools." disabled={disabled} onConfirm={onSetup} />}
+    </CardContent>
+  </Card>;
+}
 function ModelFileLocations({ paths }: { paths: string[] }) {
   async function copyPaths() {
     try {
@@ -546,15 +590,13 @@ function CatalogInstall({ label, backend, repart, dino, disabled, onInstall }: {
   label: string; backend: Backend; repart: boolean; dino: DinoAccess;
   disabled: boolean; onInstall: () => void;
 }) {
-  const available = repart
-    ? backend.installable && !(backend.environment_ready && backend.models_downloaded)
-    : backend.downloads_enabled;
-  if (!available) return null;
   const gated = !repart && backend.gated_model_access_required;
+  const pixal = backend.id.startsWith('pixal3d-');
   return <ModelInstallDialog label={label} action="Install model"
     description={repart
-      ? 'MeshHarbor installs the GeoSAM2 backend in a private Python environment and downloads one shared 616 MB checkpoint. Existing verified files are reused. Hugging Face sign-in is not required.'
-      : 'MeshHarbor installs a private Python environment and downloads the model weights for local generation.'}
+      ? 'MeshHarbor installs the GeoSAM2 backend in a private Python environment and downloads one shared 616 MB checkpoint. Existing verified files are reused.'
+      : pixal ? `Installs the Pixal3D backend and downloads up to ${accelerators[accelerator(backend.id)].download} of model files without cached files. DINOv3 access is required.`
+        : 'MeshHarbor installs a private Python environment and downloads the model weights for local generation.'}
     consentLabel={gated ? 'I have DINOv3 access, reviewed the terms, and approve installation and download.' : 'I reviewed the terms and approve installation and download.'}
     disabled={disabled} dino={gated ? dino : undefined} onConfirm={onInstall}>
     {repart ? <>
@@ -565,6 +607,10 @@ function CatalogInstall({ label, backend, repart, dino, disabled, onInstall }: {
       {backend.ready && !backend.managed_ready && <p className="text-muted-foreground">Using existing files. A managed install keeps them intact.</p>}
       {backend.license_notice && <p className="text-muted-foreground">{backend.license_notice}</p>}
       {backend.source && <a className="text-primary underline underline-offset-4" href={`${backend.source.repository}/tree/${backend.source.revision}`} target="_blank" rel="noreferrer">Review upstream source and terms</a>}
+      {pixal && backend.pixal3d_cache && <p className="text-muted-foreground">
+        {backend.pixal3d_cache.local_checkpoints}/{backend.pixal3d_cache.total_checkpoints} checkpoints cached.
+        {backend.pixal3d_cache.reusable_checkpoints > 0 && ` ${backend.pixal3d_cache.reusable_checkpoints} more can be reused from the Hugging Face cache.`}
+      </p>}
     </>}
   </ModelInstallDialog>;
 }
@@ -608,7 +654,7 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
     <CardHeader>
       <CardTitle className="flex min-w-0 items-center gap-1 text-base"><h2>Hugging Face</h2>
         <HelpTip label="About Hugging Face sign-in">
-          Credentials stay in the local runtime. The first browser sign-in prepares a private Hugging Face CLI.
+          Credentials stay on this computer. All Hugging Face model downloads use this sign-in.
           {local?.credentials_managed === false && ' Custom credential storage requires an access token instead of browser sign-in.'}
         </HelpTip>
       </CardTitle>
@@ -646,39 +692,4 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
     {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={event => onDisconnect(event.currentTarget)}>Disconnect locally</Button></div>}
     </CardContent>
   </Card>;
-}
-
-function PixalModelFiles({ label, backend, id, disabled, dino, onAction }: {
-  label: string; backend: Backend; id: RuntimeBackendId; disabled: boolean; dino: DinoAccess;
-  onAction: (action: RuntimeAction) => void;
-}) {
-  const stage = runtimeSetupStage(backend);
-  if (stage === 'environment') return <Button className="justify-self-start" disabled={disabled} onClick={() => onAction('setup')}>Set up {id === 'pixal3d-cuda' ? 'CUDA' : 'Python'} environment</Button>;
-  if (stage === 'models' && backend.downloads_enabled) return <PixalDownloadDialog label={label} backend={backend} id={id} disabled={disabled}
-    dino={dino} onDownload={() => onAction('download')} />;
-  if (stage === 'conversion') return <Button className="justify-self-start" disabled={disabled || !backend.conversion_enabled} onClick={() => onAction('convert')}>Finish NAF conversion</Button>;
-  if (stage === 'incomplete') return <div className="flex items-center gap-1 text-muted-foreground">
-    Runtime not ready <HelpTip label="About runtime checks">Files are present. Run <code>meshharbor doctor</code> for diagnostics.</HelpTip>
-  </div>;
-  if (stage !== 'ready' || !backend.generation?.view_modes?.some(mode => mode !== 'single')) return null;
-  if (backend.multiview_ready) return <Badge variant="outline">Multiview installed</Badge>;
-  return <ModelInstallDialog label={label} action="Install multiview weights"
-    description="Adds support for multiple reference views. This separate download can be large; MeshHarbor reuses compatible cached files."
-    consentLabel="I approve installing the additional model files." disabled={disabled} onConfirm={() => onAction('multiview')} />;
-}
-
-function PixalDownloadDialog({ label, backend, id, disabled, dino, onDownload }: {
-  label: string; backend: Backend; id: RuntimeBackendId; disabled: boolean; dino: DinoAccess;
-  onDownload: () => void;
-}) {
-  const cache = backend.pixal3d_cache;
-  return <ModelInstallDialog label={label} action="Download model files"
-    description={`Up to ${accelerators[accelerator(id)].download} without cached files. DINOv3 access is required.`}
-    consentLabel="I reviewed the model terms and approve this download." disabled={disabled}
-    dino={dino} onConfirm={onDownload}>
-    {cache && <p className="text-muted-foreground">
-      {cache.local_checkpoints}/{cache.total_checkpoints} checkpoints cached.
-      {cache.reusable_checkpoints > 0 && ` ${cache.reusable_checkpoints} more can be reused from the Hugging Face cache.`}
-    </p>}
-  </ModelInstallDialog>;
 }

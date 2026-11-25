@@ -230,7 +230,7 @@ export function isJobRetryable(job: Job): boolean {
   if (job.operation === 'mesh.separate_parts') return false;
   return (job.state === 'failed' || job.state === 'cancelled') && (
     Boolean(job.input_asset_id) || (job.operation === 'runtime.models.install' ? typeof job.parameters?.backend_id === 'string'
-      : job.operation.startsWith('runtime.pixal3d.'))
+      : job.operation.startsWith('runtime.pixal3d.') || job.operation === 'runtime.environment.setup')
   );
 }
 
@@ -696,6 +696,13 @@ export class MeshHarborApi {
     return this.request(`/api/v1/runtime/${backend}/install`, {
       method: 'POST',
       body: JSON.stringify({ confirmed: true, confirm_gated_access: gated }),
+    });
+  }
+
+  setupModelEnvironment(): Promise<Job> {
+    return this.request('/api/v1/runtime/environment/setup', {
+      method: 'POST',
+      body: JSON.stringify({ confirmed: true }),
     });
   }
 

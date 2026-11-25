@@ -16,7 +16,8 @@ This is the first image-generation integration profile for Apple Silicon. MeshHa
 Use the same data directory for the server and the following CLI commands. The default on macOS is `~/Library/Application Support/MeshHarbor`; `--data-dir` / `MESHHARBOR_HOME` overrides it.
 
 ~~~sh
-# Install pinned uv if missing, create managed Python 3.12, and install exact locked MLX dependencies
+# Prepare shared uv, Python, and Hugging Face account tools, then install locked MLX dependencies.
+meshharbor runtime environment-setup
 meshharbor runtime setup
 
 # In a terminal on this computer, enter the HF token only in the official masked prompt.
@@ -30,7 +31,7 @@ meshharbor runtime install-models --confirm-large-download --confirm-gated-acces
 meshharbor doctor
 ~~~
 
-`runtime install-models` checks access to the pinned gated DINOv3 checkpoint file with a HEAD request before transferring any weights. It delegates the pinned DINOv3 and Pixal3D transfers to `hf download`, preferring the browser sign-in CLI if it has been installed and otherwise using the CLI in the backend's environment. Both use the same dedicated Hugging Face cache under `<data-dir>/runtimes/pixal3d-mlx/home`, including cached files from earlier runs. MeshHarbor verifies the Pixal3D hashes and separately fetches and verifies NAF under `<data-dir>/runtimes/pixal3d-mlx/weights`. The isolated token is used for Hugging Face access checks and downloads; MeshHarbor does not expose it to generation jobs. The downloader deliberately skips MoGe because the supported generation profile uses a fixed camera and passes `--no-moge`. After download, MeshHarbor creates a separate CPU-only converter environment with pinned PyTorch, safetensors, NumPy, and packaging versions, converts and verifies NAF, and leaves the MLX inference environment unchanged. If conversion fails after the model files arrive, retry with `meshharbor runtime convert-naf` or Studio's **Finish NAF conversion** button.
+`runtime install-models` checks access to the pinned gated DINOv3 checkpoint file with a HEAD request before transferring any weights. It delegates the pinned DINOv3 and Pixal3D transfers to `hf download` using the dedicated Hugging Face cache under `<data-dir>/runtimes/pixal3d-mlx/home`, including cached files from earlier runs. MeshHarbor verifies the Pixal3D hashes and separately fetches and verifies NAF under `<data-dir>/runtimes/pixal3d-mlx/weights`. The isolated token is used for Hugging Face access checks and downloads; MeshHarbor does not expose it to generation jobs. The downloader deliberately skips MoGe because the supported generation profile uses a fixed camera and passes `--no-moge`. After download, MeshHarbor creates a separate CPU-only converter environment with pinned PyTorch, safetensors, NumPy, and packaging versions, converts and verifies NAF, and leaves the MLX inference environment unchanged. If conversion fails after the files arrive, retry the install in Studio or run `meshharbor runtime convert-naf` to retry conversion only.
 
 ## Generate
 

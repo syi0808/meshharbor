@@ -113,6 +113,7 @@ export interface GenerationModel extends GenerationProfile {
 export interface RuntimeInfo {
   status: string;
   platform: string;
+  environment: { ready: boolean; python_versions: string[] };
   operations: string[];
   model_catalog: Array<{ id: string; title: string; status: string; backend_ids: string[]; category?: 'generation' | 'repart'; output?: 'textured_glb' | 'geometry_glb' }>;
   quadriflow_backend: {
@@ -135,6 +136,7 @@ export interface RuntimeInfo {
     managed_install?: boolean;
     managed_ready?: boolean;
     account_tools_ready?: boolean;
+    requires_huggingface_login?: boolean;
     huggingface?: {
       account: HuggingFaceConnectionStatus | 'checking' | 'unavailable';
       model_access: HuggingFaceAccess | 'checking' | 'unavailable';

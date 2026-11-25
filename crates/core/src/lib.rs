@@ -15,6 +15,7 @@ mod huggingface_access;
 mod huggingface_browser;
 mod huggingface_download;
 mod job_execution;
+mod model_environment;
 mod model_storage;
 mod operation;
 mod quadriflow;
@@ -43,6 +44,7 @@ pub use glb::{
 pub use huggingface_access::{HuggingFaceAccess, HuggingFaceConnection};
 pub use huggingface_browser::HuggingFaceBrowserTool;
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
+pub use model_environment::ModelEnvironmentStatus;
 pub use model_storage::Pixal3dProfile;
 pub use operation::{
     MeshOperationResult, OperationCore, OperationDescriptor, RuntimeDoctor, SimplificationResult,

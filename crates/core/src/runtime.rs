@@ -19,6 +19,7 @@ use crate::{
     huggingface_browser::access_python,
     huggingface_download::{self, DINO_REPO},
     job_execution::JobExecution,
+    model_environment::ModelEnvironment,
 };
 
 const PYTHON_REQUEST: &str = "3.12";
@@ -32,6 +33,7 @@ const CONVERTER_PACKAGES: &[&str] = &[
 
 #[derive(Clone, Copy)]
 pub enum RuntimeJobKind {
+    EnvironmentSetup,
     Setup,
     InstallModels,
     ConvertNaf,
@@ -44,6 +46,7 @@ pub enum RuntimeJobKind {
 impl RuntimeJobKind {
     pub fn operation(self) -> &'static str {
         match self {
+            Self::EnvironmentSetup => "runtime.environment.setup",
             Self::Setup => "runtime.pixal3d.setup",
             Self::InstallModels => "runtime.pixal3d.install_models",
             Self::ConvertNaf => "runtime.pixal3d.convert_naf",
@@ -56,12 +59,23 @@ impl RuntimeJobKind {
 
     pub fn backend_id(self) -> &'static str {
         match self {
+            Self::EnvironmentSetup => "environment",
             Self::Setup | Self::InstallModels | Self::ConvertNaf => "pixal3d-mlx",
             Self::CudaSetup | Self::CudaInstallModels | Self::CudaInstallMultiview => {
                 "pixal3d-cuda"
             }
             Self::InstallCatalogModel(backend) => backend,
         }
+    }
+
+    pub(crate) fn downloads_weights(self) -> bool {
+        matches!(
+            self,
+            Self::InstallModels
+                | Self::CudaInstallModels
+                | Self::CudaInstallMultiview
+                | Self::InstallCatalogModel(_)
+        )
     }
 }
 
@@ -77,6 +91,7 @@ pub struct RuntimeSetupReport {
 
 #[derive(Debug, Clone)]
 pub struct Pixal3dRuntimeManager {
+    data_root: PathBuf,
     source_root: PathBuf,
     runtime_root: PathBuf,
 }
@@ -91,6 +106,7 @@ impl Pixal3dRuntimeManager {
             .map(PathBuf::from)
             .unwrap_or_else(|| runtime_root.join("source/upstream"));
         Self {
+            data_root,
             source_root,
             runtime_root,
         }
@@ -139,7 +155,10 @@ impl Pixal3dRuntimeManager {
 
     fn huggingface_command(&self) -> CoreResult<Command> {
         self.ensure_apple_silicon()?;
-        let python = access_python(&self.runtime_root).unwrap_or_else(|| self.python_path());
+        let python = ModelEnvironment::load(&self.data_root)
+            .map(|environment| environment.hf_python())
+            .or_else(|| access_python(&self.runtime_root))
+            .unwrap_or_else(|| self.python_path());
         if !python.is_file() {
             return Err(CoreError::OperationUnavailable(
                 "Prepare browser sign-in or set up the MLX environment before connecting a token."
@@ -149,9 +168,7 @@ impl Pixal3dRuntimeManager {
         Ok(self.python_command(&python))
     }
 
-    /// Provision a managed Python 3.12 and the source-pinned, locked MLX
-    /// dependencies. If needed, `uv` is bootstrapped from a pinned official
-    /// release after the user explicitly starts runtime setup.
+    /// Install the source-pinned MLX dependencies using the shared environment.
     pub fn setup_environment(&self) -> CoreResult<RuntimeSetupReport> {
         self.setup_environment_tracked(JobExecution::default())
     }
@@ -162,10 +179,10 @@ impl Pixal3dRuntimeManager {
     ) -> CoreResult<RuntimeSetupReport> {
         execution.stage("prepare_runtime")?;
         self.ensure_apple_silicon()?;
+        let environment = ModelEnvironment::require(&self.data_root)?;
         self.ensure_source()?;
         self.validate_source()?;
-        let uv = crate::uv_bootstrap::ensure_uv_tracked(&self.runtime_root, execution)?;
-        self.setup_environment_with_uv(&uv, execution)
+        self.setup_environment_with_uv(environment.uv(), execution)
     }
 
     fn setup_environment_with_uv(
@@ -185,6 +202,9 @@ impl Pixal3dRuntimeManager {
             execution,
             &python_dir,
             &venv_dir,
+            ModelEnvironment::load(&self.data_root)
+                .as_ref()
+                .map(|environment| environment.python(PYTHON_REQUEST)),
             || self.uv_command(uv, &home_dir, &cache_dir),
             |path| self.python_command(path),
         )?;
@@ -258,6 +278,7 @@ impl Pixal3dRuntimeManager {
             ));
         }
         self.ensure_apple_silicon()?;
+        let environment = ModelEnvironment::require(&self.data_root)?;
         self.ensure_source()?;
         self.validate_source()?;
         let python = self.python_path();
@@ -267,9 +288,8 @@ impl Pixal3dRuntimeManager {
                 python.display()
             )));
         }
-        let uv = crate::uv_bootstrap::ensure_uv_tracked(&self.runtime_root, execution)?;
         self.install_models_with_tools(
-            &uv,
+            environment.uv(),
             &python,
             huggingface_download::shared_hub_cache().as_deref(),
             execution,
@@ -357,6 +377,7 @@ impl Pixal3dRuntimeManager {
     ) -> CoreResult<RuntimeSetupReport> {
         execution.stage("prepare_runtime")?;
         self.ensure_apple_silicon()?;
+        let environment = ModelEnvironment::require(&self.data_root)?;
         self.ensure_source()?;
         self.validate_source()?;
         let python = self.python_path();
@@ -366,13 +387,12 @@ impl Pixal3dRuntimeManager {
                 python.display()
             )));
         }
-        let uv = crate::uv_bootstrap::ensure_uv_tracked(&self.runtime_root, execution)?;
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
         let cache = self.runtime_root.join("uv-cache");
         std::fs::create_dir_all(&cache)?;
         let weights = self.runtime_root.join("weights");
-        self.convert_naf_checkpoint(&uv, &home, &cache, &weights, execution)?;
+        self.convert_naf_checkpoint(environment.uv(), &home, &cache, &weights, execution)?;
         Ok(RuntimeSetupReport {
             backend_id: "pixal3d-mlx".into(),
             status: "model_files_ready".into(),
@@ -390,24 +410,7 @@ impl Pixal3dRuntimeManager {
     /// enters MeshHarbor's API, logs, or the user's normal HF cache.
     pub fn login_huggingface(&self) -> CoreResult<()> {
         self.ensure_apple_silicon()?;
-        let python = self.python_path();
-        if !python.is_file() {
-            return Err(CoreError::OperationUnavailable(format!(
-                "Managed Python environment not found at {}. Run `meshharbor runtime setup` first.",
-                python.display()
-            )));
-        }
-        let executable = if cfg!(windows) {
-            self.runtime_root.join(".venv/Scripts/hf.exe")
-        } else {
-            self.runtime_root.join(".venv/bin/hf")
-        };
-        if !executable.is_file() {
-            return Err(CoreError::OperationUnavailable(format!(
-                "The isolated Hugging Face CLI is missing at {}. Rerun `meshharbor runtime setup`.",
-                executable.display()
-            )));
-        }
+        let executable = ModelEnvironment::require(&self.data_root)?.hf_cli();
         let home = self.home_path();
         std::fs::create_dir_all(&home)?;
         eprintln!(
@@ -448,6 +451,9 @@ impl Pixal3dRuntimeManager {
             execution,
             &self.runtime_root.join("python"),
             &converter_root,
+            ModelEnvironment::load(&self.data_root)
+                .as_ref()
+                .map(|environment| environment.python(PYTHON_REQUEST)),
             || self.uv_command(uv, home, cache),
             |path| self.python_command(path),
         )?;
@@ -528,7 +534,7 @@ impl Pixal3dRuntimeManager {
             .env("UV_PROJECT_ENVIRONMENT", self.runtime_root.join(".venv"))
             .env("UV_NO_CONFIG", "1")
             .env("UV_NO_PROGRESS", "0")
-            .env("UV_PYTHON_DOWNLOADS", "automatic")
+            .env("UV_PYTHON_DOWNLOADS", "never")
             .env("UV_DEFAULT_INDEX", "https://pypi.org/simple");
         command
     }
@@ -607,6 +613,7 @@ pub(crate) fn prepare_managed_venv(
     execution: JobExecution<'_>,
     python_dir: &Path,
     venv_dir: &Path,
+    shared_python: Option<&Path>,
     uv: impl Fn() -> Command,
     python_command: impl Fn(&Path) -> Command,
 ) -> CoreResult<PathBuf> {
@@ -668,7 +675,9 @@ pub(crate) fn prepare_managed_venv(
         }
         Ok(path)
     };
-    let base = if let Ok(base) = find() {
+    let base = if let Some(base) = shared_python {
+        base.to_path_buf()
+    } else if let Ok(base) = find() {
         execution.note("Reusing the installed managed Python interpreter.")?;
         base
     } else {
@@ -792,6 +801,7 @@ mod tests {
         fs::create_dir_all(&data_root).unwrap();
         fs::write(data_root.join("owner-sentinel"), "preserve me").unwrap();
         let manager = Pixal3dRuntimeManager {
+            data_root: data_root.clone(),
             source_root: runtime_root.join("source/upstream"),
             runtime_root: runtime_root.clone(),
         };
@@ -955,6 +965,7 @@ esac
         fs::create_dir_all(&data_root).unwrap();
         fs::write(data_root.join("owner-sentinel"), "preserve me").unwrap();
         let manager = Pixal3dRuntimeManager {
+            data_root: data_root.clone(),
             source_root: runtime_root.join("source/upstream"),
             runtime_root: runtime_root.clone(),
         };

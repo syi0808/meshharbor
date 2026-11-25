@@ -61,10 +61,15 @@ impl HuggingFaceStatuses {
     pub(crate) fn decorate(&self, runtime: &mut RuntimeDoctor) {
         let statuses = self.0.lock().expect("Hugging Face status mutex poisoned");
         for backend in &mut runtime.model_backends {
-            if let Some(profile) = backend["id"]
-                .as_str()
-                .and_then(|id| Pixal3dProfile::from_backend(id).ok())
-            {
+            if let Some(profile) = backend["id"].as_str().and_then(|id| {
+                if id.ends_with("-mlx") {
+                    Some(Pixal3dProfile::Mlx)
+                } else if id.ends_with("-cuda") {
+                    Some(Pixal3dProfile::Cuda)
+                } else {
+                    None
+                }
+            }) {
                 backend["huggingface"] = json!(statuses[index(profile)].0);
             }
         }

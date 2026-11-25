@@ -813,6 +813,8 @@ export function App() {
               ? (latest.parameters?.backend_id?.startsWith('geosam2-')
                 ? 'GeoSAM2 backend and weights installed for the command-line prototype.'
                 : 'Model installed and ready for offline generation.')
+              : latest.operation === 'runtime.environment.setup'
+              ? 'Shared environment is ready. Sign in to Hugging Face in Connections to install models.'
               : latest.operation === 'runtime.pixal3d.setup'
               ? 'The isolated Python environment is ready. Connect Hugging Face in Settings before downloading model files.'
               : latest.operation === 'runtime.pixal3d.install_models'
@@ -1189,18 +1191,12 @@ export function App() {
     }
   }
 
-  async function runRuntimeAction(backend: RuntimeBackendId, action: RuntimeAction) {
+  async function startRuntimeAction(start: () => Promise<Job>) {
     if (busy || isRunning || connection !== 'connected') return;
     invalidateHistoryRequests();
     setBusy(true);
     try {
-      const cuda = backend === 'pixal3d-cuda';
-      const nextJob = action === 'install' || action === 'install-gated' ? await api.installCatalogModel(backend, action === 'install-gated')
-        : action === 'multiview' ? await api.installPixal3dMultiview() : action === 'setup'
-        ? await (cuda ? api.setupPixal3dCudaRuntime() : api.setupPixal3dRuntime())
-        : action === 'download'
-          ? await (cuda ? api.installPixal3dCudaModels() : api.installPixal3dModels())
-          : await api.convertPixal3dNaf();
+      const nextJob = await start();
       setJob(nextJob);
       notify('info', `${studioOperationLabel(nextJob.operation)} ${nextJob.state === 'queued' ? 'queued' : 'started'}.`);
     } catch (cause) {
@@ -1208,6 +1204,11 @@ export function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function runRuntimeAction(backend: RuntimeBackendId, action: RuntimeAction) {
+    void startRuntimeAction(() => action === 'multiview'
+      ? api.installPixal3dMultiview() : api.installCatalogModel(backend, action === 'install-gated'));
   }
 
   async function downloadResult(artifact?: Artifact) {
@@ -1590,7 +1591,7 @@ export function App() {
         onVisit={openSettings} onClose={closeSettings}
         onOpenJobs={() => openJobs()} onActivityChange={setSettingsActivity}
         onReconnect={() => void connect(true)} onRefreshJobs={refreshRecentJobs} onRuntimeChange={setRuntime}
-        onRuntimeAction={(backend, action) => void runRuntimeAction(backend, action)} />
+        onRuntimeAction={runRuntimeAction} onSetupEnvironment={() => void startRuntimeAction(() => api.setupModelEnvironment())} />
       <div className={`${settingsSection ? 'hidden' : 'flex'} h-dvh min-w-0 flex-col overflow-hidden bg-background`} onDragOver={(event) => {
       if (!event.dataTransfer.types.includes('Files')) return;
       event.preventDefault();
@@ -1934,6 +1935,7 @@ function studioOperationLabel(operation: string): string {
     case 'model.generate':
     case 'image.generate': return 'Generate model';
     case 'uv.unwrap': return 'Unwrap UVs';
+    case 'runtime.environment.setup': return 'Set up environment';
     case 'runtime.pixal3d.setup': return 'Set up MLX';
     case 'runtime.pixal3d.install_models': return 'Download MLX models';
     case 'runtime.pixal3d.cuda_setup': return 'Set up CUDA';

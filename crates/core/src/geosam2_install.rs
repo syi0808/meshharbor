@@ -13,8 +13,8 @@ use crate::{
     CoreError, CoreResult, Pixal3dCudaRuntimeManager,
     external_installer::Installer,
     job_execution::JobExecution,
+    model_environment::ModelEnvironment,
     model_storage::{managed_directory, managed_file_size, model_path, remove_managed_directories},
-    uv_bootstrap::ensure_uv_tracked,
 };
 
 const MANAGED: &str = "runtimes/geosam2-managed";
@@ -29,7 +29,8 @@ const WEIGHTS_DIR: &str = "runtimes/geosam2-managed/weights";
 const WEIGHTS_NAME: &str = "geosam2.pt";
 const WEIGHTS_BYTES: u64 = 615_627_435;
 const WEIGHTS_SHA: &str = "2e391c0d9455fe92b69d61cdc94754d9b8081b9b541d09e1b6a3a55ebf6c6de0";
-const WEIGHTS_URL: &str = "https://huggingface.co/VAST-AI/GeoSAM2/resolve/ba92f5f50418f2fe9af1078448b63176df13b1ee/geosam2.pt";
+const WEIGHTS_REPO: &str = "VAST-AI/GeoSAM2";
+const WEIGHTS_REVISION: &str = "ba92f5f50418f2fe9af1078448b63176df13b1ee";
 const WORKER_FILES: &[(&str, &[u8])] = &[
     (
         "repart.py",
@@ -153,19 +154,17 @@ impl Profile {
         self.require_supported(root)?;
         execution.stage("prepare_runtime")?;
         let root = fs::canonicalize(root)?;
+        let environment = ModelEnvironment::require(&root)?;
         let runtime = root.join(self.relative());
         if !self.installed(&root)? {
             ensure_owned(&root)?;
             managed_directory(&root, &self.relative())?;
             fs::create_dir_all(&runtime)?;
-            for directory in [
-                "source", "sam2-mlx", "worker", ".venv", "home", "python", "uv-cache",
-            ] {
+            for directory in ["source", "sam2-mlx", "worker", ".venv", "home", "uv-cache"] {
                 managed_directory(&root, &format!("{}/{directory}", self.relative()))?;
             }
             fs::create_dir_all(runtime.join("home"))?;
-            let uv = ensure_uv_tracked(&root, execution)?;
-            let installer = Installer::new(&runtime, &uv, execution);
+            let installer = Installer::new(&runtime, &environment, execution);
             let source = runtime.join("source");
             let mlx_source = runtime.join("sam2-mlx");
             execution.stage("prepare_source")?;
@@ -227,7 +226,8 @@ impl Profile {
             execution.checkpoint()?;
             fs::write(runtime.join(STAMP), ENVIRONMENT_VERSION)?;
         }
-        let file = install_weights(&root, execution)?;
+        let token = crate::Pixal3dProfile::for_accelerator(self.id()).hf_token(&root);
+        let file = install_weights(&root, &environment, &token, execution)?;
         Ok(json!({
             "backend_id": self.id(), "status": "files_installed",
             "runtime_root": runtime, "model_paths": [file],
@@ -235,7 +235,12 @@ impl Profile {
     }
 }
 
-fn install_weights(root: &Path, execution: JobExecution<'_>) -> CoreResult<PathBuf> {
+fn install_weights(
+    root: &Path,
+    environment: &ModelEnvironment,
+    token: &Path,
+    execution: JobExecution<'_>,
+) -> CoreResult<PathBuf> {
     let file = weights_path(root);
     if weight_size(root)? == Some(WEIGHTS_BYTES) {
         execution.stage("verify_checkpoint")?;
@@ -246,47 +251,35 @@ fn install_weights(root: &Path, execution: JobExecution<'_>) -> CoreResult<PathB
     execution.stage("download_models")?;
     let directory = root.join(WEIGHTS_DIR);
     fs::create_dir_all(&directory)?;
-    let staged = StagedFile(directory.join(format!(".download-{}", Uuid::new_v4())));
-    OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&staged.0)?;
-    let mut download = Command::new("curl");
+    let staged = StagedDownload(directory.join(format!(".download-{}", Uuid::new_v4())));
+    fs::create_dir(&staged.0)?;
+    let mut download = Command::new(environment.hf_cli());
     download
         .env_clear()
-        .env(
-            "PATH",
-            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
-        )
+        .env("HOME", &staged.0)
+        .env("HF_HOME", &staged.0)
+        .env("HF_TOKEN_PATH", token)
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .env("HF_HUB_DISABLE_UPDATE_CHECK", "1")
         .args([
-            "--disable",
-            "--fail",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--retry",
-            "2",
-            "--connect-timeout",
-            "20",
-            "--max-time",
-            "900",
-            "--max-filesize",
-            &WEIGHTS_BYTES.to_string(),
-            "--output",
+            "download",
+            WEIGHTS_REPO,
+            WEIGHTS_NAME,
+            "--revision",
+            WEIGHTS_REVISION,
+            "--local-dir",
         ])
-        .arg(&staged.0)
-        .arg(WEIGHTS_URL);
+        .arg(&staged.0);
     execution.visible(download, "Could not download the pinned GeoSAM2 checkpoint")?;
     execution.stage("verify_checkpoint")?;
-    if !verify_sha(&staged.0, execution)? {
+    let staged_file = staged.0.join(WEIGHTS_NAME);
+    if !verify_sha(&staged_file, execution)? {
         return Err(CoreError::OperationUnavailable(
             "GeoSAM2 checkpoint failed size or SHA-256 verification.".into(),
         ));
     }
     execution.begin_commit()?;
-    fs::rename(&staged.0, &file)?;
+    fs::rename(&staged_file, &file)?;
     Ok(file)
 }
 
@@ -361,11 +354,11 @@ fn verify_sha(path: &Path, execution: JobExecution<'_>) -> CoreResult<bool> {
     Ok(format!("{:x}", sha.finalize()) == WEIGHTS_SHA)
 }
 
-struct StagedFile(PathBuf);
+struct StagedDownload(PathBuf);
 
-impl Drop for StagedFile {
+impl Drop for StagedDownload {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 

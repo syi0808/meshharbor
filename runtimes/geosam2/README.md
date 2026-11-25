@@ -13,7 +13,7 @@ GeoSAM2 publishes [Apache-2.0 code and model weights](https://huggingface.co/VAS
 
 ## Install From Studio
 
-Open **Settings → Models → Repart → GeoSAM2** and choose **Install model** on the supported accelerator card. One job installs pinned sources and a private Python environment, checks native dependencies and GPU access, and downloads the weights. Already verified files are reused. Install a C++ compiler first (for example, Xcode Command Line Tools on macOS). The single 616 MB checkpoint is shared by both backends and checked against its pinned SHA-256; no Hugging Face sign-in is required. **Delete model files** removes that checkpoint without removing the backend.
+First prepare **Settings → Environment** and sign in to Hugging Face under **Connections**. Then open **Settings → Models → Repart → GeoSAM2** and choose **Install model** for the supported accelerator. One job installs pinned sources into a private environment using the shared Python toolchain, checks native dependencies and GPU access, and downloads the weights. Already verified files are reused. Install a C++ compiler first (for example, Xcode Command Line Tools on macOS). The single 616 MB checkpoint is shared by both backends and checked against its pinned SHA-256. **Delete model files** removes that checkpoint without removing the backend.
 
 In the MeshHarbor data directory (set by `--data-dir`), the managed installs use `runtimes/geosam2-managed`. For example, on Apple Silicon, the pre-rendered sample included in upstream source can be run with:
 

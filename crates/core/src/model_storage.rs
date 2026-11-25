@@ -15,6 +15,22 @@ pub enum Pixal3dProfile {
 }
 
 impl Pixal3dProfile {
+    pub(crate) fn for_accelerator(backend: &str) -> Self {
+        if backend.ends_with("-cuda") {
+            Self::Cuda
+        } else {
+            Self::Mlx
+        }
+    }
+
+    pub(crate) fn hf_token(self, root: &Path) -> PathBuf {
+        let home = match self {
+            Self::Mlx => crate::Pixal3dRuntimeManager::new(root).home_path(),
+            Self::Cuda => crate::Pixal3dCudaRuntimeManager::new(root).home_path(),
+        };
+        home.join(".cache/huggingface/token")
+    }
+
     pub fn from_backend(backend: &str) -> CoreResult<Self> {
         match backend {
             "pixal3d-mlx" => Ok(Self::Mlx),

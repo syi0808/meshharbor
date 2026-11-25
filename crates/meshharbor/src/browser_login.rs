@@ -175,7 +175,6 @@ async fn run_login(
     .await
     .map_err(|_| login_error())??;
     let _runtime_lock = runtime_lock;
-    tool.install().await?;
     let credentials = tool.stage()?;
     let mut child = tool
         .login_command(&credentials)

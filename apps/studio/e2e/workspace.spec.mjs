@@ -2,6 +2,8 @@ import { expect } from '@playwright/test';
 import { test } from './studio-fixture.mjs';
 import { texturedGlb } from './textured-glb.mjs';
 
+const readyEnvironment = { ready: true, python_versions: ['3.10', '3.12'] };
+
 test('the desktop library opens on first visit and remembers a collapsed dock', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
@@ -51,6 +53,7 @@ test('Jobs and model logs show saved failures in a details popup', async ({ page
   };
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
     platform: 'macos',
+    environment: readyEnvironment,
     model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', backend_ids: ['pixal3d-mlx'] }],
     model_backends: [{ id: 'pixal3d-mlx', installable: true }],
   } }));
@@ -102,6 +105,7 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   });
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
     platform: 'macos',
+    environment: readyEnvironment,
     model_catalog: [{ id: 'trellis-text', title: 'TRELLIS Text Large', backend_ids: ['trellis-text-cuda', 'trellis-text-mlx'] }],
     model_backends: [
       { id: 'trellis-text-mlx', model_paths: paths, managed_install: true, installable: true, downloads_enabled: !installed, ready: installed,
@@ -185,6 +189,7 @@ test('Repart installs the GeoSAM2 backend and weights in one job', async ({ page
   };
   const runtime = () => ({
     platform: 'macos',
+    environment: readyEnvironment,
     model_catalog: [
       { id: 'pixal3d', title: 'Pixal3D', category: 'generation', backend_ids: ['pixal3d-mlx'] },
       { id: 'geosam2', title: 'GeoSAM2', category: 'repart', backend_ids: ['geosam2-mlx', 'geosam2-cuda'], status: 'experimental_opt_in' },
@@ -263,6 +268,7 @@ test('a gated catalog install reads server access state and supports an explicit
   };
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
     platform: 'macos',
+    environment: readyEnvironment,
     model_catalog: [{ id: 'trellis2', title: 'TRELLIS.2', backend_ids: ['trellis2-mlx'] }],
     model_backends: [
       { id: 'trellis2-mlx', managed_install: true, installable: true, downloads_enabled: true, gated_model_access_required: true },
@@ -495,7 +501,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   const createdAt = String(Date.now());
   const setupJob = {
     id: 'setup-mlx',
-    operation: 'runtime.pixal3d.setup',
+    operation: 'runtime.environment.setup',
     state: 'queued',
     progress: 0,
     created_at: createdAt,
@@ -504,13 +510,19 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
     platform: 'macos',
     status: 'ready_for_mesh_operations',
-    model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', status: 'experimental_opt_in', backend_ids: ['pixal3d-mlx', 'pixal3d-cuda'] }],
+    environment: { ...readyEnvironment, ready: finishSetup },
+    model_catalog: [
+      { id: 'pixal3d', title: 'Pixal3D', status: 'experimental_opt_in', backend_ids: ['pixal3d-mlx', 'pixal3d-cuda'] },
+      { id: 'geosam2', title: 'GeoSAM2', category: 'repart', backend_ids: ['geosam2-mlx'] },
+    ],
     model_backends: [{
       id: 'pixal3d-mlx',
       installable: true,
       ready: false,
-      environment_ready: finishSetup,
+      account_tools_ready: finishSetup,
       downloads_enabled: true,
+      requires_huggingface_login: true,
+      gated_model_access_required: true,
       weights_included: false,
       models_downloaded: false,
       local_files: { token_saved: tokenSaved, credentials_managed: true },
@@ -520,10 +532,13 @@ test('on a narrow viewport setup is accessible without an asset and never starts
       id: 'pixal3d-cuda',
       installable: false,
       weights_included: false,
+    }, {
+      id: 'geosam2-mlx', installable: true, ready: false, requires_huggingface_login: true,
     }],
   } }));
-  await page.route('**/api/v1/runtime/pixal3d-mlx/setup', route => {
+  await page.route('**/api/v1/runtime/environment/setup', route => {
     expect(route.request().method()).toBe('POST');
+    expect(route.request().postDataJSON()).toEqual({ confirmed: true });
     return route.fulfill({ status: 202, json: setupJob });
   });
   await page.route('**/api/v1/jobs/setup-mlx', route => route.fulfill({ json: {
@@ -531,7 +546,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
     state: finishSetup ? 'succeeded' : 'running',
     progress: finishSetup ? 100 : 5,
   } }));
-  await page.route('**/api/v1/runtime/pixal3d-mlx/models', route => {
+  await page.route('**/api/v1/runtime/*/install', route => {
     downloads += 1;
     return route.abort();
   });
@@ -563,29 +578,35 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await settings.click();
   await expect(page).toHaveURL(/\/settings\/models$/);
   const main = page.getByRole('main', { name: 'Models' });
-  const setup = main.getByRole('button', { name: 'Set up Python environment' });
+  const storage = main.getByRole('article', { name: 'Pixal3D · Apple MLX' });
+  const repart = main.getByRole('article', { name: 'GeoSAM2 · Apple MLX' });
+  for (const card of [storage, repart]) {
+    await expect(card).toHaveAttribute('aria-disabled', 'true');
+    await expect(card.getByRole('button', { name: 'Install model' })).toBeDisabled();
+  }
   await expect(main.getByText('Not supported here')).toBeVisible();
+  await main.getByRole('button', { name: 'Go to Environment' }).click();
+  await expect(page).toHaveURL(/\/settings\/environment$/);
+  const environment = page.getByRole('main', { name: 'Environment' });
+  const setup = environment.getByRole('button', { name: 'Set up environment' });
+  await expect(environment).toContainText('Python 3.10 and 3.12');
   await setup.click();
-  await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Set up MLX queued.')).toBeVisible();
-  await expect(main.getByRole('progressbar', { name: 'Job progress' })).toHaveCount(0);
+  const setupDialog = page.getByRole('alertdialog', { name: 'Set up environment?' });
+  const confirmSetup = setupDialog.getByRole('button', { name: 'Set up environment' });
+  await expect(confirmSetup).toBeDisabled();
+  await setupDialog.getByRole('checkbox').check();
+  await confirmSetup.click();
+  await expect(page.getByRole('region', { name: /Notifications/ }).getByText('Set up environment queued.')).toBeVisible();
   await expect(setup).toBeDisabled();
   finishSetup = true;
-  await expect(main.getByText('Available to download')).toBeVisible();
-  const storage = main.getByRole('article', { name: 'Pixal3D · Apple MLX' });
+  await expect(environment.getByText('Ready', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Models', exact: true }).click();
   const toasts = page.getByRole('region', { name: /Notifications/ });
-  const download = storage.getByRole('button', { name: 'Download model files' });
-  const downloadDialog = page.getByRole('alertdialog', { name: 'Download model files?' });
-  const confirm = downloadDialog.getByRole('button', { name: 'Download model files' });
-  const consent = downloadDialog.getByRole('checkbox', { name: 'I reviewed the model terms and approve this download.' });
-  await expect(storage.getByRole('checkbox')).toHaveCount(0);
-  await download.click();
-  await expect(downloadDialog).toContainText('Up to 24 GB');
-  await expect(downloadDialog.getByRole('link', { name: 'Review terms and request DINOv3 access' })).toHaveAttribute('href', 'https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m');
-  await expect(confirm).toBeDisabled();
-  await expect(consent).toBeDisabled();
-  await expect(downloadDialog).toContainText('7 more can be reused');
-  expect(modelAccessChecks).toBe(0);
-  await downloadDialog.getByRole('button', { name: 'Manage Hugging Face connection' }).click();
+  const download = storage.getByRole('button', { name: 'Install model' });
+  await expect(download).toBeDisabled();
+  await expect(repart.getByRole('button', { name: 'Install model' })).toBeDisabled();
+  await expect(repart.getByText('Sign-in required')).toBeVisible();
+  await storage.getByRole('button', { name: 'Go to Connections' }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
   await expect(connections).not.toContainText('DINOv3');
   await expect(connections.getByRole('button', { name: 'Sign in with browser' })).toBeEnabled();
@@ -606,8 +627,14 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(token).toHaveValue('');
   await page.getByRole('button', { name: 'Models', exact: true }).click();
   await expect(download).toBeEnabled();
+  await expect(repart.getByRole('button', { name: 'Install model' })).toBeEnabled();
   expect(modelAccessChecks).toBe(0);
   await download.click();
+  const downloadDialog = page.getByRole('alertdialog', { name: 'Install model?' });
+  const confirm = downloadDialog.getByRole('button', { name: 'Install model' });
+  const consent = downloadDialog.getByRole('checkbox');
+  await expect(downloadDialog).toContainText('up to 24 GB');
+  await expect(downloadDialog).toContainText('7 more can be reused');
   await expect(downloadDialog.getByText('DINOv3 file access verified.')).toBeVisible();
   expect(modelAccessChecks).toBe(0);
   await expect(confirm).toBeDisabled();
@@ -630,9 +657,11 @@ test('a browser sign-in updates settings and DINOv3 can be rechecked manually', 
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
     platform: 'macos',
     status: 'ready_for_mesh_operations',
+    environment: readyEnvironment,
     model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', status: 'experimental_opt_in', backend_ids: ['pixal3d-mlx'] }],
     model_backends: [{
       id: 'pixal3d-mlx', installable: true, environment_ready: true, downloads_enabled: true,
+      gated_model_access_required: true, requires_huggingface_login: true,
       local_files: { token_saved: tokenSaved, disconnect_available: tokenSaved, credentials_managed: true },
       huggingface: { account: tokenSaved ? 'connected' : 'not_connected', model_access: !tokenSaved ? 'not_connected' : modelAccessChecks ? 'verified' : 'access_denied' },
     }],
@@ -683,9 +712,9 @@ test('a browser sign-in updates settings and DINOv3 can be rechecked manually', 
   const storage = page.getByRole('article', { name: 'Pixal3D · Apple MLX' });
   await expect(storage.getByText('Available to download')).toBeVisible();
   expect(modelAccessChecks).toBe(0);
-  await storage.getByRole('button', { name: 'Download model files' }).click();
-  const downloadDialog = page.getByRole('alertdialog', { name: 'Download model files?' });
-  const confirm = downloadDialog.getByRole('button', { name: 'Download model files' });
+  await storage.getByRole('button', { name: 'Install model' }).click();
+  const downloadDialog = page.getByRole('alertdialog', { name: 'Install model?' });
+  const confirm = downloadDialog.getByRole('button', { name: 'Install model' });
   await expect(downloadDialog.getByText('Access required', { exact: true })).toBeVisible();
   await expect(confirm).toBeDisabled();
   await downloadDialog.getByRole('button', { name: 'Recheck access' }).click();
@@ -702,9 +731,11 @@ test('settings deep links and confirmations manage one local profile at a time',
   const runtime = () => ({
     platform: 'macos',
     status: 'ready_for_mesh_operations',
+    environment: readyEnvironment,
     model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', status: 'experimental_opt_in', backend_ids: ['pixal3d-mlx', 'pixal3d-cuda'] }],
     model_backends: [{
       id: 'pixal3d-mlx', installable: true, ready: modelsInstalled,
+      gated_model_access_required: true, requires_huggingface_login: true,
       environment_ready: true, downloads_enabled: !modelsInstalled, models_downloaded: modelsInstalled,
       model_paths: [modelPath],
       local_files: { token_saved: tokenSaved, disconnect_available: tokenSaved, remove_models_available: modelsInstalled, credentials_managed: true, model_files_managed: true },
@@ -754,7 +785,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   await expect(remove).toBeVisible();
   finishModelRemoval();
   await expect(toasts.getByText('Model files removed for Pixal3D · Apple MLX.')).toBeVisible();
-  await expect(storage.getByText('Available to download', { exact: true })).toBeVisible();
+  await expect(storage.getByText('Sign-in required', { exact: true })).toBeVisible();
   await expect(storage.getByText('Model file locations', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
@@ -768,9 +799,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   await expect(connections.getByText('Not connected', { exact: true })).toBeVisible();
   expect(calls).toEqual(['model-files', 'huggingface']);
   await page.goBack();
-  await expect(storage.getByText('Available to download', { exact: true })).toBeVisible();
-  await storage.getByRole('button', { name: 'Download model files' }).click();
-  const downloadDialog = page.getByRole('alertdialog', { name: 'Download model files?' });
-  await expect(downloadDialog.getByText('Sign in to Hugging Face to check DINOv3 file access.')).toBeVisible();
-  await expect(downloadDialog.getByRole('button', { name: 'Download model files' })).toBeDisabled();
+  await expect(storage.getByText('Sign-in required', { exact: true })).toBeVisible();
+  await expect(storage.getByRole('button', { name: 'Install model' })).toBeDisabled();
+  await expect(storage.getByRole('button', { name: 'Go to Connections' })).toBeVisible();
 });

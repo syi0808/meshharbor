@@ -9,6 +9,7 @@ not make CUDA available on macOS or Windows.
 
 ```sh
 # Uses the same MESHHARBOR_HOME/--data-dir as the local server.
+meshharbor runtime environment-setup
 meshharbor runtime cuda-setup
 meshharbor runtime cuda-hf-login
 

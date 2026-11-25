@@ -2,26 +2,23 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
 };
 
-use tokio::{process::Command as AsyncCommand, time::timeout};
+use tokio::process::Command as AsyncCommand;
 use uuid::Uuid;
 
 use crate::{
     CoreError, CoreResult, Pixal3dCudaRuntimeManager, Pixal3dProfile, Pixal3dRuntimeManager,
-    uv_bootstrap::ensure_uv,
+    model_environment::ModelEnvironment,
 };
 
 const TOOL_DIR: &str = "hf-browser-cli-1.20.1";
 pub(crate) const PACKAGE: &str = "huggingface-hub==1.20.1";
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct HuggingFaceBrowserTool {
     profile: Pixal3dProfile,
     data_root: PathBuf,
-    runtime_root: PathBuf,
-    base_python: Option<PathBuf>,
+    cli: PathBuf,
     home: PathBuf,
 }
 
@@ -33,93 +30,27 @@ impl HuggingFaceBrowserTool {
                 "Browser sign-in requires the default managed Hugging Face storage without linked paths. Use an access token instead.".into(),
             )
         })?;
-        let (runtime_root, base_python, home) = match profile {
+        let cli = ModelEnvironment::require(&data_root)?.hf_cli();
+        let home = match profile {
             Pixal3dProfile::Mlx if cfg!(all(target_os = "macos", target_arch = "aarch64")) => {
-                let manager = Pixal3dRuntimeManager::new(&data_root);
-                (
-                    manager.runtime_root().to_path_buf(),
-                    manager.python_path(),
-                    manager.home_path(),
-                )
+                Pixal3dRuntimeManager::new(&data_root).home_path()
             }
             Pixal3dProfile::Cuda => {
                 let manager = Pixal3dCudaRuntimeManager::new(&data_root);
                 if !manager.host_supported() {
                     return Err(unsupported());
                 }
-                (
-                    manager.runtime_root().to_path_buf(),
-                    manager.python_path(),
-                    manager.home_path(),
-                )
+                manager.home_path()
             }
             _ => return Err(unsupported()),
         };
         fs::create_dir_all(&home)?;
-        let base_python = base_python.is_file().then_some(base_python);
         Ok(Self {
             profile,
             data_root,
-            runtime_root,
-            base_python,
+            cli,
             home,
         })
-    }
-
-    pub async fn install(&self) -> CoreResult<()> {
-        let directory = self.runtime_root.join(TOOL_DIR);
-        match fs::symlink_metadata(&directory) {
-            Ok(metadata) if !metadata.file_type().is_dir() => return Err(install_error()),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(install_error()),
-        }
-        if self.hf_path().is_file() && access_python(&self.runtime_root).is_some() {
-            return Ok(());
-        }
-        let uv_root = self.runtime_root.clone();
-        let uv = tokio::task::spawn_blocking(move || ensure_uv(&uv_root))
-            .await
-            .map_err(|_| install_error())?
-            .map_err(|_| install_error())?;
-        let uv_command = || {
-            let mut command = AsyncCommand::new(&uv);
-            command
-                .env_clear()
-                .env("HOME", &self.home)
-                .env("UV_CACHE_DIR", self.runtime_root.join("uv-cache"))
-                .env("UV_PYTHON_INSTALL_DIR", self.runtime_root.join("python"))
-                .env("UV_NO_CONFIG", "1")
-                .env("UV_NO_PROGRESS", "1")
-                .env("UV_HTTP_TIMEOUT", "20")
-                .current_dir(&self.runtime_root);
-            command
-        };
-        let mut venv = uv_command();
-        venv.args(["venv", "--no-project", "--allow-existing"]);
-        if let Some(python) = &self.base_python {
-            venv.arg("--python").arg(python);
-        } else {
-            venv.args(["--managed-python", "--python", "3.12"]);
-        }
-        venv.arg(&directory);
-        install_step(venv).await?;
-        let mut pip = uv_command();
-        pip.args(["pip", "install", "--python"])
-            .arg(directory.join("bin/python"))
-            .args([
-                "--default-index",
-                "https://pypi.org/simple",
-                "--only-binary",
-                ":all:",
-                PACKAGE,
-            ]);
-        install_step(pip).await?;
-        if !self.hf_path().is_file() {
-            return Err(install_error());
-        }
-        fs::write(directory.join(".installed"), b"1.20.1").map_err(|_| install_error())?;
-        Ok(())
     }
 
     pub fn stage(&self) -> CoreResult<BrowserCredentials> {
@@ -144,7 +75,7 @@ impl HuggingFaceBrowserTool {
     }
 
     pub fn login_command(&self, credentials: &BrowserCredentials) -> AsyncCommand {
-        let mut command = AsyncCommand::new(self.hf_path());
+        let mut command = AsyncCommand::new(&self.cli);
         command
             .env_clear()
             .env("HOME", &credentials.staged)
@@ -164,10 +95,6 @@ impl HuggingFaceBrowserTool {
     pub fn commit(&self, credentials: BrowserCredentials) -> CoreResult<()> {
         self.profile.ensure_managed_credentials(&self.data_root)?;
         credentials.commit()
-    }
-
-    fn hf_path(&self) -> PathBuf {
-        browser_cli_path(&self.runtime_root)
     }
 }
 
@@ -236,32 +163,10 @@ pub(crate) fn clear_staged_credentials(hf_home: &Path) -> CoreResult<()> {
     Ok(())
 }
 
-async fn install_step(mut command: AsyncCommand) -> CoreResult<()> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| install_error())?;
-    let status = timeout(INSTALL_TIMEOUT, child.wait())
-        .await
-        .map_err(|_| install_error())?
-        .map_err(|_| install_error())?;
-    if !status.success() {
-        return Err(install_error());
-    }
-    Ok(())
-}
-
 fn unsupported() -> CoreError {
     CoreError::OperationUnavailable(
         "Browser sign-in is available for the supported MLX and CUDA runtimes.".into(),
     )
-}
-
-fn install_error() -> CoreError {
-    CoreError::OperationUnavailable("Could not prepare the managed Hugging Face CLI. Check your network connection and try again, or use an access token.".into())
 }
 
 #[cfg(test)]

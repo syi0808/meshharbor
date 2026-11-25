@@ -25,6 +25,7 @@ use crate::{
         PIXAL_REVISION,
     },
     job_execution::JobExecution,
+    model_environment::ModelEnvironment,
     runtime::RuntimeSetupReport,
 };
 
@@ -34,6 +35,7 @@ const MAX_CUDA_PREFLIGHT_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Pixal3dCudaRuntimeManager {
+    data_root: PathBuf,
     runtime_root: PathBuf,
     upstream_root: PathBuf,
     managed_root: PathBuf,
@@ -41,11 +43,13 @@ pub struct Pixal3dCudaRuntimeManager {
 
 impl Pixal3dCudaRuntimeManager {
     pub fn new(data_root: impl AsRef<Path>) -> Self {
+        let data_root = data_root.as_ref().to_path_buf();
         let runtime_root = env::var_os("MESHHARBOR_PIXAL3D_CUDA_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| data_root.as_ref().join("runtimes/pixal3d-cuda"));
+            .unwrap_or_else(|| data_root.join("runtimes/pixal3d-cuda"));
         let source_root = runtime_root.join("source");
         Self {
+            data_root,
             upstream_root: source_root.join("upstream"),
             managed_root: source_root.join("managed"),
             runtime_root,
@@ -76,7 +80,10 @@ impl Pixal3dCudaRuntimeManager {
 
     fn huggingface_command(&self) -> CoreResult<Command> {
         self.ensure_supported_host()?;
-        let python = access_python(&self.runtime_root).unwrap_or_else(|| self.python_path());
+        let python = ModelEnvironment::load(&self.data_root)
+            .map(|environment| environment.hf_python())
+            .or_else(|| access_python(&self.runtime_root))
+            .unwrap_or_else(|| self.python_path());
         if !python.is_file() {
             return Err(CoreError::OperationUnavailable(
                 "Prepare browser sign-in or set up the CUDA environment before connecting a token."
@@ -144,11 +151,11 @@ impl Pixal3dCudaRuntimeManager {
         execution: JobExecution<'_>,
     ) -> CoreResult<RuntimeSetupReport> {
         execution.stage("prepare_runtime")?;
+        let environment = ModelEnvironment::require(&self.data_root)?;
         let device = self.detect_gpu_tracked(execution)?;
         self.invalidate_preflight_marker()?;
         self.ensure_source()?;
-        let uv = crate::uv_bootstrap::ensure_uv_tracked(&self.runtime_root, execution)?;
-        self.setup_environment_with_tools(&uv, &device, execution)
+        self.setup_environment_with_tools(environment.uv(), &device, execution)
     }
 
     fn setup_environment_with_tools(
@@ -170,6 +177,9 @@ impl Pixal3dCudaRuntimeManager {
             execution,
             &python_dir,
             &venv_dir,
+            ModelEnvironment::load(&self.data_root)
+                .as_ref()
+                .map(|environment| environment.python("3.12")),
             || self.uv_command(uv),
             |path| self.python_command(path),
         )?;
@@ -266,19 +276,7 @@ impl Pixal3dCudaRuntimeManager {
     /// MeshHarbor cache; no token enters MeshHarbor's API or logs.
     pub fn login_huggingface(&self) -> CoreResult<()> {
         self.ensure_supported_host()?;
-        let python = self.python_path();
-        if !python.is_file() {
-            return Err(CoreError::OperationUnavailable(format!(
-                "Managed CUDA environment missing at {}; run `meshharbor runtime cuda-setup` first.",
-                python.display()
-            )));
-        }
-        let executable = self.runtime_root.join(".venv/bin/hf");
-        if !executable.is_file() {
-            return Err(CoreError::OperationUnavailable(
-                "The isolated Hugging Face CLI is missing; rerun CUDA setup.".into(),
-            ));
-        }
+        let executable = ModelEnvironment::require(&self.data_root)?.hf_cli();
         std::fs::create_dir_all(self.home_path())?;
         eprintln!(
             "Hugging Face will prompt for the token in this terminal. It is saved only in MeshHarbor's isolated cache."
@@ -325,6 +323,7 @@ impl Pixal3dCudaRuntimeManager {
             ));
         }
         self.ensure_supported_host()?;
+        ModelEnvironment::require(&self.data_root)?;
         self.ensure_source()?;
         let python = self.python_path();
         if !python.is_file() {
@@ -497,6 +496,7 @@ impl Pixal3dCudaRuntimeManager {
                 "Confirm the additional model files before downloading multiview weights.".into(),
             ));
         }
+        ModelEnvironment::require(&self.data_root)?;
         if !self.readiness().ready {
             return Err(CoreError::OperationUnavailable(
                 "Set up the base Pixal3D model before adding multiview weights.".into(),
@@ -739,7 +739,7 @@ impl Pixal3dCudaRuntimeManager {
             .env("UV_PROJECT_ENVIRONMENT", self.runtime_root.join(".venv"))
             .env("UV_NO_CONFIG", "1")
             .env("UV_NO_PROGRESS", "0")
-            .env("UV_PYTHON_DOWNLOADS", "automatic")
+            .env("UV_PYTHON_DOWNLOADS", "never")
             .env("UV_DEFAULT_INDEX", "https://pypi.org/simple");
         command
     }
@@ -860,6 +860,7 @@ mod tests {
         std::fs::create_dir_all(&data_root).unwrap();
         (
             Pixal3dCudaRuntimeManager {
+                data_root: data_root.clone(),
                 upstream_root: runtime_root.join("source/upstream"),
                 managed_root: runtime_root.join("source/managed"),
                 runtime_root: runtime_root.clone(),

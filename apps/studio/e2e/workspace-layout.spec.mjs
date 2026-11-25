@@ -403,9 +403,11 @@ test('generation switches between posed presets and maps each custom image to it
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
     platform: 'linux',
     status: 'ready_for_mesh_operations',
+    environment: { ready: true, python_versions: ['3.10', '3.12'] },
     model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', backend_ids: ['pixal3d-cuda'] }],
     model_backends: [{
-      id: 'pixal3d-cuda', ready: true, multiview_ready: multiviewInstalled,
+      id: 'pixal3d-cuda', installable: true, ready: true, multiview_ready: multiviewInstalled,
+      requires_huggingface_login: true, huggingface: { account: 'connected', model_access: 'verified' },
       generation: {
         id: 'pixal3d-cuda', view_modes: ['single', 'four', 'six', 'custom'], max_views: 8,
         parameters: [

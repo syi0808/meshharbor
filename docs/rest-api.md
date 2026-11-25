@@ -19,9 +19,10 @@ Do not expose the server through a public proxy. These browser-origin checks are
 Selected endpoints:
 
 - `GET /api/v1/health`, `/api/v1/runtime`, `/api/v1/operations`
+- Studio-only: `POST /api/v1/runtime/environment/setup` with `{"confirmed":true}` queues shared uv, Python 3.10/3.12, and Hugging Face tool setup without installing any model. Check `environment.ready` in runtime status.
 - `POST /api/v1/runtime/pixal3d-mlx/setup`, `/models`, `/convert-naf`; `/api/v1/runtime/pixal3d-cuda/setup` and `/models` for explicit asynchronous setup actions
 - `GET /api/v1/runtime/{backend}/jobs` returns the six most recent setup or install jobs for that backend. The runtime status includes model file paths.
-- Studio-only: `POST /api/v1/runtime/{backend}/install` with `confirmed: true` queues one managed backend-and-weights job for GeoSAM2 (`geosam2-mlx` or `geosam2-cuda`), TRELLIS.2, TripoSG, or TRELLIS Text. TRELLIS.2 also requires `confirm_gated_access: true`. In runtime status, `model_catalog[].category` distinguishes `repart` from `generation`. GeoSAM2 files do not enable a Studio repart operation.
+- Studio-only: `POST /api/v1/runtime/{backend}/install` with `confirmed: true` queues a managed backend-and-weights job for Pixal3D, GeoSAM2, TRELLIS.2, TripoSG, or TRELLIS Text. The shared environment and saved Hugging Face credentials must be present before queuing; the worker verifies sign-in before provisioning or downloads. Pixal3D and TRELLIS.2 also require DINOv3 access and `confirm_gated_access: true`. In runtime status, `model_catalog[].category` distinguishes `repart` from `generation`. GeoSAM2 files do not enable a Studio repart operation.
 - Studio-only: `DELETE /api/v1/runtime/{backend}/model-files` with `confirmed: true` removes managed model files. For either GeoSAM2 backend this removes the one shared checkpoint and preserves both environments.
 - `GET /api/v1/assets?limit=50`; `POST /api/v1/assets?filename=scene.glb` with raw file bytes
 - `GET /api/v1/assets/page?limit=50&cursor=<asset_id>&q=<filename>&kind=image|mesh&derived=true|false` returns `{items,next_cursor}` newest-first; filters are optional, and `next_cursor` can be sent back to load older assets

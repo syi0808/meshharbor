@@ -51,12 +51,6 @@ impl UvAsset {
     }
 }
 
-/// Find an existing explicit/system uv, or bootstrap the pinned official
-/// release into `<data-root>/tools/uv-<version>`.
-pub(crate) fn ensure_uv(data_root: &Path) -> CoreResult<PathBuf> {
-    ensure_uv_tracked(data_root, Default::default())
-}
-
 pub(crate) fn ensure_uv_tracked(
     data_root: &Path,
     execution: crate::job_execution::JobExecution<'_>,

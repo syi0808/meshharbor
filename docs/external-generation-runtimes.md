@@ -1,6 +1,6 @@
 # External generation runtimes
 
-These experimental backends can be installed in **Settings → Models** after you review the model and dependency terms. The engine checks out pinned source and installs packages and model snapshots in a private runtime. TRELLIS.2 requires Hugging Face sign-in and DINOv3 access first. You need Git, disk space for the downloads, and any system build prerequisites: Apple command-line build tools for native MLX extensions, or an NVIDIA driver and a matching CUDA toolkit/compiler for native CUDA extensions. MeshHarbor does not install system prerequisites. Use **Recent logs** on the backend card to inspect setup failures.
+These experimental backends can be installed in **Settings → Models** after shared tool setup in **Environment**, Hugging Face sign-in in **Connections**, and review of the model and dependency terms. The engine checks out pinned source and installs packages and model snapshots in a private runtime. TRELLIS.2 also requires DINOv3 access. You need Git, disk space for the downloads, and any system build prerequisites: Apple command-line build tools for native MLX extensions, or an NVIDIA driver and a matching CUDA toolkit/compiler for native CUDA extensions. MeshHarbor does not install system prerequisites. Use **Recent logs** on the backend card to inspect setup failures.
 
 Existing manually provisioned backends still work and are not changed by the installer. Managed installations use `<data-dir>/runtimes/<backend>-managed`; **Delete model files** removes only the managed weights and model-transfer cache.
 

@@ -5,12 +5,16 @@ use serde_json::{Value, json};
 
 use crate::{
     Asset, AssetKind, AtlasBakeError, AtlasBakeOptions, CoreError, CoreResult, GenerationInput,
-    GenerationInputMode, GenerationOptions, GenerationResult, IMAGE_GENERATION_OPERATION,
-    MODEL_GENERATION_OPERATION, Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dProfile,
-    Pixal3dRuntimeManager, QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport,
-    SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb, external_generation,
-    geosam2_install, inspect_asset, install_bundled_quadriflow_sidecar,
-    job_execution::JobExecution, model_storage::model_path, optimize_render_glb, simplify_glb,
+    GenerationInputMode, GenerationOptions, GenerationResult, HuggingFaceAccess,
+    HuggingFaceConnection, IMAGE_GENERATION_OPERATION, MODEL_GENERATION_OPERATION,
+    Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dProfile, Pixal3dRuntimeManager,
+    QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport, SimplificationReport,
+    Store, bake_glb, cleanup_glb, compress_mesh_glb, external_generation, geosam2_install,
+    inspect_asset, install_bundled_quadriflow_sidecar,
+    job_execution::JobExecution,
+    model_environment::{ModelEnvironment, ModelEnvironmentStatus},
+    model_storage::model_path,
+    optimize_render_glb, simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +30,7 @@ pub struct OperationDescriptor {
 pub struct RuntimeDoctor {
     pub status: String,
     pub platform: String,
+    pub environment: ModelEnvironmentStatus,
     pub operations: Vec<String>,
     pub model_backends: Vec<Value>,
     pub model_catalog: Vec<Value>,
@@ -424,11 +429,53 @@ impl OperationCore {
         Pixal3dRuntimeManager::new(self.store.root()).setup_environment()
     }
 
+    pub fn setup_model_environment(&self) -> CoreResult<ModelEnvironmentStatus> {
+        ModelEnvironment::prepare(self.store.root(), JobExecution::default())
+    }
+
+    pub fn validate_runtime_job(&self, kind: crate::RuntimeJobKind) -> CoreResult<()> {
+        if matches!(kind, crate::RuntimeJobKind::EnvironmentSetup) {
+            return Ok(());
+        }
+        let root = self.store.root();
+        ModelEnvironment::require(root)?;
+        if kind.downloads_weights() {
+            let token = Pixal3dProfile::for_accelerator(kind.backend_id()).hf_token(root);
+            if !token
+                .metadata()
+                .is_ok_and(|file| file.is_file() && file.len() > 0)
+            {
+                return Err(huggingface_sign_in_required());
+            }
+        }
+        Ok(())
+    }
+
     pub fn run_runtime_job(&self, kind: crate::RuntimeJobKind, job_id: &str) -> CoreResult<Value> {
         use crate::RuntimeJobKind;
         let root = self.store.root();
         let execution = JobExecution::for_job(&self.store, job_id);
+        self.validate_runtime_job(kind)?;
+        if kind.downloads_weights() {
+            execution.stage("check_huggingface_login")?;
+            let connection = match Pixal3dProfile::for_accelerator(kind.backend_id()) {
+                Pixal3dProfile::Mlx => {
+                    Pixal3dRuntimeManager::new(root).huggingface_connection(None)
+                }
+                Pixal3dProfile::Cuda => {
+                    Pixal3dCudaRuntimeManager::new(root).huggingface_connection(None)
+                }
+            }?;
+            if connection != HuggingFaceConnection::Connected {
+                return Err(huggingface_sign_in_required());
+            }
+        }
         let report = match kind {
+            RuntimeJobKind::EnvironmentSetup => {
+                return Ok(serde_json::to_value(ModelEnvironment::prepare(
+                    root, execution,
+                )?)?);
+            }
             RuntimeJobKind::Setup => {
                 Pixal3dRuntimeManager::new(root).setup_environment_tracked(execution)
             }
@@ -447,6 +494,11 @@ impl OperationCore {
             RuntimeJobKind::CudaInstallMultiview => Pixal3dCudaRuntimeManager::new(root)
                 .install_multiview_models_tracked(true, execution),
             RuntimeJobKind::InstallCatalogModel(backend) => {
+                if let Ok(profile) = Pixal3dProfile::from_backend(backend) {
+                    return Ok(serde_json::to_value(
+                        self.install_pixal3d_catalog(profile, execution)?,
+                    )?);
+                }
                 if let Some(profile) = geosam2_install::Profile::find(backend) {
                     return profile.install(root, execution);
                 }
@@ -458,11 +510,64 @@ impl OperationCore {
         Ok(serde_json::to_value(report)?)
     }
 
+    fn install_pixal3d_catalog(
+        &self,
+        profile: Pixal3dProfile,
+        execution: JobExecution<'_>,
+    ) -> CoreResult<RuntimeSetupReport> {
+        let root = self.store.root();
+        execution.stage("check_model_access")?;
+        let access = match profile {
+            Pixal3dProfile::Mlx => Pixal3dRuntimeManager::new(root).huggingface_model_access(),
+            Pixal3dProfile::Cuda => Pixal3dCudaRuntimeManager::new(root).huggingface_model_access(),
+        }?;
+        if access != HuggingFaceAccess::Verified {
+            return Err(CoreError::OperationUnavailable(
+                "Verify Hugging Face access to DINOv3 before installing Pixal3D.".into(),
+            ));
+        }
+        match profile {
+            Pixal3dProfile::Mlx => {
+                let manager = Pixal3dRuntimeManager::new(root);
+                manager.setup_environment_tracked(execution)?;
+                manager.install_models_tracked(true, true, execution)
+            }
+            Pixal3dProfile::Cuda => {
+                let manager = Pixal3dCudaRuntimeManager::new(root);
+                if !manager.readiness().environment_ready {
+                    manager.setup_environment_tracked(execution)?;
+                }
+                manager.install_models_tracked(true, true, execution)
+            }
+        }
+    }
+
     pub fn catalog_install_job(
         &self,
         backend: &str,
         confirm_gated_access: bool,
     ) -> CoreResult<crate::RuntimeJobKind> {
+        if let Ok(profile) = Pixal3dProfile::from_backend(backend) {
+            if !confirm_gated_access {
+                return Err(CoreError::InvalidInput(
+                    "Confirm access to DINOv3 before installing Pixal3D.".into(),
+                ));
+            }
+            let supported = match profile {
+                Pixal3dProfile::Mlx => cfg!(all(target_os = "macos", target_arch = "aarch64")),
+                Pixal3dProfile::Cuda => {
+                    Pixal3dCudaRuntimeManager::new(self.store.root()).host_supported()
+                }
+            };
+            if !supported {
+                return Err(CoreError::OperationUnavailable(format!(
+                    "{backend} is not supported on this host."
+                )));
+            }
+            return Ok(crate::RuntimeJobKind::InstallCatalogModel(
+                profile.backend(),
+            ));
+        }
         if let Some(profile) = geosam2_install::Profile::find(backend) {
             profile.require_supported(self.store.root())?;
             return Ok(crate::RuntimeJobKind::InstallCatalogModel(profile.id()));
@@ -579,6 +684,7 @@ impl OperationCore {
     }
 
     pub fn runtime_doctor(&self) -> RuntimeDoctor {
+        let environment = ModelEnvironment::status(self.store.root());
         let supported = self
             .list_operations()
             .into_iter()
@@ -597,7 +703,7 @@ impl OperationCore {
                 "id": readiness.backend_id,
                 "generation": crate::generation_catalog::generation_profile(&readiness.backend_id),
                 "local_files": Pixal3dProfile::Cuda.local_files(self.store.root()),
-                "account_tools_ready": readiness.environment_ready || crate::huggingface_browser::access_python(cuda_manager.runtime_root()).is_some(),
+                "account_tools_ready": cuda_supported && (environment.ready || readiness.environment_ready || crate::huggingface_browser::access_python(cuda_manager.runtime_root()).is_some()),
                 "pixal3d_cache": crate::huggingface_download::pixal_cache_status(&cuda_manager.home_path(), shared_cache.as_deref()),
                 "multiview_ready": readiness.ready && crate::huggingface_download::multiview_files_present(&cuda_manager.home_path()),
                 "ready": readiness.ready,
@@ -609,7 +715,9 @@ impl OperationCore {
                 "validation_level": readiness.validation_level,
                 "installable": cuda_supported,
                 "weights_included": false,
-                "downloads_enabled": readiness.downloads_enabled,
+                "downloads_enabled": cuda_supported && !readiness.ready,
+                "managed_install": true,
+                "managed_ready": readiness.ready,
                 "environment_ready": readiness.environment_ready,
                 "model_files_ready": readiness.model_files_ready,
                 "models_downloaded": readiness.models_downloaded,
@@ -626,7 +734,7 @@ impl OperationCore {
                 "id": readiness.backend_id,
                 "generation": crate::generation_catalog::generation_profile(&readiness.backend_id),
                 "local_files": Pixal3dProfile::Mlx.local_files(self.store.root()),
-                "account_tools_ready": readiness.environment_ready || crate::huggingface_browser::access_python(Pixal3dRuntimeManager::new(self.store.root()).runtime_root()).is_some(),
+                "account_tools_ready": cfg!(all(target_os = "macos", target_arch = "aarch64")) && (environment.ready || readiness.environment_ready || crate::huggingface_browser::access_python(Pixal3dRuntimeManager::new(self.store.root()).runtime_root()).is_some()),
                 "pixal3d_cache": crate::huggingface_download::pixal_cache_status(&mlx_runtime.home, shared_cache.as_deref()),
                 "ready": readiness.ready,
                 "status": if readiness.ready {
@@ -645,7 +753,9 @@ impl OperationCore {
                 "validation_level": readiness.validation_level,
                 "installable": cfg!(all(target_os = "macos", target_arch = "aarch64")),
                 "weights_included": false,
-                "downloads_enabled": readiness.downloads_enabled,
+                "downloads_enabled": cfg!(all(target_os = "macos", target_arch = "aarch64")) && !readiness.ready,
+                "managed_install": true,
+                "managed_ready": readiness.ready,
                 "environment_ready": readiness.environment_ready,
                 "model_files_ready": readiness.model_files_ready,
                 "models_downloaded": readiness.models_downloaded,
@@ -668,6 +778,9 @@ impl OperationCore {
                 .into_iter()
                 .map(|profile| profile.status(self.store.root(), cuda_supported)),
         );
+        for backend in &mut model_backends {
+            backend["requires_huggingface_login"] = json!(true);
+        }
         let pixal3d: Value =
             serde_json::from_str(include_str!("../../../registry/models/pixal3d.json"))
                 .expect("bundled Pixal3D registry must be valid JSON");
@@ -681,6 +794,7 @@ impl OperationCore {
         RuntimeDoctor {
             status: "ready_for_mesh_operations".into(),
             platform: std::env::consts::OS.to_string(),
+            environment,
             operations: supported,
             model_backends,
             model_catalog: vec![
@@ -711,16 +825,21 @@ impl OperationCore {
             ],
             quadriflow_backend: self.quadriflow_backend_status(),
             notes: vec![
+                "Managed model installation requires the shared Python and uv environment and a verified Hugging Face login. In Studio, set up Environment, sign in under Connections, then choose Install model. Existing offline generation is not gated on sign-in.".into(),
                 "The Rust core includes CPU mesh simplification, conservative cleanup, xatlas UV atlas rebaking, render cache/overdraw optimization, and required KHR_meshopt_compression output; this does not yet constitute a full cross-platform Studio or one-file distribution.".into(),
                 "QuadriFlow retopology is unavailable in this build: adjacent executables are ignored, and the in-process signature/provenance verifier has no approved sidecar to accept because the trusted manifest is empty. Backend status and an install request are exposed, but readiness and installation stay fail-closed until a verified managed release is available. It accepts one closed static triangle mesh; textured input needs POSITION, TEXCOORD_0, optional NORMAL, and the supported embedded base-color/metallic-roughness PNG maps. Supported maps are projected with distance, facing-normal, coverage, and opposing-shell ambiguity gates into the triangulated GLB preview only; the separate OBJ retains quad topology without UVs or appearance. Other maps/attributes are rejected, and self-intersection freedom or measured surface-error tolerance is not certified.".into(),
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
-                "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
+                "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. The combined Studio install may download 25–30 GB. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
                 "TRELLIS Text, TRELLIS.2, and TripoSG are opt-in installs in Studio. The engine provisions an isolated environment and downloads pinned snapshots after explicit consent. Existing operator-provisioned runtimes are kept separately; readiness does not prove license compliance, memory fit, or inference quality.".into(),
                 "GeoSAM2 installs the backend and shared checkpoint in one opt-in job for the guided repart prototype. Installed files do not enable a repart operation in Studio.".into(),
                 "MeshHarbor's MIT license covers its own code. Third-party runtime and model terms, including DINOv3 and NAF, remain separate; gated access is user-controlled. See THIRD-PARTY-NOTICES.md.".into(),
             ],
         }
     }
+}
+
+fn huggingface_sign_in_required() -> CoreError {
+    CoreError::OperationUnavailable("Sign in to Hugging Face in Studio → Settings → Connections before installing model weights.".into())
 }
 
 #[derive(Debug, Deserialize)]
