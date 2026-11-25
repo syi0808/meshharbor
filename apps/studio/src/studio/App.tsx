@@ -1,4 +1,4 @@
-import { ArrowDownIcon, ArrowsClockwiseIcon, ArrowsInIcon, BoundingBoxIcon, BroomIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GaugeIcon, GearSixIcon, GridFourIcon, ImageSquareIcon, IntersectIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SlidersHorizontalIcon, SquaresFourIcon, type Icon } from '@phosphor-icons/react';
+import { ArrowDownIcon, ArrowsClockwiseIcon, ArrowsInIcon, BoundingBoxIcon, BroomIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GaugeIcon, GearSixIcon, GridFourIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SlidersHorizontalIcon, SquaresFourIcon, type Icon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   assetComparisonPairForSelection,
@@ -146,13 +146,6 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; label?: 
     title: 'Cleanup',
     icon: BroomIcon,
     description: 'Remove invalid and duplicate faces, then reduce redundant triangles within a small shape and UV error tolerance. No triangle target is needed.',
-  },
-  {
-    id: 'mesh.separate_parts',
-    title: 'Separate connected parts',
-    label: 'Separate parts',
-    icon: IntersectIcon,
-    description: 'Split connected surfaces without welding. Small fragments may share an output part.',
   },
   {
     id: 'uv.unwrap',
@@ -867,13 +860,6 @@ export function App() {
           } else if (latest.operation === 'mesh.compress') {
             const saved = Number(resultReport.bytes_saved ?? 0);
             notify('success', `Compression complete. Saved ${formatSize(saved)}. The exported GLB requires KHR_meshopt_compression support.`);
-          } else if (latest.operation === 'mesh.separate_parts') {
-            const parts = Number(resultReport.connected_parts ?? 0);
-            const grouped = Number(resultReport.grouped_components ?? 0);
-            const primitives = Number(resultReport.output_primitives ?? parts);
-            notify('success', grouped > 0
-              ? `Part separation complete. Found ${parts.toLocaleString()} connected components. ${grouped.toLocaleString()} small components share the last of ${primitives.toLocaleString()} output primitives; no triangles were discarded.`
-              : `Part separation complete. Found ${parts.toLocaleString()} connected component${parts === 1 ? '' : 's'}, emitted as primitives in the same mesh.`);
           } else if (latest.operation === 'mesh.retopology') {
             const projection = resultReport.appearance_projection;
             const coverage = projection && typeof projection === 'object'
@@ -1942,6 +1928,7 @@ export function App() {
 function studioOperationLabel(operation: string): string {
   switch (operation) {
     case 'mesh.simplify': return 'Optimize mesh';
+    case 'mesh.separate_parts': return 'Connected parts (retired)';
     case 'model.generate':
     case 'image.generate': return 'Generate model';
     case 'uv.unwrap': return 'Unwrap UVs';

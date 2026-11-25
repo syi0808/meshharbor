@@ -10,7 +10,7 @@ use crate::{
     Pixal3dRuntimeManager, QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport,
     SimplificationReport, Store, bake_glb, cleanup_glb, compress_mesh_glb, external_generation,
     inspect_asset, install_bundled_quadriflow_sidecar, job_execution::JobExecution,
-    model_storage::model_path, optimize_render_glb, separate_components, simplify_glb,
+    model_storage::model_path, optimize_render_glb, simplify_glb,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,9 +225,6 @@ impl OperationCore {
         execution.stage("load_mesh")?;
         let source = self.mesh_processing_source(asset_id)?;
         let source_artifact = mesh_source_artifact(&source)?;
-        if operation == "mesh.separate_parts" {
-            crate::parts::validate_part_glb_size(source_artifact.byte_size)?;
-        }
         if operation == "mesh.retopology" {
             let backend = self.quadriflow_backend_status();
             if !backend.available {
@@ -289,11 +286,6 @@ impl OperationCore {
                 reject_unused_parameters(&parameters, operation)?;
                 let (output, report) = compress_mesh_glb(&bytes)?;
                 ("compressed", output, serde_json::to_value(report)?)
-            }
-            "mesh.separate_parts" => {
-                reject_unused_parameters(&parameters, operation)?;
-                let (output, report) = separate_components(&bytes)?;
-                ("separated-parts", output, serde_json::to_value(report)?)
             }
             "uv.unwrap" => {
                 let options: AtlasBakeOptions =
@@ -568,7 +560,6 @@ impl OperationCore {
             OperationDescriptor { id: IMAGE_GENERATION_OPERATION.into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Compatibility operation for generating a local GLB from an imported image.".into(), implemented: image_generation_ready },
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangles to a hard upper limit with meshoptimizer while retaining original vertex streams, materials, and textures. No result is saved if the limit cannot be met.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces, then simplify eligible primitives within a conservative error tolerance without a triangle target.".into(), implemented: true },
-            OperationDescriptor { id: "mesh.separate_parts".into(), title: "Separate connected parts".into(), category: "mesh".into(), summary: "Find components in one static indexed TRIANGLES primitive by shared indices and exact unambiguous edges. Emit up to 256 primitives, grouping excess fragments without discarding triangles. No vertex welding or scene-node split.".into(), implemented: true },
             OperationDescriptor { id: "mesh.retopology".into(), title: "Quad retopology".into(), category: "mesh".into(), summary: "Experimental QuadriFlow quad remeshing through a signature-verified, manifest-matched managed sidecar; adjacent executables are ignored. Accepts one closed static triangle GLB; textured inputs also require TEXCOORD_0, optional NORMAL, and the narrow supported embedded base-color/metallic-roughness PNG maps. Those maps are projected only into a triangulated GLB preview with distance, normal, coverage, and ambiguity gates; the editable quad OBJ remains geometry-only. Other attributes/maps, self-intersection freedom, and a measured surface-error tolerance are not supported or certified.".into(), implemented: quadriflow_ready },
             OperationDescriptor { id: "uv.unwrap".into(), title: "Atlas UV unwrap".into(), category: "uv".into(), summary: "Use xatlas to unwrap one supported static textured mesh and rebake its embedded base-color and metallic/roughness PNG maps from its existing UVs. Zero-area faces are omitted from the result. This is not high-to-low projection.".into(), implemented: true },
             OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Generic high-to-low and arbitrary texture baking is not implemented; uv.unwrap only rebakes supported same-mesh embedded base-color and metallic/roughness PNG maps.".into(), implemented: false },
@@ -700,8 +691,7 @@ impl OperationCore {
             ],
             quadriflow_backend: self.quadriflow_backend_status(),
             notes: vec![
-                "The Rust core includes CPU mesh simplification, conservative cleanup, shared-index connected-part splitting, xatlas UV atlas rebaking, render cache/overdraw optimization, and required KHR_meshopt_compression output; this does not yet constitute a full cross-platform Studio or one-file distribution.".into(),
-                "Connected-part splitting handles one indexed static TRIANGLES primitive, groups by shared vertex indices, and emits primitives within the same GLB mesh; it does not split scene nodes, weld duplicate positions, or retopologize.".into(),
+                "The Rust core includes CPU mesh simplification, conservative cleanup, xatlas UV atlas rebaking, render cache/overdraw optimization, and required KHR_meshopt_compression output; this does not yet constitute a full cross-platform Studio or one-file distribution.".into(),
                 "QuadriFlow retopology is unavailable in this build: adjacent executables are ignored, and the in-process signature/provenance verifier has no approved sidecar to accept because the trusted manifest is empty. Backend status and an install request are exposed, but readiness and installation stay fail-closed until a verified managed release is available. It accepts one closed static triangle mesh; textured input needs POSITION, TEXCOORD_0, optional NORMAL, and the supported embedded base-color/metallic-roughness PNG maps. Supported maps are projected with distance, facing-normal, coverage, and opposing-shell ambiguity gates into the triangulated GLB preview only; the separate OBJ retains quad topology without UVs or appearance. Other maps/attributes are rejected, and self-intersection freedom or measured surface-error tolerance is not certified.".into(),
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
@@ -800,9 +790,10 @@ mod tests {
         assert!(doctor.operations.contains(&"render.optimize".to_string()));
         assert!(doctor.operations.contains(&"mesh.compress".to_string()));
         assert!(
-            doctor
-                .operations
-                .contains(&"mesh.separate_parts".to_string())
+            !core
+                .list_operations()
+                .iter()
+                .any(|operation| operation.id == "mesh.separate_parts")
         );
         assert!(doctor.operations.contains(&"uv.unwrap".to_string()));
         assert_eq!(

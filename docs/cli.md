@@ -17,9 +17,8 @@ meshharbor jobs show job_REPLACE_ME
 # Simplify an imported asset; the source stays intact
 meshharbor simplify "$ASSET_ID" --target-triangles 4000 --max-error 0.02 --output ./scene-simplified.glb
 
-# Conservative cleanup, connected-part primitives, atlas UV rebake, render optimization, or required KHR_meshopt compression
+# Conservative cleanup, atlas UV rebake, render optimization, or required KHR_meshopt compression
 meshharbor process-mesh "$ASSET_ID" --operation mesh.cleanup --output ./scene-cleaned.glb
-meshharbor process-mesh "$ASSET_ID" --operation mesh.separate_parts --output ./scene-parts.glb
 meshharbor process-mesh "$ASSET_ID" --operation uv.unwrap --output ./scene-atlas.glb
 # Adjust atlas resolution (64–4,096; default 1,024) and chart padding (0–64; default 8)
 meshharbor process-mesh "$ASSET_ID" --operation uv.unwrap --resolution 2048 --padding 12 --output ./scene-atlas-hd.glb
@@ -29,7 +28,7 @@ meshharbor process-mesh "$ASSET_ID" --operation render.optimize --overdraw-thres
 meshharbor process-mesh "$ASSET_ID" --operation mesh.compress --output ./scene-compressed.glb
 ```
 
-Mesh processing targets supported static indexed triangle GLBs and creates a new asset. The simplification target is a goal; check the report for the actual count and error. Part separation accepts up to 64 MiB of GLB data, 4 MiB of JSON, 1,000,000 vertices, and 3,000,000 indices. It keeps the largest 255 components separate when more than 256 are found and groups the remainder without discarding triangles. Compressed GLBs require a viewer that supports `KHR_meshopt_compression`; they do not include an uncompressed geometry fallback. See [architecture and operation limits](architecture.md#simplification-and-uvbaking-boundary).
+Mesh processing targets supported static indexed triangle GLBs and creates a new asset. Simplification fails without creating an asset if it cannot honor the triangle limit. Compressed GLBs require a viewer that supports `KHR_meshopt_compression`; they do not include an uncompressed geometry fallback. See [architecture and operation limits](architecture.md#simplification-and-uvbaking-boundary).
 
 ## Image-to-3D
 

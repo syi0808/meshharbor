@@ -129,9 +129,9 @@ export function texturedGlb({ singleMaterial = false } = {}) {
   return Buffer.concat([header, jsonChunk, binChunk]);
 }
 
-export function disconnectedPartsGlb() {
+export function disconnectedPartsGlb({ separated = false } = {}) {
   const positions = [-2, -1, 0, -0.25, -1, 0, -1, 1, 0, 0.25, -1, 0, 2, -1, 0, 1, 1, 0];
-  const indices = [0, 1, 2, 0, 1, 2, 3, 4, 5];
+  const indices = separated ? [0, 1, 2, 3, 4, 5] : [0, 1, 2, 0, 1, 2, 3, 4, 5];
   const positionBytes = positions.length * 4;
   const binary = Buffer.alloc(positionBytes + indices.length * 2);
   positions.forEach((value, index) => binary.writeFloatLE(value, index * 4));
@@ -152,6 +152,11 @@ export function disconnectedPartsGlb() {
       { bufferView: 1, componentType: 5123, count: indices.length, type: 'SCALAR' },
     ],
   };
+  if (separated) {
+    document.accessors[1].count = 3;
+    document.accessors.push({ ...document.accessors[1], byteOffset: 6 });
+    document.meshes[0].primitives.push({ attributes: { POSITION: 0 }, indices: 2 });
+  }
   const json = chunk('JSON', Buffer.from(JSON.stringify(document)), 0x20);
   const bin = chunk('BIN\0', binary, 0);
   const header = Buffer.alloc(12);

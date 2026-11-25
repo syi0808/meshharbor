@@ -227,6 +227,7 @@ export function isJobCancellable(job: Job | null): boolean {
 }
 
 export function isJobRetryable(job: Job): boolean {
+  if (job.operation === 'mesh.separate_parts') return false;
   return (job.state === 'failed' || job.state === 'cancelled') && (
     Boolean(job.input_asset_id) || (job.operation === 'runtime.models.install' ? typeof job.parameters?.backend_id === 'string'
       : job.operation.startsWith('runtime.pixal3d.'))

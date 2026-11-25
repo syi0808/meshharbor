@@ -68,11 +68,55 @@ test('edits stay on one inventory card and restored versions survive reload', as
   await expect(inventory.getByTitle('panels-cleaned.glb')).toHaveCount(0);
   await expect(card).toHaveCount(1);
 
-  await page.getByRole('button', { name: 'Separate parts', exact: true }).click();
-  await page.getByRole('button', { name: 'Run Separate connected parts' }).click();
-  const separationName = selected.getByTitle(/panels-cleaned-.*\.glb/);
-  await expect(separationName).toBeVisible();
+  await page.getByRole('button', { name: 'Render optimization', exact: true }).click();
+  await page.getByRole('button', { name: 'Run Render optimization' }).click();
+  const optimizedName = selected.getByTitle('panels-cleaned-render-optimized.glb', { exact: true });
+  await expect(optimizedName).toBeVisible();
   await expect(card).toHaveCount(1);
+
+  const history = page.getByRole('dialog', { name: 'Version history' });
+  const openHistory = selected.getByRole('button', { name: 'Version history' });
+  const historyRow = number => history.getByRole('listitem').filter({
+    has: page.getByRole('button', { name: `Preview version ${number}`, exact: true }),
+  });
+  await openHistory.click();
+  await expect(historyRow(3)).toContainText('Current');
+  await expect(historyRow(3)).toContainText('From v2');
+  await expect(historyRow(2)).toContainText('Cleanup');
+  await history.getByRole('button', { name: 'Preview version 1' }).click();
+  await expect(selected.getByTitle('panels.glb', { exact: true })).toBeVisible();
+  await openHistory.click();
+  await expect(historyRow(1)).toContainText('Viewing');
+  await expect(historyRow(3)).toContainText('Current');
+  await history.getByRole('button', { name: 'Restore version 1' }).click();
+  await expect(page.getByText('Version 1 restored. Other versions are unchanged.')).toBeVisible();
+  await page.reload();
+  await expect(selected.getByTitle('panels.glb', { exact: true })).toBeVisible();
+  await expect(card).toHaveCount(1);
+  await openHistory.click();
+  await expect(historyRow(1)).toContainText('Current');
+  await history.getByRole('button', { name: 'Restore version 3' }).click();
+  await expect(optimizedName).toBeVisible();
+  await expect(card).toHaveCount(1);
+});
+
+test('Studio can still highlight and isolate parts on a legacy split asset', async ({ page, studioOrigin }) => {
+  const name = 'legacy-parts.glb';
+  await page.route(`**/api/v1/assets?filename=${name}`, async route => {
+    const response = await route.fetch();
+    const asset = await response.json();
+    asset.metadata.operation = 'mesh.separate_parts';
+    asset.metadata.report = { output_primitives: 2, grouped_components: 0 };
+    await route.fulfill({ response, json: asset });
+  });
+  await page.goto(studioOrigin);
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.getByRole('button', { name: 'Open GLB', exact: true }).click(),
+  ]);
+  await chooser.setFiles({ name, mimeType: 'model/gltf-binary', buffer: disconnectedPartsGlb({ separated: true }) });
+  const selected = page.getByRole('region', { name: 'Selected asset' });
+  await expect(selected.getByTitle(name, { exact: true })).toBeVisible();
   const partMode = selected.getByRole('radio', { name: 'Part highlighting' });
   const canvas = selected.locator('canvas');
   await expect(partMode).toBeVisible();
@@ -122,30 +166,4 @@ test('edits stay on one inventory card and restored versions survive reload', as
   await page.mouse.up();
   await expect(highlight).toHaveValue('all');
 
-  const history = page.getByRole('dialog', { name: 'Version history' });
-  const openHistory = selected.getByRole('button', { name: 'Version history' });
-  const historyRow = number => history.getByRole('listitem').filter({
-    has: page.getByRole('button', { name: `Preview version ${number}`, exact: true }),
-  });
-  await openHistory.click();
-  await expect(historyRow(3)).toContainText('Current');
-  await expect(historyRow(3)).toContainText('From v2');
-  await expect(historyRow(2)).toContainText('Cleanup');
-  await history.getByRole('button', { name: 'Preview version 1' }).click();
-  await expect(selected.getByTitle('panels.glb')).toBeVisible();
-  await expect(partMode).toHaveCount(0);
-  await openHistory.click();
-  await expect(historyRow(1)).toContainText('Viewing');
-  await expect(historyRow(3)).toContainText('Current');
-  await history.getByRole('button', { name: 'Restore version 1' }).click();
-  await expect(page.getByText('Version 1 restored. Other versions are unchanged.')).toBeVisible();
-  await page.reload();
-  await expect(selected.getByTitle('panels.glb')).toBeVisible();
-  await expect(card).toHaveCount(1);
-  await openHistory.click();
-  await expect(historyRow(1)).toContainText('Current');
-  await history.getByRole('button', { name: 'Restore version 3' }).click();
-  await expect(separationName).toBeVisible();
-  await expect(partMode).toBeVisible();
-  await expect(card).toHaveCount(1);
 });

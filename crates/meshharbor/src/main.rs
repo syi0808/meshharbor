@@ -91,10 +91,9 @@ enum Command {
         target_quads: Option<u32>,
     },
     /// Run a supported local mesh operation. For retopology, --output writes the triangle GLB preview and --quad-output preserves the editable OBJ quads.
-    /// Part separation limits: 64 MiB GLB, 4 MiB JSON, 1,000,000 vertices, 3,000,000 indices, and 256 output primitives (excess fragments grouped).
     ProcessMesh {
         asset_id: String,
-        #[arg(long, value_parser = ["mesh.cleanup", "mesh.separate_parts", "uv.unwrap", "render.optimize", "mesh.compress", "mesh.retopology"])]
+        #[arg(long, value_parser = ["mesh.cleanup", "uv.unwrap", "render.optimize", "mesh.compress", "mesh.retopology"])]
         operation: String,
         /// Requested approximate quad count for mesh.retopology (4 to 50,000).
         #[arg(long)]
@@ -249,7 +248,7 @@ struct RetopologyPreflightArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct MeshProcessArgs {
     asset_id: String,
-    /// One of mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology.
+    /// One of mesh.cleanup, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology.
     operation: String,
     /// Optional operation parameters, such as resolution/padding for uv.unwrap.
     #[serde(default)]
@@ -486,7 +485,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local mesh processing job for mesh.cleanup, mesh.separate_parts, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. Part separation emits up to 256 primitives in one mesh, grouping excess fragments without discarding triangles. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires a verified, manifest-matched managed QuadriFlow sidecar and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
+        description = "Start a local mesh processing job for mesh.cleanup, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires a verified, manifest-matched managed QuadriFlow sidecar and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
     )]
     async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
         let args = params.0;
@@ -1927,12 +1926,7 @@ async fn submit_asset_job(
             )
             .await?
         }
-        "mesh.cleanup"
-        | "mesh.separate_parts"
-        | "uv.unwrap"
-        | "render.optimize"
-        | "mesh.compress"
-        | "mesh.retopology" => {
+        "mesh.cleanup" | "uv.unwrap" | "render.optimize" | "mesh.compress" | "mesh.retopology" => {
             start_mesh_operation_job(
                 state.core,
                 state.scheduler,
@@ -3256,6 +3250,125 @@ mod tests {
                 .bytes,
             bytes
         );
+        drop(app);
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retired_connected_part_jobs_are_read_only() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-retired-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let bytes = minimal_triangle_glb();
+        let source = core.import_asset("Original.glb", &bytes).unwrap();
+        let operation = "mesh.separate_parts";
+        let historical = core
+            .store()
+            .import_derived_asset(
+                "Historical parts.glb",
+                &bytes,
+                &source.id,
+                json!({"operation": operation}),
+            )
+            .unwrap();
+        let completed = core
+            .store()
+            .create_running_job(operation, Some(&source.id), &json!({}))
+            .unwrap();
+        core.store()
+            .finish_job(&completed.id, Ok(json!({ "asset_id": historical.id })))
+            .unwrap();
+        let failed = core
+            .store()
+            .create_running_job(operation, Some(&source.id), &json!({}))
+            .unwrap();
+        core.store()
+            .finish_job(
+                &failed.id,
+                Err(CoreError::OperationUnavailable("Old failure.".into())),
+            )
+            .unwrap();
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: Arc::new(JobScheduler::default()),
+            },
+            "token".into(),
+        );
+        let request = |method: Method, uri: String, body: Body| {
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::HOST, "localhost:7432")
+                    .header(header::AUTHORIZATION, "Bearer token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+        };
+        let completed_response = request(
+            Method::GET,
+            format!("/api/v1/jobs/{}", completed.id),
+            Body::empty(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed_response.status(), StatusCode::OK);
+        let completed_record: meshharbor_core::Job = serde_json::from_slice(
+            &completed_response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(completed_record.result.unwrap()["asset_id"], historical.id);
+        let artifact = request(
+            Method::GET,
+            format!("/api/v1/artifacts/{}", historical.artifacts[0].id),
+            Body::empty(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(artifact.status(), StatusCode::OK);
+        assert_eq!(
+            artifact
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            bytes
+        );
+
+        let new_job = request(
+            Method::POST,
+            "/api/v1/jobs".into(),
+            Body::from(
+                json!({
+                    "operation": operation,
+                    "input": { "asset_id": source.id },
+                    "parameters": {}
+                })
+                .to_string(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(new_job.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let retry = request(
+            Method::POST,
+            format!("/api/v1/jobs/{}/retry", failed.id),
+            Body::empty(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(core.store().list_jobs(10).unwrap().len(), 2);
         drop(app);
         drop(core);
         std::fs::remove_dir_all(root).unwrap();

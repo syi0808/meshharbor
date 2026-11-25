@@ -569,7 +569,7 @@ test('Studio starts a derived local mesh-processing job with explicit operation 
 
 
 
-test('Studio submits atlas options and part separation through the shared job API', async () => {
+test('Studio submits atlas options through the shared job API', async () => {
   const requests = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init = {}) => {
@@ -578,15 +578,9 @@ test('Studio submits atlas options and part separation through the shared job AP
   };
   try {
     const api = new MeshHarborApi();
-    await api.createMeshOperationJob('mesh-asset-1', 'mesh.separate_parts', {});
     await api.createMeshOperationJob('mesh-asset-1', 'uv.unwrap', { resolution: 1024, padding: 8 });
-    assert.deepEqual(requests.map(({ path }) => path), ['/api/v1/jobs', '/api/v1/jobs']);
+    assert.deepEqual(requests.map(({ path }) => path), ['/api/v1/jobs']);
     assert.deepEqual(JSON.parse(requests[0].init.body), {
-      operation: 'mesh.separate_parts',
-      input: { asset_id: 'mesh-asset-1' },
-      parameters: {},
-    });
-    assert.deepEqual(JSON.parse(requests[1].init.body), {
       operation: 'uv.unwrap',
       input: { asset_id: 'mesh-asset-1' },
       parameters: { resolution: 1024, padding: 8 },

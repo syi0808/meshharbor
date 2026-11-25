@@ -8,7 +8,7 @@
 MeshHarbor is a local-first alternative to [Tripo](https://www.tripo3d.ai/) and [Meshy](https://www.meshy.ai/) for 3D asset generation. After you set up a runtime and download its weights, generation runs on your hardware instead of sending inputs to a hosted service.
 
 - **Generate with local models.** Studio manages installation for Pixal3D, TRELLIS.2, and TripoSG from images, or TRELLIS Text Large from prompts, on Apple Silicon (MLX) and Linux with NVIDIA (CUDA).
-- **Refine and export GLBs.** Inspect, simplify, clean, split connected parts, or compress meshes. Compare revisions and export without overwriting the original. Supported textured meshes can get a new UV atlas with a same-mesh rebake.
+- **Refine and export GLBs.** Inspect, simplify, clean, or compress meshes. Compare revisions and export without overwriting the original. Supported textured meshes can get a new UV atlas with a same-mesh rebake.
 - **Work in Studio or automate locally.** Use the browser workbench, CLI, loopback REST API, or stdio MCP through the same Rust engine.
 
 ![MeshHarbor Studio with the generation panel open and the Surveyor rover in the 3D viewport](docs/images/studio-workbench.png)

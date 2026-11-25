@@ -62,7 +62,7 @@ Job submissions return `202 Accepted` with `state: "running"` and `started_at` s
 
 `GET /api/v1/jobs/generation-queue` returns the IDs of waiting generation jobs in execution order. `POST` to the same endpoint with `job_id` and `swap_with` to swap two adjacent generation jobs; other operations retain their positions. A job that has started or was left behind by an interrupted engine cannot be reordered. Use `POST /api/v1/jobs/{job_id}/cancel?queued_only=true` to remove a waiting job without stopping it if it has just started.
 
-Job requests support `mesh.simplify`, `mesh.cleanup`, `mesh.separate_parts`, `uv.unwrap`, `render.optimize`, `mesh.compress`, conditional `mesh.retopology`, `model.generate`, legacy `image.generate`, and explicit runtime jobs.
+Job requests support `mesh.simplify`, `mesh.cleanup`, `uv.unwrap`, `render.optimize`, `mesh.compress`, conditional `mesh.retopology`, `model.generate`, legacy `image.generate`, and explicit runtime jobs. The retired `mesh.separate_parts` operation cannot be submitted or retried; its recorded jobs and assets remain readable.
 
 `mesh.simplify` requires a positive `target_triangles` lower than the input triangle count. This is the maximum for the entire output GLB; if it cannot be reached within `max_error` and border constraints, the job fails without a derived asset. `mesh.cleanup` takes no parameters. After removing invalid and duplicate faces, it attempts conservative, target-free simplification and reports its additional removals as `simplified_triangles_removed`.
 

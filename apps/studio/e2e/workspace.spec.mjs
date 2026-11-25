@@ -268,9 +268,10 @@ test('the icon-only rail exposes individual mesh tools without a model', async (
   await expect(cleanupPanel.getByRole('button', { name: 'Run Cleanup' })).toBeDisabled();
   await expect(cleanup).toHaveAttribute('aria-current', 'true');
   await expect(rail.locator('[aria-current=true]')).toHaveCount(1);
-  for (const tool of ['Retopology', 'Separate parts', 'UV atlas rebake', 'Render optimization', 'Compression']) {
+  for (const tool of ['Retopology', 'UV atlas rebake', 'Render optimization', 'Compression']) {
     await expect(rail.getByRole('button', { name: tool, exact: true })).toBeVisible();
   }
+  await expect(rail.getByRole('button', { name: 'Separate parts', exact: true })).toHaveCount(0);
   await expect(rail.getByRole('button', { name: 'Jobs' })).toHaveCount(0);
   await rail.getByRole('button', { name: 'Optimize', exact: true }).click();
   const optimize = page.getByRole('complementary', { name: 'Optimize mesh' });

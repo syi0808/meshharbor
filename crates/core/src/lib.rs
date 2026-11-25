@@ -16,7 +16,6 @@ mod huggingface_download;
 mod job_execution;
 mod model_storage;
 mod operation;
-mod parts;
 mod quadriflow;
 mod quadriflow_attestation;
 mod quadriflow_installer;
@@ -47,7 +46,6 @@ pub use model_storage::Pixal3dProfile;
 pub use operation::{
     MeshOperationResult, OperationCore, OperationDescriptor, RuntimeDoctor, SimplificationResult,
 };
-pub use parts::{PartSeparationReport, separate_components};
 pub use quadriflow::{
     QuadMesh, QuadMeshReport, QuadRetopologyOptions, QuadRetopologyPreflight, QuadRetopologyReport,
     parse_quad_obj_output, quad_mesh_preview_glb, quadriflow_preflight_glb,
