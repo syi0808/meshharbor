@@ -107,7 +107,7 @@ test('Models aligns accelerator cards and installs a catalog model after consent
       { id: 'trellis-text-mlx', model_paths: paths, managed_install: true, installable: true, downloads_enabled: !installed, ready: installed,
         license_notice: notice, source: { repository: 'https://github.com/example/text-model', revision: 'fixed-revision' },
         local_files: { remove_models_available: installed, model_files_managed: true } },
-      { id: 'trellis-text-cuda', managed_install: true, installable: false },
+      { id: 'trellis-text-cuda', model_paths: ['/local/meshharbor/trellis-text-cuda/weights'], managed_install: true, installable: false },
     ],
   } }));
   await page.route('**/api/v1/runtime/trellis-text-mlx/install', route => {
@@ -125,19 +125,14 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   await logsLoaded;
   const mlx = page.getByRole('article', { name: 'TRELLIS Text Large · Apple MLX' });
   const cuda = page.getByRole('article', { name: 'TRELLIS Text Large · NVIDIA CUDA' });
-  const pathLine = mlx.locator('code');
-  await expect(pathLine).toHaveText(paths.join(' · '));
-  await expect(pathLine).toHaveCSS('white-space', 'nowrap');
-  await expect(pathLine).toHaveCSS('text-overflow', 'ellipsis');
-  expect(await pathLine.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
-  await mlx.getByRole('button', { name: 'Copy model file locations' }).click();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(paths.join('\n'));
   await expect(mlx.getByText('Available to download')).toBeVisible();
+  await expect(mlx.getByText('Model file locations', { exact: true })).toHaveCount(0);
   await expect(mlx.getByText(notice)).toHaveCount(0);
   await expect(mlx.getByRole('checkbox')).toHaveCount(0);
   const install = mlx.getByRole('button', { name: 'Install model' });
   await expect(install).toBeEnabled();
   await expect(cuda.getByText('Not supported here')).toBeVisible();
+  await expect(cuda.getByText('Model file locations', { exact: true })).toHaveCount(0);
   await expect(cuda.getByRole('button', { name: 'Install model' })).toHaveCount(0);
   const mlxCard = await mlx.boundingBox();
   const cudaCard = await cuda.boundingBox();
@@ -166,6 +161,13 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   await confirm.click();
   await expect(installDialog).toBeHidden();
   await expect(mlx.getByText('Ready', { exact: true })).toBeVisible();
+  const pathLine = mlx.locator('code');
+  await expect(pathLine).toHaveText(paths.join(' · '));
+  await expect(pathLine).toHaveCSS('white-space', 'nowrap');
+  await expect(pathLine).toHaveCSS('text-overflow', 'ellipsis');
+  expect(await pathLine.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
+  await mlx.getByRole('button', { name: 'Copy model file locations' }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(paths.join('\n'));
   await expect(mlx.getByRole('button', { name: 'Delete model files' })).toBeEnabled();
   await expect(mlx.getByRole('button', { name: 'Recent logs' })).toBeVisible();
   await expect(cuda.getByRole('button', { name: 'Recent logs' })).toHaveCount(0);
@@ -667,6 +669,7 @@ test('settings deep links and confirmations manage one local profile at a time',
   finishModelRemoval();
   await expect(toasts.getByText('Model files removed for Pixal3D · Apple MLX.')).toBeVisible();
   await expect(storage.getByText('Available to download', { exact: true })).toBeVisible();
+  await expect(storage.getByText('Model file locations', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   const connections = page.getByRole('main', { name: 'Connections' });
   await expect(connections.getByText('Token saved', { exact: true })).toBeVisible();

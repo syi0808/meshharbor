@@ -328,7 +328,9 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                   onRecheck: () => recheckModelAccess(authBackend),
                   onConnections: () => onVisit('connections', authBackend),
                 };
-                const modelPaths = backend.model_paths ?? (backend.runtime_root ? [backend.runtime_root] : []);
+                const modelPaths = backend.ready || backend.models_downloaded
+                  ? backend.model_paths ?? (backend.runtime_root ? [backend.runtime_root] : [])
+                  : [];
                 return <Card key={id} role="article" aria-label={label} size="sm" className="min-w-0 bg-background">
                   <CardHeader>
                     <CardTitle className="min-w-0"><h3 id={`runtime-${id}`} tabIndex={-1} className="outline-none">{accelerators[kind].title}</h3></CardTitle>
