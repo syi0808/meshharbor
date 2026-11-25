@@ -21,8 +21,7 @@ Selected endpoints:
 - `GET /api/v1/health`, `/api/v1/runtime`, `/api/v1/operations`
 - `POST /api/v1/runtime/pixal3d-mlx/setup`, `/models`, `/convert-naf`; `/api/v1/runtime/pixal3d-cuda/setup` and `/models` for explicit asynchronous setup actions
 - `GET /api/v1/runtime/{backend}/jobs` returns the six most recent setup or install jobs for that backend. The runtime status includes model file paths.
-- Studio-only: `POST /api/v1/runtime/{backend}/install` queues a managed TRELLIS.2, TripoSG, or TRELLIS Text install with `confirmed: true`; TRELLIS.2 also requires `confirm_gated_access: true`.
-- Studio-only: `POST /api/v1/runtime/{backend}/repart/{component}` with `{"confirmed":true}` queues an independent GeoSAM2 `backend` or `weights` job for a supported `geosam2-mlx` or `geosam2-cuda` host. In runtime status, `model_catalog[].category` distinguishes `repart` from `generation`. The GeoSAM2 cards report `environment_ready` and `models_downloaded` separately; these files do not enable a Studio repart operation.
+- Studio-only: `POST /api/v1/runtime/{backend}/install` with `confirmed: true` queues one managed backend-and-weights job for GeoSAM2 (`geosam2-mlx` or `geosam2-cuda`), TRELLIS.2, TripoSG, or TRELLIS Text. TRELLIS.2 also requires `confirm_gated_access: true`. In runtime status, `model_catalog[].category` distinguishes `repart` from `generation`. GeoSAM2 files do not enable a Studio repart operation.
 - Studio-only: `DELETE /api/v1/runtime/{backend}/model-files` with `confirmed: true` removes managed model files. For either GeoSAM2 backend this removes the one shared checkpoint and preserves both environments.
 - `GET /api/v1/assets?limit=50`; `POST /api/v1/assets?filename=scene.glb` with raw file bytes
 - `GET /api/v1/assets/page?limit=50&cursor=<asset_id>&q=<filename>&kind=image|mesh&derived=true|false` returns `{items,next_cursor}` newest-first; filters are optional, and `next_cursor` can be sent back to load older assets

@@ -149,11 +149,7 @@ impl Profile {
         })
     }
 
-    pub(crate) fn install_backend(
-        self,
-        root: &Path,
-        execution: JobExecution<'_>,
-    ) -> CoreResult<Value> {
+    pub(crate) fn install(self, root: &Path, execution: JobExecution<'_>) -> CoreResult<Value> {
         self.require_supported(root)?;
         execution.stage("prepare_runtime")?;
         let root = fs::canonicalize(root)?;
@@ -228,70 +224,70 @@ impl Profile {
                 )]);
             execution.visible(command, "GeoSAM2 backend preflight failed")?;
             managed_file_size(&root, &format!("{}/{STAMP}", self.relative()))?;
-            execution.begin_commit()?;
+            execution.checkpoint()?;
             fs::write(runtime.join(STAMP), ENVIRONMENT_VERSION)?;
         }
-        Ok(json!({"backend_id":self.id(), "status":"backend_installed", "runtime_root":runtime}))
+        let file = install_weights(&root, execution)?;
+        Ok(json!({
+            "backend_id": self.id(), "status": "files_installed",
+            "runtime_root": runtime, "model_paths": [file],
+        }))
     }
+}
 
-    pub(crate) fn install_weights(
-        self,
-        root: &Path,
-        execution: JobExecution<'_>,
-    ) -> CoreResult<Value> {
-        self.require_supported(root)?;
-        let root = fs::canonicalize(root)?;
-        execution.stage("download_models")?;
-        ensure_owned(&root)?;
-        let file = weights_path(&root);
-        let size = weight_size(&root)?;
-        if size != Some(WEIGHTS_BYTES) || !verify_sha(&file, execution)? {
-            let directory = root.join(WEIGHTS_DIR);
-            fs::create_dir_all(&directory)?;
-            let staged = StagedFile(directory.join(format!(".download-{}", Uuid::new_v4())));
-            OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&staged.0)?;
-            let mut download = Command::new("curl");
-            download
-                .env_clear()
-                .env(
-                    "PATH",
-                    std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
-                )
-                .args([
-                    "--disable",
-                    "--fail",
-                    "--location",
-                    "--proto",
-                    "=https",
-                    "--proto-redir",
-                    "=https",
-                    "--retry",
-                    "2",
-                    "--connect-timeout",
-                    "20",
-                    "--max-time",
-                    "900",
-                    "--max-filesize",
-                    &WEIGHTS_BYTES.to_string(),
-                    "--output",
-                ])
-                .arg(&staged.0)
-                .arg(WEIGHTS_URL);
-            execution.visible(download, "Could not download the pinned GeoSAM2 checkpoint")?;
-            execution.stage("verify_checkpoint")?;
-            if !verify_sha(&staged.0, execution)? {
-                return Err(CoreError::OperationUnavailable(
-                    "GeoSAM2 checkpoint failed size or SHA-256 verification.".into(),
-                ));
-            }
-            execution.begin_commit()?;
-            fs::rename(&staged.0, &file)?;
+fn install_weights(root: &Path, execution: JobExecution<'_>) -> CoreResult<PathBuf> {
+    let file = weights_path(root);
+    if weight_size(root)? == Some(WEIGHTS_BYTES) {
+        execution.stage("verify_checkpoint")?;
+        if verify_sha(&file, execution)? {
+            return Ok(file);
         }
-        Ok(json!({"backend_id":self.id(), "status":"weights_downloaded", "model_paths":[file]}))
     }
+    execution.stage("download_models")?;
+    let directory = root.join(WEIGHTS_DIR);
+    fs::create_dir_all(&directory)?;
+    let staged = StagedFile(directory.join(format!(".download-{}", Uuid::new_v4())));
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&staged.0)?;
+    let mut download = Command::new("curl");
+    download
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+        )
+        .args([
+            "--disable",
+            "--fail",
+            "--location",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "20",
+            "--max-time",
+            "900",
+            "--max-filesize",
+            &WEIGHTS_BYTES.to_string(),
+            "--output",
+        ])
+        .arg(&staged.0)
+        .arg(WEIGHTS_URL);
+    execution.visible(download, "Could not download the pinned GeoSAM2 checkpoint")?;
+    execution.stage("verify_checkpoint")?;
+    if !verify_sha(&staged.0, execution)? {
+        return Err(CoreError::OperationUnavailable(
+            "GeoSAM2 checkpoint failed size or SHA-256 verification.".into(),
+        ));
+    }
+    execution.begin_commit()?;
+    fs::rename(&staged.0, &file)?;
+    Ok(file)
 }
 
 fn weights_path(root: &Path) -> PathBuf {

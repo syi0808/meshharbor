@@ -1173,10 +1173,6 @@ fn api_router_with_statuses(
             "/api/v1/runtime/{backend}/install",
             post(api_start_catalog_install).layer(DefaultBodyLimit::max(1024)),
         )
-        .route(
-            "/api/v1/runtime/{backend}/repart/{component}",
-            post(api_start_repart_install).layer(DefaultBodyLimit::max(1024)),
-        )
         .route("/api/v1/runtime/{backend}/jobs", get(api_runtime_jobs))
         .route(
             "/api/v1/backends/quadriflow",
@@ -1324,7 +1320,6 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         && (path.ends_with("/huggingface")
             || path.ends_with("/model-files")
             || path.ends_with("/install")
-            || path.contains("/repart/")
             || path.ends_with("/model-access")
             || path.ends_with("/huggingface/browser")
             || path.contains("/huggingface/browser/"));
@@ -1632,28 +1627,6 @@ struct CatalogInstallConfirmation {
     confirmed: bool,
     #[serde(default)]
     confirm_gated_access: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RepartInstallConfirmation {
-    confirmed: bool,
-}
-
-async fn api_start_repart_install(
-    State(state): State<AppState>,
-    Path((backend, component)): Path<(String, String)>,
-    Json(confirmation): Json<RepartInstallConfirmation>,
-) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
-    if !confirmation.confirmed {
-        return Err(CoreError::InvalidInput(
-            "Review the model or backend terms and confirm installation first.".into(),
-        )
-        .into());
-    }
-    let kind = state.core.geosam2_install_job(&backend, &component)?;
-    let job = start_runtime_job(state.core, state.scheduler, kind).await?;
-    Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
 async fn api_start_catalog_install(
@@ -2017,15 +1990,11 @@ async fn api_retry_job(
             Some(state.core.catalog_install_job(backend, true)?)
         }
         "runtime.geosam2.install_backend" | "runtime.geosam2.download_weights" => {
-            let backend = saved.parameters["backend_id"].as_str().ok_or_else(|| {
-                CoreError::Conflict("This record has no saved runtime backend.".into())
-            })?;
-            let component = if saved.operation == "runtime.geosam2.install_backend" {
-                "backend"
-            } else {
-                "weights"
-            };
-            Some(state.core.geosam2_install_job(backend, component)?)
+            return Err(CoreError::Conflict(
+                "GeoSAM2 is now installed in one job. Use Install model in Settings → Models."
+                    .into(),
+            )
+            .into());
         }
         _ => None,
     };
@@ -4273,6 +4242,10 @@ mod tests {
             ("trellis2-mlx", true, false, StatusCode::UNAUTHORIZED),
             ("trellis2-mlx", false, true, StatusCode::BAD_REQUEST),
             ("trellis2-mlx", true, true, StatusCode::BAD_REQUEST),
+            ("geosam2-mlx", true, false, StatusCode::UNAUTHORIZED),
+            ("geosam2-mlx", false, true, StatusCode::BAD_REQUEST),
+            ("geosam2-cuda", true, false, StatusCode::UNAUTHORIZED),
+            ("geosam2-cuda", false, true, StatusCode::BAD_REQUEST),
             ("unknown-mlx", true, true, StatusCode::BAD_REQUEST),
         ] {
             let mut request = axum::http::Request::builder()
@@ -4304,77 +4277,10 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test]
-    async fn repart_installs_require_studio_and_confirm_known_components() {
+    #[test]
+    fn repart_catalog_installs_use_one_job_without_enabling_studio_repart() {
         let root = std::env::temp_dir().join(format!("meshharbor-repart-{}", uuid::Uuid::new_v4()));
         let core = OperationCore::open(&root).unwrap();
-        let app = api_router(
-            AppState {
-                core: core.clone(),
-                scheduler: Arc::new(JobScheduler::default()),
-            },
-            "private-test-token".into(),
-        );
-        for (path, confirmed, dashboard, expected) in [
-            (
-                "geosam2-mlx/repart/backend",
-                true,
-                false,
-                StatusCode::UNAUTHORIZED,
-            ),
-            (
-                "geosam2-mlx/repart/weights",
-                true,
-                false,
-                StatusCode::UNAUTHORIZED,
-            ),
-            (
-                "geosam2-mlx/repart/backend",
-                false,
-                true,
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                "geosam2-mlx/repart/weights",
-                false,
-                true,
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                "geosam2-mlx/repart/unknown",
-                true,
-                true,
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                "pixal3d-mlx/repart/backend",
-                true,
-                true,
-                StatusCode::BAD_REQUEST,
-            ),
-        ] {
-            let mut request = axum::http::Request::builder()
-                .method(Method::POST)
-                .uri(format!("/api/v1/runtime/{path}"))
-                .header(header::HOST, "127.0.0.1:7432")
-                .header(header::ORIGIN, "http://127.0.0.1:7432")
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::AUTHORIZATION, "Bearer private-test-token");
-            if dashboard {
-                request = request.header("x-meshharbor-dashboard", "local-ui-v1");
-            }
-            let response = app
-                .clone()
-                .oneshot(
-                    request
-                        .body(Body::from(json!({"confirmed": confirmed}).to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), expected);
-        }
-        assert!(core.store().list_jobs(20).unwrap().is_empty());
         let doctor = core.runtime_doctor();
         let repart = doctor
             .model_catalog
@@ -4393,6 +4299,15 @@ mod tests {
         {
             assert_eq!(backend["ready"], false);
             assert!(backend.get("generation").is_none());
+            let id = backend["id"].as_str().unwrap();
+            let job = core.catalog_install_job(id, false);
+            if backend["installable"] == true {
+                let job = job.unwrap();
+                assert_eq!(job.operation(), "runtime.models.install");
+                assert_eq!(job.backend_id(), id);
+            } else {
+                assert!(matches!(job, Err(CoreError::OperationUnavailable(_))));
+            }
         }
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -34,8 +34,7 @@ const sections = {
 };
 
 export type SettingsSection = keyof typeof sections;
-type RepartAction = 'repart-backend' | 'repart-weights';
-export type RuntimeAction = 'setup' | 'download' | 'convert' | 'multiview' | 'install' | 'install-gated' | RepartAction;
+export type RuntimeAction = 'setup' | 'download' | 'convert' | 'multiview' | 'install' | 'install-gated';
 
 const modelCategories = [
   { id: 'generation', title: '3D Generation', empty: 'No generation models reported by the local engine.' },
@@ -353,9 +352,8 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                       </CardHeader>
                       <CardContent className="grid gap-3">
                         {modelPaths.length > 0 && <ModelFileLocations paths={modelPaths} />}
-                        {repart ? <RepartInstall label={label} backend={backend} disabled={disabled} onAction={action => onRuntimeAction(id, action)} />
-                          : backend.managed_install
-                          ? <CatalogInstall label={label} backend={backend} disabled={disabled} dino={dino}
+                        {repart || backend.managed_install
+                          ? <CatalogInstall label={label} backend={backend} repart={repart} disabled={disabled} dino={dino}
                               onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />
                           : <PixalModelFiles label={label} backend={backend} id={id} disabled={disabled} dino={dino}
                               onAction={action => onRuntimeAction(id, action)} />}
@@ -411,7 +409,10 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
 function profileStatus(backend: Backend, repart: boolean) {
   if (repart) {
     if (!backend.installable) return 'Not supported here';
-    return backend.environment_ready && backend.models_downloaded ? 'Files installed' : 'Available to install';
+    if (backend.environment_ready && backend.models_downloaded) return 'Files installed';
+    if (backend.environment_ready) return 'Backend installed';
+    if (backend.models_downloaded) return 'Weights downloaded';
+    return 'Available to install';
   }
   if (backend.ready) return 'Ready';
   if (!backend.installable) return 'Not supported here';
@@ -541,43 +542,31 @@ function DinoAccessLink() {
   return <a className="text-primary underline underline-offset-4" href={dinoAccessUrl} target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a>;
 }
 
-function CatalogInstall({ label, backend, dino, disabled, onInstall }: {
-  label: string; backend: Backend; dino: DinoAccess;
+function CatalogInstall({ label, backend, repart, dino, disabled, onInstall }: {
+  label: string; backend: Backend; repart: boolean; dino: DinoAccess;
   disabled: boolean; onInstall: () => void;
 }) {
-  if (!backend.downloads_enabled) return null;
-  const gated = backend.gated_model_access_required;
+  const available = repart
+    ? backend.installable && !(backend.environment_ready && backend.models_downloaded)
+    : backend.downloads_enabled;
+  if (!available) return null;
+  const gated = !repart && backend.gated_model_access_required;
   return <ModelInstallDialog label={label} action="Install model"
-    description="MeshHarbor installs a private Python environment and downloads the model weights for local generation."
+    description={repart
+      ? 'MeshHarbor installs the GeoSAM2 backend in a private Python environment and downloads one shared 616 MB checkpoint. Existing verified files are reused. Hugging Face sign-in is not required.'
+      : 'MeshHarbor installs a private Python environment and downloads the model weights for local generation.'}
     consentLabel={gated ? 'I have DINOv3 access, reviewed the terms, and approve installation and download.' : 'I reviewed the terms and approve installation and download.'}
     disabled={disabled} dino={gated ? dino : undefined} onConfirm={onInstall}>
-    {backend.ready && !backend.managed_ready && <p className="text-muted-foreground">Using existing files. A managed install keeps them intact.</p>}
-    {backend.license_notice && <p className="text-muted-foreground">{backend.license_notice}</p>}
-    {backend.source && <a className="text-primary underline underline-offset-4" href={`${backend.source.repository}/tree/${backend.source.revision}`} target="_blank" rel="noreferrer">Review upstream source and terms</a>}
+    {repart ? <>
+      <a className="text-primary underline underline-offset-4" href="https://github.com/VAST-AI-Research/GeoSAM2" target="_blank" rel="noreferrer">Review GeoSAM2 source and terms</a>
+      {backend.id.endsWith('-mlx') && <a className="text-primary underline underline-offset-4" href="https://github.com/eisneim/sam2.1_mlx" target="_blank" rel="noreferrer">Review SAM2.1 MLX source and terms</a>}
+      <a className="text-primary underline underline-offset-4" href="https://huggingface.co/VAST-AI/GeoSAM2" target="_blank" rel="noreferrer">Review GeoSAM2 model terms</a>
+    </> : <>
+      {backend.ready && !backend.managed_ready && <p className="text-muted-foreground">Using existing files. A managed install keeps them intact.</p>}
+      {backend.license_notice && <p className="text-muted-foreground">{backend.license_notice}</p>}
+      {backend.source && <a className="text-primary underline underline-offset-4" href={`${backend.source.repository}/tree/${backend.source.revision}`} target="_blank" rel="noreferrer">Review upstream source and terms</a>}
+    </>}
   </ModelInstallDialog>;
-}
-
-function RepartInstall({ label, backend, disabled, onAction }: {
-  label: string; backend: Backend; disabled: boolean; onAction: (action: RepartAction) => void;
-}) {
-  if (!backend.installable) return null;
-  return <div className="grid gap-3">
-    {backend.environment_ready ? <span className="text-muted-foreground">Backend installed</span>
-      : <ModelInstallDialog label={label} action="Install GeoSAM2 backend"
-          description="Downloads the runtime source and sets up a private Python environment. Model weights are downloaded separately."
-          consentLabel="I reviewed the upstream terms and approve backend installation."
-          disabled={disabled} onConfirm={() => onAction('repart-backend')}>
-          <a className="text-primary underline underline-offset-4" href="https://github.com/VAST-AI-Research/GeoSAM2" target="_blank" rel="noreferrer">Review GeoSAM2 source and terms</a>
-          {backend.id.endsWith('-mlx') && <a className="text-primary underline underline-offset-4" href="https://github.com/eisneim/sam2.1_mlx" target="_blank" rel="noreferrer">Review SAM2.1 MLX source and terms</a>}
-        </ModelInstallDialog>}
-    {backend.models_downloaded ? <span className="text-muted-foreground">Weights downloaded</span>
-      : <ModelInstallDialog label={label} action="Download GeoSAM2 weights"
-          description="Downloads one shared 616 MB checkpoint for MLX and CUDA. Hugging Face sign-in is not required."
-          consentLabel="I reviewed the model terms and approve the download."
-          disabled={disabled} onConfirm={() => onAction('repart-weights')}>
-          <a className="text-primary underline underline-offset-4" href="https://huggingface.co/VAST-AI/GeoSAM2" target="_blank" rel="noreferrer">Review GeoSAM2 model terms</a>
-        </ModelInstallDialog>}
-  </div>;
 }
 
 const accessMessages: Record<AccessStatus, string> = {

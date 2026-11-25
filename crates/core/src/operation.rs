@@ -447,15 +447,12 @@ impl OperationCore {
             RuntimeJobKind::CudaInstallMultiview => Pixal3dCudaRuntimeManager::new(root)
                 .install_multiview_models_tracked(true, execution),
             RuntimeJobKind::InstallCatalogModel(backend) => {
+                if let Some(profile) = geosam2_install::Profile::find(backend) {
+                    return profile.install(root, execution);
+                }
                 return external_generation::ExternalProfile::find(backend)
-                    .ok_or_else(|| CoreError::InvalidInput("Unknown generation backend.".into()))?
+                    .ok_or_else(|| CoreError::InvalidInput("Unknown model backend.".into()))?
                     .install(root, execution);
-            }
-            RuntimeJobKind::GeoSam2Backend(backend) => {
-                return geosam2_profile(backend)?.install_backend(root, execution);
-            }
-            RuntimeJobKind::GeoSam2Weights(backend) => {
-                return geosam2_profile(backend)?.install_weights(root, execution);
             }
         }?;
         Ok(serde_json::to_value(report)?)
@@ -466,8 +463,12 @@ impl OperationCore {
         backend: &str,
         confirm_gated_access: bool,
     ) -> CoreResult<crate::RuntimeJobKind> {
+        if let Some(profile) = geosam2_install::Profile::find(backend) {
+            profile.require_supported(self.store.root())?;
+            return Ok(crate::RuntimeJobKind::InstallCatalogModel(profile.id()));
+        }
         let profile = external_generation::ExternalProfile::find(backend)
-            .ok_or_else(|| CoreError::InvalidInput("Unknown generation backend.".into()))?;
+            .ok_or_else(|| CoreError::InvalidInput("Unknown model backend.".into()))?;
         if profile.needs_dinov3() && !confirm_gated_access {
             return Err(CoreError::InvalidInput(
                 "Confirm access to DINOv3 before installing TRELLIS.2.".into(),
@@ -483,21 +484,6 @@ impl OperationCore {
             )));
         }
         Ok(crate::RuntimeJobKind::InstallCatalogModel(profile.id))
-    }
-
-    pub fn geosam2_install_job(
-        &self,
-        backend: &str,
-        component: &str,
-    ) -> CoreResult<crate::RuntimeJobKind> {
-        let profile = geosam2_profile(backend)?;
-        let kind = match component {
-            "backend" => crate::RuntimeJobKind::GeoSam2Backend(profile.id()),
-            "weights" => crate::RuntimeJobKind::GeoSam2Weights(profile.id()),
-            _ => return Err(CoreError::InvalidInput("Unknown GeoSAM2 component.".into())),
-        };
-        profile.require_supported(self.store.root())?;
-        Ok(kind)
     }
 
     pub fn remove_model_files(&self, backend: &str) -> CoreResult<()> {
@@ -730,16 +716,11 @@ impl OperationCore {
                 "xatlas UV rebaking is limited to one static mesh/primitive/material with embedded PNG base-color and metallic/roughness maps; it repacks the same mesh's existing appearance and is not high-to-low projection. Unsupported tangents, extensions, external images, and other material maps are rejected.".into(),
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. Model weights are a separate explicit 25–30 GB action. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
                 "TRELLIS Text, TRELLIS.2, and TripoSG are opt-in installs in Studio. The engine provisions an isolated environment and downloads pinned snapshots after explicit consent. Existing operator-provisioned runtimes are kept separately; readiness does not prove license compliance, memory fit, or inference quality.".into(),
-                "GeoSAM2 provides opt-in, independent backend and shared checkpoint installs for the guided repart prototype. Installed files do not enable a repart operation in Studio.".into(),
+                "GeoSAM2 installs the backend and shared checkpoint in one opt-in job for the guided repart prototype. Installed files do not enable a repart operation in Studio.".into(),
                 "MeshHarbor's MIT license covers its own code. Third-party runtime and model terms, including DINOv3 and NAF, remain separate; gated access is user-controlled. See THIRD-PARTY-NOTICES.md.".into(),
             ],
         }
     }
-}
-
-fn geosam2_profile(backend: &str) -> CoreResult<geosam2_install::Profile> {
-    geosam2_install::Profile::find(backend)
-        .ok_or_else(|| CoreError::InvalidInput("Unknown repart backend.".into()))
 }
 
 #[derive(Debug, Deserialize)]

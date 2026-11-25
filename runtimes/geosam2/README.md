@@ -13,7 +13,7 @@ GeoSAM2 publishes [Apache-2.0 code and model weights](https://huggingface.co/VAS
 
 ## Install From Studio
 
-Open **Settings → Models → Repart → GeoSAM2**. On the supported accelerator card, choose **Install GeoSAM2 backend** and **Download GeoSAM2 weights** in either order. The backend job installs pinned sources and a private Python environment, then checks native dependencies and GPU access. Install a C++ compiler first (for example, Xcode Command Line Tools on macOS). The single 616 MB checkpoint is shared by both backends and checked against its pinned SHA-256; no Hugging Face sign-in is required. **Delete model files** removes that checkpoint without removing the backend.
+Open **Settings → Models → Repart → GeoSAM2** and choose **Install model** on the supported accelerator card. One job installs pinned sources and a private Python environment, checks native dependencies and GPU access, and downloads the weights. Already verified files are reused. Install a C++ compiler first (for example, Xcode Command Line Tools on macOS). The single 616 MB checkpoint is shared by both backends and checked against its pinned SHA-256; no Hugging Face sign-in is required. **Delete model files** removes that checkpoint without removing the backend.
 
 In the MeshHarbor data directory (set by `--data-dir`), the managed installs use `runtimes/geosam2-managed`. For example, on Apple Silicon, the pre-rendered sample included in upstream source can be run with:
 
@@ -47,7 +47,7 @@ For CUDA pass `--backend cuda` and omit `--sam2-mlx-source`. Coordinates are pix
 
 ## Validation
 
-The managed MLX install was tested from an empty MeshHarbor data directory on Apple M3 Pro: weights downloaded before the backend, both jobs completed, and the installed worker exported two nodes from the 12-view sample. Managed CUDA has not been exercised on a Linux/NVIDIA host.
+The managed MLX install was tested from an empty MeshHarbor data directory on Apple M3 Pro. One job installed the backend and verified the downloaded checkpoint. Running the installer again reused both. Managed CUDA has not been exercised on a Linux/NVIDIA host.
 
 On Apple M3 Pro, the initial MLX port matched upstream PyTorch MPS with mask IoU 1.000000 in the clicked view and 0.999972 in the next view. This compares one prompt/track with postprocessing disabled, not general segmentation quality.
 
