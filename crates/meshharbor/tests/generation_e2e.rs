@@ -712,6 +712,98 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     assert_eq!(store.list_assets(10).unwrap().len(), 2);
     assert_eq!(fs::read_dir(store.staging_root()).unwrap().count(), 0);
 
+    let (status, body) = http_request(
+        address,
+        "POST",
+        &format!("{job_path}/retry"),
+        &[("Authorization", authorization.as_str())],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let retry: Value = serde_json::from_slice(&body).unwrap();
+    assert_ne!(retry["id"], submitted["id"]);
+    assert_eq!(retry["input_asset_id"], submitted["input_asset_id"]);
+    assert_eq!(retry["parameters"], submitted["parameters"]);
+    assert_eq!(read_job()["state"], "cancelled");
+    let retry_id = retry["id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while store.get_job(retry_id).unwrap().unwrap().stage.as_deref() != Some("shape_decode") {
+        assert!(Instant::now() < deadline, "retry did not start the worker");
+        thread::sleep(Duration::from_millis(25));
+    }
+    let owned_queue = http_request(
+        address,
+        "POST",
+        "/api/v1/jobs",
+        &[
+            ("Authorization", authorization.as_str()),
+            ("Content-Type", "application/json"),
+        ],
+        &job_json,
+    )
+    .unwrap();
+    assert_eq!(owned_queue.0, 202);
+    let queued: Value = serde_json::from_slice(&owned_queue.1).unwrap();
+    assert_eq!(queued["state"], "queued");
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-TERM", &server.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline, "server did not drain its jobs");
+        thread::sleep(Duration::from_millis(25));
+    }
+    for id in [retry_id, queued["id"].as_str().unwrap()] {
+        let stopped = store.get_job(id).unwrap().unwrap();
+        assert_eq!(stopped.state, meshharbor_core::JobState::Cancelled);
+        assert_eq!(stopped.progress, 100);
+    }
+    assert_eq!(fs::read_dir(store.staging_root()).unwrap().count(), 0);
+
+    server = ChildGuard(command.spawn().unwrap());
+    assert_eq!(wait_for_health(&address, &mut server.0).0, 200);
+    let (status, body) = http_request(
+        address,
+        "POST",
+        "/api/v1/jobs",
+        &[
+            ("Authorization", authorization.as_str()),
+            ("Content-Type", "application/json"),
+        ],
+        &job_json,
+    )
+    .unwrap();
+    assert_eq!(status, 202);
+    let crashed: Value = serde_json::from_slice(&body).unwrap();
+    let crashed_id = crashed["id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while store.get_job(crashed_id).unwrap().unwrap().stage.as_deref() != Some("shape_decode") {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(25));
+    }
+    server.terminate();
+    fs::remove_file(hold_generation).unwrap();
+    server = ChildGuard(command.spawn().unwrap());
+    assert_eq!(wait_for_health(&address, &mut server.0).0, 200);
+    let recovered = store.get_job(crashed_id).unwrap().unwrap();
+    assert_eq!(recovered.state, meshharbor_core::JobState::Failed);
+    assert_eq!(recovered.error.unwrap()["code"], "interrupted");
+    let steps = store.job_steps(crashed_id).unwrap();
+    assert!(
+        steps
+            .iter()
+            .flat_map(|step| &step.commands)
+            .any(|command| command.outcome.as_deref() == Some("Interrupted"))
+    );
     server.terminate();
 }
 
@@ -816,6 +908,62 @@ fn mcp_import_generation_and_glb_export_use_the_same_mock_generation_core() {
     assert_eq!(fs::read(destination).unwrap(), runtime.generated_glb);
 
     client.shutdown();
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn startup_checks_saved_huggingface_status_without_a_client_write() {
+    let runtime = MockRuntime::new("startup-huggingface");
+    let data_dir = runtime._tree.0.join("store");
+    fs::write(
+        runtime.runtime_root.join("home/.cache/huggingface/token"),
+        b"fixture-token",
+    )
+    .unwrap();
+    fs::write(&runtime.python, "#!/bin/sh\ncase \"$4\" in\n account) printf 'connected\\n';;\n model) printf 'verified\\n';;\n *) exit 99;;\nesac\n").unwrap();
+    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reserved.local_addr().unwrap();
+    drop(reserved);
+    let mut command = meshharbor();
+    command
+        .arg("--data-dir")
+        .arg(data_dir)
+        .args(["serve", "--listen", &address.to_string()])
+        .env("MESHHARBOR_API_TOKEN", "fixture-auth")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    runtime.configure(&mut command);
+    let mut server = ChildGuard(command.spawn().unwrap());
+    assert_eq!(wait_for_health(&address, &mut server.0).0, 200);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (status, body) = http_request(
+            address,
+            "GET",
+            "/api/v1/runtime",
+            &[("Authorization", "Bearer fixture-auth")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(status, 200);
+        let runtime: Value = serde_json::from_slice(&body).unwrap();
+        let backend = runtime["model_backends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|backend| backend["id"] == "pixal3d-mlx")
+            .unwrap();
+        if backend["huggingface"]["model_access"] == "verified" {
+            assert_eq!(backend["huggingface"]["account"], "connected");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "unexpected status: {}",
+            backend["huggingface"]
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 struct McpClient {

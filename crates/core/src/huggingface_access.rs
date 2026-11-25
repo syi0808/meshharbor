@@ -1,6 +1,8 @@
 use std::{
     io::Write,
     process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -47,6 +49,18 @@ fn run_check(
         .take()
         .expect("piped child stdin")
         .write_all(token.as_bytes());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(unavailable());
+            }
+        }
+    }
     let output = child.wait_with_output().map_err(|_| unavailable())?;
     if written.is_err() || !output.status.success() {
         return Err(unavailable());

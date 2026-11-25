@@ -16,6 +16,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use crate::huggingface_status::HuggingFaceStatuses;
 use crate::{ApiError, AppState, acquire_runtime_write_lock};
 
 #[derive(Clone, Default)]
@@ -54,6 +55,7 @@ impl LoginPhase {
 pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(sessions): Extension<BrowserLoginSessions>,
+    Extension(statuses): Extension<HuggingFaceStatuses>,
     Path(backend): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let profile = Pixal3dProfile::from_backend(&backend)?;
@@ -94,7 +96,7 @@ pub(crate) async fn start(
         let phase = tokio::select! {
             biased;
             _ = cancellation.changed() => LoginPhase::Cancelled,
-            result = run_login(root, profile, &sessions, id) => match result {
+            result = run_login(root, profile, &sessions, id, statuses) => match result {
                 Ok(phase) => phase,
                 Err(error) => LoginPhase::Failed { message: public_message(error) },
             }
@@ -162,7 +164,9 @@ async fn run_login(
     profile: Pixal3dProfile,
     sessions: &BrowserLoginSessions,
     id: Uuid,
+    statuses: HuggingFaceStatuses,
 ) -> Result<LoginPhase, CoreError> {
+    let status_root = root.clone();
     let (runtime_lock, tool) = task::spawn_blocking(move || {
         let runtime_lock = acquire_runtime_write_lock(&root)?;
         let tool = HuggingFaceBrowserTool::new(profile, &root)?;
@@ -205,6 +209,7 @@ async fn run_login(
         Ok(_) => return Err(login_error()),
     }
     tool.commit(credentials)?;
+    statuses.signed_in(&status_root, profile);
     Ok(LoginPhase::SignedIn)
 }
 

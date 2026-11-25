@@ -12,23 +12,53 @@ struct PendingJob {
     generation: bool,
 }
 
+#[derive(Default)]
+struct Queue {
+    closed: bool,
+    pending: VecDeque<PendingJob>,
+}
+
 pub(crate) struct JobScheduler {
     slot: Arc<Semaphore>,
-    pending: Mutex<VecDeque<PendingJob>>,
+    queue: Mutex<Queue>,
     changes: watch::Sender<()>,
+    owner: Option<String>,
 }
 
 impl Default for JobScheduler {
     fn default() -> Self {
         Self {
             slot: Arc::new(Semaphore::new(1)),
-            pending: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(Queue::default()),
             changes: watch::channel(()).0,
+            owner: None,
         }
     }
 }
 
 impl JobScheduler {
+    pub(crate) fn owned(owner: String) -> Self {
+        Self {
+            owner: Some(owner),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn stop(&self, store: &Store) -> Result<(), CoreError> {
+        let mut queue = self.queue.lock().expect("job queue mutex poisoned");
+        queue.closed = true;
+        if let Some(owner) = &self.owner {
+            store.stop_service_jobs(owner)?;
+        }
+        queue.pending.clear();
+        self.changes.send_replace(());
+        Ok(())
+    }
+
+    pub(crate) async fn drain(&self) {
+        let _permit = self.slot.acquire().await.expect("job semaphore open");
+    }
+
     pub(crate) fn submit(
         &self,
         store: &Store,
@@ -36,17 +66,21 @@ impl JobScheduler {
         asset_id: Option<&str>,
         parameters: &Value,
     ) -> Result<(Job, Option<OwnedSemaphorePermit>), CoreError> {
-        let mut pending = self.pending.lock().expect("job queue mutex poisoned");
-        if pending.is_empty()
+        let mut queue = self.queue.lock().expect("job queue mutex poisoned");
+        if queue.closed {
+            return Err(CoreError::Conflict("MeshHarbor is shutting down.".into()));
+        }
+        let owner = self.owner.as_deref();
+        if queue.pending.is_empty()
             && let Ok(permit) = self.slot.clone().try_acquire_owned()
         {
             return Ok((
-                store.create_running_job(operation, asset_id, parameters)?,
+                store.create_owned_job(operation, asset_id, parameters, true, owner)?,
                 Some(permit),
             ));
         }
-        let job = store.create_job(operation, asset_id, parameters)?;
-        pending.push_back(PendingJob {
+        let job = store.create_owned_job(operation, asset_id, parameters, false, owner)?;
+        queue.pending.push_back(PendingJob {
             id: job.id.clone(),
             generation: is_generation_operation(operation),
         });
@@ -64,17 +98,21 @@ impl JobScheduler {
             return reserved;
         }
         let permit = self.acquire(id).await?;
-        store
-            .update_job(id, JobState::Running, 5, None, None)
-            .ok()?;
+        if let Err(error) = store.update_job(id, JobState::Running, 5, None, None) {
+            if let Err(error) = store.finish_job(id, Err(error)) {
+                eprintln!("Could not finalize unclaimed job {id}: {error}");
+            }
+            return None;
+        }
         Some(permit)
     }
 
     #[cfg(test)]
     pub(crate) fn enqueue(&self, id: &str, operation: &str) {
-        self.pending
+        self.queue
             .lock()
             .expect("job queue mutex poisoned")
+            .pending
             .push_back(PendingJob {
                 id: id.into(),
                 generation: is_generation_operation(operation),
@@ -83,9 +121,10 @@ impl JobScheduler {
     }
 
     pub(crate) fn remove(&self, id: &str) {
-        self.pending
+        self.queue
             .lock()
             .expect("job queue mutex poisoned")
+            .pending
             .retain(|item| item.id != id);
         self.changes.send_replace(());
     }
@@ -94,9 +133,10 @@ impl JobScheduler {
         let mut changes = self.changes.subscribe();
         loop {
             let position = self
-                .pending
+                .queue
                 .lock()
                 .expect("job queue mutex poisoned")
+                .pending
                 .iter()
                 .position(|item| item.id == id)?;
             if position != 0 {
@@ -107,7 +147,8 @@ impl JobScheduler {
                 _ = changes.changed() => continue,
                 permit = self.slot.clone().acquire_owned() => permit.ok()?,
             };
-            let mut pending = self.pending.lock().expect("job queue mutex poisoned");
+            let mut queue = self.queue.lock().expect("job queue mutex poisoned");
+            let pending = &mut queue.pending;
             if pending.front().is_some_and(|item| item.id == id) {
                 pending.pop_front();
                 self.changes.send_replace(());
@@ -117,20 +158,24 @@ impl JobScheduler {
     }
 
     pub(crate) fn try_acquire_owned(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
-        let pending = self.pending.lock().expect("job queue mutex poisoned");
-        if !pending.is_empty() {
+        let queue = self.queue.lock().expect("job queue mutex poisoned");
+        if queue.closed {
+            return Err(TryAcquireError::Closed);
+        }
+        if !queue.pending.is_empty() {
             return Err(TryAcquireError::NoPermits);
         }
         self.slot.clone().try_acquire_owned()
     }
 
     pub(crate) fn generation_queue(&self) -> Vec<String> {
-        let pending = self.pending.lock().expect("job queue mutex poisoned");
-        generation_ids(&pending)
+        let queue = self.queue.lock().expect("job queue mutex poisoned");
+        generation_ids(&queue.pending)
     }
 
     pub(crate) fn swap_generation(&self, id: &str, other: &str) -> Result<Vec<String>, CoreError> {
-        let mut pending = self.pending.lock().expect("job queue mutex poisoned");
+        let mut queue = self.queue.lock().expect("job queue mutex poisoned");
+        let pending = &mut queue.pending;
         let mut previous = None;
         for (index, item) in pending
             .iter()
@@ -143,7 +188,7 @@ impl JobScheduler {
             {
                 pending.swap(previous_index, index);
                 self.changes.send_replace(());
-                return Ok(generation_ids(&pending));
+                return Ok(generation_ids(pending));
             }
             previous = Some((index, item.id.as_str()));
         }

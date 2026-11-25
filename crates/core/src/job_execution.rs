@@ -1,6 +1,6 @@
 use std::{
     io::{self, Read},
-    process::{Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -36,10 +36,10 @@ impl<'a> JobExecution<'a> {
     }
 
     pub(crate) fn checkpoint(self) -> CoreResult<()> {
-        if let Some((store, id)) = self.0 {
-            if store.job_cancellation_requested(id)? {
-                return Err(CoreError::Cancelled);
-            }
+        if let Some((store, id)) = self.0
+            && store.job_cancellation_requested(id)?
+        {
+            return Err(CoreError::Cancelled);
         }
         Ok(())
     }
@@ -85,8 +85,9 @@ impl<'a> JobExecution<'a> {
     }
 
     pub(crate) fn visible(self, mut command: Command, failure_prefix: &str) -> CoreResult<()> {
-        let status = self.status(&mut command).map_err(|error| {
-            CoreError::OperationUnavailable(format!("{failure_prefix}: {error}"))
+        let status = self.status(&mut command).map_err(|error| match error {
+            CoreError::Cancelled => error,
+            _ => CoreError::OperationUnavailable(format!("{failure_prefix}: {error}")),
         })?;
         if !status.success() {
             return Err(CoreError::OperationUnavailable(format!(
@@ -122,6 +123,12 @@ impl<'a> JobExecution<'a> {
     }
 
     fn run_captured(self, command: &mut Command) -> CoreResult<(ExitStatus, Vec<u8>)> {
+        self.checkpoint()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let trace = self.trace_command(command)?.expect("tracked command");
         let result = (|| {
             let mut child = command
@@ -134,7 +141,7 @@ impl<'a> JobExecution<'a> {
             thread::scope(|scope| {
                 let stdout = scope.spawn(|| trace.drain(stdout, false, |_| {}));
                 let stderr = scope.spawn(|| trace.drain(stderr, true, |_| {}));
-                let status = child.wait();
+                let status = self.wait_for_child(&mut child);
                 let output = stdout.join().expect("stdout reader");
                 stderr.join().expect("stderr reader")?;
                 Ok((status?, output?))
@@ -144,15 +151,46 @@ impl<'a> JobExecution<'a> {
         result
     }
 
-    pub(crate) fn begin_commit(self) -> CoreResult<()> {
-        if let Some((store, id)) = self.0 {
-            if let Err(error) = store.update_job(id, JobState::Validating, 90, None, None) {
-                self.checkpoint()?;
-                return Err(error);
+    pub(crate) fn wait_for_child(self, child: &mut Child) -> CoreResult<ExitStatus> {
+        loop {
+            let outcome = self.checkpoint().and_then(|()| Ok(child.try_wait()?));
+            match outcome {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(error) => {
+                    stop_child(child)?;
+                    return Err(error);
+                }
             }
+        }
+    }
+
+    pub(crate) fn begin_commit(self) -> CoreResult<()> {
+        if let Some((store, id)) = self.0
+            && let Err(error) = store.update_job(id, JobState::Validating, 90, None, None)
+        {
+            self.checkpoint()?;
+            return Err(error);
         }
         Ok(())
     }
+}
+
+pub(crate) fn stop_child(child: &mut Child) -> CoreResult<()> {
+    #[cfg(unix)]
+    if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+        let stopped = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        if matches!(stopped, Ok(()) | Err(rustix::io::Errno::SRCH)) {
+            if matches!(stopped, Err(rustix::io::Errno::SRCH)) {
+                let _ = child.kill();
+            }
+            child.wait()?;
+            return Ok(());
+        }
+    }
+    let _ = child.kill();
+    child.wait()?;
+    Ok(())
 }
 
 impl CommandTrace<'_> {
@@ -281,4 +319,46 @@ fn redact(text: &str) -> String {
         }
     }
     sanitized
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopping_a_tracked_runtime_command_reaps_its_process_group_and_closes_the_log() {
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-runtime-stop-{}", uuid::Uuid::new_v4()));
+        let store = Store::open(&root).unwrap();
+        let job = store
+            .create_running_job(
+                "runtime.pixal3d.install_models",
+                None,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let cache = root.join("partial-download");
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .args(["-c", "printf partial > \"$1\"; sleep 30", "fixture"])
+                    .arg(&cache);
+                JobExecution::for_job(&store, &job.id).status(&mut command)
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !cache.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            store.cancel_job(&job.id).unwrap();
+            assert!(matches!(worker.join().unwrap(), Err(CoreError::Cancelled)));
+        });
+        assert_eq!(std::fs::read(&cache).unwrap(), b"partial");
+        let steps = store.job_steps(&job.id).unwrap();
+        let command = steps.iter().flat_map(|step| &step.commands).next().unwrap();
+        assert_eq!(command.outcome.as_deref(), Some("Cancelled"));
+        assert!(command.ended_at.is_some());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -317,6 +317,9 @@ impl Store {
         if !columns.iter().any(|column| column == "stage") {
             migration.execute("ALTER TABLE jobs ADD COLUMN stage TEXT", [])?;
         }
+        if !columns.iter().any(|column| column == "service_owner") {
+            migration.execute("ALTER TABLE jobs ADD COLUMN service_owner TEXT", [])?;
+        }
         migration.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS job_steps_on_insert AFTER INSERT ON jobs BEGIN
                 INSERT INTO job_steps(job_id,state,stage,at) VALUES (NEW.id,NEW.state,NEW.stage,NEW.updated_at);
@@ -1006,7 +1009,7 @@ impl Store {
         input_asset_id: Option<&str>,
         parameters: &Value,
     ) -> CoreResult<Job> {
-        self.insert_job(operation, input_asset_id, parameters, JobState::Queued)
+        self.create_owned_job(operation, input_asset_id, parameters, false, None)
     }
 
     pub fn create_running_job(
@@ -1015,26 +1018,31 @@ impl Store {
         input_asset_id: Option<&str>,
         parameters: &Value,
     ) -> CoreResult<Job> {
-        self.insert_job(operation, input_asset_id, parameters, JobState::Running)
+        self.create_owned_job(operation, input_asset_id, parameters, true, None)
     }
 
-    fn insert_job(
+    pub fn create_owned_job(
         &self,
         operation: &str,
         input_asset_id: Option<&str>,
         parameters: &Value,
-        state: JobState,
+        running: bool,
+        owner: Option<&str>,
     ) -> CoreResult<Job> {
         let id = format!("job_{}", Uuid::new_v4().simple());
         let now = timestamp()?;
         let parameters_json = serde_json::to_string(parameters)?;
-        let running = state == JobState::Running;
+        let state = if running {
+            JobState::Running
+        } else {
+            JobState::Queued
+        };
         let conn = self.connection.lock().expect("SQLite mutex poisoned");
         conn.execute(
-            "INSERT INTO jobs (id,operation,state,input_asset_id,parameters_json,progress,created_at,updated_at,started_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8)",
+            "INSERT INTO jobs (id,operation,state,input_asset_id,parameters_json,progress,created_at,updated_at,started_at,service_owner)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8,?9)",
             params![id, operation, state.as_str(), input_asset_id, parameters_json,
-                if running { 5 } else { 0 }, now, running.then_some(&now)],
+                if running { 5 } else { 0 }, now, running.then_some(&now), owner],
         )?;
         drop(conn);
         self.get_job(&id)?
@@ -1146,6 +1154,40 @@ impl Store {
             "UPDATE jobs SET stage=?2,updated_at=?3 WHERE id=?1 AND state='running' AND stage IS NOT ?2",
             params![id, stage, timestamp()?],
         )?;
+        Ok(())
+    }
+
+    pub fn finish_job(&self, id: &str, result: CoreResult<Value>) -> CoreResult<()> {
+        let now = timestamp()?;
+        let mut conn = self.connection.lock().expect("SQLite mutex poisoned");
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = job_state_from_transaction(&transaction, id)?;
+        if current.is_terminal() {
+            return Ok(());
+        }
+        let (next, value, error) = match result {
+            _ if current == JobState::Cancelling => (JobState::Cancelled, None, None),
+            Err(CoreError::Cancelled) => (JobState::Cancelled, None, None),
+            Err(error) => (
+                JobState::Failed,
+                None,
+                Some(serde_json::json!({"message":error.to_string()})),
+            ),
+            Ok(value) => {
+                if current != JobState::Validating {
+                    transaction.execute(
+                        "UPDATE jobs SET state='validating',progress=90,updated_at=?2 WHERE id=?1",
+                        params![id, now],
+                    )?;
+                }
+                (JobState::Succeeded, Some(value), None)
+            }
+        };
+        transaction.execute(
+            "UPDATE jobs SET state=?2,progress=100,result_json=?3,error_json=?4,updated_at=?5 WHERE id=?1",
+            params![id, next.as_str(), value.map(|value| value.to_string()), error.map(|error| error.to_string()), now],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1263,9 +1305,9 @@ impl Store {
     pub fn request_job_cancellation(&self, id: &str, queued_only: bool) -> CoreResult<Job> {
         let conn = self.connection.lock().expect("SQLite mutex poisoned");
         conn.execute(
-            "UPDATE jobs SET state=CASE state WHEN 'queued' THEN 'cancelled' ELSE 'cancelling' END,updated_at=?2
-             WHERE id=?1 AND (state='queued' OR (NOT ?3 AND state='running' AND
-                (operation LIKE 'mesh.%' OR operation IN ('model.generate','image.generate','uv.unwrap','render.optimize'))))",
+            "UPDATE jobs SET state=CASE state WHEN 'queued' THEN 'cancelled' ELSE 'cancelling' END,
+                progress=CASE state WHEN 'queued' THEN 100 ELSE progress END,updated_at=?2
+             WHERE id=?1 AND (state='queued' OR (NOT ?3 AND state='running'))",
             params![id, timestamp()?, queued_only],
         )?;
         drop(conn);
@@ -1292,33 +1334,77 @@ impl Store {
     /// The caller must ensure that no other MeshHarbor process is using this
     /// store. This deliberately does not resume work or delete partial assets.
     pub fn recover_interrupted_jobs(&self) -> CoreResult<Vec<Job>> {
+        self.recover_jobs(None)
+    }
+
+    pub fn recover_service_jobs(&self, owner: Option<&str>) -> CoreResult<Vec<Job>> {
+        self.recover_jobs(Some(owner))
+    }
+
+    pub fn active_job_owners(&self) -> CoreResult<Vec<String>> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT service_owner FROM jobs WHERE service_owner IS NOT NULL
+             AND state IN ('queued','running','validating','cancelling')",
+        )?;
+        Ok(statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    pub fn stop_service_jobs(&self, owner: &str) -> CoreResult<()> {
+        let conn = self.connection.lock().expect("SQLite mutex poisoned");
+        conn.execute(
+            "UPDATE jobs SET state=CASE state WHEN 'queued' THEN 'cancelled' ELSE 'cancelling' END,
+                progress=CASE state WHEN 'queued' THEN 100 ELSE progress END,updated_at=?2
+             WHERE service_owner=?1 AND state IN ('queued','running')",
+            params![owner, timestamp()?],
+        )?;
+        Ok(())
+    }
+
+    fn recover_jobs(&self, scope: Option<Option<&str>>) -> CoreResult<Vec<Job>> {
+        let mut conn = self.connection.lock().expect("SQLite mutex poisoned");
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let unfinished_jobs = {
-            let conn = self.connection.lock().expect("SQLite mutex poisoned");
-            let mut statement = conn.prepare(
+            let mut statement = transaction.prepare(
                 "SELECT id, state FROM jobs
-                 WHERE state IN ('queued', 'running', 'validating', 'cancelling')
+                 WHERE state IN ('queued','running','validating','cancelling')
+                 AND (NOT ?1 OR service_owner IS ?2)
                  ORDER BY created_at ASC, rowid ASC",
             )?;
-            let rows = statement.query_map([], |row| {
+            let rows = statement.query_map(params![scope.is_some(), scope.flatten()], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
-        let mut recovered = Vec::with_capacity(unfinished_jobs.len());
-        for (id, state) in unfinished_jobs {
-            let previous_state = JobState::parse(&state)?;
-            if previous_state.is_terminal() {
-                continue;
-            }
+        let now = timestamp()?;
+        for (id, state) in &unfinished_jobs {
             let error = serde_json::json!({
                 "code": "interrupted",
                 "message": "This job was unfinished when MeshHarbor last exited. It was not resumed; inspect existing assets before retrying.",
-                "previous_state": previous_state.as_str(),
+                "previous_state": state,
             });
-            recovered.push(self.update_job(&id, JobState::Failed, 100, None, Some(error))?);
+            transaction.execute(
+                "UPDATE jobs SET state='failed',progress=100,error_json=?2,updated_at=?3 WHERE id=?1",
+                params![id, error.to_string(), now],
+            )?;
+            transaction.execute(
+                "UPDATE job_commands SET ended_at=?2,outcome='Interrupted'
+                 WHERE ended_at IS NULL AND step_id IN (SELECT id FROM job_steps WHERE job_id=?1)",
+                params![id, now],
+            )?;
         }
-        Ok(recovered)
+        transaction.commit()?;
+        drop(conn);
+        unfinished_jobs
+            .into_iter()
+            .map(|(id, _)| {
+                self.get_job(&id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("Job '{id}' was not found.")))
+            })
+            .collect()
     }
 
     fn artifact_path_for_hash(&self, hash: &str) -> PathBuf {
@@ -2316,10 +2402,19 @@ mod tests {
         store
             .update_job(&runtime.id, JobState::Running, 5, None, None)
             .unwrap();
-        assert!(store.cancel_job(&runtime.id).is_err());
+        assert_eq!(
+            store.cancel_job(&runtime.id).unwrap().state,
+            JobState::Cancelling
+        );
+        store
+            .finish_job(
+                &runtime.id,
+                Err(CoreError::OperationUnavailable("worker exited".into())),
+            )
+            .unwrap();
         assert_eq!(
             store.get_job(&runtime.id).unwrap().unwrap().state,
-            JobState::Running
+            JobState::Cancelled
         );
         drop(store);
         fs::remove_dir_all(dir).unwrap();

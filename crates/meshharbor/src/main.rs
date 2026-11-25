@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::http::Method;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
     extract::DefaultBodyLimit,
     extract::rejection::JsonRejection,
@@ -13,11 +13,11 @@ use axum::{
     routing::{delete, get, post},
 };
 use clap::{Parser, Subcommand};
+use huggingface_status::HuggingFaceStatuses;
 use job_scheduler::JobScheduler;
 use meshharbor_core::{
     CoreError, GenerationInput, GenerationOptions, IMAGE_GENERATION_OPERATION, MAX_ASSET_BYTES,
-    MODEL_GENERATION_OPERATION, OperationCore, Pixal3dCudaRuntimeManager, Pixal3dProfile,
-    Pixal3dRuntimeManager, RuntimeDoctor, RuntimeJobKind,
+    MODEL_GENERATION_OPERATION, OperationCore, Pixal3dProfile, RuntimeDoctor, RuntimeJobKind,
 };
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -34,6 +34,7 @@ include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
 
 mod browser_login;
 mod data_dir_lock;
+mod huggingface_status;
 mod job_scheduler;
 
 /// Prevents fork/exec lock tests from inheriting another test's live advisory-lock descriptor.
@@ -705,7 +706,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Cancel a queued job or request a permanent stop for a running asset job before its result is saved. Mesh processing stops at a safe checkpoint. Running runtime setup and downloads cannot be stopped."
+        description = "Cancel a queued job or request a stop for a running job before it commits its result. Mesh processing stops at a safe checkpoint; runtime jobs keep partial downloads for a retry."
     )]
     async fn cancel_job(&self, params: Parameters<JobIdArgs>) -> String {
         match cancel_job(&self.core, &self.scheduler, &params.0.job_id, false) {
@@ -748,6 +749,98 @@ async fn read_bounded_asset(
     Ok(bytes)
 }
 
+struct JobService {
+    state: AppState,
+    _service_lock: data_dir_lock::DataDirLock,
+    owner_lock: Option<data_dir_lock::DataDirLock>,
+    owner: uuid::Uuid,
+}
+
+impl Drop for JobService {
+    fn drop(&mut self) {
+        drop(self.owner_lock.take());
+        data_dir_lock::DataDirLock::remove_job_owner_file(
+            self.state.core.store().root(),
+            self.owner,
+        );
+    }
+}
+
+async fn open_job_service(
+    root: &std::path::Path,
+) -> Result<JobService, Box<dyn std::error::Error>> {
+    use data_dir_lock::DataDirLock;
+    use std::io::ErrorKind::WouldBlock;
+
+    let service_lock = loop {
+        match DataDirLock::try_acquire_for_recovery(root) {
+            Ok(lock) => {
+                let core = OperationCore::open(root)?;
+                let recovered = core.store().recover_service_jobs(None)?;
+                if !recovered.is_empty() {
+                    tracing::info!(count = recovered.len(), "Recovered legacy interrupted jobs");
+                }
+                drop(lock);
+            }
+            Err(error) if error.kind() == WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+        match DataDirLock::try_acquire_for_service(root) {
+            Ok(lock) => break lock,
+            Err(error) if error.kind() == WouldBlock => {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let core = OperationCore::open(root)?;
+    for saved in core.store().active_job_owners()? {
+        let owner = uuid::Uuid::parse_str(&saved)?;
+        match DataDirLock::try_acquire_for_job_owner(root, owner) {
+            Ok(lock) => {
+                let recovered = core.store().recover_service_jobs(Some(&saved))?;
+                if !recovered.is_empty() {
+                    tracing::info!(count = recovered.len(), "Recovered interrupted jobs");
+                }
+                drop(lock);
+                DataDirLock::remove_job_owner_file(root, owner);
+            }
+            Err(error) if error.kind() == WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let owner = uuid::Uuid::new_v4();
+    let owner_lock = DataDirLock::try_acquire_for_job_owner(root, owner)?;
+    let scheduler = Arc::new(JobScheduler::owned(owner.to_string()));
+    Ok(JobService {
+        state: AppState { core, scheduler },
+        _service_lock: service_lock,
+        owner_lock: Some(owner_lock),
+        owner,
+    })
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = terminate.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn stop_jobs(state: &AppState) {
+    if let Err(error) = state.scheduler.stop(state.core.store()) {
+        tracing::error!(%error, "Could not request job shutdown");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -762,30 +855,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("Refusing non-loopback bind; remote listening is not implemented in this build.".into());
             }
             let token = resolve_api_token(std::env::var("MESHHARBOR_API_TOKEN"))?;
-            let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_service(&root)?;
-            let core = OperationCore::open(&root)?;
-            let app = api_router(
-                AppState {
-                    core,
-                    scheduler: Arc::new(JobScheduler::default()),
-                },
-                token.value.clone(),
-            );
             let listener = TcpListener::bind(listen).await?;
+            let jobs = open_job_service(&root).await?;
+            let state = &jobs.state;
+            let statuses = HuggingFaceStatuses::default();
+            statuses.start(&root);
+            let app = api_router_with_statuses(state.clone(), token.value.clone(), statuses);
             eprintln!(
                 "MeshHarbor REST API listening at http://{listen}; {}",
                 token_startup_log(&token)
             );
-            axum::serve(listener, app).await?;
+            let shutdown_state = state.clone();
+            let served = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    shutdown_signal().await;
+                    stop_jobs(&shutdown_state);
+                })
+                .await;
+            stop_jobs(state);
+            state.scheduler.drain().await;
+            served?;
         }
         Command::Mcp => {
-            let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_service(&root)?;
-            let server = McpServer::new(
-                OperationCore::open(&root)?,
-                Arc::new(JobScheduler::default()),
-            );
+            let jobs = open_job_service(&root).await?;
+            let state = &jobs.state;
+            let server = McpServer::new(state.core.clone(), state.scheduler.clone());
             let service = server.serve(rmcp::transport::stdio()).await?;
-            service.waiting().await?;
+            let cancellation = service.cancellation_token();
+            let waiting = service.waiting();
+            tokio::pin!(waiting);
+            let closed = tokio::select! {
+                result = &mut waiting => result,
+                _ = shutdown_signal() => {
+                    stop_jobs(state);
+                    cancellation.cancel();
+                    waiting.await
+                }
+            };
+            stop_jobs(state);
+            state.scheduler.drain().await;
+            closed?;
         }
         Command::Import { file } => {
             let bytes = read_bounded_asset(&file, MAX_ASSET_BYTES).await?;
@@ -1026,7 +1135,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(test)]
 fn api_router(state: AppState, token: String) -> Router {
+    api_router_with_statuses(state, token, HuggingFaceStatuses::default())
+}
+
+fn api_router_with_statuses(
+    state: AppState,
+    token: String,
+    statuses: HuggingFaceStatuses,
+) -> Router {
     Router::new()
         .route("/api/v1/health", get(api_health))
         .route("/api/v1/runtime", get(api_runtime))
@@ -1121,11 +1239,13 @@ fn api_router(state: AppState, token: String) -> Router {
         .route("/api/v1/jobs/{job_id}", get(api_get_job))
         .route("/api/v1/jobs/{job_id}/steps", get(api_job_steps))
         .route("/api/v1/jobs/{job_id}/cancel", post(api_cancel_job))
+        .route("/api/v1/jobs/{job_id}/retry", post(api_retry_job))
         .route("/api/v1/artifacts/{artifact_id}", get(api_read_artifact))
         .fallback(api_studio_fallback)
         .layer(axum::Extension(
             browser_login::BrowserLoginSessions::default(),
         ))
+        .layer(Extension(statuses))
         .layer(middleware::from_fn_with_state(token, authenticate))
         .with_state(state)
 }
@@ -1311,8 +1431,13 @@ fn with_studio_frame_guards(mut response: Response) -> Response {
 async fn api_health() -> Json<Value> {
     Json(json!({"status":"ok","service":"meshharbor"}))
 }
-async fn api_runtime(State(state): State<AppState>) -> Json<meshharbor_core::RuntimeDoctor> {
-    Json(state.core.runtime_doctor())
+async fn api_runtime(
+    State(state): State<AppState>,
+    Extension(statuses): Extension<HuggingFaceStatuses>,
+) -> impl IntoResponse {
+    let mut runtime = state.core.runtime_doctor();
+    statuses.decorate(&mut runtime);
+    ([(header::CACHE_CONTROL, "no-store")], Json(runtime))
 }
 
 async fn api_runtime_jobs(
@@ -1387,6 +1512,7 @@ struct HuggingFaceConnectionRequest {
 
 async fn api_huggingface_connection(
     State(state): State<AppState>,
+    Extension(statuses): Extension<HuggingFaceStatuses>,
     Path(backend): Path<String>,
     payload: Result<Json<HuggingFaceConnectionRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -1395,14 +1521,21 @@ async fn api_huggingface_connection(
     let profile = Pixal3dProfile::from_backend(&backend)?;
     let access = task::spawn_blocking(move || {
         let root = state.core.store().root();
-        let _runtime_lock = acquire_runtime_write_lock(root)?;
-        match profile {
-            Pixal3dProfile::Mlx => {
-                Pixal3dRuntimeManager::new(root).huggingface_connection(payload.token.as_deref())
-            }
-            Pixal3dProfile::Cuda => Pixal3dCudaRuntimeManager::new(root)
-                .huggingface_connection(payload.token.as_deref()),
+        let _runtime_lock = if payload.token.is_some() {
+            acquire_runtime_write_lock(root)?
+        } else {
+            acquire_generation_runtime_lock(root)?
+        };
+        let result = huggingface_status::check_connection(root, profile, payload.token.as_deref());
+        if payload.token.is_none()
+            || matches!(
+                result,
+                Ok(meshharbor_core::HuggingFaceConnection::Connected)
+            )
+        {
+            statuses.record_account(root, profile, result.as_ref().ok());
         }
+        result
     })
     .await
     .map_err(|_| {
@@ -1413,16 +1546,16 @@ async fn api_huggingface_connection(
 
 async fn api_model_access(
     State(state): State<AppState>,
+    Extension(statuses): Extension<HuggingFaceStatuses>,
     Path(backend): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let profile = Pixal3dProfile::from_backend(&backend)?;
     let access = task::spawn_blocking(move || {
         let root = state.core.store().root();
-        let _runtime_lock = acquire_runtime_write_lock(root)?;
-        match profile {
-            Pixal3dProfile::Mlx => Pixal3dRuntimeManager::new(root).huggingface_model_access(),
-            Pixal3dProfile::Cuda => Pixal3dCudaRuntimeManager::new(root).huggingface_model_access(),
-        }
+        let _runtime_lock = acquire_generation_runtime_lock(root)?;
+        let result = huggingface_status::check_access(root, profile);
+        statuses.record_access(profile, result.as_ref().ok());
+        result
     })
     .await
     .map_err(|_| CoreError::OperationUnavailable("Model access worker failed.".into()))??;
@@ -1437,22 +1570,26 @@ struct RuntimeRemovalConfirmation {
 
 async fn api_disconnect_huggingface(
     State(state): State<AppState>,
+    Extension(statuses): Extension<HuggingFaceStatuses>,
     Path(backend): Path<String>,
     Json(confirmation): Json<RuntimeRemovalConfirmation>,
 ) -> Result<Json<RuntimeDoctor>, ApiError> {
     let profile = Pixal3dProfile::from_backend(&backend)?;
-    remove_runtime_files(state.core, confirmation, move |core| {
-        profile.disconnect_huggingface(core.store().root())
+    remove_runtime_files(state.core, confirmation, statuses.clone(), move |core| {
+        profile.disconnect_huggingface(core.store().root())?;
+        statuses.disconnected(profile);
+        Ok(())
     })
     .await
 }
 
 async fn api_remove_model_files(
     State(state): State<AppState>,
+    Extension(statuses): Extension<HuggingFaceStatuses>,
     Path(backend): Path<String>,
     Json(confirmation): Json<RuntimeRemovalConfirmation>,
 ) -> Result<Json<RuntimeDoctor>, ApiError> {
-    remove_runtime_files(state.core, confirmation, move |core| {
+    remove_runtime_files(state.core, confirmation, statuses, move |core| {
         core.remove_model_files(&backend)
     })
     .await
@@ -1461,6 +1598,7 @@ async fn api_remove_model_files(
 async fn remove_runtime_files(
     core: OperationCore,
     confirmation: RuntimeRemovalConfirmation,
+    statuses: HuggingFaceStatuses,
     remove: impl FnOnce(&OperationCore) -> Result<(), CoreError> + Send + 'static,
 ) -> Result<Json<RuntimeDoctor>, ApiError> {
     if !confirmation.confirmed {
@@ -1473,7 +1611,9 @@ async fn remove_runtime_files(
         let root = core.store().root();
         let _runtime_lock = acquire_runtime_write_lock(root)?;
         remove(&core)?;
-        Ok::<_, CoreError>(core.runtime_doctor())
+        let mut runtime = core.runtime_doctor();
+        statuses.decorate(&mut runtime);
+        Ok::<_, CoreError>(runtime)
     })
     .await
     .map_err(|_| {
@@ -1741,6 +1881,16 @@ async fn api_create_job(
     State(state): State<AppState>,
     Json(body): Json<JobStartBody>,
 ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(submit_asset_job(state, body).await?),
+    ))
+}
+
+async fn submit_asset_job(
+    state: AppState,
+    body: JobStartBody,
+) -> Result<meshharbor_core::Job, ApiError> {
     let parameters = body.parameters.unwrap_or_else(|| json!({}));
     if body.operation == MODEL_GENERATION_OPERATION {
         let input = serde_json::from_value(body.input).map_err(|error| {
@@ -1757,7 +1907,7 @@ async fn api_create_job(
             MODEL_GENERATION_OPERATION,
         )
         .await?;
-        return Ok((StatusCode::ACCEPTED, Json(job)));
+        return Ok(job);
     }
     let input: JobStartInput = serde_json::from_value(body.input)
         .map_err(|error| CoreError::InvalidInput(format!("Invalid asset job input: {error}")))?;
@@ -1815,6 +1965,63 @@ async fn api_create_job(
                 "Operation '{operation}' is not implemented by this build."
             ))));
         }
+    };
+    Ok(job)
+}
+
+async fn api_retry_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    let saved = read_job_record(&state.core, &job_id)?;
+    if !matches!(
+        saved.state,
+        meshharbor_core::JobState::Failed | meshharbor_core::JobState::Cancelled
+    ) {
+        return Err(
+            CoreError::Conflict("Only failed or stopped jobs can be retried.".into()).into(),
+        );
+    }
+    let kind = match saved.operation.as_str() {
+        "runtime.pixal3d.setup" => Some(RuntimeJobKind::Setup),
+        "runtime.pixal3d.install_models" => Some(RuntimeJobKind::InstallModels),
+        "runtime.pixal3d.convert_naf" => Some(RuntimeJobKind::ConvertNaf),
+        "runtime.pixal3d.cuda_setup" => Some(RuntimeJobKind::CudaSetup),
+        "runtime.pixal3d.cuda_install_models" => Some(RuntimeJobKind::CudaInstallModels),
+        "runtime.pixal3d.cuda_install_multiview" => Some(RuntimeJobKind::CudaInstallMultiview),
+        "runtime.models.install" => {
+            let backend = saved.parameters["backend_id"].as_str().ok_or_else(|| {
+                CoreError::Conflict("This record has no saved runtime backend.".into())
+            })?;
+            Some(state.core.catalog_install_job(backend, true)?)
+        }
+        _ => None,
+    };
+    let job = if let Some(kind) = kind {
+        start_runtime_job(state.core, state.scheduler, kind).await?
+    } else {
+        if saved.parameters["input_mode"] == "text" {
+            return Err(CoreError::Conflict(
+                "Text prompts are not saved. Enter the prompt again in New model.".into(),
+            )
+            .into());
+        }
+        let asset_id = saved
+            .input_asset_id
+            .ok_or_else(|| CoreError::Conflict("This record has no saved input asset.".into()))?;
+        let mut parameters = saved.parameters;
+        if let Some(parameters) = parameters.as_object_mut() {
+            parameters.remove("input_mode");
+        }
+        submit_asset_job(
+            state,
+            JobStartBody {
+                operation: saved.operation,
+                input: json!({"kind":"image","asset_id":asset_id}),
+                parameters: Some(parameters),
+            },
+        )
+        .await?
     };
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
@@ -1925,28 +2132,17 @@ async fn api_swap_generation_queue(
     ))
 }
 
-fn finish_asset_job(
+fn finish_job(
     core: &OperationCore,
     job_id: &str,
     result: Result<Result<Value, CoreError>, task::JoinError>,
 ) {
-    use meshharbor_core::JobState;
-
-    let (state, value, error) = match result {
-        Ok(Ok(value)) => (JobState::Succeeded, Some(value), None),
-        Ok(Err(CoreError::Cancelled)) => (JobState::Cancelled, None, None),
-        Ok(Err(error)) => (
-            JobState::Failed,
-            None,
-            Some(json!({"message":error.to_string()})),
-        ),
-        Err(error) => (
-            JobState::Failed,
-            None,
-            Some(json!({"message":format!("Asset worker failed: {error}")})),
-        ),
-    };
-    if let Err(error) = core.store().update_job(job_id, state, 100, value, error) {
+    let result = result.unwrap_or_else(|error| {
+        Err(CoreError::OperationUnavailable(format!(
+            "Job worker failed: {error}"
+        )))
+    });
+    if let Err(error) = core.store().finish_job(job_id, result) {
         eprintln!("Could not finalize job {job_id}: {error}");
     }
 }
@@ -1992,7 +2188,7 @@ async fn start_simplify_job(
             Ok(json!({"asset_id": result.asset.id, "report": result.report}))
         })
         .await;
-        finish_asset_job(&core, &job_id, result);
+        finish_job(&core, &job_id, result);
         drop(permit);
     });
     Ok(job)
@@ -2049,7 +2245,7 @@ async fn start_mesh_operation_job(
             Ok(json!({"asset_id": result.asset.id, "report": result.report}))
         })
         .await;
-        finish_asset_job(&core, &job_id, result);
+        finish_job(&core, &job_id, result);
         drop(permit);
     });
     Ok(job)
@@ -2106,7 +2302,7 @@ async fn start_generation_job(
             Ok(payload)
         })
         .await;
-        finish_asset_job(&core, &job_id, result);
+        finish_job(&core, &job_id, result);
         drop(permit);
     });
     Ok(job)
@@ -2171,47 +2367,7 @@ async fn start_runtime_job(
         })
         .await;
 
-        match result {
-            Ok(Ok(value)) => {
-                if core
-                    .store()
-                    .update_job(
-                        &job_id,
-                        meshharbor_core::JobState::Validating,
-                        90,
-                        None,
-                        None,
-                    )
-                    .is_ok()
-                {
-                    let _ = core.store().update_job(
-                        &job_id,
-                        meshharbor_core::JobState::Succeeded,
-                        100,
-                        Some(value),
-                        None,
-                    );
-                }
-            }
-            Ok(Err(error)) => {
-                let _ = core.store().update_job(
-                    &job_id,
-                    meshharbor_core::JobState::Failed,
-                    100,
-                    None,
-                    Some(json!({"message":error.to_string()})),
-                );
-            }
-            Err(error) => {
-                let _ = core.store().update_job(
-                    &job_id,
-                    meshharbor_core::JobState::Failed,
-                    100,
-                    None,
-                    Some(json!({"message":format!("Runtime setup worker failed: {error}")})),
-                );
-            }
-        }
+        finish_job(&core, &job_id, result);
         drop(permit);
     });
     Ok(job)
@@ -3714,6 +3870,61 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn startup_recovers_dead_owners_without_disturbing_a_live_service() {
+        use data_dir_lock::DataDirLock;
+        use meshharbor_core::JobState;
+
+        let root =
+            std::env::temp_dir().join(format!("meshharbor-job-owner-{}", uuid::Uuid::new_v4()));
+        let core = OperationCore::open(&root).unwrap();
+        let legacy = core
+            .store()
+            .create_running_job("mesh.cleanup", None, &json!({}))
+            .unwrap();
+        let live = open_job_service(&root).await.unwrap();
+        assert_eq!(
+            read_job_record(&core, &legacy.id).unwrap().state,
+            JobState::Failed
+        );
+        let (live_job, live_permit) = live
+            .state
+            .scheduler
+            .submit(live.state.core.store(), "mesh.cleanup", None, &json!({}))
+            .unwrap();
+        let dead_owner = uuid::Uuid::new_v4();
+        let dead_lock = DataDirLock::try_acquire_for_job_owner(&root, dead_owner).unwrap();
+        let interrupted = core
+            .store()
+            .create_owned_job(
+                RuntimeJobKind::InstallModels.operation(),
+                None,
+                &json!({}),
+                true,
+                Some(&dead_owner.to_string()),
+            )
+            .unwrap();
+        core.store()
+            .request_job_cancellation(&interrupted.id, false)
+            .unwrap();
+        drop(dead_lock);
+
+        let restarted = open_job_service(&root).await.unwrap();
+        assert_eq!(
+            read_job_record(&restarted.state.core, &live_job.id)
+                .unwrap()
+                .state,
+            JobState::Running
+        );
+        let recovered = read_job_record(&restarted.state.core, &interrupted.id).unwrap();
+        assert_eq!(recovered.state, JobState::Failed);
+        assert_eq!(recovered.error.unwrap()["previous_state"], "cancelling");
+
+        drop(live_permit);
+        drop((core, restarted, live));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

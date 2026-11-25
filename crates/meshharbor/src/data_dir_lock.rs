@@ -30,6 +30,18 @@ impl DataDirLock {
         Self::try_acquire(root, ".meshharbor.lock", LockMode::Exclusive)
     }
 
+    pub fn try_acquire_for_job_owner(root: &Path, owner: uuid::Uuid) -> io::Result<Self> {
+        Self::try_acquire(
+            &root.join(".meshharbor-job-owners"),
+            &owner.to_string(),
+            LockMode::Exclusive,
+        )
+    }
+
+    pub fn remove_job_owner_file(root: &Path, owner: uuid::Uuid) {
+        let _ = fs::remove_file(root.join(".meshharbor-job-owners").join(owner.to_string()));
+    }
+
     /// Acquire exclusive access to app-managed runtime state and shared Python caches.
     pub fn try_acquire_for_runtime(root: &Path) -> io::Result<Self> {
         Self::try_acquire(root, ".meshharbor.runtime.lock", LockMode::Exclusive)
