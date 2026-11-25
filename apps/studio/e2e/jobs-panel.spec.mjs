@@ -1,6 +1,55 @@
 import { expect } from '@playwright/test';
 import { test } from './studio-fixture.mjs';
 
+test('running and failed jobs put their status and actions below full-width details', async ({ page, studioOrigin }) => {
+  const timestamp = String(Date.now());
+  const job = {
+    operation: 'model.generate', input_asset_id: 'reference',
+    input_asset_name: 'Screenshot of a model reference with a long filename.png',
+    created_at: timestamp, started_at: timestamp, updated_at: timestamp, stage: 'shape_hr',
+  };
+  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [
+    { ...job, id: 'running-layout', state: 'running', progress: 5 },
+    { ...job, id: 'failed-layout', state: 'failed', progress: 100 },
+  ] }));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(studioOrigin + '/jobs');
+  const running = page.getByRole('region', { name: /In progress/ }).getByRole('listitem');
+  const failed = page.getByRole('region', { name: 'History' }).getByRole('listitem');
+  const assertLayout = async (card, status, lastAction, expectSameRow) => {
+    await expect(card).toBeVisible();
+    const [content, badge, actions, detailsButton, lastButton] = await Promise.all([
+      card.locator('[data-slot="item-content"]').boundingBox(),
+      card.getByText(status, { exact: true }).boundingBox(),
+      card.locator('[data-slot="item-actions"]').boundingBox(),
+      card.getByRole('button', { name: 'View details for Generate model' }).boundingBox(),
+      card.getByRole('button', { name: lastAction }).boundingBox(),
+    ]);
+    expect(badge.y).toBeGreaterThanOrEqual(content.y + content.height);
+    expect(actions.y).toBeGreaterThanOrEqual(content.y + content.height);
+    expect(badge.x).toBeCloseTo(content.x, 0);
+    expect(actions.x + actions.width).toBeCloseTo(content.x + content.width, 0);
+    expect(lastButton.x + lastButton.width).toBeCloseTo(content.x + content.width, 0);
+    expect(badge.x + badge.width).toBeLessThan(detailsButton.x);
+    if (expectSameRow) {
+      expect(lastButton.y).toBeLessThan(badge.y + badge.height);
+    }
+  };
+  await assertLayout(running, 'Running', 'Stop job', true);
+  await assertLayout(failed, 'Failed', 'View input', false);
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const dock = page.getByRole('complementary', { name: 'Jobs' });
+  await expect(dock).toBeVisible();
+  const divider = await page.getByRole('separator', { name: 'Resize Jobs panel' }).boundingBox();
+  await page.mouse.move(divider.x + divider.width / 2, divider.y + divider.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(divider.x - 140, divider.y + divider.height / 2);
+  await page.mouse.up();
+  await expect.poll(async () => (await dock.boundingBox()).width).toBeGreaterThan(400);
+  await assertLayout(running, 'Running', 'Stop job', true);
+  await assertLayout(failed, 'Failed', 'View input', true);
+});
+
 test('the Jobs panel polls engine activity, keeps stable completed durations, and loads older records', async ({ page, studioOrigin }) => {
   const now = Date.now();
   const lastFinished = Array.from({ length: 20 }, (_, index) => ({
