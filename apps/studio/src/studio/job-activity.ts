@@ -4,7 +4,8 @@ import type { Job } from './types';
 export const JOB_PAGE_SIZE = 20;
 
 export function jobStateLabel(state: Job['state']): string {
-  return state === 'succeeded' ? 'Complete' : state === 'cancelling' ? 'Stopping' : state[0].toUpperCase() + state.slice(1);
+  return state === 'succeeded' ? 'Complete' : state === 'cancelling' ? 'Stopping'
+    : state === 'cancelled' ? 'Stopped' : state[0].toUpperCase() + state.slice(1);
 }
 
 export function generationJobName(job: Job, sources: ReadonlyMap<string, string>): string {
@@ -63,10 +64,11 @@ export function jobStage(job: Job): string {
   switch (job.state) {
     case 'queued': return 'Waiting for an engine slot';
     case 'validating': return 'Finalizing result';
-    case 'cancelling': return isGenerationOperation(job.operation) ? 'Stopping generation worker' : 'Stopping at a safe checkpoint';
+    case 'cancelling': return isGenerationOperation(job.operation) ? 'Stopping generation worker'
+      : job.operation.startsWith('runtime.') ? 'Stopping runtime worker' : 'Stopping at a safe checkpoint';
     case 'succeeded': return 'Finished';
     case 'failed': return 'Stopped with an error';
-    case 'cancelled': return 'Cancelled';
+    case 'cancelled': return 'Stopped';
     case 'running':
       if (job.stage) return jobStepLabel(job.stage);
       if (isGenerationOperation(job.operation)) return 'Preparing generation';

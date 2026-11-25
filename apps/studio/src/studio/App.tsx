@@ -1,4 +1,4 @@
-import { ArrowDownIcon, ArrowsClockwiseIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GearSixIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SlidersHorizontalIcon, SquaresFourIcon, WrenchIcon } from '@phosphor-icons/react';
+import { ArrowDownIcon, ArrowsClockwiseIcon, ArrowsInIcon, BoundingBoxIcon, BroomIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GaugeIcon, GearSixIcon, GridFourIcon, ImageSquareIcon, IntersectIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SlidersHorizontalIcon, SquaresFourIcon, type Icon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   assetComparisonPairForSelection,
@@ -12,7 +12,6 @@ import {
   generationLabel,
   isActiveJob,
   isGenerationOperation,
-  isJobCancellable,
   jobReportMatchesAsset,
   jobResultCardModel,
   jobPollRetryDelay,
@@ -50,8 +49,7 @@ import { ModelPreview } from './ModelPreview';
 import { ModelVersionHistory } from './ModelVersionHistory';
 import { AssetGalleryCard } from './AssetGalleryCard';
 import { Disclosure } from './Disclosure';
-import { JobListItem } from './JobListItem';
-import { JobsDashboard, PendingGenerationCards, type StudioActivity } from './JobsDashboard';
+import { JobsPanel, PendingGenerationCards, type StudioActivity } from './JobsPanel';
 import { JOB_PAGE_SIZE, generationJobName, jobStage, mergeJobRecords } from './job-activity';
 import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
@@ -83,7 +81,7 @@ const ASSET_PAGE_SIZE = 50;
 const ASSET_GALLERY_GRID = 'grid min-w-0 grid-cols-2 gap-2 @min-[380px]:grid-cols-3';
 const EMPTY_ASSET_BROWSER_FILTERS: AssetBrowserFilters = { query: '', kind: 'mesh', origin: 'all' };
 
-function dashboardFromLocation() {
+function jobsFromLocation() {
   return window.location.pathname === '/jobs'
     ? { jobId: new URLSearchParams(window.location.search).get('job') }
     : null;
@@ -135,35 +133,43 @@ function formatSize(size: number) {
   return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(0)} KiB` : `${(size / (1024 * 1024)).toFixed(2)} MiB`;
 }
 
-const meshOperationOptions: Array<{ id: MeshOperationId; title: string; description: string }> = [
+const meshOperationOptions: Array<{ id: MeshOperationId; title: string; label?: string; icon: Icon; description: string }> = [
   {
     id: 'mesh.retopology',
     title: 'Quad retopology (experimental)',
+    label: 'Retopology',
+    icon: GridFourIcon,
     description: 'Build a quad mesh with QuadriFlow. Supported PNG base color and metallic/roughness maps appear only in the GLB preview; the quad OBJ is geometry-only.',
   },
   {
     id: 'mesh.cleanup',
     title: 'Cleanup',
+    icon: BroomIcon,
     description: 'Remove repeated-index, exact zero-area, and same-winding duplicate faces.',
   },
   {
     id: 'mesh.separate_parts',
     title: 'Separate connected parts',
+    label: 'Separate parts',
+    icon: IntersectIcon,
     description: 'Split connected surfaces without welding. Small fragments may share an output part.',
   },
   {
     id: 'uv.unwrap',
     title: 'UV atlas rebake',
+    icon: BoundingBoxIcon,
     description: 'Repack existing UVs and rebake embedded PNG base color and metallic/roughness on one primitive. Zero-area faces are dropped. This is not a high-to-low bake.',
   },
   {
     id: 'render.optimize',
     title: 'Render optimization',
+    icon: GaugeIcon,
     description: 'Reorder opaque and masked triangles for cache and overdraw; preserve translucent order.',
   },
   {
     id: 'mesh.compress',
     title: 'Compression',
+    icon: ArrowsInIcon,
     description: 'Shrink geometry with KHR_meshopt_compression. Other viewers need a compatible decoder.',
   },
 ];
@@ -173,18 +179,21 @@ export function App() {
   useLayoutEffect(() => { applyStudioTheme(theme); }, [theme]);
   const [connection, setConnection] = useState<Connection>('disconnected');
   const [settingsSection, setSettingsSection] = useState(() => settingsSectionFromPath(window.location.pathname));
-  const [dashboard, setDashboard] = useState(dashboardFromLocation);
+  const [focusedJobId, setFocusedJobId] = useState(() => jobsFromLocation()?.jobId ?? null);
   const [settingsBackend, setSettingsBackend] = useState<RuntimeBackendId | null>(null);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
-  const dashboardTrigger = useRef<HTMLButtonElement>(null);
+  const sidebar = useWorkbenchSidebar(jobsFromLocation() ? 'jobs' : 'inventory');
+  const { showPanel } = sidebar;
   useEffect(() => {
     function onPopState() {
       setSettingsSection(settingsSectionFromPath(window.location.pathname));
-      setDashboard(dashboardFromLocation());
+      const jobs = jobsFromLocation();
+      if (jobs) showPanel('jobs');
+      setFocusedJobId(jobs?.jobId ?? null);
     }
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, []);
+  }, [showPanel]);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [operations, setOperations] = useState<Operation[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -232,6 +241,8 @@ export function App() {
   const [stopTarget, setStopTarget] = useState<Job | null>(null);
   const [stoppingJob, setStoppingJob] = useState(false);
   const stopTrigger = useRef<HTMLButtonElement | null>(null);
+  const [retryTarget, setRetryTarget] = useState<Job | null>(null);
+  const retryTrigger = useRef<HTMLButtonElement | null>(null);
   const jobRef = useRef<Job | null>(null);
   const setJob = useCallback((next: Job | null) => {
     if (jobRef.current?.id !== next?.id) historySelectionGuard.current.invalidate();
@@ -245,7 +256,6 @@ export function App() {
   const [downloading, setDownloading] = useState(false);
   const downloadInFlight = useRef(false);
   const [inspector, setInspector] = useState<Inspector>('generation');
-  const sidebar = useWorkbenchSidebar();
   const draggedImage = useRef<Asset | null>(null);
   const [dragging, setDragging] = useState(false);
   const [importProgress, setImportProgress] = useState<AssetImportProgress | null>(null);
@@ -291,13 +301,12 @@ export function App() {
   const showLibraryFilters = assets.length > 0 || hasActiveAssetFilters;
   const quadArtifact = quadTopologyArtifact(selectedAsset);
   const quadriflowBackend = runtime?.quadriflow_backend;
-  const [meshTool, setMeshTool] = useState('');
   const [installingBackend, setInstallingBackend] = useState(false);
   const isRunning = isActiveJob(job);
   const recentJobs = useMemo(() => mergeJobRecords(jobSnapshot, job ? [job] : []), [job, jobSnapshot]);
   const pendingGenerationJobs = recentJobs.filter(saved => isGenerationOperation(saved.operation) && isActiveJob(saved));
   const selectedPendingJob = pendingSelection ? recentJobs.find(saved => saved.id === pendingSelection.id) ?? pendingSelection : null;
-  const retopologyAssetId = inspector === 'tools' && meshTool === 'mesh.retopology' && !settingsSection && !dashboard
+  const retopologyAssetId = inspector === 'mesh.retopology' && !settingsSection
     && connection === 'connected' && !isRunning && !pendingGenerationJobs.some(saved => localGenerations.current.has(saved.id))
     && validQuadTarget && selectedAsset?.kind === 'mesh' ? selectedAsset.id : null;
   const { checking: checkingRetopology, report: retopologyCheck } = useRetopologyPreflight(api, retopologyAssetId, requestedQuads);
@@ -346,7 +355,6 @@ export function App() {
     if (sidebar.narrow && sidebar.open) sidebar.setOpen(false);
     const path = `/settings/${section}`;
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
-    setDashboard(null);
     setSettingsSection(section);
   }
 
@@ -356,18 +364,13 @@ export function App() {
     requestAnimationFrame(() => settingsTrigger.current?.focus());
   }
 
-  function openDashboard(jobId?: string) {
-    if (sidebar.narrow && sidebar.open) sidebar.setOpen(false);
-    const path = jobId ? `/jobs?job=${encodeURIComponent(jobId)}` : '/jobs';
-    if (window.location.pathname + window.location.search !== path) window.history.pushState(null, '', path);
-    setSettingsSection(null);
-    setDashboard({ jobId: jobId ?? null });
-  }
-
-  function closeDashboard() {
-    window.history.pushState(null, '', '/');
-    setDashboard(null);
-    requestAnimationFrame(() => dashboardTrigger.current?.focus());
+  function openJobs(jobId?: string) {
+    if (settingsSection) {
+      window.history.pushState(null, '', '/');
+      setSettingsSection(null);
+    }
+    setFocusedJobId(jobId ?? null);
+    sidebar.showPanel('jobs');
   }
 
   const publishInventoryAsset = useCallback((asset: Asset) => {
@@ -754,7 +757,7 @@ export function App() {
       if (assetFiltersRef.current.kind !== 'mesh' || hasActiveAssetFilters || assetSearchInputRef.current) {
         applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS);
       }
-      sidebar.setOpen(true);
+      sidebar.showPanel('inventory');
     } else if (sidebar.narrow) sidebar.setOpen(false);
   }
 
@@ -1252,6 +1255,38 @@ export function App() {
     setDetailsTarget(target);
   }
 
+  function focusPanelHeading() {
+    if (!settingsSection && sidebar.open && sidebar.panel === 'jobs' && sidebar.narrow) {
+      document.querySelector<HTMLElement>('#workbench-sidebar-drawer [data-slot="sheet-title"]')?.focus();
+      return;
+    }
+    const headingId = settingsSection ? 'settings-heading' : sidebar.open && sidebar.panel === 'jobs'
+      ? 'workbench-sidebar-title' : 'workbench-inspector-title';
+    document.getElementById(headingId)?.focus();
+  }
+
+  async function retryJob() {
+    if (!retryTarget || busy || isRunning || connection !== 'connected') return;
+    setBusy(true);
+    try {
+      const next = await api.retryJob(retryTarget.id);
+      if (isGenerationOperation(next.operation)) {
+        localGenerations.current.add(next.id);
+        observedJobStates.current.set(next.id, next.state);
+        setJobSnapshot(current => mergeJobRecords([next], current));
+      } else {
+        setJob(next);
+      }
+      setFocusedJobId(next.id);
+      setRetryTarget(null);
+      notify('info', `${studioOperationLabel(next.operation)} ${next.state === 'queued' ? 'queued' : 'started'} again.`);
+    } catch (cause) {
+      notify('error', cause instanceof Error ? cause.message : 'Could not retry this job.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function stopJob() {
     if (!stopTarget || stoppingJob) return;
     setStoppingJob(true);
@@ -1297,7 +1332,11 @@ export function App() {
     : null;
   const showVersionStats = previewComparison && comparisonResult
     && (typeof beforeTriangles === 'number' || comparisonSizes);
-  const inspectorTitle = openInspector === 'generation' ? 'Generate model' : openInspector === 'optimize' ? 'Optimize mesh' : openInspector === 'jobs' ? 'Jobs' : 'Mesh tools';
+  const meshTool = meshOperationOptions.find(tool => tool.id === openInspector);
+  const isRetopology = meshTool?.id === 'mesh.retopology';
+  const meshToolAvailable = operations.some(operation => operation.id === meshTool?.id && operation.implemented);
+  const processingTool = isRunning && job.operation === meshTool?.id;
+  const inspectorTitle = meshTool?.title ?? (openInspector === 'generation' ? 'Generate model' : 'Optimize mesh');
   const exportIsPrimary = shouldHighlightExport(activeView, isRunning, connection === 'connected');
 
   function renderAssetCard(asset: Asset) {
@@ -1328,42 +1367,14 @@ export function App() {
   }
 
   function inspectorBody() {
-    if (openInspector === 'jobs') return (
-        <section className="grid min-w-0 grid-cols-1 gap-3 p-3 text-xs" aria-label="Recent jobs">
-          <div className="flex min-w-0 items-center justify-between gap-2 text-muted-foreground">
-            <div className="flex items-center gap-1">
-              <span>Recent activity</span>
-              {recentJobs.some(savedJob => isActiveJob(savedJob) && savedJob.id !== job?.id) &&
-                <HelpTip label="About interrupted jobs">
-                  Checking a record never resumes it. Stop all REST/MCP processes for this store before running <code>meshharbor jobs recover-interrupted --confirm-no-running-meshharbor</code>.
-                </HelpTip>}
-            </div>
-            <Button variant="ghost" size="sm" onClick={() => void refreshJobHistory()} disabled={connection !== 'connected'}>Refresh <ArrowsClockwiseIcon aria-hidden="true" /></Button>
-          </div>
-          <Button variant="outline" size="sm" onClick={() => openDashboard()}><ListChecksIcon aria-hidden="true" /> Open dashboard</Button>
-          {recentJobs.length === 0
-            ? <Empty><EmptyHeader><EmptyDescription>No saved jobs yet.</EmptyDescription></EmptyHeader></Empty>
-            : <ItemGroup>{recentJobs.slice(0, 8).map((savedJob) => (
-              <JobListItem key={savedJob.id} job={savedJob} title={studioOperationLabel(savedJob.operation)} showUpdated
-                selected={savedJob.id === (reportJob?.id ?? job?.id)} onDetails={showJobDetails}>
-                {isJobCancellable(savedJob) && <Button variant="ghost" size="sm" disabled={connection !== 'connected'} onClick={event => requestStop(savedJob, event.currentTarget)}>Stop job</Button>}
-                {(savedJob.result?.asset_id || (savedJob.state === 'failed' && savedJob.input_asset_id)) &&
-                  <Button variant="ghost" size="sm" onClick={() => void openRecentJob(savedJob.id)}
-                    disabled={connection !== 'connected' || (isRunning && savedJob.id !== job?.id)}>
-                    {savedJob.state === 'failed' ? 'View input' : 'View result'}
-                  </Button>}
-              </JobListItem>
-            ))}</ItemGroup>}
-        </section>
-    );
     return <>
-      {(openInspector === 'optimize' || openInspector === 'tools') && (
+      {(openInspector === 'optimize' || meshTool) && (
         <div className="grid min-w-0 gap-1 border-b px-4 py-3 text-xs">
           <span className="text-muted-foreground">Selected model</span>
           {hasSelectedMesh ? <span className="truncate font-medium" title={selectedAsset.name}>{selectedAsset.name}</span>
             : <Button variant="outline" size="sm" className="justify-self-start" onClick={() => {
               if (assetFilters.kind !== 'mesh') applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS);
-              sidebar.setOpen(true);
+              sidebar.showPanel('inventory');
             }}>Choose a 3D model</Button>}
         </div>
       )}
@@ -1467,63 +1478,44 @@ export function App() {
           {!selectedGenerationProfile && singleReferencePicker()}
         </section>}
 
-      {openInspector === 'tools' && <>
-      <div className="grid gap-4 p-4 text-xs/relaxed" id="mesh-tools">
-        <Accordion type="single" collapsible value={meshTool} onValueChange={setMeshTool}>
-          {meshOperationOptions.map((tool) => {
-            const available = operations.find((operation) => operation.id === tool.id)?.implemented === true;
-            const processing = isRunning && job.operation === tool.id;
-            const retopology = tool.id === 'mesh.retopology';
-            return (
-              <AccordionItem key={tool.id} value={tool.id}>
-                <div className="flex items-center gap-1 pr-1.5">
-                  <div className="min-w-0 flex-1">
-                    <AccordionTrigger className="gap-2 focus-visible:border-ring">{tool.title}</AccordionTrigger>
-                  </div>
-                  <HelpTip label={`About ${tool.title}`}>{tool.description}</HelpTip>
-                </div>
-                <AccordionContent>
-                  <div className="grid gap-2">
-                    {retopology && <>
-                      <Field>
-                        <div className="flex items-center gap-1">
-                          <FieldLabel htmlFor="quad-target">Target quads</FieldLabel>
-                          <span id="quad-range" className="text-muted-foreground">4–50,000</span>
-                          <HelpTip label="About the quad target">The output count is approximate. Studio checks the input automatically without running the solver.</HelpTip>
-                        </div>
-                        <Input id="quad-target" type="number" min="4" max="50000" step="1"
-                          value={targetQuads} aria-invalid={!validQuadTarget} aria-describedby="quad-range"
-                          onChange={event => setTargetQuads(event.currentTarget.value)} disabled={busy || isRunning} />
-                      </Field>
-                      {(checkingRetopology || retopologyCheck) && <div className="flex items-center gap-1 text-muted-foreground">
-                        <span role="status" className="flex items-center gap-1">
-                          {checkingRetopology ? <><Spinner aria-hidden="true" /> Checking input…</>
-                            : retopologyCheck?.appearance_projection_required ? 'Textured input passed' : 'Geometry-only input passed'}
-                        </span>
-                        {retopologyCheck && <HelpTip label="About the input check">
-                          {retopologyCheck.input_triangles.toLocaleString()} triangles. The solver did not run.
-                          {retopologyCheck.coincident_boundary_vertices_joined && ' Exact seams can be joined without changing the source.'}
-                        </HelpTip>}
-                      </div>}
-                    </>}
-                    {!processing && (
-                      <Button
-                        className="w-full"
-                        disabled={!hasSelectedMesh || !available || busy || connection !== 'connected' || isRunning || (retopology && !retopologyCheck)}
-                        onClick={() => void runMeshOperation(tool.id)}
-                      >
-                        Run {tool.title}
-                      </Button>
-                    )}
-                  </div>
-                </AccordionContent>
-              </AccordionItem>
-            );
-          })}
-        </Accordion>
-      </div>
+      {meshTool && <section className="grid gap-4 p-4 text-xs/relaxed" aria-label={meshTool.title}>
+        <p className="text-muted-foreground">{meshTool.description}</p>
+        <div className="grid gap-2">
+          {isRetopology && <>
+            <Field>
+              <div className="flex items-center gap-1">
+                <FieldLabel htmlFor="quad-target">Target quads</FieldLabel>
+                <span id="quad-range" className="text-muted-foreground">4–50,000</span>
+                <HelpTip label="About the quad target">The output count is approximate. Studio checks the input automatically without running the solver.</HelpTip>
+              </div>
+              <Input id="quad-target" type="number" min="4" max="50000" step="1"
+                value={targetQuads} aria-invalid={!validQuadTarget} aria-describedby="quad-range"
+                onChange={event => setTargetQuads(event.currentTarget.value)} disabled={busy || isRunning} />
+            </Field>
+            {(checkingRetopology || retopologyCheck) && <div className="flex items-center gap-1 text-muted-foreground">
+              <span role="status" className="flex items-center gap-1">
+                {checkingRetopology ? <><Spinner aria-hidden="true" /> Checking input…</>
+                  : retopologyCheck?.appearance_projection_required ? 'Textured input passed' : 'Geometry-only input passed'}
+              </span>
+              {retopologyCheck && <HelpTip label="About the input check">
+                {retopologyCheck.input_triangles.toLocaleString()} triangles. The solver did not run.
+                {retopologyCheck.coincident_boundary_vertices_joined && ' Exact seams can be joined without changing the source.'}
+              </HelpTip>}
+            </div>}
+          </>}
+          {!processingTool && (
+            <Button
+              className="w-full"
+              disabled={!hasSelectedMesh || !meshToolAvailable || busy || connection !== 'connected' || isRunning || (isRetopology && !retopologyCheck)}
+              onClick={() => void runMeshOperation(meshTool.id)}
+            >
+              Run {meshTool.title}
+            </Button>
+          )}
+        </div>
+      </section>}
 
-      <Disclosure className="mx-4 mb-4 border-y py-2 text-xs/relaxed" title="Retopology availability">
+      {openInspector === 'mesh.retopology' && <Disclosure className="mx-4 mb-4 border-y py-2 text-xs/relaxed" title="Retopology availability">
         <div className="my-2 flex flex-wrap items-center justify-between gap-x-2">
           <span>QuadriFlow backend</span>
           <div className="flex items-center gap-1 text-muted-foreground">
@@ -1535,21 +1527,19 @@ export function App() {
           </div>
         </div>
         <Button onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</Button>
-      </Disclosure>
-      </>}
+      </Disclosure>}
     </>;
   }
 
-  const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools" className="h-full">
+  const toolRail = <div role="group" aria-label="Model tools" data-slot="model-tools" className="h-full overflow-y-auto">
     <SidebarMenu className="p-1.5">
       {([
         { key: 'generation', label: 'New model', icon: ImageSquareIcon },
         { key: 'optimize', label: 'Optimize', icon: SlidersHorizontalIcon },
-        { key: 'tools', label: 'More tools', icon: WrenchIcon },
-        { key: 'jobs', label: 'Jobs', icon: ListChecksIcon },
+        ...meshOperationOptions.map(tool => ({ key: tool.id, label: tool.label ?? tool.title, icon: tool.icon })),
       ] as const).map(({ key, label, icon: Icon }) => (
         <SidebarMenuItem key={key}>
-          <SidebarMenuButton type="button" isActive={openInspector === key} aria-label={label}
+          <SidebarMenuButton type="button" isActive={openInspector === key} aria-label={label} title={label}
             className="size-9 justify-center p-0 data-active:text-primary [&_svg]:size-5"
             aria-current={openInspector === key ? true : undefined} aria-controls="workbench-inspector"
             onClick={() => setInspector(key)}>
@@ -1576,7 +1566,7 @@ export function App() {
       aria-labelledby="workbench-inspector-title">
       <SidebarHeader className="shrink-0 flex-row items-center gap-1 border-b px-4 py-2 font-heading text-sm font-medium">
         <h2 id="workbench-inspector-title" tabIndex={-1}>{inspectorTitle}</h2>
-        {openInspector === 'tools' && <HelpTip label="About mesh tools">Tools create a new asset and never overwrite the original GLB.</HelpTip>}
+        {meshTool && <HelpTip label="About mesh tools">Tools create a new asset and never overwrite the original GLB.</HelpTip>}
       </SidebarHeader>
       {inspectorContent}
     </aside>
@@ -1592,16 +1582,10 @@ export function App() {
         jobs={recentJobs} operationLabel={studioOperationLabel} onJobDetails={showJobDetails}
         theme={theme} onThemeChange={setTheme}
         onVisit={openSettings} onClose={closeSettings}
-        onOpenDashboard={() => openDashboard()} onActivityChange={setSettingsActivity}
+        onOpenJobs={() => openJobs()} onActivityChange={setSettingsActivity}
         onReconnect={() => void connect(true)} onRefreshJobs={refreshRecentJobs} onRuntimeChange={setRuntime}
         onRuntimeAction={(backend, action) => void runRuntimeAction(backend, action)} />
-      {dashboard && <JobsDashboard api={api} jobs={recentJobs} localActivities={localActivities} focusedJobId={dashboard.jobId}
-        connection={connection} loaded={jobFeedLoaded} resultBlocked={isRunning}
-        operationLabel={studioOperationLabel} onBack={closeDashboard} onRefresh={refreshJobHistory} onReconnect={() => void connect(true)}
-        onStop={requestStop} onDetails={showJobDetails}
-        onLoadOlder={before => api.jobs(JOB_PAGE_SIZE, { before })}
-        onViewResult={id => { closeDashboard(); void openRecentJob(id); }} />}
-      <div className={`${settingsSection || dashboard ? 'hidden' : 'flex'} h-dvh min-w-0 flex-col overflow-hidden bg-background`} onDragOver={(event) => {
+      <div className={`${settingsSection ? 'hidden' : 'flex'} h-dvh min-w-0 flex-col overflow-hidden bg-background`} onDragOver={(event) => {
       if (!event.dataTransfer.types.includes('Files')) return;
       event.preventDefault();
       setDragging(true);
@@ -1616,13 +1600,16 @@ export function App() {
       <header className="z-10 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b bg-background px-4 py-2">
         <span className="font-heading text-sm font-medium">meshharbor</span>
         <div className="ml-auto flex flex-wrap items-center gap-1 sm:gap-2">
-          <Button variant={sidebar.open ? 'secondary' : 'ghost'} size="sm" ref={sidebar.triggerRef}
-            aria-expanded={sidebar.open} aria-haspopup={sidebar.narrow ? 'dialog' : undefined}
-            aria-controls={sidebar.open ? (sidebar.narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
-            onClick={sidebar.toggleInventory}><SquaresFourIcon aria-hidden="true" /> Inventory</Button>
-          <Button variant="ghost" size="sm" ref={dashboardTrigger} onClick={() => openDashboard()}><ListChecksIcon aria-hidden="true" /> Dashboard</Button>
+          <Button variant={sidebar.open && sidebar.panel === 'inventory' ? 'secondary' : 'ghost'} size="sm" ref={sidebar.inventoryTriggerRef}
+            aria-expanded={sidebar.open && sidebar.panel === 'inventory'} aria-haspopup={sidebar.narrow ? 'dialog' : undefined}
+            aria-controls={sidebar.open && sidebar.panel === 'inventory' ? (sidebar.narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
+            onClick={() => sidebar.togglePanel('inventory')}><SquaresFourIcon aria-hidden="true" /> Inventory</Button>
+          <Button variant={sidebar.open && sidebar.panel === 'jobs' ? 'secondary' : 'ghost'} size="sm" ref={sidebar.jobsTriggerRef}
+            aria-expanded={sidebar.open && sidebar.panel === 'jobs'} aria-haspopup={sidebar.narrow ? 'dialog' : undefined}
+            aria-controls={sidebar.open && sidebar.panel === 'jobs' ? (sidebar.narrow ? 'workbench-sidebar-drawer' : 'workbench-sidebar-dock') : undefined}
+            onClick={() => { setFocusedJobId(null); sidebar.togglePanel('jobs'); }}><ListChecksIcon aria-hidden="true" /> Jobs</Button>
           <Button variant="ghost" size="sm" ref={settingsTrigger} onClick={() => openSettings('models')}><GearSixIcon data-icon="inline-start" aria-hidden="true" /> Settings</Button>
-          {!settingsSection && !dashboard && <NotificationHistory />}
+          {!settingsSection && <NotificationHistory />}
         </div>
       </header>
 
@@ -1630,8 +1617,15 @@ export function App() {
           <h1 className="sr-only">MeshHarbor Studio</h1>
           <input ref={fileInputRef} className="sr-only" aria-label="Choose GLB files" tabIndex={-1} type="file" multiple accept=".glb,model/gltf-binary" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
           <input ref={inventoryInputRef} className="sr-only" aria-label="Choose image files" tabIndex={-1} type="file" multiple accept=".png,.jpg,.jpeg,image/png,image/jpeg" onChange={(event) => { if (event.currentTarget.files) void importFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-            <WorkbenchLayout state={(settingsSection || dashboard) && sidebar.narrow ? { ...sidebar, open: false } : sidebar} inspector={toolInspector} tools={toolRail}
-              assets={
+            <WorkbenchLayout state={settingsSection && sidebar.narrow ? { ...sidebar, open: false } : sidebar} inspector={toolInspector} tools={toolRail}
+              content={sidebar.panel === 'jobs' ?
+                <JobsPanel api={api} jobs={recentJobs} localActivities={localActivities} focusedJobId={focusedJobId}
+                  connection={connection} loaded={jobFeedLoaded} resultBlocked={isRunning} retryBlocked={busy || isRunning}
+                  operationLabel={studioOperationLabel} onRefresh={refreshJobHistory} onReconnect={() => void connect(true)}
+                  onStop={requestStop} onDetails={showJobDetails}
+                  onRetry={(target, trigger) => { retryTrigger.current = trigger; setRetryTarget(target); }}
+                  onLoadOlder={before => api.jobs(JOB_PAGE_SIZE, { before })}
+                  onViewResult={id => { if (sidebar.narrow) sidebar.setOpen(false); void openRecentJob(id); }} /> :
               <Tabs value={assetFilters.kind} onValueChange={kind => {
                 if (kind === 'mesh' || kind === 'image') applyAssetBrowserFilters({ ...EMPTY_ASSET_BROWSER_FILTERS, kind });
               }} className="@container min-w-0 text-xs" id="asset-library">
@@ -1738,7 +1732,7 @@ export function App() {
                   <EmptyTitle className="wrap-anywhere">{generationJobName(selectedPendingJob, referenceNames)}</EmptyTitle>
                   <EmptyDescription role="status">{jobStage(selectedPendingJob)}</EmptyDescription>
                 </EmptyHeader>
-                <EmptyContent><Button variant="outline" onClick={() => openDashboard(selectedPendingJob.id)}>View in dashboard</Button></EmptyContent>
+                <EmptyContent><Button variant="outline" onClick={() => openJobs(selectedPendingJob.id)}>View in Jobs</Button></EmptyContent>
               </Empty> : !selectedAsset ? <div className="flex min-h-0 flex-1 overflow-y-auto">
                 <div className="m-auto grid w-full max-w-4xl items-center gap-4 p-4 @min-[42rem]:grid-cols-[minmax(0,22rem)_minmax(0,24rem)] @min-[42rem]:gap-8 sm:p-6">
                 <div className="order-2 grid min-w-0 gap-4 @min-[42rem]:order-first">
@@ -1746,7 +1740,7 @@ export function App() {
                   <div className="flex flex-wrap gap-2">
                     <Button onClick={() => {
                       if (assetFilters.kind !== 'mesh') applyAssetBrowserFilters(EMPTY_ASSET_BROWSER_FILTERS);
-                      sidebar.setOpen(true);
+                      sidebar.showPanel('inventory');
                     }}><CubeIcon data-icon="inline-start" aria-hidden="true" /> Browse inventory</Button>
                     <Button variant="outline" onClick={() => setInspector('generation')}><ImageSquareIcon data-icon="inline-start" aria-hidden="true" /> Create from image</Button>
                   </div>
@@ -1872,7 +1866,7 @@ export function App() {
         onClose={() => setDetailsTarget(null)} returnFocus={() => {
           const trigger = detailsTrigger.current;
           if (trigger?.isConnected && trigger.getClientRects().length) trigger.focus();
-          else document.getElementById(dashboard ? 'jobs-dashboard-title' : settingsSection ? 'settings-heading' : 'workbench-inspector-title')?.focus();
+          else focusPanelHeading();
         }} />}
       <AlertDialog open={stopTarget !== null} onOpenChange={open => { if (!open && !stoppingJob) setStopTarget(null); }}>
         <AlertDialogContent onEscapeKeyDown={event => { if (stoppingJob) event.preventDefault(); }}
@@ -1880,15 +1874,15 @@ export function App() {
             event.preventDefault();
             const trigger = stopTrigger.current;
             if (trigger?.isConnected && !trigger.disabled && trigger.getClientRects().length) trigger.focus();
-            else document.getElementById(dashboard ? 'jobs-dashboard-title' : settingsSection ? 'settings-heading' : 'workbench-inspector-title')?.focus();
+            else focusPanelHeading();
           }}>
           <AlertDialogHeader>
             <AlertDialogTitle>{stopTarget?.state === 'queued' ? 'Remove this queued job?' : 'Stop this job?'}</AlertDialogTitle>
             <AlertDialogDescription>
-              {stopTarget?.state === 'running' && !isGenerationOperation(stopTarget.operation)
-                ? 'Stops at the next safe checkpoint without saving a result. '
-                : ''}
-              A stopped job cannot be resumed.
+              {stopTarget?.state === 'queued' ? 'Removes the job before it starts.'
+                : stopTarget?.operation.startsWith('runtime.') ? 'Downloaded files are kept for a retry.'
+                  : isGenerationOperation(stopTarget?.operation ?? '') ? 'Stops the worker without saving a result.'
+                    : 'Stops at the next safe checkpoint without saving a result.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1897,6 +1891,29 @@ export function App() {
               event.preventDefault();
               void stopJob();
             }}>{stoppingJob ? 'Requesting stop…' : stopTarget?.state === 'queued' ? 'Remove from queue' : 'Stop job'}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog open={retryTarget !== null} onOpenChange={open => { if (!open && !busy) setRetryTarget(null); }}>
+        <AlertDialogContent onCloseAutoFocus={event => {
+          event.preventDefault();
+          const trigger = retryTrigger.current;
+          if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+          else focusPanelHeading();
+        }}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Retry this job?</AlertDialogTitle>
+            <AlertDialogDescription>
+              With the same input and settings, this starts a new attempt and keeps the previous record.
+              {retryTarget?.operation.startsWith('runtime.') && ' The attempt may download large files and reuses available cached data.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction disabled={busy || isRunning || connection !== 'connected'} onClick={event => {
+              event.preventDefault();
+              void retryJob();
+            }}>{busy ? 'Starting…' : 'Retry job'}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

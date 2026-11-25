@@ -12,7 +12,7 @@ async function openCube(page, name, bytes) {
   await chooser.setFiles({ name, mimeType: 'model/gltf-binary', buffer: bytes });
   const selected = page.getByRole('region', { name: 'Selected asset' });
   await expect(selected.getByTitle(name, { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'More tools' }).click();
+  await page.getByRole('button', { name: 'Retopology', exact: true }).click();
   return selected;
 }
 
@@ -108,13 +108,11 @@ test('reviewed QuadriFlow release installs, retopologizes and exports GLB and OB
       ]);
       expect(response.ok(), await response.text()).toBe(true);
       expect(await response.json()).toMatchObject({ release_tag: releaseTag, already_installed: false });
-      const availability = page.getByRole('complementary', { name: 'Mesh tools' });
+      const availability = page.getByRole('complementary', { name: 'Quad retopology (experimental)' });
       await availability.getByRole('button', { name: 'About the QuadriFlow backend' }).hover();
       await expect(page.getByRole('tooltip')).toContainText('A verified, manifest-matched managed QuadriFlow sidecar is available.');
     }
 
-    const retopology = page.getByRole('button', { name: 'Quad retopology (experimental)', exact: true });
-    if (await retopology.getAttribute('aria-expanded') === 'false') await retopology.click();
     await page.getByRole('spinbutton', { name: 'Target quads' }).fill(textured ? '384' : '12');
     await expect(page.getByText(textured ? 'Textured input passed' : 'Geometry-only input passed', { exact: false })).toBeVisible();
     const [completed] = await Promise.all([

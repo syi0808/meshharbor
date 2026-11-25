@@ -98,7 +98,6 @@ test('Studio renders the compressed result and reopens the exported GLB', async 
   const originalPreview = await previewMaterial(page);
 
   await test.step('Render the result immediately after compression', async () => {
-    await page.getByRole('button', { name: 'More tools' }).click();
     await page.getByRole('button', { name: 'Compression', exact: true }).click();
     await page.getByRole('button', { name: 'Run Compression' }).click();
     await expect(resultTab).toHaveAttribute('aria-selected', 'true', { timeout: 20_000 });
@@ -135,7 +134,6 @@ test('Studio rebakes a supported GLB UV atlas and exports both PBR maps', async 
   await chooser.setFiles({ name: sourceName, mimeType: 'model/gltf-binary', buffer: source });
   const selected = page.getByRole('region', { name: 'Selected asset' });
   await expect(selected.getByTitle(sourceName, { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'More tools' }).click();
   await page.getByRole('button', { name: 'UV atlas rebake', exact: true }).click();
   await page.getByRole('button', { name: 'Run UV atlas rebake' }).click();
   await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();

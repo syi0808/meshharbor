@@ -62,16 +62,14 @@ test('edits stay on one inventory card and restored versions survive reload', as
   await expect(card).toBeVisible();
   await expect(selected.getByTitle('panels.glb')).toBeVisible();
 
-  await page.getByRole('button', { name: 'More tools' }).click();
-  const tools = page.getByRole('complementary', { name: 'Mesh tools' });
-  await tools.getByRole('button', { name: 'Cleanup', exact: true }).click();
-  await tools.getByRole('button', { name: 'Run Cleanup' }).click();
+  await page.getByRole('button', { name: 'Cleanup', exact: true }).click();
+  await page.getByRole('button', { name: 'Run Cleanup' }).click();
   await expect(selected.getByTitle('panels-cleaned.glb')).toBeVisible();
   await expect(inventory.getByTitle('panels-cleaned.glb')).toHaveCount(0);
   await expect(card).toHaveCount(1);
 
-  await tools.getByRole('button', { name: 'Separate connected parts', exact: true }).click();
-  await tools.getByRole('button', { name: 'Run Separate connected parts' }).click();
+  await page.getByRole('button', { name: 'Separate parts', exact: true }).click();
+  await page.getByRole('button', { name: 'Run Separate connected parts' }).click();
   const separationName = selected.getByTitle(/panels-cleaned-.*\.glb/);
   await expect(separationName).toBeVisible();
   await expect(card).toHaveCount(1);

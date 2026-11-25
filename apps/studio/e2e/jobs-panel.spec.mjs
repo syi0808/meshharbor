@@ -1,7 +1,7 @@
 import { expect } from '@playwright/test';
 import { test } from './studio-fixture.mjs';
 
-test('the dashboard polls engine activity, keeps stable completed durations, and loads older records', async ({ page, studioOrigin }) => {
+test('the Jobs panel polls engine activity, keeps stable completed durations, and loads older records', async ({ page, studioOrigin }) => {
   const now = Date.now();
   const lastFinished = Array.from({ length: 20 }, (_, index) => ({
     id: `job_finished_${index}`, operation: 'mesh.compress', state: 'succeeded', progress: 100,
@@ -48,7 +48,7 @@ test('the dashboard polls engine activity, keeps stable completed durations, and
   await expect(active.getByText('Queued for: 10s')).toBeVisible();
   await expect(active.getByText(external.input_asset_name)).toBeVisible();
   await expect(history.getByText('Elapsed: 25s')).toHaveCount(21);
-  await page.getByRole('button', { name: 'Studio', exact: true }).click();
+  await page.getByRole('button', { name: 'Inventory', exact: true }).click();
   const inventory = page.getByRole('complementary', { name: 'Inventory' });
   await expect(inventory.getByRole('region', { name: 'Models in progress' }).getByText('Refining geometry')).toBeVisible();
   jobs = [{
@@ -58,20 +58,21 @@ test('the dashboard polls engine activity, keeps stable completed durations, and
   await expect(inventory.getByRole('region', { name: 'Models in progress' })).toHaveCount(0);
   await expect(page.getByRole('region', { name: 'Start a model' })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole('button', { name: 'Dashboard', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Jobs dashboard' })).toBeVisible();
+  await page.getByRole('button', { name: 'Jobs', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Jobs' })).toBeVisible();
   await expect(history.getByText(external.input_asset_name)).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 });
 
-test('stopping a running generation requires confirmation and cannot be resumed', async ({ page, studioOrigin }) => {
+test('a generation moves from Stopping to Stopped and can start a new attempt', async ({ page, studioOrigin }) => {
   const timestamp = Date.now();
   const record = {
     id: 'job_stop', operation: 'image.generate', state: 'running', progress: 5,
-    stage: 'shape_hr', created_at: String(timestamp - 3000), started_at: String(timestamp - 2000), updated_at: String(timestamp),
+    stage: 'shape_hr', input_asset_id: 'reference', created_at: String(timestamp - 3000), started_at: String(timestamp - 2000), updated_at: String(timestamp),
   };
   let requests = 0;
-  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [record] }));
+  let retried;
+  await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: retried ? [record, retried] : [record] }));
   await page.route('**/api/v1/jobs/job_stop/cancel', async route => {
     expect(route.request().method()).toBe('POST');
     requests += 1;
@@ -79,12 +80,17 @@ test('stopping a running generation requires confirmation and cannot be resumed'
     record.updated_at = String(timestamp + 1);
     await route.fulfill({ json: record });
   });
+  await page.route('**/api/v1/jobs/job_stop/retry', route => {
+    expect(route.request().method()).toBe('POST');
+    expect(record.state).toBe('cancelled');
+    retried = { ...record, id: 'new_attempt', state: 'queued', updated_at: String(timestamp + 3) };
+    return route.fulfill({ status: 202, json: retried });
+  });
   await page.goto(studioOrigin + '/jobs');
   const active = page.getByRole('region', { name: /In progress/ });
   const stop = active.getByRole('button', { name: 'Stop job' });
   await stop.click();
   const confirm = page.getByRole('alertdialog', { name: 'Stop this job?' });
-  await expect(confirm).toContainText('cannot be resumed');
   await confirm.getByRole('button', { name: 'Keep job' }).click();
   expect(requests).toBe(0);
   await stop.click();
@@ -93,10 +99,16 @@ test('stopping a running generation requires confirmation and cannot be resumed'
   await expect(stop).toHaveCount(0);
   record.state = 'cancelled';
   record.updated_at = String(timestamp + 2);
-  await expect(page.getByRole('region', { name: 'History' }).getByText('Cancelled', { exact: true }).first()).toBeVisible();
+  const history = page.getByRole('region', { name: 'History' });
+  await expect(history.getByText('Stopped', { exact: true }).first()).toBeVisible();
   await expect(active.getByText('Nothing in progress')).toBeVisible();
-  await expect(page.getByRole('button', { name: /resume/i })).toHaveCount(0);
   expect(requests).toBe(1);
+  await history.getByRole('button', { name: 'Retry job' }).click();
+  const retry = page.getByRole('alertdialog', { name: 'Retry this job?' });
+  await expect(retry).toContainText('keeps the previous record');
+  await retry.getByRole('button', { name: 'Retry job' }).click();
+  await expect(active.getByText('Queued', { exact: true })).toBeVisible();
+  await expect(history.getByText('Stopped', { exact: true }).first()).toBeVisible();
 });
 
 test('job details expand saved commands and update logs without closing the step', async ({ page, studioOrigin }) => {

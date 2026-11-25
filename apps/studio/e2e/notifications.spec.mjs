@@ -32,7 +32,7 @@ test('the header shares dismissed toast history across Studio pages', async ({ p
 
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await dismissToast('Local status refreshed.');
-  await header.getByRole('button', { name: 'Dashboard', exact: true }).click();
+  await header.getByRole('button', { name: 'Jobs', exact: true }).click();
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await dismissToast('Job history refreshed.');
   await page.setViewportSize({ width: 390, height: 844 });

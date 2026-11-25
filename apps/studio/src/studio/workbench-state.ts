@@ -1,4 +1,6 @@
-export type Inspector = 'generation' | 'optimize' | 'tools' | 'jobs';
+import type { MeshOperationId } from './types';
+
+export type Inspector = 'generation' | 'optimize' | MeshOperationId;
 
 export const DESKTOP_SIDEBAR_KEY = 'meshharbor.studio.sidebar.v1';
 export const WORKBENCH_NARROW_QUERY = '(max-width: 760px)';

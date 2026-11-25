@@ -135,6 +135,10 @@ export interface RuntimeInfo {
     managed_install?: boolean;
     managed_ready?: boolean;
     account_tools_ready?: boolean;
+    huggingface?: {
+      account: HuggingFaceConnectionStatus | 'checking' | 'unavailable';
+      model_access: HuggingFaceAccess | 'checking' | 'unavailable';
+    };
     host_supported?: boolean;
     validation_level?: string;
     missing?: string[];

@@ -1,4 +1,4 @@
-import { ArrowDownIcon, ArrowLeftIcon, ArrowUpIcon, ArrowUpRightIcon, ArrowsClockwiseIcon, CubeIcon, ListChecksIcon } from '@phosphor-icons/react';
+import { ArrowDownIcon, ArrowUpIcon, ArrowUpRightIcon, ArrowsClockwiseIcon, CubeIcon, ListChecksIcon } from '@phosphor-icons/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -6,11 +6,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from '@/components/ui/item';
 import { Spinner } from '@/components/ui/spinner';
-import { isActiveJob, isGenerationOperation, isJobCancellable, type MeshHarborApi } from './api';
-import { HelpTip } from './HelpTip';
+import { isActiveJob, isGenerationOperation, isJobCancellable, isJobRetryable, type MeshHarborApi } from './api';
 import { JOB_PAGE_SIZE, formatDuration, generationJobName, jobStage, jobTiming, lastGenerationStage, mergeJobRecords } from './job-activity';
 import { JobListItem } from './JobListItem';
-import { NotificationHistory } from './NotificationHistory';
 import { notify } from './notify';
 import type { Job } from './types';
 
@@ -65,8 +63,8 @@ export function PendingGenerationCards({ jobs, sources, selectedId, onSelect }: 
   </section>;
 }
 
-export function JobsDashboard({ api, jobs, localActivities, focusedJobId, connection, loaded, resultBlocked,
-  operationLabel, onBack, onReconnect, onRefresh, onLoadOlder, onViewResult, onStop, onDetails }: {
+export function JobsPanel({ api, jobs, localActivities, focusedJobId, connection, loaded, resultBlocked, retryBlocked,
+  operationLabel, onReconnect, onRefresh, onLoadOlder, onViewResult, onStop, onDetails, onRetry }: {
   api: MeshHarborApi;
   jobs: Job[];
   localActivities: StudioActivity[];
@@ -74,13 +72,14 @@ export function JobsDashboard({ api, jobs, localActivities, focusedJobId, connec
   connection: 'disconnected' | 'connecting' | 'connected';
   loaded: boolean;
   resultBlocked: boolean;
+  retryBlocked: boolean;
   operationLabel: (operation: string) => string;
-  onBack: () => void;
   onReconnect: () => void;
   onRefresh: () => Promise<void>;
   onLoadOlder: (before: string) => Promise<Job[]>;
   onViewResult: (id: string) => void;
   onStop: (job: Job, trigger: HTMLButtonElement) => void;
+  onRetry: (job: Job, trigger: HTMLButtonElement) => void;
   onDetails: (job: Job, trigger: HTMLButtonElement) => void;
 }) {
   const [historyCache, setHistoryCache] = useState<Job[]>([]);
@@ -91,7 +90,6 @@ export function JobsDashboard({ api, jobs, localActivities, focusedJobId, connec
   const [reordering, setReordering] = useState(false);
   const queueRevision = useRef(0);
   const queueEditing = useRef(false);
-  const heading = useRef<HTMLHeadingElement>(null);
   const focusRow = useRef<HTMLDivElement>(null);
   const queueById = new Map(jobs.filter(job => isGenerationOperation(job.operation) && job.state === 'queued').map(job => [job.id, job]));
   const hasQueuedGeneration = queueById.size > 0;
@@ -102,7 +100,6 @@ export function JobsDashboard({ api, jobs, localActivities, focusedJobId, connec
   const focused = jobs.some(job => job.id === focusedJobId) || history.some(job => job.id === focusedJobId);
   const activeCount = active.length + localActivities.length;
   const now = useJobClock(activeCount > 0 || queued.length > 0);
-  useEffect(() => { heading.current?.focus(); }, []);
   useEffect(() => {
     setHistoryCache(current => mergeJobRecords(jobs.filter(job => !isActiveJob(job)), current));
   }, [jobs]);
@@ -186,24 +183,16 @@ export function JobsDashboard({ api, jobs, localActivities, focusedJobId, connec
           onClick={() => void moveQueued(job, queued[position + 1])}><ArrowDownIcon aria-hidden="true" /></Button>
       </>}
       {isJobCancellable(job) && <Button variant="outline" size="sm" disabled={connection !== 'connected'} onClick={event => onStop(job, event.currentTarget)}>{position !== undefined ? 'Remove from queue' : 'Stop job'}</Button>}
-      {job.state === 'running' && job.operation.startsWith('runtime.') &&
-        <HelpTip label="About stopping setup jobs">Setup jobs can only be stopped while queued.</HelpTip>}
-      {job.state === 'succeeded' && job.result?.asset_id && <Button variant="ghost" size="sm" onClick={() => onViewResult(job.id)}
-        disabled={resultBlocked || connection !== 'connected'}>View result <ArrowUpRightIcon aria-hidden="true" /></Button>}
+      {isJobRetryable(job) && <Button variant="outline" size="sm" disabled={retryBlocked || connection !== 'connected'}
+        onClick={event => onRetry(job, event.currentTarget)}>Retry job</Button>}
+      {((job.state === 'succeeded' && job.result?.asset_id) || (job.state === 'failed' && job.input_asset_id)) &&
+        <Button variant="ghost" size="sm" onClick={() => onViewResult(job.id)}
+          disabled={resultBlocked || connection !== 'connected'}>{job.state === 'failed' ? 'View input' : 'View result'} <ArrowUpRightIcon aria-hidden="true" /></Button>}
     </JobListItem>;
   }
 
-  return <div className="min-h-dvh bg-background">
-    <header className="flex min-h-12 items-center gap-3 border-b px-4 py-2 sm:px-6">
-      <Button variant="ghost" size="sm" onClick={onBack}><ArrowLeftIcon aria-hidden="true" /> Studio</Button>
-      <span className="font-heading text-sm font-medium">meshharbor</span>
-      <div className="ml-auto"><NotificationHistory /></div>
-    </header>
-    <main className="mx-auto grid w-full max-w-4xl gap-5 px-4 py-6 sm:px-6 sm:py-9">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="grid gap-1">
-          <h1 id="jobs-dashboard-title" ref={heading} tabIndex={-1} className="font-heading text-2xl font-medium outline-none sm:text-3xl">Jobs dashboard</h1>
-        </div>
+  return <div className="grid min-w-0 gap-3 p-3 text-xs">
+      <div className="flex justify-end">
         <Button variant="outline" size="sm" disabled={refreshing || connection === 'connecting'} onClick={() => {
           if (connection === 'disconnected') onReconnect();
           else { setRefreshing(true); void onRefresh().finally(() => setRefreshing(false)); }
@@ -216,9 +205,6 @@ export function JobsDashboard({ api, jobs, localActivities, focusedJobId, connec
         <CardHeader>
           <CardTitle id="jobs-active" className="flex items-center gap-2" role="heading" aria-level={2}>
             In progress <Badge variant="secondary">{activeCount}</Badge>
-            {active.length > 0 && <HelpTip label="About interrupted jobs">
-              Jobs interrupted by an engine exit may appear here until recovered. Viewing this page never resumes them.
-            </HelpTip>}
           </CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3">
@@ -256,6 +242,5 @@ export function JobsDashboard({ api, jobs, localActivities, focusedJobId, connec
             disabled={loadingOlder || connection !== 'connected'} onClick={() => void loadOlder()}>{loadingOlder ? 'Loading…' : 'Load older jobs'}</Button>}
         </CardContent>
       </Card>
-    </main>
   </div>;
 }

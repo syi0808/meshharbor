@@ -11,27 +11,28 @@ test('the desktop library opens on first visit and remembers a collapsed dock', 
   await expect(inventory).toBeFocused();
   await page.reload();
   await expect(inventory).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs', exact: true })).toBeVisible();
+  await expect(page.getByRole('banner').getByRole('button', { name: 'Jobs', exact: true })).toBeVisible();
   await inventory.click();
   await expect(inventory).toHaveAttribute('aria-expanded', 'true');
 });
 
-test('Jobs opens on the left without replacing the resizable Inventory', async ({ page, studioOrigin }) => {
+test('Jobs and Inventory share one resizable right-hand dock', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
   const library = page.getByRole('complementary', { name: 'Inventory' });
-  const jobs = page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs', exact: true });
+  const jobs = page.getByRole('banner').getByRole('button', { name: 'Jobs', exact: true });
   await jobs.click();
-  await expect(jobs).toHaveAttribute('aria-current', 'true');
+  await expect(jobs).toHaveAttribute('aria-expanded', 'true');
   const activity = page.getByRole('complementary', { name: 'Jobs' });
   const viewport = page.getByRole('region', { name: 'Start a model' });
-  await expect(activity.getByText('No saved jobs yet.')).toBeVisible();
-  await expect(library.getByRole('button', { name: 'Open GLB' })).toBeVisible();
-  const [left, center, right] = await Promise.all([activity.boundingBox(), viewport.boundingBox(), library.boundingBox()]);
-  expect(left.x + left.width).toBeLessThanOrEqual(center.x);
+  await expect(activity.getByText('No finished jobs yet.')).toBeVisible();
+  await expect(library).toHaveCount(0);
+  const [center, right] = await Promise.all([viewport.boundingBox(), activity.boundingBox()]);
+  expect(center.x + center.width).toBeLessThanOrEqual(right.x);
   expect(Math.round(right.x + right.width)).toBe(1280);
-  await page.keyboard.press('Escape');
-  await expect(activity).toBeVisible();
+  await page.getByRole('banner').getByRole('button', { name: 'Inventory', exact: true }).click();
+  await expect(activity).toHaveCount(0);
+  await expect(library.getByRole('button', { name: 'Open GLB' })).toBeVisible();
   const panelWidth = () => library.evaluate(element => Math.round(element.getBoundingClientRect().width));
   const initialWidth = await panelWidth();
   const handle = page.getByRole('separator', { name: 'Resize library panel' });
@@ -56,7 +57,7 @@ test('Jobs and model logs show saved failures in a details popup', async ({ page
   await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: [recorded] }));
   await page.route('**/api/v1/runtime/pixal3d-mlx/jobs', route => route.fulfill({ json: [recorded] }));
   await page.goto(studioOrigin);
-  await page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs' }).click();
+  await page.getByRole('banner').getByRole('button', { name: 'Jobs' }).click();
   const jobsRow = page.getByRole('complementary', { name: 'Jobs' }).getByRole('listitem');
   await expect(jobsRow).toHaveAttribute('data-slot', 'item');
   await expect(jobsRow.getByText('Failed', { exact: true })).toBeVisible();
@@ -170,8 +171,9 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   await expect(cuda.getByRole('button', { name: 'Recent logs' })).toHaveCount(0);
 });
 
-test('a gated catalog install verifies DINOv3 each time its dialog opens', async ({ page, studioOrigin }) => {
+test('a gated catalog install reads server access state and supports an explicit recheck', async ({ page, studioOrigin }) => {
   let checks = 0;
+  let modelAccess = 'access_denied';
   let finishCheck;
   const job = {
     id: 'gated-install', operation: 'runtime.models.install', state: 'queued', progress: 0,
@@ -182,14 +184,15 @@ test('a gated catalog install verifies DINOv3 each time its dialog opens', async
     model_catalog: [{ id: 'trellis2', title: 'TRELLIS.2', backend_ids: ['trellis2-mlx'] }],
     model_backends: [
       { id: 'trellis2-mlx', managed_install: true, installable: true, downloads_enabled: true, gated_model_access_required: true },
-      { id: 'pixal3d-mlx', installable: true, local_files: { token_saved: true, credentials_managed: true } },
+      { id: 'pixal3d-mlx', installable: true, huggingface: { account: 'connected', model_access: modelAccess } },
     ],
   } }));
   await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', async route => {
     expect(route.request().method()).toBe('POST');
-    if (++checks === 1) return route.fulfill({ json: 'access_denied' });
+    ++checks;
     await new Promise(resolve => { finishCheck = resolve; });
-    return route.fulfill({ json: 'verified' });
+    modelAccess = 'verified';
+    return route.fulfill({ json: modelAccess });
   });
   await page.route('**/api/v1/runtime/trellis2-mlx/install', route => {
     expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: true });
@@ -211,6 +214,8 @@ test('a gated catalog install verifies DINOv3 each time its dialog opens', async
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(install).toBeFocused();
   await install.click();
+  expect(checks).toBe(0);
+  await dialog.getByRole('button', { name: 'Recheck access' }).click();
   await expect(dialog.getByText('Checking DINOv3 file access…')).toBeVisible();
   await expect(confirm).toBeDisabled();
   await expect.poll(() => typeof finishCheck).toBe('function');
@@ -224,52 +229,49 @@ test('a gated catalog install verifies DINOv3 each time its dialog opens', async
   await expect(dialog).toBeHidden();
 });
 
-test('the icon-only rail always shows one panel and exposes mesh tools without a model', async ({ page, studioOrigin }) => {
+test('the icon-only rail exposes individual mesh tools without a model', async ({ page, studioOrigin }) => {
   await page.goto(studioOrigin);
   const rail = page.getByRole('group', { name: 'Model tools' });
-  const job = rail.getByRole('button', { name: 'Jobs' });
-  const icon = job.locator('svg');
+  const cleanup = rail.getByRole('button', { name: 'Cleanup', exact: true });
+  const icon = cleanup.locator('svg');
   const generation = rail.getByRole('button', { name: 'New model' });
   const viewport = page.getByRole('region', { name: 'Start a model' });
   await expect(generation).toHaveAttribute('aria-current', 'true');
-  await expect(job).toHaveText('');
+  await expect(cleanup).toHaveText('');
   await expect(icon).toHaveCSS('width', '20px');
   await expect(page.getByRole('complementary', { name: 'Generate model' })).toBeVisible();
   const initialRail = await rail.boundingBox();
   const initialViewport = await viewport.boundingBox();
-  const iconBox = await job.boundingBox();
+  const iconBox = await cleanup.boundingBox();
   expect(iconBox.width).toBe(iconBox.height);
   expect(initialRail.height).toBe(initialViewport.height);
   const highlight = await generation.evaluate(element => getComputedStyle(element).backgroundColor);
   expect(highlight).not.toBe('rgba(0, 0, 0, 0)');
-  await job.hover();
-  await expect(job).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await cleanup.hover();
+  await expect(cleanup).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
   expect(await rail.boundingBox()).toEqual(initialRail);
-  expect(await job.boundingBox()).toEqual(iconBox);
+  expect(await cleanup.boundingBox()).toEqual(iconBox);
   expect(await viewport.boundingBox()).toEqual(initialViewport);
   await expect(page.getByRole('tooltip')).toHaveCount(0);
   await page.mouse.move(600, 20);
-  await job.focus();
+  await cleanup.focus();
   expect(await rail.boundingBox()).toEqual(initialRail);
-  await job.press('Enter');
-  const activity = page.getByRole('complementary', { name: 'Jobs' });
-  await expect(activity).toBeVisible();
-  await job.click();
-  await expect(activity).toBeVisible();
-  await job.press('Space');
-  await expect(job).toHaveAttribute('aria-current', 'true');
+  await cleanup.press('Enter');
+  const cleanupPanel = page.getByRole('complementary', { name: 'Cleanup' });
+  await expect(cleanupPanel.getByRole('button', { name: 'Run Cleanup' })).toBeDisabled();
+  await expect(cleanup).toHaveAttribute('aria-current', 'true');
   await expect(rail.locator('[aria-current=true]')).toHaveCount(1);
+  for (const tool of ['Retopology', 'Separate parts', 'UV atlas rebake', 'Render optimization', 'Compression']) {
+    await expect(rail.getByRole('button', { name: tool, exact: true })).toBeVisible();
+  }
+  await expect(rail.getByRole('button', { name: 'Jobs' })).toHaveCount(0);
   await rail.getByRole('button', { name: 'Optimize', exact: true }).click();
   const optimize = page.getByRole('complementary', { name: 'Optimize mesh' });
   await expect(optimize.getByRole('button', { name: 'Choose a 3D model' })).toBeVisible();
   await expect(optimize.getByRole('button', { name: 'Optimize mesh' })).toBeDisabled();
-  await rail.getByRole('button', { name: 'More tools' }).click();
-  const meshTools = page.getByRole('complementary', { name: 'Mesh tools' });
-  await meshTools.getByRole('button', { name: 'Cleanup', exact: true }).click();
-  await expect(meshTools.getByRole('button', { name: 'Run cleanup', exact: false })).toBeDisabled();
   await generation.click();
   await expect(generation).toHaveAttribute('aria-current', 'true');
-  await expect(activity).toHaveCount(0);
+  await expect(cleanupPanel).toHaveCount(0);
   await expect(page.getByRole('complementary', { name: 'Generate model' })).toBeVisible();
 });
 
@@ -391,7 +393,7 @@ test('refresh results use one global toast across settings and workbench', async
   await page.getByRole('button', { name: 'Refresh assets' }).click();
   await expect(toasts.getByText('Asset library refreshed.')).toBeVisible();
   failRefresh = false;
-  await page.getByRole('group', { name: 'Model tools' }).getByRole('button', { name: 'Jobs' }).click();
+  await page.getByRole('banner').getByRole('button', { name: 'Jobs' }).click();
   await page.getByRole('complementary', { name: 'Jobs' }).getByRole('button', { name: 'Refresh' }).click();
   await expect(toasts.getByText('Job history refreshed.')).toBeVisible();
 });
@@ -424,6 +426,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
       weights_included: false,
       models_downloaded: false,
       local_files: { token_saved: tokenSaved, credentials_managed: true },
+      huggingface: { account: tokenSaved ? 'connected' : 'not_connected', model_access: tokenSaved ? 'verified' : 'not_connected' },
       pixal3d_cache: { local_checkpoints: 0, reusable_checkpoints: 7, total_checkpoints: 7 },
     }, {
       id: 'pixal3d-cuda',
@@ -518,7 +521,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   expect(modelAccessChecks).toBe(0);
   await download.click();
   await expect(downloadDialog.getByText('DINOv3 file access verified.')).toBeVisible();
-  expect(modelAccessChecks).toBeGreaterThan(0);
+  expect(modelAccessChecks).toBe(0);
   await expect(confirm).toBeDisabled();
   await consent.check();
   await expect(confirm).toBeEnabled();
@@ -530,7 +533,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
   await expect(settings).toBeFocused();
 });
 
-test('the download dialog checks DINOv3 access and rechecks it on window focus', async ({ page, studioOrigin }) => {
+test('a browser sign-in updates settings and DINOv3 can be rechecked manually', async ({ page, studioOrigin }) => {
   let sessionNumber = 0;
   let cancelled = false;
   let approved = false;
@@ -543,6 +546,7 @@ test('the download dialog checks DINOv3 access and rechecks it on window focus',
     model_backends: [{
       id: 'pixal3d-mlx', installable: true, environment_ready: true, downloads_enabled: true,
       local_files: { token_saved: tokenSaved, disconnect_available: tokenSaved, credentials_managed: true },
+      huggingface: { account: tokenSaved ? 'connected' : 'not_connected', model_access: !tokenSaved ? 'not_connected' : modelAccessChecks ? 'verified' : 'access_denied' },
     }],
   } }));
   await page.route('**/api/v1/runtime/pixal3d-mlx/huggingface/browser', route => {
@@ -567,7 +571,8 @@ test('the download dialog checks DINOv3 access and rechecks it on window focus',
   await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', route => {
     expect(route.request().method()).toBe('POST');
     expect(route.request().postData()).toBeNull();
-    return route.fulfill({ json: ++modelAccessChecks === 1 ? 'access_denied' : 'verified' });
+    ++modelAccessChecks;
+    return route.fulfill({ json: 'verified' });
   });
   await page.goto(studioOrigin + '/settings/connections');
   const connections = page.getByRole('main', { name: 'Connections' });
@@ -583,8 +588,7 @@ test('the download dialog checks DINOv3 access and rechecks it on window focus',
   await expect(connections.getByText('TEST-CODE')).toBeVisible();
   approved = true;
   await expect(toasts.getByText('Signed in to Hugging Face.')).toBeVisible();
-  await connections.getByRole('button', { name: 'Check sign-in' }).click();
-  await expect(toasts.getByText('Hugging Face account verified.')).toBeVisible();
+  await expect(connections.getByText('Signed in', { exact: true })).toBeVisible();
   expect(modelAccessChecks).toBe(0);
   await expect(connections).not.toContainText('DINOv3');
   await page.getByRole('button', { name: 'Models', exact: true }).click();
@@ -595,9 +599,8 @@ test('the download dialog checks DINOv3 access and rechecks it on window focus',
   const downloadDialog = page.getByRole('alertdialog', { name: 'Download model files?' });
   const confirm = downloadDialog.getByRole('button', { name: 'Download model files' });
   await expect(downloadDialog.getByText('Access required', { exact: true })).toBeVisible();
-  await expect(page.getByText('DINOv3 access denied.', { exact: true })).toBeVisible();
   await expect(confirm).toBeDisabled();
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await downloadDialog.getByRole('button', { name: 'Recheck access' }).click();
   await expect(downloadDialog.getByText('DINOv3 file access verified.')).toBeVisible();
   await expect(confirm).toBeDisabled();
 });
@@ -605,6 +608,7 @@ test('the download dialog checks DINOv3 access and rechecks it on window focus',
 test('settings deep links and confirmations manage one local profile at a time', async ({ page, studioOrigin }) => {
   let tokenSaved = true;
   let modelsInstalled = true;
+  const modelPath = '/meshharbor/runtimes/pixal3d-mlx/home/.cache/huggingface/hub/models--fixture--a-long-model-directory';
   const calls = [];
   let finishModelRemoval;
   const runtime = () => ({
@@ -614,7 +618,9 @@ test('settings deep links and confirmations manage one local profile at a time',
     model_backends: [{
       id: 'pixal3d-mlx', installable: true, ready: modelsInstalled,
       environment_ready: true, downloads_enabled: !modelsInstalled, models_downloaded: modelsInstalled,
+      model_paths: [modelPath],
       local_files: { token_saved: tokenSaved, disconnect_available: tokenSaved, remove_models_available: modelsInstalled, credentials_managed: true, model_files_managed: true },
+      huggingface: { account: tokenSaved ? 'unavailable' : 'not_connected', model_access: tokenSaved ? 'verified' : 'not_connected' },
     }, { id: 'pixal3d-cuda', installable: false }],
   });
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: runtime() }));
@@ -636,6 +642,13 @@ test('settings deep links and confirmations manage one local profile at a time',
   const toasts = page.getByRole('region', { name: /Notifications/ });
   const uninstall = storage.getByRole('button', { name: 'Delete model files' });
   await expect(storage.getByText('Ready', { exact: true })).toBeVisible();
+  const path = storage.getByText(modelPath, { exact: true });
+  await path.hover();
+  await expect(page.getByRole('tooltip')).toContainText(modelPath);
+  await page.keyboard.press('Escape');
+  await path.focus();
+  await expect(page.getByRole('tooltip')).toContainText(modelPath);
+  await page.keyboard.press('Escape');
   await uninstall.click();
   const remove = page.getByRole('alertdialog', { name: 'Remove model files?' });
   await expect(remove).toContainText('assets stay intact');

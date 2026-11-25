@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { decodeInventoryOpen, formatVersionSizes, runtimeSetupStage, shouldHighlightExport } from './workbench-state.ts';
 
-test('inventory keeps existing open and closed preferences after Jobs moves left', () => {
+test('the shared dock keeps existing open and closed preferences', () => {
   for (const value of ['assets', 'jobs', null]) assert.equal(decodeInventoryOpen(value), true);
   for (const value of ['closed', '', 'true', 'unknown']) assert.equal(decodeInventoryOpen(value), false);
 });

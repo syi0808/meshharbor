@@ -14,10 +14,11 @@ import { ItemGroup } from '@/components/ui/item';
 import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Sidebar, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider } from '@/components/ui/sidebar';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Disclosure } from './Disclosure';
 import { HelpTip } from './HelpTip';
 import { JobListItem } from './JobListItem';
-import type { StudioActivity } from './JobsDashboard';
+import type { StudioActivity } from './JobsPanel';
 import { NotificationHistory } from './NotificationHistory';
 import { notify } from './notify';
 import type { MeshHarborApi } from './api';
@@ -44,7 +45,7 @@ const accelerator = (id: string) => id.endsWith('-cuda') ? 'cuda' : 'mlx';
 type Backend = RuntimeInfo['model_backends'][number];
 type RemovalScope = 'huggingface' | 'model-files';
 type AccessStatus = HuggingFaceAccess | 'checking' | 'unavailable';
-type AccountStatus = HuggingFaceConnectionStatus | 'checking';
+type AccountStatus = HuggingFaceConnectionStatus | 'checking' | 'unavailable';
 type VisitSettings = (section: SettingsSection, backend?: RuntimeBackendId) => void;
 
 export function settingsSectionFromPath(path: string): SettingsSection | null {
@@ -66,7 +67,7 @@ interface Props {
   onJobDetails: (job: Job, trigger: HTMLButtonElement) => void;
   onVisit: VisitSettings;
   onClose: () => void;
-  onOpenDashboard: () => void;
+  onOpenJobs: () => void;
   onActivityChange: (activity: StudioActivity | null) => void;
   onReconnect: () => void;
   onRefreshJobs: () => Promise<boolean>;
@@ -75,10 +76,10 @@ interface Props {
   onRuntimeAction: (backend: RuntimeBackendId, action: RuntimeAction) => void;
 }
 
-export function SettingsPage({ api, section, backendId, runtime, connection, busy, theme, jobs, operationLabel, onJobDetails, onVisit, onClose, onOpenDashboard, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
+export function SettingsPage({ api, section, backendId, runtime, connection, busy, theme, jobs, operationLabel, onJobDetails, onVisit, onClose, onOpenJobs, onActivityChange, onReconnect, onRefreshJobs, onThemeChange, onRuntimeChange, onRuntimeAction }: Props) {
   const heading = useRef<HTMLHeadingElement>(null);
   const removalTrigger = useRef<HTMLButtonElement | null>(null);
-  const [accounts, setAccounts] = useState<Partial<Record<RuntimeBackendId, AccountStatus>>>({});
+  const [checkingAccount, setCheckingAccount] = useState(false);
   const [pending, setPending] = useState(false);
   const [removal, setRemoval] = useState<{ backend: RuntimeBackendId; scope: RemovalScope; label?: string } | null>(null);
   const [browserLogin, setBrowserLogin] = useState<{ backend: RuntimeBackendId; session: HuggingFaceBrowserLogin } | null>(null);
@@ -89,6 +90,22 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
   const browserSessionId = browserLogin?.session.id;
   const browserActive = browserLogin && browserLoginIsActive(browserLogin.session);
   const disabled = pending || busy || Boolean(browserActive);
+  useEffect(() => {
+    if ((section !== 'models' && section !== 'connections') || connection !== 'connected' || disabled) return;
+    let stopped = false;
+    let timer = 0;
+    async function poll() {
+      try {
+        const next = await api.runtime();
+        if (!stopped) onRuntimeChange(next);
+      } catch {
+        // Keep the previous status if a background read fails.
+      }
+      if (!stopped) timer = window.setTimeout(poll, 5000);
+    }
+    timer = window.setTimeout(poll, 1000);
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [api, connection, disabled, section, onRuntimeChange]);
   useEffect(() => {
     if (section === 'models' && backendId) {
       const cardHeading = document.getElementById(`runtime-${backendId}`);
@@ -116,7 +133,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
           return;
         }
         if (session.state === 'signed_in') {
-          setAccounts(current => ({ ...current, [backend]: 'connected' }));
           try {
             const nextRuntime = await api.runtime();
             if (stopped) return;
@@ -157,25 +173,28 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
 
   function verifyConnection(backend: RuntimeBackendId, token?: string) {
     void perform(async () => {
-      setAccounts(current => ({ ...current, [backend]: 'checking' }));
+      setCheckingAccount(true);
       let result: HuggingFaceConnectionStatus;
       try {
         result = await api.checkHuggingFaceConnection(backend, token);
-        setAccounts(current => ({ ...current, [backend]: result }));
-      } catch (cause) {
-        setAccounts(current => ({ ...current, [backend]: undefined }));
-        throw cause;
-      }
-      if (token !== undefined && result === 'connected') {
-        try {
-          onRuntimeChange(await api.runtime());
-        } catch {
-          notify('warning', 'Token connected, but the local status could not be refreshed.');
-          return;
-        }
+        onRuntimeChange(await api.runtime());
+      } finally {
+        setCheckingAccount(false);
       }
       notify(result === 'connected' ? 'success' : result === 'invalid_token' ? 'error' : 'warning', accountMessages[result]);
     });
+  }
+
+  async function recheckModelAccess(backend: RuntimeBackendId) {
+    try {
+      await api.checkModelAccess(backend);
+    } catch (cause) {
+      notify('error', cause instanceof Error ? cause.message : 'Could not verify DINOv3 access.');
+    } finally {
+      await api.runtime().then(onRuntimeChange).catch(() => {
+        notify('warning', 'Could not refresh local status.');
+      });
+    }
   }
 
   function startBrowserLogin(backend: RuntimeBackendId) {
@@ -204,9 +223,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
       if (scope === 'model-files') notify('info', 'Removing local model files.');
       try {
         onRuntimeChange(await api.removeRuntimeFiles(backend, scope));
-        if (scope === 'huggingface') {
-          setAccounts(current => ({ ...current, [backend]: 'not_connected' }));
-        }
         notify('success', scope === 'huggingface'
           ? 'Hugging Face disconnected on this computer.'
           : `Model files removed for ${removal.label}.`);
@@ -231,7 +247,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
         <Button variant="ghost" size="sm" onClick={onClose}><ArrowLeftIcon aria-hidden="true" /> Workbench</Button>
         <span className="border-l pl-3 font-heading text-sm font-medium">Settings</span>
         <div className="ml-auto flex items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={onOpenDashboard}><ListChecksIcon aria-hidden="true" /> Dashboard</Button>
+          <Button variant="ghost" size="sm" onClick={onOpenJobs}><ListChecksIcon aria-hidden="true" /> Jobs</Button>
           <NotificationHistory />
         </div>
       </div>
@@ -262,7 +278,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
           </div>
           {section !== 'preferences' && connection === 'connected' && <Button variant="outline" onClick={() => void perform(async () => {
             onRuntimeChange(await api.runtime());
-            setAccounts({});
             await onRefreshJobs();
             notify('success', 'Local status refreshed.');
           })} disabled={disabled}><ArrowsClockwiseIcon aria-hidden="true" /> Refresh status</Button>}
@@ -307,6 +322,12 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                 if (!id || !backend) return null;
                 const label = `${model.title} · ${accelerators[kind].title}`;
                 const authBackend: RuntimeBackendId = `pixal3d-${kind}`;
+                const access = runtime?.model_backends.find(item => item.id === authBackend)?.huggingface?.model_access;
+                const dino = {
+                  status: access ?? 'unavailable' as const,
+                  onRecheck: () => recheckModelAccess(authBackend),
+                  onConnections: () => onVisit('connections', authBackend),
+                };
                 const modelPaths = backend.model_paths ?? (backend.runtime_root ? [backend.runtime_root] : []);
                 return <Card key={id} role="article" aria-label={label} size="sm" className="min-w-0 bg-background">
                   <CardHeader>
@@ -317,12 +338,10 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                   <CardContent className="grid gap-3">
                     {modelPaths.length > 0 && <ModelFileLocations paths={modelPaths} />}
                     {backend.managed_install
-                      ? <CatalogInstall label={label} api={api} backend={backend} disabled={disabled} authBackend={authBackend}
-                          credentials={runtime?.model_backends.find(item => item.id === authBackend)?.local_files}
-                          onConnections={() => onVisit('connections', authBackend)}
+                      ? <CatalogInstall label={label} backend={backend} disabled={disabled} dino={dino}
                           onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />
-                      : <PixalModelFiles label={label} api={api} backend={backend} id={id} disabled={disabled}
-                          onAction={action => onRuntimeAction(id, action)} onSettings={onVisit} />}
+                      : <PixalModelFiles label={label} backend={backend} id={id} disabled={disabled} dino={dino}
+                          onAction={action => onRuntimeAction(id, action)} />}
                   </CardContent>
                   <RuntimeActions api={api} id={id} backend={backend} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
                     action={backend.local_files?.remove_models_available && <Button variant="destructive" size="sm" onClick={event => openRemoval(id, 'model-files', event.currentTarget, label)} disabled={disabled}>
@@ -334,7 +353,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
           </Card>)}
           {section === 'models' && !runtime?.model_catalog?.length && <Empty><EmptyHeader><EmptyDescription>No generation models reported by the local engine.</EmptyDescription></EmptyHeader></Empty>}
           {section === 'connections' && (connectionBackend ? <HuggingFaceConnection key={connectionId}
-            backend={connectionBackend} account={accounts[connectionId]} disabled={disabled}
+            backend={connectionBackend} account={checkingAccount ? 'checking' : connectionBackend.huggingface?.account} disabled={disabled}
             browserSession={browserLogin?.backend === connectionId && browserActive ? browserLogin.session : null}
             cancelling={pending} onStartBrowser={() => startBrowserLogin(connectionId)} onCancelBrowser={cancelBrowserLogin}
             onCheck={token => verifyConnection(connectionId, token)}
@@ -390,7 +409,12 @@ function ModelFileLocations({ paths }: { paths: string[] }) {
   return <dl className="grid min-w-0 gap-1">
     <dt className="font-medium">Model file locations</dt>
     <dd className="flex min-w-0 items-center gap-2">
-      <code className="min-w-0 flex-1 truncate text-muted-foreground">{paths.join(' · ')}</code>
+      <Tooltip>
+        <TooltipTrigger asChild><code tabIndex={0} className="min-w-0 flex-1 truncate text-muted-foreground">{paths.join(' · ')}</code></TooltipTrigger>
+        <TooltipContent className="grid max-w-[min(28rem,90vw)] gap-1 break-all">
+          {paths.map(path => <code key={path}>{path}</code>)}
+        </TooltipContent>
+      </Tooltip>
       <Button type="button" variant="ghost" size="icon-sm" aria-label="Copy model file locations" title="Copy model file locations"
         onClick={() => void copyPaths()}><CopyIcon aria-hidden="true" /></Button>
     </dd>
@@ -437,9 +461,8 @@ function RuntimeActions({ api, id, backend, jobs, operationLabel, onJobDetails, 
 }
 
 type DinoAccess = {
-  api: MeshHarborApi;
-  backendId: RuntimeBackendId;
-  credentials?: Backend['local_files'];
+  status: AccessStatus;
+  onRecheck: () => Promise<void>;
   onConnections: () => void;
 };
 
@@ -450,11 +473,11 @@ function ModelInstallDialog({ label, action, description, consentLabel, disabled
 }) {
   const consentId = useId();
   const [consent, setConsent] = useState(false);
-  const { status: access, setDialogOpen } = useDinoAccess(dino, disabled);
+  const [checking, setChecking] = useState(false);
+  const access = checking ? 'checking' : dino?.status ?? 'unavailable';
   const blocked = dino !== undefined && access !== 'verified';
   return <AlertDialog onOpenChange={open => {
     if (!open) setConsent(false);
-    setDialogOpen(open);
   }}>
     <AlertDialogTrigger asChild><Button className="justify-self-start" disabled={disabled}>{action}</Button></AlertDialogTrigger>
     <AlertDialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] data-[size=default]:sm:max-w-md">
@@ -469,6 +492,10 @@ function ModelInstallDialog({ label, action, description, consentLabel, disabled
           <div role="status" className="text-muted-foreground">
             {access === 'verified' ? <Badge variant="secondary">{accessMessages.verified}</Badge> : accessMessages[access]}
           </div>
+          <Button variant="outline" disabled={disabled || checking} onClick={() => {
+            setChecking(true);
+            void dino.onRecheck().finally(() => setChecking(false));
+          }}>Recheck access</Button>
           {blocked && access !== 'checking' && <Button variant="outline" onClick={dino.onConnections}>Manage Hugging Face connection</Button>}
         </>}
         <div className="flex items-start gap-2">
@@ -490,16 +517,16 @@ function DinoAccessLink() {
   return <a className="text-primary underline underline-offset-4" href={dinoAccessUrl} target="_blank" rel="noreferrer">Review terms and request DINOv3 access</a>;
 }
 
-function CatalogInstall({ label, api, backend, authBackend, credentials, disabled, onConnections, onInstall }: {
-  label: string; api: MeshHarborApi; backend: Backend; authBackend: RuntimeBackendId; credentials?: Backend['local_files'];
-  disabled: boolean; onConnections: () => void; onInstall: () => void;
+function CatalogInstall({ label, backend, dino, disabled, onInstall }: {
+  label: string; backend: Backend; dino: DinoAccess;
+  disabled: boolean; onInstall: () => void;
 }) {
   if (!backend.downloads_enabled) return null;
   const gated = backend.gated_model_access_required;
   return <ModelInstallDialog label={label} action="Install model"
     description="MeshHarbor installs a private Python environment and downloads the model weights for local generation."
     consentLabel={gated ? 'I have DINOv3 access, reviewed the terms, and approve installation and download.' : 'I reviewed the terms and approve installation and download.'}
-    disabled={disabled} dino={gated ? { api, backendId: authBackend, credentials, onConnections } : undefined} onConfirm={onInstall}>
+    disabled={disabled} dino={gated ? dino : undefined} onConfirm={onInstall}>
     {backend.ready && !backend.managed_ready && <p className="text-muted-foreground">Using existing files. A managed install keeps them intact.</p>}
     {backend.license_notice && <p className="text-muted-foreground">{backend.license_notice}</p>}
     {backend.source && <a className="text-primary underline underline-offset-4" href={`${backend.source.repository}/tree/${backend.source.revision}`} target="_blank" rel="noreferrer">Review upstream source and terms</a>}
@@ -514,59 +541,12 @@ const accessMessages: Record<AccessStatus, string> = {
   unavailable: 'Access not verified',
 };
 
-function useDinoAccess(dino: DinoAccess | undefined, disabled: boolean) {
-  const [open, setOpen] = useState(false);
-  const [access, setAccess] = useState<AccessStatus>('checking');
-  const api = dino?.api;
-  const backendId = dino?.backendId;
-  const credentials = dino?.credentials;
-  const needsConnection = credentials?.credentials_managed === true && !credentials.token_saved;
-  useEffect(() => {
-    if (!api || !backendId || !open || disabled || needsConnection) return;
-    const controller = new AbortController();
-    let checking = false;
-    let previous: AccessStatus | undefined;
-    async function check(api: MeshHarborApi, id: RuntimeBackendId) {
-      if (checking || controller.signal.aborted) return;
-      checking = true;
-      setAccess('checking');
-      const result = await api.checkModelAccess(id, controller.signal).catch(() => 'unavailable' as const);
-      if (!controller.signal.aborted) {
-        setAccess(result);
-        if (previous !== result && result === 'access_denied') {
-          notify('warning', 'DINOv3 access denied.', 'Request access on Hugging Face with the same account.');
-        } else if (previous !== result && result === 'unavailable') {
-          notify('error', 'Could not verify DINOv3 access.', 'Reopen this dialog to retry.');
-        }
-        previous = result;
-      }
-      checking = false;
-    }
-    const onFocus = () => void check(api, backendId);
-    const initialCheck = window.setTimeout(onFocus, 0);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      window.clearTimeout(initialCheck);
-      window.removeEventListener('focus', onFocus);
-      controller.abort();
-    };
-  }, [api, backendId, disabled, needsConnection, open]);
-
-  return {
-    status: needsConnection ? 'not_connected' as const : access,
-    setDialogOpen(next: boolean) {
-      if (!dino) return;
-      if (next) setAccess('checking');
-      setOpen(next);
-    },
-  };
-}
-
 const accountMessages: Record<AccountStatus, string> = {
   checking: 'Checking Hugging Face sign-in…',
   connected: 'Hugging Face account verified.',
   not_connected: 'No local token is saved. Sign in or connect a token.',
   invalid_token: 'Hugging Face did not accept this token. Sign in again or use a different token.',
+  unavailable: 'Could not verify Hugging Face sign-in.',
 };
 
 function browserLoginIsActive(session: HuggingFaceBrowserLogin) {
@@ -626,20 +606,20 @@ function HuggingFaceConnection({ backend, account, disabled, browserSession, can
         </form>
       </Disclosure>}
     </> : <p className="text-muted-foreground">Hugging Face sign-in is not available on this computer.</p>}
-    {account === 'checking' && <p role="status" className="text-muted-foreground">{accountMessages.checking}</p>}
+    {account && <p role="status" className="text-muted-foreground">{accountMessages[account]}</p>}
     {local?.disconnect_available && <div className="border-t pt-3"><Button variant="destructive" disabled={disabled} onClick={event => onDisconnect(event.currentTarget)}>Disconnect locally</Button></div>}
     </CardContent>
   </Card>;
 }
 
-function PixalModelFiles({ label, api, backend, id, disabled, onAction, onSettings }: {
-  label: string; api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
-  onAction: (action: RuntimeAction) => void; onSettings: VisitSettings;
+function PixalModelFiles({ label, backend, id, disabled, dino, onAction }: {
+  label: string; backend: Backend; id: RuntimeBackendId; disabled: boolean; dino: DinoAccess;
+  onAction: (action: RuntimeAction) => void;
 }) {
   const stage = runtimeSetupStage(backend);
   if (stage === 'environment') return <Button className="justify-self-start" disabled={disabled} onClick={() => onAction('setup')}>Set up {id === 'pixal3d-cuda' ? 'CUDA' : 'Python'} environment</Button>;
-  if (stage === 'models' && backend.downloads_enabled) return <PixalDownloadDialog label={label} api={api} backend={backend} id={id} disabled={disabled}
-    onConnections={() => onSettings('connections', id)} onDownload={() => onAction('download')} />;
+  if (stage === 'models' && backend.downloads_enabled) return <PixalDownloadDialog label={label} backend={backend} id={id} disabled={disabled}
+    dino={dino} onDownload={() => onAction('download')} />;
   if (stage === 'conversion') return <Button className="justify-self-start" disabled={disabled || !backend.conversion_enabled} onClick={() => onAction('convert')}>Finish NAF conversion</Button>;
   if (stage === 'incomplete') return <div className="flex items-center gap-1 text-muted-foreground">
     Runtime not ready <HelpTip label="About runtime checks">Files are present. Run <code>meshharbor doctor</code> for diagnostics.</HelpTip>
@@ -651,15 +631,15 @@ function PixalModelFiles({ label, api, backend, id, disabled, onAction, onSettin
     consentLabel="I approve installing the additional model files." disabled={disabled} onConfirm={() => onAction('multiview')} />;
 }
 
-function PixalDownloadDialog({ label, api, backend, id, disabled, onConnections, onDownload }: {
-  label: string; api: MeshHarborApi; backend: Backend; id: RuntimeBackendId; disabled: boolean;
-  onConnections: () => void; onDownload: () => void;
+function PixalDownloadDialog({ label, backend, id, disabled, dino, onDownload }: {
+  label: string; backend: Backend; id: RuntimeBackendId; disabled: boolean; dino: DinoAccess;
+  onDownload: () => void;
 }) {
   const cache = backend.pixal3d_cache;
   return <ModelInstallDialog label={label} action="Download model files"
     description={`Up to ${accelerators[accelerator(id)].download} without cached files. DINOv3 access is required.`}
     consentLabel="I reviewed the model terms and approve this download." disabled={disabled}
-    dino={{ api, backendId: id, credentials: backend.local_files, onConnections }} onConfirm={onDownload}>
+    dino={dino} onConfirm={onDownload}>
     {cache && <p className="text-muted-foreground">
       {cache.local_checkpoints}/{cache.total_checkpoints} checkpoints cached.
       {cache.reusable_checkpoints > 0 && ` ${cache.reusable_checkpoints} more can be reused from the Hugging Face cache.`}

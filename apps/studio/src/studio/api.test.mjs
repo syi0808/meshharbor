@@ -142,12 +142,12 @@ test('asset import completion keeps browser filters and selection changed during
   }), { resetFilters: true, selectFirstImportedAsset: false });
 });
 
-test('Studio offers stop for queued jobs and asset jobs that are not finalizing', () => {
+test('Studio offers stop for queued and running jobs that are not finalizing', () => {
   assert.equal(isJobCancellable({ state: 'queued' }), true);
-  for (const state of ['running', 'validating', 'cancelling', 'cancelled', 'succeeded', 'failed']) {
+  for (const state of ['validating', 'cancelling', 'cancelled', 'succeeded', 'failed']) {
     assert.equal(isJobCancellable({ state, operation: 'runtime.pixal3d.install_models' }), false);
   }
-  for (const operation of ['model.generate', 'image.generate', 'mesh.simplify', 'mesh.cleanup', 'uv.unwrap', 'render.optimize']) {
+  for (const operation of ['model.generate', 'image.generate', 'mesh.simplify', 'mesh.cleanup', 'uv.unwrap', 'render.optimize', 'runtime.pixal3d.install_models']) {
     assert.equal(isJobCancellable({ state: 'running', operation }), true);
     assert.equal(isJobCancellable({ state: 'validating', operation }), false);
   }
@@ -339,7 +339,7 @@ test('job history uses a bounded read-only dashboard request', async () => {
 });
 
 test('cancellation notices describe queued, running, and finished outcomes', () => {
-  assert.equal(cancelJobNotice({ state: 'cancelled' }), 'Job stopped. It cannot be resumed.');
+  assert.equal(cancelJobNotice({ state: 'cancelled' }), 'Job stopped.');
   assert.match(cancelJobNotice({ state: 'queued' }), /still queued/);
   assert.match(cancelJobNotice({ state: 'cancelling' }), /Stop requested/);
   for (const state of ['running', 'validating']) {

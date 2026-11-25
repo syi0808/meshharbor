@@ -212,7 +212,7 @@ export async function resolveComparisonAsset(
 }
 
 export function cancelJobNotice(job: Job): string {
-  if (job.state === 'cancelled') return 'Job stopped. It cannot be resumed.';
+  if (job.state === 'cancelled') return 'Job stopped.';
   if (job.state === 'cancelling') return 'Stop requested. Waiting for the worker to exit.';
   if (job.state === 'queued') return 'This job is still queued. Try stopping it again.';
   if (job.state === 'running' || job.state === 'validating') {
@@ -223,10 +223,14 @@ export function cancelJobNotice(job: Job): string {
 
 export function isJobCancellable(job: Job | null): boolean {
   if (!job) return false;
-  return job.state === 'queued' || (job.state === 'running' && (
-    isGenerationOperation(job.operation) || job.operation.startsWith('mesh.')
-    || job.operation === 'uv.unwrap' || job.operation === 'render.optimize'
-  ));
+  return job.state === 'queued' || job.state === 'running';
+}
+
+export function isJobRetryable(job: Job): boolean {
+  return (job.state === 'failed' || job.state === 'cancelled') && (
+    Boolean(job.input_asset_id) || (job.operation === 'runtime.models.install' ? typeof job.parameters?.backend_id === 'string'
+      : job.operation.startsWith('runtime.pixal3d.'))
+  );
 }
 
 export function isGenerationOperation(operation: string): boolean {
@@ -894,6 +898,10 @@ export class MeshHarborApi {
       }
       throw cancelError;
     }
+  }
+
+  retryJob(jobId: string): Promise<Job> {
+    return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
   }
 
   derivedAsset(assetId: string): Promise<Asset> {

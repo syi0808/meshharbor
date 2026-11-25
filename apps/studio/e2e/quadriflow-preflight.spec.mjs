@@ -20,16 +20,11 @@ test('Studio automatically preflights the open retopology tool without queuing a
   await page.goto(studioOrigin);
   await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
   await importCube(page, 'quad-source.glb');
-  await page.getByRole('button', { name: 'More tools' }).click();
-  const tool = page.getByRole('button', { name: 'Quad retopology (experimental)', exact: true });
-  const tools = page.getByRole('complementary', { name: 'Mesh tools' });
-  const help = tools.getByRole('button', { name: 'About Quad retopology (experimental)', exact: true });
-  await expect(page.getByRole('tooltip')).toHaveCount(0);
-  await help.hover();
-  await expect(page.getByRole('tooltip')).toContainText('the quad OBJ is geometry-only');
-  await expect(tool).toHaveAttribute('aria-expanded', 'false');
+  const tool = page.getByRole('button', { name: 'Retopology', exact: true });
+  const tools = page.getByRole('complementary', { name: 'Quad retopology (experimental)' });
   expect(requests).toEqual([]);
   await tool.click();
+  await expect(tools).toContainText('the quad OBJ is geometry-only');
   await expect(tools.getByRole('status')).toHaveText('Geometry-only input passed');
   await expect(tools.getByRole('button', { name: 'Check retopology input' })).toHaveCount(0);
   const target = page.getByRole('spinbutton', { name: 'Target quads' });
@@ -56,7 +51,7 @@ test('Studio automatically preflights the open retopology tool without queuing a
   await expect(tools.getByRole('status')).toHaveText('Textured input passed');
   expect(requests).toEqual([10000, 12, 12]);
   await page.getByRole('button', { name: 'Jobs', exact: true }).click();
-  await expect(page.getByText('No saved jobs yet.')).toBeVisible();
+  await expect(page.getByText('No finished jobs yet.')).toBeVisible();
 });
 
 test('retopology failures use only a toast and superseded requests are cancelled', async ({ page, studioOrigin }) => {
@@ -80,9 +75,8 @@ test('retopology failures use only a toast and superseded requests are cancelled
     await page.goto(studioOrigin);
     await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
     await importCube(page, 'quad-source.glb');
-    await page.getByRole('button', { name: 'More tools' }).click();
-    const tool = page.getByRole('button', { name: 'Quad retopology (experimental)', exact: true });
-    const tools = page.getByRole('complementary', { name: 'Mesh tools' });
+    const tool = page.getByRole('button', { name: 'Retopology', exact: true });
+    const tools = page.getByRole('complementary', { name: 'Quad retopology (experimental)' });
     const run = tools.getByRole('button', { name: 'Run Quad retopology (experimental)', exact: true });
     const target = tools.getByRole('spinbutton', { name: 'Target quads' });
     await Promise.all([page.waitForRequest(preflightPath), tool.click()]);
