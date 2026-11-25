@@ -1596,6 +1596,7 @@ dependencies = [
  "clap",
  "http-body-util",
  "meshharbor-core",
+ "meshharbor-quadriflow-sys",
  "remesh",
  "rmcp",
  "schemars",
@@ -1636,6 +1637,14 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "meshharbor-quadriflow-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "serde_json",
 ]
 
 [[package]]

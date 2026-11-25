@@ -17,6 +17,7 @@ required-features = ["experimental-retopology-worker"]
 
 [features]
 default = []
+bundled-quadriflow = ["dep:meshharbor-quadriflow-sys", "meshharbor-quadriflow-sys/native"]
 experimental-retopology-worker = ["dep:remesh"]
 
 [dependencies]
@@ -24,6 +25,7 @@ axum.workspace = true
 clap.workspace = true
 http-body-util.workspace = true
 meshharbor-core = { path = "../core" }
+meshharbor-quadriflow-sys = { path = "../quadriflow-sys", optional = true }
 rmcp.workspace = true
 remesh = { workspace = true, optional = true }
 schemars.workspace = true

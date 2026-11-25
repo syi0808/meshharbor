@@ -1,4 +1,7 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -41,6 +44,7 @@ pub struct RuntimeDoctor {
 #[derive(Clone)]
 pub struct OperationCore {
     store: Arc<Store>,
+    linked_quadriflow_worker: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,13 +61,20 @@ pub struct MeshOperationResult {
 
 impl OperationCore {
     pub fn open(root: impl AsRef<Path>) -> CoreResult<Self> {
-        Ok(Self {
-            store: Arc::new(Store::open(root)?),
-        })
+        Ok(Self::with_store(Arc::new(Store::open(root)?)))
     }
 
     pub fn with_store(store: Arc<Store>) -> Self {
-        Self { store }
+        Self {
+            store,
+            linked_quadriflow_worker: None,
+        }
+    }
+
+    /// Enable the linked solver in a host executable implementing the private worker entry point.
+    pub fn with_linked_quadriflow_worker(mut self) -> CoreResult<Self> {
+        self.linked_quadriflow_worker = Some(std::env::current_exe()?);
+        Ok(self)
     }
 
     pub fn store(&self) -> &Arc<Store> {
@@ -71,6 +82,18 @@ impl OperationCore {
     }
 
     pub fn quadriflow_backend_status(&self) -> QuadriFlowBackendStatus {
+        if self.linked_quadriflow_worker.is_some() {
+            return QuadriFlowBackendStatus {
+                backend_id: "quadriflow".into(),
+                status: "ready".into(),
+                available: true,
+                managed: false,
+                sidecar_source: None,
+                install_available: false,
+                message: "QuadriFlow is built into this MeshHarbor executable.".into(),
+                next_step: "No separate installation is needed.".into(),
+            };
+        }
         crate::quadriflow_installer::quadriflow_backend_status(self.store.data_root())
     }
 
@@ -251,6 +274,7 @@ impl OperationCore {
                 &bytes,
                 options,
                 self.store.data_root(),
+                self.linked_quadriflow_worker.as_deref(),
             )?;
             let report_value = serde_json::to_value(&report)?;
             let name = derived_mesh_name(&source.name, "quad-retopologized");
@@ -666,8 +690,8 @@ impl OperationCore {
         let image_generation_ready = generation_profiles
             .iter()
             .any(|profile| profile.input_modes.contains(&GenerationInputMode::Image));
-        let quadriflow_ready =
-            crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root());
+        let quadriflow_ready = self.linked_quadriflow_worker.is_some()
+            || crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root());
         vec![
             OperationDescriptor { id: "asset.import".into(), title: "Import asset".into(), category: "asset".into(), summary: "Import PNG, JPEG, or GLB files while retaining an immutable content-addressed source artifact.".into(), implemented: true },
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
@@ -675,7 +699,7 @@ impl OperationCore {
             OperationDescriptor { id: IMAGE_GENERATION_OPERATION.into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Compatibility operation for generating a local GLB from an imported image.".into(), implemented: image_generation_ready },
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangles to a hard upper limit with meshoptimizer while retaining original vertex streams, materials, and textures. No result is saved if the limit cannot be met.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces, then simplify eligible primitives within a conservative error tolerance without a triangle target.".into(), implemented: true },
-            OperationDescriptor { id: "mesh.retopology".into(), title: "Quad retopology".into(), category: "mesh".into(), summary: "Experimental QuadriFlow quad remeshing through a signature-verified, manifest-matched managed sidecar; adjacent executables are ignored. Accepts one closed static triangle GLB; textured inputs also require TEXCOORD_0, optional NORMAL, and the narrow supported embedded base-color/metallic-roughness PNG maps. Those maps are projected only into a triangulated GLB preview with distance, normal, coverage, and ambiguity gates; the editable quad OBJ remains geometry-only. Other attributes/maps, self-intersection freedom, and a measured surface-error tolerance are not supported or certified.".into(), implemented: quadriflow_ready },
+            OperationDescriptor { id: "mesh.retopology".into(), title: "Quad retopology".into(), category: "mesh".into(), summary: "Experimental QuadriFlow quad remeshing in an isolated worker. Accepts one closed static triangle GLB; textured inputs also require TEXCOORD_0, optional NORMAL, and the narrow supported embedded base-color/metallic-roughness PNG maps. Those maps are projected only into a triangulated GLB preview with distance, normal, coverage, and ambiguity gates; the editable quad OBJ remains geometry-only. Other attributes/maps, self-intersection freedom, and a measured surface-error tolerance are not supported or certified.".into(), implemented: quadriflow_ready },
             OperationDescriptor { id: "uv.unwrap".into(), title: "Atlas UV unwrap".into(), category: "uv".into(), summary: "Use xatlas to unwrap one supported static textured mesh and rebake its embedded base-color and metallic/roughness PNG maps from its existing UVs. Zero-area faces are omitted from the result. This is not high-to-low projection.".into(), implemented: true },
             OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Generic high-to-low and arbitrary texture baking is not implemented; uv.unwrap only rebakes supported same-mesh embedded base-color and metallic/roughness PNG maps.".into(), implemented: false },
             OperationDescriptor { id: "render.optimize".into(), title: "Render optimization".into(), category: "mesh".into(), summary: "Use meshoptimizer vertex-cache and overdraw reordering on opaque/masked indexed triangles; translucent order is preserved.".into(), implemented: true },

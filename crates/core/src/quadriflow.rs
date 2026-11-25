@@ -627,7 +627,9 @@ fn output_error(message: impl Into<String>) -> CoreError {
 
 pub(crate) const MAX_QUADRIFLOW_INPUT_GLB_BYTES: usize = 64 * 1024 * 1024;
 const MAX_INPUT_OBJ_BYTES: usize = 64 * 1024 * 1024;
-const MAX_QUAD_TARGET: u32 = 50_000;
+pub const MAX_QUAD_TARGET: u32 = 50_000;
+pub const LINKED_QUADRIFLOW_WORKER_ARG: &str = "--internal-quadriflow-worker";
+pub const MAX_LINKED_QUADRIFLOW_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const QUADRIFLOW_TIMEOUT: Duration = Duration::from_secs(180);
 const QUADRIFLOW_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -718,9 +720,6 @@ pub(crate) fn quadriflow_sidecar_available_at(data_root: &Path) -> bool {
     quadriflow_sidecar_path(data_root).is_some()
 }
 
-/// Run a verified managed sidecar on a generated geometry-only OBJ. The original OBJ
-/// bytes are returned separately so callers can persist the actual editable quads;
-/// the GLB is only a triangle preview.
 fn validate_quad_target(target_quads: u32) -> CoreResult<()> {
     if !(4..=MAX_QUAD_TARGET).contains(&target_quads) {
         return Err(CoreError::InvalidInput(format!(
@@ -735,19 +734,33 @@ pub fn quadriflow_retopology_glb(
     options: QuadRetopologyOptions,
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
     let data_root = crate::quadriflow_installer::default_data_root();
-    quadriflow_retopology_glb_at(bytes, options, &data_root)
+    quadriflow_retopology_glb_at(bytes, options, &data_root, None)
+}
+
+enum QuadriFlowWorker<'worker> {
+    Linked(&'worker Path),
+    Managed(PathBuf),
 }
 
 pub(crate) fn quadriflow_retopology_glb_at(
     bytes: &[u8],
     options: QuadRetopologyOptions,
     data_root: &Path,
+    linked_worker: Option<&Path>,
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
     quadriflow_retopology_glb_with_runner(bytes, options, || {
-        let worker = quadriflow_sidecar_path(data_root)?;
+        let worker = match linked_worker {
+            Some(path) => QuadriFlowWorker::Linked(path),
+            None => QuadriFlowWorker::Managed(quadriflow_sidecar_path(data_root)?),
+        };
         Some(
-            move |input_path: &Path, output_path: &Path, target_quads: u32| {
-                execute_quadriflow_worker(&worker, input_path, output_path, target_quads)
+            move |request: &RemeshRequest, output_path: &Path, target_quads: u32| match worker {
+                QuadriFlowWorker::Linked(path) => {
+                    execute_linked_quadriflow_worker(path, request, output_path, target_quads)
+                }
+                QuadriFlowWorker::Managed(path) => {
+                    execute_managed_quadriflow_job(&path, request, output_path, target_quads)
+                }
             },
         )
     })
@@ -892,7 +905,7 @@ fn quadriflow_retopology_glb_with_runner<F>(
     resolve_runner: impl FnOnce() -> Option<F>,
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)>
 where
-    F: FnOnce(&Path, &Path, u32) -> CoreResult<()>,
+    F: FnOnce(&RemeshRequest, &Path, u32) -> CoreResult<()>,
 {
     let PreparedQuadriFlowInput { validation, report } = prepare_quadriflow_input(bytes, options)?;
     let QuadRetopologyPreflight {
@@ -902,10 +915,6 @@ where
         appearance_projection_required: project_appearance,
         ..
     } = report;
-    let RemeshRequest {
-        positions, indices, ..
-    } = validation;
-    let input_obj = triangle_geometry_obj(&positions, &indices)?;
     let run_worker = resolve_runner().ok_or_else(|| {
         CoreError::OperationUnavailable(
             "No signature-verified, manifest-matched managed QuadriFlow sidecar is available."
@@ -913,11 +922,9 @@ where
         )
     })?;
     let temp = QuadriflowTempDir::create()?;
-    let input_path = temp.0.join("input.obj");
     let output_path = temp.0.join("output.obj");
-    fs::write(&input_path, input_obj)?;
 
-    run_worker(&input_path, &output_path, options.target_quads)?;
+    run_worker(&validation, &output_path, options.target_quads)?;
 
     let output_size = fs::metadata(&output_path)?.len();
     if output_size == 0 || output_size > MAX_OBJ_BYTES as u64 {
@@ -926,7 +933,7 @@ where
         ));
     }
     let quad_obj = fs::read(&output_path)?;
-    let (mesh, parsed_report) = parse_quad_obj_output(&quad_obj, &positions)?;
+    let (mesh, parsed_report) = parse_quad_obj_output(&quad_obj, &validation.positions)?;
     let (preview_glb, appearance_projection) =
         build_quad_preview(bytes, &mesh, project_appearance)?;
 
@@ -990,11 +997,48 @@ pub(crate) fn rehearse_textured_cube_with_worker(
         &tests::closed_textured_cube_glb(true),
         QuadRetopologyOptions { target_quads: 384 },
         || {
-            Some(|input: &Path, output: &Path, target| {
-                execute_quadriflow_worker(worker, input, output, target)
+            Some(|request: &RemeshRequest, output: &Path, target| {
+                execute_managed_quadriflow_job(worker, request, output, target)
             })
         },
     )
+}
+
+fn execute_managed_quadriflow_job(
+    worker: &Path,
+    request: &RemeshRequest,
+    output_path: &Path,
+    target_quads: u32,
+) -> CoreResult<()> {
+    let input_path = output_path.with_file_name("input.obj");
+    fs::write(
+        &input_path,
+        triangle_geometry_obj(&request.positions, &request.indices)?,
+    )?;
+    execute_quadriflow_worker(worker, &input_path, output_path, target_quads)
+}
+
+fn execute_linked_quadriflow_worker(
+    worker: &Path,
+    request: &RemeshRequest,
+    output_path: &Path,
+    target_quads: u32,
+) -> CoreResult<()> {
+    let input_path = output_path.with_file_name("input.json");
+    let bytes = serde_json::to_vec(request)?;
+    if bytes.len() > MAX_LINKED_QUADRIFLOW_REQUEST_BYTES {
+        return Err(CoreError::OperationUnavailable(
+            "QuadriFlow worker request exceeds 64 MiB.".into(),
+        ));
+    }
+    fs::write(&input_path, bytes)?;
+    let mut command = Command::new(worker);
+    command
+        .arg(LINKED_QUADRIFLOW_WORKER_ARG)
+        .arg(target_quads.to_string())
+        .current_dir(output_path.parent().expect("worker output directory"))
+        .stdin(fs::File::open(input_path)?);
+    wait_for_quadriflow_worker(command)
 }
 
 fn execute_quadriflow_worker(
@@ -1003,7 +1047,8 @@ fn execute_quadriflow_worker(
     output_path: &Path,
     target_quads: u32,
 ) -> CoreResult<()> {
-    let mut child = Command::new(worker)
+    let mut command = Command::new(worker);
+    command
         .arg("-i")
         .arg(input_path)
         .arg("-o")
@@ -1012,14 +1057,19 @@ fn execute_quadriflow_worker(
         .arg(target_quads.to_string())
         .arg("-seed")
         .arg("0")
+        .stdin(Stdio::null());
+    wait_for_quadriflow_worker(command)
+}
+
+fn wait_for_quadriflow_worker(mut command: Command) -> CoreResult<()> {
+    let mut child = command
         .env_clear()
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| {
             CoreError::OperationUnavailable(format!(
-                "Could not start the verified managed QuadriFlow sidecar: {error}"
+                "Could not start the QuadriFlow worker: {error}"
             ))
         })?;
 
@@ -1047,7 +1097,7 @@ fn execute_quadriflow_worker(
         Ok(())
     } else {
         Err(CoreError::OperationUnavailable(format!(
-            "Packaged QuadriFlow exited with {status}."
+            "QuadriFlow worker exited with {status}."
         )))
     }
 }
@@ -1560,22 +1610,25 @@ f 4 1 5 8\n";
             &source,
             QuadRetopologyOptions { target_quads: 6 },
             || {
-                Some(|input_path: &Path, output_path: &Path, target_quads: u32| {
-                    assert_eq!(target_quads, 6);
-                    let input = fs::read_to_string(input_path).unwrap();
-                    assert_eq!(
-                        input.lines().filter(|line| line.starts_with("v ")).count(),
-                        8
-                    );
-                    assert_eq!(
-                        input.lines().filter(|line| line.starts_with("f ")).count(),
-                        12
-                    );
-                    assert!(!input.contains("vt "));
-                    assert!(!input.contains("vn "));
-                    fs::write(output_path, CUBE_OBJ).unwrap();
-                    Ok(())
-                })
+                Some(
+                    |request: &RemeshRequest, output_path: &Path, target_quads: u32| {
+                        assert_eq!(target_quads, 6);
+                        let input =
+                            triangle_geometry_obj(&request.positions, &request.indices).unwrap();
+                        assert_eq!(
+                            input.lines().filter(|line| line.starts_with("v ")).count(),
+                            8
+                        );
+                        assert_eq!(
+                            input.lines().filter(|line| line.starts_with("f ")).count(),
+                            12
+                        );
+                        assert!(!input.contains("vt "));
+                        assert!(!input.contains("vn "));
+                        fs::write(output_path, CUBE_OBJ).unwrap();
+                        Ok(())
+                    },
+                )
             },
         )
         .unwrap();
@@ -1631,7 +1684,7 @@ f 4 1 5 8\n";
                 .unwrap_err()
                 .to_string();
         let worker_error = quadriflow_retopology_glb_with_runner::<
-            fn(&Path, &Path, u32) -> CoreResult<()>,
+            fn(&RemeshRequest, &Path, u32) -> CoreResult<()>,
         >(&open, QuadRetopologyOptions { target_quads: 6 }, || {
             panic!("invalid geometry cannot resolve the native worker")
         })
@@ -1643,13 +1696,14 @@ f 4 1 5 8\n";
 
     #[test]
     fn open_geometry_only_input_does_not_resolve_a_runner() {
-        let error =
-            quadriflow_retopology_glb_with_runner::<fn(&Path, &Path, u32) -> CoreResult<()>>(
-                &cube_triangle_glb(true),
-                QuadRetopologyOptions { target_quads: 6 },
-                || panic!("open geometry-only input must not resolve a sidecar"),
-            )
-            .unwrap_err();
+        let error = quadriflow_retopology_glb_with_runner::<
+            fn(&RemeshRequest, &Path, u32) -> CoreResult<()>,
+        >(
+            &cube_triangle_glb(true),
+            QuadRetopologyOptions { target_quads: 6 },
+            || panic!("open geometry-only input must not resolve a sidecar"),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("closed, watertight"));
     }
 
@@ -1666,8 +1720,8 @@ f 4 1 5 8\n";
             &source,
             QuadRetopologyOptions { target_quads: 6 },
             || {
-                Some(|input_path: &Path, output_path: &Path, _: u32| {
-                    let obj = fs::read_to_string(input_path).unwrap();
+                Some(|request: &RemeshRequest, output_path: &Path, _: u32| {
+                    let obj = triangle_geometry_obj(&request.positions, &request.indices).unwrap();
                     assert_eq!(obj.lines().filter(|line| line.starts_with("v ")).count(), 8);
                     assert_eq!(
                         obj.lines().filter(|line| line.starts_with("f ")).count(),
@@ -1768,7 +1822,7 @@ f 4 1 5 8\n";
             QuadRetopologyOptions { target_quads: 6 },
             || {
                 Some(
-                    |_input_path: &Path, output_path: &Path, target_quads: u32| {
+                    |_request: &RemeshRequest, output_path: &Path, target_quads: u32| {
                         assert_eq!(target_quads, 6);
                         fs::write(output_path, CUBE_OBJ).unwrap();
                         Ok(())

@@ -36,6 +36,8 @@ mod browser_login;
 mod data_dir_lock;
 mod huggingface_status;
 mod job_scheduler;
+#[cfg(feature = "bundled-quadriflow")]
+mod quadriflow_worker;
 
 /// Prevents fork/exec lock tests from inheriting another test's live advisory-lock descriptor.
 #[cfg(test)]
@@ -487,7 +489,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local mesh processing job for mesh.cleanup, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires a verified, manifest-matched managed QuadriFlow sidecar and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
+        description = "Start a local mesh processing job for mesh.cleanup, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires an available QuadriFlow backend and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
     )]
     async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
         let args = params.0;
@@ -794,7 +796,7 @@ async fn open_job_service(
             Err(error) => return Err(error.into()),
         }
     };
-    let core = OperationCore::open(root)?;
+    let core = open_operation_core(root)?;
     for saved in core.store().active_job_owners()? {
         let owner = uuid::Uuid::parse_str(&saved)?;
         match DataDirLock::try_acquire_for_job_owner(root, owner) {
@@ -842,8 +844,30 @@ fn stop_jobs(state: &AppState) {
     }
 }
 
+fn open_operation_core(root: &std::path::Path) -> Result<OperationCore, CoreError> {
+    let core = OperationCore::open(root)?;
+    #[cfg(feature = "bundled-quadriflow")]
+    let core = core.with_linked_quadriflow_worker()?;
+    Ok(core)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "bundled-quadriflow")]
+    {
+        let mut args = std::env::args_os().skip(1);
+        if args.next().as_deref()
+            == Some(std::ffi::OsStr::new(
+                meshharbor_core::LINKED_QUADRIFLOW_WORKER_ARG,
+            ))
+        {
+            return quadriflow_worker::run(args);
+        }
+    }
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("meshharbor=info".parse()?))
         .with_writer(std::io::stderr)
@@ -972,7 +996,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 overdraw_threshold,
             )?;
             preflight_cli_output_paths(output.as_deref(), quad_output.as_deref())?;
-            let core = OperationCore::open(&root)?;
+            let core = open_operation_core(&root)?;
             let parameters = process_mesh_cli_parameters(
                 &operation,
                 target_quads,
@@ -1045,10 +1069,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Doctor => println!(
             "{}",
-            serde_json::to_string_pretty(&OperationCore::open(&root)?.runtime_doctor())?
+            serde_json::to_string_pretty(&open_operation_core(&root)?.runtime_doctor())?
         ),
         Command::Backend { command } => {
-            let core = OperationCore::open(&root)?;
+            let core = open_operation_core(&root)?;
             match command {
                 BackendCommand::Status => {
                     println!(

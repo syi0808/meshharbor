@@ -15,7 +15,7 @@ MeshHarbor is a local-first alternative to [Tripo](https://www.tripo3d.ai/) and 
 
 *The Studio generation screen with an imported example GLB.*
 
-**Status:** Early source build, not feature parity with hosted services. No official installer, binary release, or bundled model weights. Some checkpoints require gated access and have separate usage terms. Mesh editing needs no Python or model setup. Generic high-to-low baking and QuadriFlow retopology are not available.
+**Status:** Early source build, not feature parity with hosted services. No official installer, binary release, or bundled model weights. Some checkpoints require gated access and have separate usage terms. Mesh editing needs no Python or model setup. Generic high-to-low baking is not available. Experimental QuadriFlow retopology is available in an [opt-in linked build](docs/retopology-candidate.md#linked-development-build).
 
 ## Quick start
 

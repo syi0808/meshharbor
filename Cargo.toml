@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/meshharbor", "crates/atlas-baker", "crates/xatlas-sys"]
+members = ["crates/core", "crates/meshharbor", "crates/atlas-baker", "crates/xatlas-sys", "crates/quadriflow-sys"]
 resolver = "2"
 
 [workspace.package]

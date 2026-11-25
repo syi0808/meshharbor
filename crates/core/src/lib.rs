@@ -50,9 +50,10 @@ pub use operation::{
     MeshOperationResult, OperationCore, OperationDescriptor, RuntimeDoctor, SimplificationResult,
 };
 pub use quadriflow::{
-    QuadMesh, QuadMeshReport, QuadRetopologyOptions, QuadRetopologyPreflight, QuadRetopologyReport,
-    parse_quad_obj_output, quad_mesh_preview_glb, quadriflow_preflight_glb,
-    quadriflow_retopology_glb, quadriflow_sidecar_available,
+    LINKED_QUADRIFLOW_WORKER_ARG, MAX_LINKED_QUADRIFLOW_REQUEST_BYTES,
+    MAX_QUAD_TARGET as MAX_QUADRIFLOW_TARGET, QuadMesh, QuadMeshReport, QuadRetopologyOptions,
+    QuadRetopologyPreflight, QuadRetopologyReport, parse_quad_obj_output, quad_mesh_preview_glb,
+    quadriflow_preflight_glb, quadriflow_retopology_glb, quadriflow_sidecar_available,
 };
 pub use quadriflow_installer::{
     QuadriFlowBackendStatus, QuadriFlowInstallError, QuadriFlowInstallResult,

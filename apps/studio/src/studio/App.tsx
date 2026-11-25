@@ -1528,11 +1528,11 @@ export function App() {
             <span>{quadriflowBackend?.status.replaceAll('_', ' ') ?? 'Connect engine'}</span>
             <HelpTip label="About the QuadriFlow backend">
               {quadriflowBackend ? <>{quadriflowBackend.message} {quadriflowBackend.next_step}</>
-                : 'Retopology needs a verified managed QuadriFlow backend.'}
+                : 'Retopology needs an available QuadriFlow backend.'}
             </HelpTip>
           </div>
         </div>
-        <Button onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</Button>
+        {!quadriflowBackend?.available && <Button onClick={() => void installQuadriflowBackend()} disabled={!quadriflowBackend?.install_available || installingBackend}>{installingBackend ? 'Installing…' : quadriflowBackend?.install_available ? 'Install QuadriFlow' : 'Install unavailable'}</Button>}
       </Disclosure>}
     </>;
   }
