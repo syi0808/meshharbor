@@ -10,6 +10,7 @@
 ## Develop and distribute
 
 - [Contribution guide](../CONTRIBUTING.md) · [Architecture and operation limits](architecture.md) · [Studio design references](studio-workspace-layout.md)
+- [Semantic repart feasibility](semantic-repart-feasibility.md)
 - [Embedded Studio build and CI smoke](embedded-studio-package-smoke.md) · [Pinned uv bootstrap](uv-bootstrap.md)
 - [Third-party notices](../THIRD-PARTY-NOTICES.md) · [Source provenance](source-provenance.md) · [Licensing status](licensing-status.md) · [Release checklist](releasing.md)
 - [QuadriFlow candidate status](retopology-candidate.md) · [Packaging](quadriflow-sidecar-packaging.md) · [Release manifest](quadriflow-sidecar-manifest.md) · [Manifest schema](quadriflow-sidecar-manifest-schema.md) · [Offline apt evidence](quadriflow-apt-evidence.md)
