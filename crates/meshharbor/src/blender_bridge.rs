@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     env, fs,
     io::{self, Read, Write},
     net::SocketAddr,
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{process::Command, task, time::timeout};
 use uuid::Uuid;
 
-use crate::{ApiError, AppState};
+use crate::{ApiError, AppState, data_dir_lock::DataDirLock};
 
 const ADDON_FILENAME: &str = "meshharbor_bridge.py";
 const ADDON_SOURCE: &str = include_str!("../blender/meshharbor_bridge.py");
@@ -27,7 +28,9 @@ const ADDON_MARKER: &str = "\"name\": \"MeshHarbor Bridge\"";
 const PREFERENCES_FILENAME: &str = "userpref.blend";
 const MAX_PREFERENCES_BYTES: u64 = 64 * 1024 * 1024;
 const HEARTBEAT_LIMIT: Duration = Duration::from_secs(8);
-const TRANSFER_LIMIT: Duration = Duration::from_secs(240);
+pub(crate) const TRANSFER_LIMIT: Duration = Duration::from_secs(240);
+const RECENT_TRANSFER_LIMIT: usize = 16;
+static INSTALLATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const PROBE: &str = r#"import bpy, json; print("MESHHARBOR_BLENDER:" + json.dumps({"version": bpy.app.version, "addons": bpy.utils.user_resource("SCRIPTS", path="addons"), "config": bpy.utils.user_resource("CONFIG")}))"#;
 const ACTIVATE: &str = r#"
 import addon_utils
@@ -58,13 +61,13 @@ mod processes;
 struct Bridge {
     listen: SocketAddr,
     queue: Arc<Mutex<Queue>>,
-    installation: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
 struct Queue {
     client: Option<(Uuid, Instant)>,
     transfer: Option<Transfer>,
+    recent: VecDeque<SendStatus>,
 }
 
 struct Transfer {
@@ -76,9 +79,9 @@ struct Transfer {
     error: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Stage {
+pub(crate) enum Stage {
     Waiting,
     Importing,
     Succeeded,
@@ -86,7 +89,7 @@ enum Stage {
 }
 
 impl Stage {
-    fn active(self) -> bool {
+    pub(crate) fn active(self) -> bool {
         matches!(self, Self::Waiting | Self::Importing)
     }
 }
@@ -119,16 +122,16 @@ impl Queue {
     }
 }
 
-#[derive(Deserialize)]
-struct SendRequest {
-    asset_id: String,
+#[derive(Deserialize, Serialize)]
+pub(crate) struct SendRequest {
+    pub(crate) asset_id: String,
 }
 
-#[derive(Serialize)]
-struct SendStatus {
-    id: Uuid,
-    stage: Stage,
-    error: Option<String>,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct SendStatus {
+    pub(crate) id: Uuid,
+    pub(crate) stage: Stage,
+    pub(crate) error: Option<String>,
 }
 
 impl From<&Transfer> for SendStatus {
@@ -156,7 +159,6 @@ pub(crate) fn routes(listen: SocketAddr) -> Router<AppState> {
     let bridge = Bridge {
         listen,
         queue: Arc::default(),
-        installation: Arc::default(),
     };
     Router::new()
         .route("/api/v1/blender", get(status))
@@ -221,7 +223,12 @@ async fn send(
         error: None,
     };
     let response = SendStatus::from(&transfer);
-    queue.transfer = Some(transfer);
+    if let Some(previous) = queue.transfer.replace(transfer) {
+        if queue.recent.len() == RECENT_TRANSFER_LIMIT {
+            queue.recent.pop_front();
+        }
+        queue.recent.push_back(SendStatus::from(&previous));
+    }
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
@@ -235,13 +242,18 @@ async fn send_status(
         .transfer
         .as_ref()
         .filter(|transfer| transfer.id == id)
+        .map(SendStatus::from)
+        .or_else(|| {
+            queue
+                .recent
+                .iter()
+                .find(|transfer| transfer.id == id)
+                .cloned()
+        })
         .ok_or_else(|| {
             CoreError::NotFound("This Blender transfer is no longer available.".into())
         })?;
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(SendStatus::from(transfer)),
-    ))
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(transfer)))
 }
 
 async fn poll(
@@ -379,32 +391,45 @@ struct BlenderLocation {
 }
 
 #[derive(Serialize)]
-struct InstallResult {
+pub(crate) struct InstallResult {
     version: String,
 }
 
 async fn install_addon(
     Extension(bridge): Extension<Bridge>,
 ) -> Result<Json<InstallResult>, ApiError> {
+    Ok(Json(install_local(bridge.listen).await?))
+}
+
+pub(crate) async fn install_local(listen: SocketAddr) -> Result<InstallResult, CoreError> {
     if FsPath::new("/.dockerenv").exists() || FsPath::new("/run/.containerenv").exists() {
         return Err(CoreError::OperationUnavailable(
             "MeshHarbor is running in a container. Download the add-on and install it on the host from Blender.".into(),
-        ).into());
+        ));
     }
-    let _installation = bridge.installation.try_lock().map_err(|_| {
+    let _installation = INSTALLATION.try_lock().map_err(|_| {
         CoreError::Conflict("Another Blender add-on installation is in progress.".into())
     })?;
     installation_io(ensure_blender_closed).await?;
     let (executable, location) = find_blender().await?;
     let [major, minor, patch] = location.version;
     let addon = location.addons.join(ADDON_FILENAME);
-    let staged = installation_io(move || {
-        ensure_blender_closed()?;
-        let staged = StagedPreferences::open(&location.config)?;
-        install_source(&location.addons, &addon_source(bridge.listen))?;
-        Ok(staged)
-    })
-    .await?;
+    let (staged, profile_lock) =
+        installation_io(move || {
+            ensure_blender_closed()?;
+            let profile_lock = DataDirLock::try_acquire_for_blender_install(&location.config)
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::WouldBlock => CoreError::Conflict(
+                        "Another Blender add-on installation is in progress.".into(),
+                    ),
+                    _ => error.into(),
+                })?;
+            ensure_blender_closed()?;
+            let staged = StagedPreferences::open(&location.config)?;
+            install_source(&location.addons, &addon_source(listen))?;
+            Ok((staged, profile_lock))
+        })
+        .await?;
     let mut command = blender_command(executable);
     command
         .args([
@@ -435,9 +460,10 @@ async fn install_addon(
             && !preferences_loaded(&output.stdout, &staged.staged_path())
             && !preferences_loaded(&output.stderr, &staged.staged_path()))
     {
-        return Err(activation_failed().into());
+        return Err(activation_failed());
     }
     installation_io(move || {
+        let _profile_lock = profile_lock;
         if saved {
             staged.commit(ensure_blender_closed)
         } else {
@@ -445,9 +471,9 @@ async fn install_addon(
         }
     })
     .await?;
-    Ok(Json(InstallResult {
+    Ok(InstallResult {
         version: format!("{major}.{minor}.{patch}"),
-    }))
+    })
 }
 
 async fn installation_io<T: Send + 'static>(
@@ -468,7 +494,7 @@ fn ensure_blender_closed() -> Result<(), CoreError> {
     match processes::blender_running() {
         Ok(false) => Ok(()),
         Ok(true) => Err(CoreError::Conflict(
-            "Blender is running. Quit Blender, then click Install locally again.".into(),
+            "Blender is running. Quit Blender, then retry the add-on installation.".into(),
         )),
         Err(_) => Err(CoreError::OperationUnavailable(
             "Could not verify that Blender is closed. No Blender preferences were changed. Use Download add-on to install manually.".into(),
@@ -567,6 +593,7 @@ fn blender_command(executable: PathBuf) -> Command {
         "1",
     ]);
     command.kill_on_drop(true);
+    command.env_remove("MESHHARBOR_API_TOKEN");
     #[cfg(windows)]
     command.creation_flags(0x08000000);
     command

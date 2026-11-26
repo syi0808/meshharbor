@@ -34,7 +34,7 @@ Selected endpoints:
 - `POST /api/v1/jobs/{job_id}/retry` (start a new attempt from a replayable failed or stopped job)
 - `GET /api/v1/artifacts/{artifact_id}`
 - Studio-only: `GET /api/v1/blender` returns bridge connection status; `POST /api/v1/blender/install` installs and enables the bundled add-on for Blender’s next launch and returns `409 Conflict` if Blender is running. `GET /api/v1/blender/addon` downloads the add-on for manual installation.
-- Studio-only: `POST /api/v1/blender/send` with `{"asset_id":"..."}` requests a transfer of that exact model version. `GET /api/v1/blender/send/{id}` reports the transfer's status. The native companion uses dedicated loopback-only routes that reject browser requests. It has no general asset access and receives only the version Studio requests.
+- `POST /api/v1/blender/send` with `{"asset_id":"..."}` requests a transfer of that exact model version. `GET /api/v1/blender/send/{id}` reports the status of a recent transfer. These two endpoints accept the Studio dashboard or an authenticated local bearer client. The separate native companion routes reject browser requests; the companion has no general asset access and receives only the requested version.
 
 ## Model versions
 

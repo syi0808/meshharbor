@@ -28,7 +28,7 @@ test('Studio downloads the Blender add-on and sends the selected compressed vers
   await expect(dots).toHaveCSS('animation-name', 'none');
 
   const install = dialog.getByRole('button', { name: 'Install locally' });
-  const blenderRunning = 'Blender is running. Quit Blender, then click Install locally again.';
+  const blenderRunning = 'Blender is running. Quit Blender, then retry the add-on installation.';
   await page.route('**/api/v1/blender/install', route => route.fulfill({
     status: 409, json: { error: blenderRunning },
   }), { times: 1 });

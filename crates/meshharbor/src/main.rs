@@ -33,13 +33,13 @@ use tracing_subscriber::EnvFilter;
 include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
 
 mod blender_bridge;
+mod blender_client;
 mod browser_login;
 mod data_dir_lock;
 mod huggingface_status;
 mod job_scheduler;
 #[cfg(feature = "bundled-quadriflow")]
 mod quadriflow_worker;
-
 /// Prevents fork/exec lock tests from inheriting another test's live advisory-lock descriptor.
 #[cfg(test)]
 pub(crate) static DATA_DIR_LOCK_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -66,6 +66,14 @@ enum Command {
     },
     /// Start the stdio MCP server.
     Mcp,
+    /// Install the Blender add-on or send a model to the open Blender scene.
+    Blender {
+        /// Loopback address of the MeshHarbor REST server.
+        #[arg(long, global = true, env = blender_client::SERVER_ENV, default_value = blender_client::DEFAULT_SERVER, value_parser = blender_client::parse_server)]
+        server: SocketAddr,
+        #[command(subcommand)]
+        command: BlenderCommand,
+    },
     /// Import a PNG, JPEG, or GLB asset (up to 512 MiB; images up to 16 MiB/16 MP).
     Import { file: PathBuf },
     /// Inspect a supported asset file (up to 512 MiB; images up to 16 MiB/16 MP).
@@ -163,6 +171,21 @@ enum Command {
         #[command(subcommand)]
         command: RuntimeCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum BlenderCommand {
+    /// Install and enable the add-on for the next Blender launch. Quit Blender first.
+    Install,
+    /// Send a stored GLB version to the open Blender scene. Requires MESHHARBOR_API_TOKEN.
+    Send {
+        asset_id: String,
+        /// Return the transfer ID without waiting for Blender to import the model.
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Check an existing Blender transfer. Requires MESHHARBOR_API_TOKEN.
+    TransferStatus { transfer_id: uuid::Uuid },
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,6 +351,25 @@ struct ExportQuadObjArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct BlenderInstallArgs {
+    /// Set true only after the user approves installing the add-on and changing Blender preferences.
+    #[serde(default)]
+    confirmed: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BlenderSendArgs {
+    /// ID of the exact GLB asset version stored by the running MeshHarbor server.
+    asset_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BlenderTransferArgs {
+    /// Transfer ID returned by send_to_blender.
+    transfer_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ModelInstallConfirmation {
     /// Must be true to queue the approximately 25–30 GB model download.
     confirm_large_download: bool,
@@ -340,7 +382,7 @@ struct UploadQuery {
     filename: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ApiErrorBody {
     error: String,
 }
@@ -583,6 +625,48 @@ impl McpServer {
     }
 
     #[tool(
+        description = "Install and enable the bundled MeshHarbor Bridge add-on on the local Blender host for its next launch. Only call after explicit user approval. Blender must be closed; if it is running, this does not change its files or preferences. No MeshHarbor REST server or API token is needed to install."
+    )]
+    async fn install_blender_addon(&self, params: Parameters<BlenderInstallArgs>) -> String {
+        if !params.0.confirmed {
+            return json!({"error": "Installing and enabling the Blender add-on requires the user's explicit confirmation."}).to_string();
+        }
+        let result = async {
+            let server = blender_client::configured_server()?;
+            blender_bridge::install_local(server).await
+        }
+        .await;
+        blender_tool_result(result)
+    }
+
+    #[tool(
+        description = "Send the exact stored GLB version to the current scene in the connected Blender. Supports MeshHarbor meshopt-compressed GLBs without changing the source. Requires a running local MeshHarbor REST server, MESHHARBOR_API_TOKEN in the MCP process environment, and Start Bridge enabled in Blender. Returns a transfer ID immediately; poll get_blender_transfer to confirm import. Does not install the add-on or save the scene."
+    )]
+    async fn send_to_blender(&self, params: Parameters<BlenderSendArgs>) -> String {
+        let result = async {
+            let client = blender_client::Client::new(blender_client::configured_server()?)?;
+            client.send(params.0.asset_id).await
+        }
+        .await;
+        blender_tool_result(result)
+    }
+
+    #[tool(
+        description = "Check a recent Blender transfer without sending it again. Reports waiting, importing, succeeded or failed."
+    )]
+    async fn get_blender_transfer(&self, params: Parameters<BlenderTransferArgs>) -> String {
+        let Ok(id) = uuid::Uuid::parse_str(&params.0.transfer_id) else {
+            return json!({"error": "The Blender transfer ID is invalid."}).to_string();
+        };
+        let result = async {
+            let client = blender_client::Client::new(blender_client::configured_server()?)?;
+            client.status(id).await
+        }
+        .await;
+        blender_tool_result(result)
+    }
+
+    #[tool(
         description = "Export a completed QuadriFlow retopology result's editable quad OBJ artifact to an absolute path inside MESHHARBOR_EXPORT_DIR (defaults to the MeshHarbor data directory's exports folder) on the local MCP host. The destination must not exist; existing files are never overwritten. Maximum export size is 64 MiB."
     )]
     async fn export_quad_obj(&self, params: Parameters<ExportQuadObjArgs>) -> String {
@@ -737,6 +821,14 @@ impl McpServer {
 
 #[tool_handler]
 impl ServerHandler for McpServer {}
+
+fn blender_tool_result(result: Result<impl Serialize, impl std::fmt::Display>) -> String {
+    match result {
+        Ok(value) => serde_json::to_string_pretty(&value)
+            .unwrap_or_else(|error| json!({"error": error.to_string()}).to_string()),
+        Err(error) => json!({"error": error.to_string()}).to_string(),
+    }
+}
 
 async fn read_bounded_asset(
     path: &std::path::Path,
@@ -930,6 +1022,39 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             state.scheduler.drain().await;
             closed?;
         }
+        Command::Blender { server, command } => match command {
+            BlenderCommand::Install => {
+                let result = blender_bridge::install_local(server).await?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            BlenderCommand::Send { asset_id, no_wait } => {
+                let client = blender_client::Client::new(server)?;
+                let transfer = client.send(asset_id).await?;
+                let transfer = if no_wait {
+                    transfer
+                } else {
+                    client.wait(transfer).await?
+                };
+                if transfer.stage == blender_bridge::Stage::Failed {
+                    return Err(format!(
+                        "Blender transfer {} failed: {}",
+                        transfer.id,
+                        transfer
+                            .error
+                            .as_deref()
+                            .unwrap_or("Blender could not import the model."),
+                    )
+                    .into());
+                }
+                println!("{}", serde_json::to_string_pretty(&transfer)?);
+            }
+            BlenderCommand::TransferStatus { transfer_id } => {
+                let transfer = blender_client::Client::new(server)?
+                    .status(transfer_id)
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&transfer)?);
+            }
+        },
         Command::Import { file } => {
             let bytes = read_bounded_asset(&file, MAX_ASSET_BYTES).await?;
             let name = file
@@ -1392,16 +1517,17 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         == Some(DASHBOARD_MARKER)
         && (origin_matches_host
             || (safe_read && request.headers().get(header::ORIGIN).is_none() && same_origin_fetch));
-    let dashboard_only = path.starts_with("/api/v1/blender/")
-        || path == "/api/v1/blender"
-        || path.starts_with("/api/v1/runtime/")
-            && (path.ends_with("/huggingface")
-                || path.ends_with("/model-files")
-                || path.ends_with("/install")
-                || path == "/api/v1/runtime/environment/setup"
-                || path.ends_with("/model-access")
-                || path.ends_with("/huggingface/browser")
-                || path.contains("/huggingface/browser/"));
+    let dashboard_only = matches!(
+        path,
+        "/api/v1/blender" | "/api/v1/blender/addon" | "/api/v1/blender/install"
+    ) || path.starts_with("/api/v1/runtime/")
+        && (path.ends_with("/huggingface")
+            || path.ends_with("/model-files")
+            || path.ends_with("/install")
+            || path == "/api/v1/runtime/environment/setup"
+            || path.ends_with("/model-access")
+            || path.ends_with("/huggingface/browser")
+            || path.contains("/huggingface/browser/"));
     if dashboard_authorized || (authorized && !dashboard_only) {
         next.run(request).await
     } else {

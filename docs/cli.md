@@ -32,6 +32,32 @@ meshharbor process-mesh "$ASSET_ID" --operation mesh.compress --output ./scene-c
 
 Mesh processing targets supported static indexed triangle GLBs and creates a new asset. Simplification fails without creating an asset if it cannot honor the triangle limit. Compressed GLBs require a viewer that supports `KHR_meshopt_compression`; they do not include an uncompressed geometry fallback. See [architecture and operation limits](architecture.md#simplification-and-uvbaking-boundary).
 
+## Send to Blender
+
+With Blender 4.2+ closed, run `meshharbor blender install` to install and enable
+the bundled add-on for the next Blender launch. Installation needs neither a
+server nor a token. If Blender is running, quit it and retry; its settings are
+not changed. In Blender, press **N** in the 3D Viewport and choose
+**MeshHarbor → Start Bridge**.
+
+To transfer an asset, run `meshharbor serve` on the same computer. The Studio
+browser does not need to be open. Set `MESHHARBOR_API_TOKEN` in the sending
+process to the server's bearer token (the configured value or the temporary token
+printed by the server). Use the asset ID in that server's data directory:
+
+```sh
+meshharbor blender send "$ASSET_ID"
+meshharbor blender send "$ASSET_ID" --no-wait
+meshharbor blender transfer-status "$TRANSFER_ID"
+```
+
+By default, `send` waits for Blender to confirm the import. With `--no-wait`,
+it returns an ID for `transfer-status`. For a nondefault listen address, pass
+`--server 127.0.0.1:PORT` or set `MESHHARBOR_BLENDER_SERVER` for both installation
+and transfer. Only loopback IP addresses are accepted (default `127.0.0.1:7432`).
+Standard and MeshHarbor meshopt-compressed GLBs use the same bridge. The source
+GLB and existing scene file are not overwritten.
+
 ## Image-to-3D
 
 Run `meshharbor doctor` to check local backend readiness. Follow the [Pixal3D MLX](pixal3d-mlx-manual-runtime.md) or [CUDA](pixal3d-cuda-managed-runtime.md) guide for setup and gated model downloads. After setup, import your image and substitute its asset ID:

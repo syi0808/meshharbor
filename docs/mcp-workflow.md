@@ -49,6 +49,25 @@ and set `parameters.backend_id` to `trellis-text-mlx` or `trellis-text-cuda`; no
 9. Call `export_glb` with that mesh asset ID and an absolute `.glb` output path
    on the computer running the local MCP server.
 
+## Send to Blender
+
+1. With Blender 4.2+ closed, ask the owner to approve installing and enabling the
+   add-on. Call `install_blender_addon` with `{"confirmed":true}`. It installs
+   on the MCP server host, requires no REST server or token, and does not
+   change Blender's files or preferences if Blender is running.
+2. Open Blender and choose **N → MeshHarbor → Start Bridge** in the 3D Viewport.
+   Start `meshharbor serve` on the same computer, using the same data directory
+   as `meshharbor mcp`. No Studio browser tab is needed.
+3. Set `MESHHARBOR_API_TOKEN` in the MCP process environment to the REST server's
+   bearer token, not in a tool argument. If the server listens on a nondefault
+   port, set `MESHHARBOR_BLENDER_SERVER` to its loopback address before starting
+   the MCP process, including before installing the add-on. The default is
+   `127.0.0.1:7432`.
+4. Call `send_to_blender` with `{"asset_id":"..."}` and pass the returned ID to
+   `get_blender_transfer` as `{"transfer_id":"..."}`. A `succeeded` result
+   confirms the selected version was added to the current scene; the scene
+   file and stored GLB remain unchanged. Meshopt-compressed GLBs are supported.
+
 ## Export safeguards
 
 - `export_glb` accepts only stored mesh assets whose artifact is a binary GLB.

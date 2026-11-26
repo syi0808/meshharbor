@@ -47,6 +47,14 @@ impl DataDirLock {
         Self::try_acquire(root, ".meshharbor.runtime.lock", LockMode::Exclusive)
     }
 
+    pub fn try_acquire_for_blender_install(config: &Path) -> io::Result<Self> {
+        Self::try_acquire(
+            config,
+            ".meshharbor-blender-install.lock",
+            LockMode::Exclusive,
+        )
+    }
+
     /// Acquire read access for model inference, excluding installs and cache mutation.
     pub fn try_acquire_for_generation(root: &Path) -> io::Result<Self> {
         Self::try_acquire(root, ".meshharbor.runtime.lock", LockMode::Shared)

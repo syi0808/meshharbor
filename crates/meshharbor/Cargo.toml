@@ -28,6 +28,7 @@ meshharbor-core = { path = "../core" }
 meshharbor-quadriflow-sys = { path = "../quadriflow-sys", optional = true }
 rmcp.workspace = true
 remesh = { workspace = true, optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
