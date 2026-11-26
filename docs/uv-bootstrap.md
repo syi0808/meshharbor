@@ -1,6 +1,8 @@
 # Pinned uv bootstrap
 
-When setup is explicitly requested, MeshHarbor uses `MESHHARBOR_UV` if configured, then checks for its existing pinned uv and for uv on `PATH` or in common install directories such as `~/.local/bin` and `/opt/homebrew/bin`. If no executable is available, it installs Astral uv 0.13.8 under `<app-data>/tools/uv-0.13.8` for the shared model environment.
+On service startup, MeshHarbor checks `MESHHARBOR_UV` if configured, then looks for existing uv and compatible CPython 3.10/3.12. It links reusable tools into `<app-data>/model-environment/downloads`; status reads use those selections instead of searching the host again. Restart the service to discover tools installed since startup. Startup does not download or install packages.
+
+When **Set up environment** is confirmed, MeshHarbor downloads only missing or unlinkable tools. It installs pinned uv under `<app-data>/model-environment/downloads/tools/uv-0.13.8` and missing Python versions under the same downloads directory's `python` subdirectory. On platforms that restrict symlinks, such as Windows without symlink privileges, setup uses private downloads when linking is not possible. Standalone `meshharbor runtime environment-setup` also performs discovery if no saved selection exists.
 
 The release is pinned to the immutable official GitHub release [0.13.8](https://github.com/astral-sh/uv/releases/tag/0.13.8). The selected asset is chosen from the running OS, CPU architecture, and Linux GNU/musl ABI. Supported targets are macOS arm64/x86-64, Windows arm64/x86-64, and Linux arm64/x86-64 with GNU or musl. Other targets fail with an actionable error and can use an explicitly configured uv executable.
 
@@ -8,4 +10,4 @@ Before extraction or execution, MeshHarbor downloads the asset over HTTPS from `
 
 The download requires `curl` to be available on `PATH`. Archive extraction uses system `tar` on Unix-like platforms and PowerShell's `Expand-Archive` on Windows. If any prerequisite is absent, setup returns an error; it does not silently run a second installer path. Users behind a restricted network may need to allow the official GitHub release host. The app never changes the host network policy.
 
-uv itself is downloaded only when a user explicitly starts runtime setup. Python, wheels, and model weights remain separate explicit actions. This bootstrap does not enable CUDA or make the Pixal3D MLX backend available on non-Apple-Silicon systems.
+Shared tool downloads require explicit environment setup. Model runtime dependencies and weights are not installed during that setup. This bootstrap does not enable CUDA or make the Pixal3D MLX backend available on non-Apple-Silicon systems.

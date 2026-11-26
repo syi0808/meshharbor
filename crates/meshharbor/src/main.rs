@@ -1027,6 +1027,17 @@ async fn open_job_service(
     let owner = uuid::Uuid::new_v4();
     let owner_lock = DataDirLock::try_acquire_for_job_owner(root, owner)?;
     let scheduler = Arc::new(JobScheduler::owned(owner.to_string()));
+    let detection_core = core.clone();
+    match task::spawn_blocking(move || {
+        let _runtime_lock = acquire_runtime_write_lock(detection_core.store().root())?;
+        detection_core.detect_model_environment()
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "Could not detect shared model tools at startup"),
+        Err(error) => tracing::warn!(%error, "Shared model tool detection worker failed"),
+    }
     Ok(JobService {
         state: AppState { core, scheduler },
         _service_lock: service_lock,
@@ -4458,6 +4469,17 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn startup_records_tool_detection_without_queuing_a_download() {
+        let root = std::env::temp_dir().join(format!("meshharbor-detect-{}", uuid::Uuid::new_v4()));
+        let service = open_job_service(&root).await.unwrap();
+        assert!(root.join("model-environment/tools-v2.json").is_file());
+        assert!(!root.join("model-environment/huggingface").exists());
+        assert!(service.state.core.store().list_jobs(20).unwrap().is_empty());
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -51,66 +51,42 @@ impl UvAsset {
     }
 }
 
-pub(crate) fn ensure_uv_tracked(
+pub(crate) fn download_uv_tracked(
     data_root: &Path,
     execution: crate::job_execution::JobExecution<'_>,
 ) -> CoreResult<PathBuf> {
     execution.stage("prepare_uv")?;
-    if let Some(override_path) = env::var_os("MESHHARBOR_UV") {
-        let path = PathBuf::from(override_path);
-        if !path.is_file() {
-            return Err(CoreError::OperationUnavailable(format!(
-                "MESHHARBOR_UV points to a missing file: {}",
-                path.display()
-            )));
-        }
-        execution.note("Using the explicitly configured uv executable.")?;
-        return Ok(path);
-    }
-
+    crate::model_storage::managed_directory(data_root, "tools")?;
+    crate::model_storage::managed_directory(data_root, &format!("tools/uv-{UV_VERSION}"))?;
     let app_managed = managed_executable(data_root);
-    if app_managed.is_file() {
+    if crate::model_storage::managed_file_size(
+        data_root,
+        &format!("tools/uv-{UV_VERSION}/{}", uv_executable_name()),
+    )?
+    .is_some()
+    {
         verify_uv_version(&app_managed, execution)?;
         execution.note("Reusing app-managed uv.")?;
         return Ok(app_managed);
     }
-
-    for candidate in uv_candidates().filter(|path| is_executable(path)) {
-        match verify_uv_command(&candidate, execution) {
-            Ok(version) if version.starts_with("uv ") => {
-                execution.note("Reusing an existing uv executable.")?;
-                return Ok(candidate);
-            }
-            Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
-            _ => continue,
-        }
-    }
-
     install_pinned(data_root, execution)
 }
 
-fn managed_executable(data_root: &Path) -> PathBuf {
-    let bin = data_root.join("tools").join(format!("uv-{UV_VERSION}"));
-    if cfg!(windows) {
-        bin.join("uv.exe")
-    } else {
-        bin.join("uv")
-    }
+pub(crate) fn managed_executable(data_root: &Path) -> PathBuf {
+    data_root
+        .join("tools")
+        .join(format!("uv-{UV_VERSION}"))
+        .join(uv_executable_name())
 }
 
-pub(crate) fn uv_available(data_root: &Path) -> bool {
-    if let Some(path) = env::var_os("MESHHARBOR_UV") {
-        return is_executable(Path::new(&path));
-    }
-    is_executable(&managed_executable(data_root))
-        || uv_candidates().any(|path| is_executable(&path))
+pub(crate) fn uv_executable_name() -> &'static str {
+    if cfg!(windows) { "uv.exe" } else { "uv" }
 }
 
-fn uv_candidates() -> impl Iterator<Item = PathBuf> {
-    let executable = if cfg!(windows) { "uv.exe" } else { "uv" };
+pub(crate) fn uv_candidates() -> impl Iterator<Item = PathBuf> {
     local_tool_dirs()
         .into_iter()
-        .map(move |directory| directory.join(executable))
+        .map(|directory| directory.join(uv_executable_name()))
 }
 
 pub(crate) fn local_tool_dirs() -> Vec<PathBuf> {

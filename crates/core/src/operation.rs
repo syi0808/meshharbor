@@ -477,6 +477,10 @@ impl OperationCore {
         ModelEnvironment::prepare(self.store.root(), JobExecution::default())
     }
 
+    pub fn detect_model_environment(&self) -> CoreResult<ModelEnvironmentStatus> {
+        ModelEnvironment::detect(self.store.root())
+    }
+
     pub fn validate_runtime_job(&self, kind: crate::RuntimeJobKind) -> CoreResult<()> {
         if matches!(kind, crate::RuntimeJobKind::EnvironmentSetup) {
             return Ok(());
