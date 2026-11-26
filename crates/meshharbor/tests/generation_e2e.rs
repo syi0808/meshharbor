@@ -491,6 +491,48 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
 
     let response = wait_for_health(&address, &mut server.0);
     assert_eq!(response.0, 200, "REST API failed to become ready");
+    let engine_cli = |args: &[&str]| {
+        let output = meshharbor()
+            .args(["engine", "--server", &address.to_string()])
+            .args(args)
+            .env("MESHHARBOR_API_TOKEN", auth_token)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let export_dir = runtime._tree.0.join("engine-exports");
+    let mut mcp_command = meshharbor();
+    mcp_command
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("mcp")
+        .env("MESHHARBOR_SERVER", address.to_string())
+        .env("MESHHARBOR_API_TOKEN", auth_token)
+        .env("MESHHARBOR_EXPORT_DIR", &export_dir);
+    let mut mcp = McpClient::start(mcp_command);
+    assert_eq!(engine_cli(&["runtime", "health"])["status"], "ok");
+    assert_eq!(engine_cli(&["runtime", "jobs", "pixal3d-mlx"]), json!([]));
+    let missing_session = mcp.request(
+        "tools/call",
+        json!({"name":"engine_runtime","arguments":{"request":{
+            "action":"login_status", "backend":"pixal3d-mlx", "session":uuid::Uuid::nil()
+        }}}),
+    );
+    assert_eq!(
+        missing_session["result"]["isError"], true,
+        "{missing_session}"
+    );
+    assert!(
+        missing_session["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("session not found")
+    );
 
     let (status, body) = http_request(
         address,
@@ -641,6 +683,31 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     .unwrap();
     assert_eq!(status, 200);
     assert_eq!(artifact_bytes, runtime.generated_glb);
+    assert_eq!(
+        engine_cli(&["assets", "show", generated_asset_id])["id"],
+        generated_asset_id
+    );
+    assert_eq!(
+        mcp.tool(
+            "engine_assets",
+            json!({"request":{"action":"versions","model_id":generated_asset_id}})
+        )["current_asset_id"],
+        generated_asset_id
+    );
+    let output_path = export_dir.join("generated.glb");
+    let exported = mcp.tool(
+        "engine_assets",
+        json!({"request":{"action":"export","artifact_id":artifact_id,"output_path":output_path}}),
+    );
+    assert_eq!(exported["byte_size"], runtime.generated_glb.len());
+    assert_eq!(fs::read(output_path).unwrap(), runtime.generated_glb);
+    assert_eq!(
+        engine_cli(&["jobs", "steps", job_id])
+            .as_array()
+            .unwrap()
+            .len(),
+        steps.len()
+    );
 
     let hold_generation = runtime.source_root.join("hold-generation");
     fs::write(&hold_generation, []).unwrap();
@@ -711,6 +778,33 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     let store = meshharbor_core::Store::open(&data_dir).unwrap();
     assert_eq!(store.list_assets(10).unwrap().len(), 2);
     assert_eq!(fs::read_dir(store.staging_root()).unwrap().count(), 0);
+    let version = store
+        .import_derived_asset(
+            "new-version.glb",
+            &runtime.generated_glb,
+            generated_asset_id,
+            json!({"operation":"mesh.cleanup"}),
+        )
+        .unwrap();
+    let model_page = engine_cli(&[
+        "assets",
+        "page",
+        "--models-only",
+        "--kind",
+        "mesh",
+        "--derived",
+        "true",
+    ]);
+    assert_eq!(model_page["items"][0]["id"], version.id);
+    let restored = mcp.tool("engine_assets", json!({"request":{"action":"restore","model_id":generated_asset_id,"asset_id":generated_asset_id}}));
+    assert_eq!(restored["model"]["current_asset_id"], generated_asset_id);
+    assert_eq!(
+        engine_cli(&["assets", "versions", generated_asset_id])["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 
     let (status, body) = http_request(
         address,
@@ -732,20 +826,51 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
         assert!(Instant::now() < deadline, "retry did not start the worker");
         thread::sleep(Duration::from_millis(25));
     }
-    let owned_queue = http_request(
+    let queued = engine_cli(&[
+        "jobs",
+        "submit",
+        "image.generate",
+        "--input",
+        &job_body["input"].to_string(),
+        "--parameters",
+        &job_body["parameters"].to_string(),
+    ]);
+    let queued_id = queued["id"].as_str().unwrap();
+    assert_eq!(queued["state"], "queued");
+    let mcp_queued = mcp.tool("engine_jobs", json!({"request":{
+        "action":"submit", "operation":"image.generate", "input":job_body["input"], "parameters":job_body["parameters"]
+    }}));
+    let mcp_queued_id = mcp_queued["id"].as_str().unwrap();
+    assert_eq!(mcp_queued["state"], "queued");
+    assert_eq!(
+        engine_cli(&["jobs", "queue"]),
+        json!([queued_id, mcp_queued_id])
+    );
+    assert_eq!(
+        mcp.tool(
+            "engine_jobs",
+            json!({"request":{"action":"swap","job_id":mcp_queued_id,"swap_with":queued_id}})
+        ),
+        json!([mcp_queued_id, queued_id])
+    );
+    let (status, queue) = http_request(
         address,
-        "POST",
-        "/api/v1/jobs",
-        &[
-            ("Authorization", authorization.as_str()),
-            ("Content-Type", "application/json"),
-        ],
-        &job_json,
+        "GET",
+        "/api/v1/jobs/generation-queue",
+        &[("Authorization", &authorization)],
+        &[],
     )
     .unwrap();
-    assert_eq!(owned_queue.0, 202);
-    let queued: Value = serde_json::from_slice(&owned_queue.1).unwrap();
-    assert_eq!(queued["state"], "queued");
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&queue).unwrap(),
+        json!([mcp_queued_id, queued_id])
+    );
+    assert_eq!(
+        engine_cli(&["jobs", "cancel", mcp_queued_id, "--queued-only"])["state"],
+        "cancelled"
+    );
+    assert_eq!(engine_cli(&["jobs", "queue"]), json!([queued_id]));
     assert!(
         Command::new("/bin/kill")
             .args(["-TERM", &server.0.id().to_string()])
@@ -819,42 +944,9 @@ fn mcp_import_generation_and_glb_export_use_the_same_mock_generation_core() {
         .arg("--data-dir")
         .arg(&data_dir)
         .arg("mcp")
-        .env("MESHHARBOR_EXPORT_DIR", &export_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .env("MESHHARBOR_EXPORT_DIR", &export_dir);
     runtime.configure(&mut command);
-    let mut child = command.spawn().expect("launch MCP server");
-    let stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (line_tx, line_rx) = mpsc::channel::<std::io::Result<String>>();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if line_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let mut client = McpClient {
-        child,
-        stdin,
-        lines: line_rx,
-        next_id: 1,
-    };
-
-    let initialized = client.request(
-        "initialize",
-        json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "meshharbor-mock-e2e", "version": "0.1.0" }
-        }),
-    );
-    assert!(
-        initialized.get("result").is_some(),
-        "MCP initialize: {initialized}"
-    );
-    client.notify("notifications/initialized", json!({}));
+    let mut client = McpClient::start(command);
 
     let imported = client.tool(
         "import_asset",
@@ -974,6 +1066,44 @@ struct McpClient {
 }
 
 impl McpClient {
+    fn start(mut command: Command) -> Self {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("launch MCP server");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (line_tx, line_rx) = mpsc::channel::<std::io::Result<String>>();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if line_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut client = Self {
+            child,
+            stdin,
+            lines: line_rx,
+            next_id: 1,
+        };
+        let initialized = client.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05", "capabilities": {},
+                "clientInfo": { "name": "meshharbor-mock-e2e", "version": "0.1.0" }
+            }),
+        );
+        assert!(
+            initialized.get("result").is_some(),
+            "MCP initialize: {initialized}"
+        );
+        client.notify("notifications/initialized", json!({}));
+        client
+    }
+
     fn request(&mut self, method: &str, params: Value) -> Value {
         let id = self.next_id;
         self.next_id += 1;

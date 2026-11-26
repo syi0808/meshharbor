@@ -22,6 +22,7 @@ use meshharbor_core::{
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{CallToolResult, ContentBlock},
     tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
@@ -36,6 +37,7 @@ mod blender_bridge;
 mod blender_client;
 mod browser_login;
 mod data_dir_lock;
+mod engine_client;
 mod huggingface_status;
 mod job_scheduler;
 #[cfg(feature = "bundled-quadriflow")]
@@ -43,6 +45,7 @@ mod quadriflow_worker;
 mod service;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:7432";
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// Prevents fork/exec lock tests from inheriting another test's live advisory-lock descriptor.
 #[cfg(test)]
 pub(crate) static DATA_DIR_LOCK_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -77,6 +80,14 @@ enum Command {
     },
     /// Start the stdio MCP server.
     Mcp,
+    /// Control the same running engine, job queue, and models as Studio.
+    Engine {
+        /// Loopback address of the running MeshHarbor server.
+        #[arg(long, global = true, env = engine_client::SERVER_ENV, default_value = DEFAULT_LISTEN, value_parser = engine_client::parse_server)]
+        server: SocketAddr,
+        #[command(subcommand)]
+        command: engine_client::Command,
+    },
     /// Install the Blender add-on or send a model to the open Blender scene.
     Blender {
         /// Loopback address of the MeshHarbor REST server.
@@ -134,6 +145,9 @@ enum Command {
         /// Overdraw optimization threshold for render.optimize (1.0 to 1.5).
         #[arg(long, value_parser = parse_overdraw_threshold)]
         overdraw_threshold: Option<f32>,
+        /// Remove duplicate faces for retopology without simplifying the mesh. Requires mesh.cleanup.
+        #[arg(long)]
+        for_retopology: bool,
         /// Optional new path for a derived GLB or the triangulated retopology preview; existing files are never overwritten.
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -161,6 +175,12 @@ enum Command {
         texture_size: u16,
         #[arg(long, default_value_t = 100_000)]
         target_faces: u32,
+        /// Additional backend catalog settings as a JSON object.
+        #[arg(long, value_parser = parse_cli_json::<std::collections::BTreeMap<String, Value>>)]
+        tuning: Option<std::collections::BTreeMap<String, Value>>,
+        /// Posed multiview input as a JSON object; positional asset ID must match the first view.
+        #[arg(long, conflicts_with = "prompt", value_parser = parse_cli_json::<meshharbor_core::PosedGenerationInput>)]
+        view_input: Option<meshharbor_core::PosedGenerationInput>,
         /// Write a new output file; existing files are never overwritten.
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -337,6 +357,14 @@ struct JobListArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct JobIdArgs {
     job_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CancelJobArgs {
+    job_id: String,
+    /// Leave a job alone if it has already started.
+    #[serde(default)]
+    queued_only: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -813,8 +841,9 @@ impl McpServer {
     #[tool(
         description = "Cancel a queued job or request a stop for a running job before it commits its result. Mesh processing stops at a safe checkpoint; runtime jobs keep partial downloads for a retry."
     )]
-    async fn cancel_job(&self, params: Parameters<JobIdArgs>) -> String {
-        match cancel_job(&self.core, &self.scheduler, &params.0.job_id, false) {
+    async fn cancel_job(&self, params: Parameters<CancelJobArgs>) -> String {
+        let args = params.0;
+        match cancel_job(&self.core, &self.scheduler, &args.job_id, args.queued_only) {
             Ok(job) => serde_json::to_string_pretty(&job)
                 .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
             Err(error) => json!({"error": error.to_string()}).to_string(),
@@ -828,10 +857,83 @@ impl McpServer {
         serde_json::to_string_pretty(&self.core.runtime_doctor())
             .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
+
+    #[tool(
+        description = "Browse or manage assets on the running Studio engine: page, show, versions, restore, or export the exact bytes of an artifact to a new absolute path within MESHHARBOR_EXPORT_DIR. Requires the local server bearer token in the MCP process environment, never in a tool argument."
+    )]
+    async fn engine_assets(
+        &self,
+        params: Parameters<engine_client::Request<engine_client::Assets>>,
+    ) -> CallToolResult {
+        let result = async {
+            engine_client::Client::configured()?
+                .assets(params.0.request, Some(self.core.store().root()))
+                .await
+        }
+        .await;
+        engine_tool_result(result)
+    }
+
+    #[tool(
+        description = "Manage the running Studio engine's job queue: list, show, steps (including saved command logs), submit, retry, cancel, queue, or swap. Use submit for jobs that should appear in Studio's live generation queue. Confirm retries with the owner first, as runtime retries can download models."
+    )]
+    async fn engine_jobs(
+        &self,
+        params: Parameters<engine_client::Request<engine_client::Jobs>>,
+    ) -> CallToolResult {
+        let result = async {
+            engine_client::Client::configured()?
+                .jobs(params.0.request)
+                .await
+        }
+        .await;
+        engine_tool_result(result)
+    }
+
+    #[tool(
+        description = "Use the running Studio engine's runtime status, operations, per-backend jobs, catalog and Pixal3D setup/downloads, model removal, and Hugging Face connection checks, device login, and disconnect. Ask the owner before changing runtime files or authentication, honor download and gated confirmations, and have the owner complete device authorization in their browser. Never accept or request a Hugging Face token in tool arguments."
+    )]
+    async fn engine_runtime(
+        &self,
+        params: Parameters<engine_client::Request<engine_client::Runtime>>,
+    ) -> CallToolResult {
+        let result = async {
+            engine_client::Client::configured()?
+                .runtime(params.0.request)
+                .await
+        }
+        .await;
+        engine_tool_result(result)
+    }
+
+    #[tool(
+        description = "Check the connection to Blender, or save the bundled .py add-on for manual installation to a new absolute path inside MESHHARBOR_EXPORT_DIR. Downloading does not install or execute the add-on."
+    )]
+    async fn engine_blender(
+        &self,
+        params: Parameters<engine_client::Request<engine_client::Blender>>,
+    ) -> CallToolResult {
+        let result = async {
+            engine_client::Client::configured()?
+                .blender(params.0.request, Some(self.core.store().root()))
+                .await
+        }
+        .await;
+        engine_tool_result(result)
+    }
 }
 
 #[tool_handler]
 impl ServerHandler for McpServer {}
+
+fn engine_tool_result(result: Result<Value, BoxError>) -> CallToolResult {
+    match result {
+        Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
+        Err(error) => CallToolResult::error(vec![ContentBlock::text(
+            json!({"error": error.to_string()}).to_string(),
+        )]),
+    }
+}
 
 fn blender_tool_result(result: Result<impl Serialize, impl std::fmt::Display>) -> String {
     match result {
@@ -1057,6 +1159,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             state.scheduler.drain().await;
             closed?;
         }
+        Command::Engine { server, command } => {
+            let result = command
+                .run(server)
+                .await
+                .map_err(|error| -> Box<dyn std::error::Error> { error })?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         Command::Blender { server, command } => match command {
             BlenderCommand::Install => {
                 let result = blender_bridge::install_local(server).await?;
@@ -1154,6 +1263,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             voxel_resolution,
             padding,
             overdraw_threshold,
+            for_retopology,
             output,
             quad_output,
         } => {
@@ -1166,9 +1276,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 padding,
                 overdraw_threshold,
             )?;
+            if for_retopology && operation != "mesh.cleanup" {
+                return Err("--for-retopology requires mesh.cleanup.".into());
+            }
             preflight_cli_output_paths(output.as_deref(), quad_output.as_deref())?;
             let core = open_operation_core(&root)?;
-            let parameters = process_mesh_cli_parameters(
+            let mut parameters = process_mesh_cli_parameters(
                 &operation,
                 target_quads,
                 resolution,
@@ -1176,6 +1289,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 padding,
                 overdraw_threshold,
             );
+            if for_retopology {
+                parameters["for_retopology"] = json!(true);
+            }
             let result = core.process_mesh_asset(&asset_id, &operation, parameters)?;
             if let Some(path) = output {
                 let artifact = result
@@ -1207,6 +1323,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             resolution,
             texture_size,
             target_faces,
+            tuning,
+            view_input,
             output,
         } => {
             preflight_cli_output_paths(output.as_deref(), None)?;
@@ -1218,7 +1336,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 resolution,
                 texture_size,
                 target_faces,
-                ..GenerationOptions::default()
+                tuning: tuning.unwrap_or_default(),
+                view_input,
             };
             let result = match (asset_id, prompt) {
                 (Some(asset_id), None) => core.generate_image(&asset_id, options)?,
@@ -1373,6 +1492,10 @@ fn api_router_with_statuses(
             post(api_huggingface_connection)
                 .delete(api_disconnect_huggingface)
                 .layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/api/v1/runtime/{backend}/huggingface/check",
+            post(api_check_huggingface_connection),
         )
         .route(
             "/api/v1/runtime/{backend}/model-access",
@@ -1552,17 +1675,10 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         == Some(DASHBOARD_MARKER)
         && (origin_matches_host
             || (safe_read && request.headers().get(header::ORIGIN).is_none() && same_origin_fetch));
-    let dashboard_only = matches!(
-        path,
-        "/api/v1/blender" | "/api/v1/blender/addon" | "/api/v1/blender/install"
-    ) || path.starts_with("/api/v1/runtime/")
-        && (path.ends_with("/huggingface")
-            || path.ends_with("/model-files")
-            || path.ends_with("/install")
-            || path == "/api/v1/runtime/environment/setup"
-            || path.ends_with("/model-access")
-            || path.ends_with("/huggingface/browser")
-            || path.contains("/huggingface/browser/"));
+    let dashboard_only = path == "/api/v1/blender/install"
+        || (request.method() == Method::POST
+            && path.starts_with("/api/v1/runtime/")
+            && path.ends_with("/huggingface"));
     if dashboard_authorized || (authorized && !dashboard_only) {
         next.run(request).await
     } else {
@@ -1753,16 +1869,33 @@ async fn api_huggingface_connection(
 ) -> Result<impl IntoResponse, ApiError> {
     let Json(payload) = payload
         .map_err(|_| CoreError::InvalidInput("Invalid Hugging Face connection request.".into()))?;
+    check_huggingface_connection(state, statuses, backend, payload.token).await
+}
+
+async fn api_check_huggingface_connection(
+    State(state): State<AppState>,
+    Extension(statuses): Extension<HuggingFaceStatuses>,
+    Path(backend): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    check_huggingface_connection(state, statuses, backend, None).await
+}
+
+async fn check_huggingface_connection(
+    state: AppState,
+    statuses: HuggingFaceStatuses,
+    backend: String,
+    token: Option<String>,
+) -> Result<impl IntoResponse, ApiError> {
     let profile = Pixal3dProfile::from_backend(&backend)?;
     let access = task::spawn_blocking(move || {
         let root = state.core.store().root();
-        let _runtime_lock = if payload.token.is_some() {
+        let _runtime_lock = if token.is_some() {
             acquire_runtime_write_lock(root)?
         } else {
             acquire_generation_runtime_lock(root)?
         };
-        let result = huggingface_status::check_connection(root, profile, payload.token.as_deref());
-        if payload.token.is_none()
+        let result = huggingface_status::check_connection(root, profile, token.as_deref());
+        if token.is_none()
             || matches!(
                 result,
                 Ok(meshharbor_core::HuggingFaceConnection::Connected)
@@ -2806,6 +2939,33 @@ fn write_cli_output(path: &std::path::Path, bytes: &[u8]) -> Result<PathBuf, Cor
     })
 }
 
+fn canonical_mcp_export_path(
+    data_dir: &std::path::Path,
+    output_path: &std::path::Path,
+) -> Result<PathBuf, CoreError> {
+    if !output_path.is_absolute() {
+        return Err(CoreError::InvalidInput(
+            "Export path must be absolute on the local MCP host.".into(),
+        ));
+    }
+    let configured_export_root = std::env::var_os("MESHHARBOR_EXPORT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("exports"));
+    std::fs::create_dir_all(&configured_export_root)?;
+    let canonical_export_root = std::fs::canonicalize(&configured_export_root)?;
+    let destination = canonical_cli_output_path(output_path)?;
+    if !destination
+        .parent()
+        .is_some_and(|parent| parent.starts_with(&canonical_export_root))
+    {
+        return Err(CoreError::InvalidInput(format!(
+            "MCP exports must stay inside the configured export directory: {}",
+            canonical_export_root.display()
+        )));
+    }
+    Ok(destination)
+}
+
 /// Write a stored mesh GLB to a caller-selected local path without clobbering
 /// existing data. This is used only by the explicit MCP export tool.
 fn export_glb_file(
@@ -2847,31 +3007,7 @@ fn export_glb_file(
         ));
     }
 
-    let file_name = output_path
-        .file_name()
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| CoreError::InvalidInput("Export path must name a file.".into()))?;
-    let requested_parent = output_path.parent().ok_or_else(|| {
-        CoreError::InvalidInput("Export path must include a parent directory.".into())
-    })?;
-    let configured_export_root = std::env::var_os("MESHHARBOR_EXPORT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| core.store().root().join("exports"));
-    std::fs::create_dir_all(&configured_export_root)?;
-    let canonical_export_root = std::fs::canonicalize(&configured_export_root)?;
-    let canonical_parent = std::fs::canonicalize(requested_parent)?;
-    if !canonical_parent.is_dir() {
-        return Err(CoreError::InvalidInput(
-            "Export destination parent must be an existing directory.".into(),
-        ));
-    }
-    if !canonical_parent.starts_with(&canonical_export_root) {
-        return Err(CoreError::InvalidInput(format!(
-            "MCP exports must stay inside the configured export directory: {}",
-            canonical_export_root.display()
-        )));
-    }
-    let destination = canonical_parent.join(file_name);
+    let destination = canonical_mcp_export_path(core.store().root(), output_path)?;
     let content = core.store().read_artifact(&artifact.id)?;
     if content.bytes.len() as u64 > MAX_MCP_EXPORT_BYTES || !content.bytes.starts_with(b"glTF") {
         return Err(CoreError::InvalidInput(
@@ -2953,31 +3089,7 @@ fn export_quad_obj_file(
         ));
     }
 
-    let file_name = output_path
-        .file_name()
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| CoreError::InvalidInput("Export path must name a file.".into()))?;
-    let requested_parent = output_path.parent().ok_or_else(|| {
-        CoreError::InvalidInput("Export path must include a parent directory.".into())
-    })?;
-    let configured_export_root = std::env::var_os("MESHHARBOR_EXPORT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| core.store().root().join("exports"));
-    std::fs::create_dir_all(&configured_export_root)?;
-    let canonical_export_root = std::fs::canonicalize(&configured_export_root)?;
-    let canonical_parent = std::fs::canonicalize(requested_parent)?;
-    if !canonical_parent.is_dir() {
-        return Err(CoreError::InvalidInput(
-            "Export destination parent must be an existing directory.".into(),
-        ));
-    }
-    if !canonical_parent.starts_with(&canonical_export_root) {
-        return Err(CoreError::InvalidInput(format!(
-            "MCP exports must stay inside the configured export directory: {}",
-            canonical_export_root.display()
-        )));
-    }
-    let destination = canonical_parent.join(file_name);
+    let destination = canonical_mcp_export_path(core.store().root(), output_path)?;
     let content = core.store().read_artifact(&artifact.id)?;
     if content.bytes.len() as u64 > MAX_QUAD_OBJ_EXPORT_BYTES
         || std::str::from_utf8(&content.bytes).is_err()
@@ -3085,6 +3197,10 @@ fn parse_overdraw_threshold(value: &str) -> Result<f32, String> {
         return Err("must be finite and between 1.0 and 1.5.".into());
     }
     Ok(threshold)
+}
+
+fn parse_cli_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, String> {
+    serde_json::from_str(value).map_err(|error| error.to_string())
 }
 
 fn validate_process_mesh_cli_options(
@@ -4579,7 +4695,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_installs_require_studio_and_confirmation() {
+    async fn catalog_installs_require_authorization_and_confirmation() {
         let root =
             std::env::temp_dir().join(format!("meshharbor-catalog-{}", uuid::Uuid::new_v4()));
         let core = OperationCore::open(&root).unwrap();
@@ -4590,15 +4706,13 @@ mod tests {
             },
             "private-test-token".into(),
         );
-        for (backend, confirmed, dashboard, expected) in [
-            ("trellis2-mlx", true, false, StatusCode::UNAUTHORIZED),
-            ("trellis2-mlx", false, true, StatusCode::BAD_REQUEST),
-            ("trellis2-mlx", true, true, StatusCode::BAD_REQUEST),
-            ("geosam2-mlx", true, false, StatusCode::UNAUTHORIZED),
-            ("geosam2-mlx", false, true, StatusCode::BAD_REQUEST),
-            ("geosam2-cuda", true, false, StatusCode::UNAUTHORIZED),
-            ("geosam2-cuda", false, true, StatusCode::BAD_REQUEST),
-            ("unknown-mlx", true, true, StatusCode::BAD_REQUEST),
+        for (backend, confirmed, dashboard, bearer, expected) in [
+            ("trellis2-mlx", true, false, false, StatusCode::UNAUTHORIZED),
+            ("trellis2-mlx", false, true, false, StatusCode::BAD_REQUEST),
+            ("trellis2-mlx", true, false, true, StatusCode::BAD_REQUEST),
+            ("geosam2-mlx", false, false, true, StatusCode::BAD_REQUEST),
+            ("geosam2-cuda", false, true, false, StatusCode::BAD_REQUEST),
+            ("unknown-mlx", true, false, true, StatusCode::BAD_REQUEST),
         ] {
             let mut request = axum::http::Request::builder()
                 .method(Method::POST)
@@ -4608,7 +4722,8 @@ mod tests {
                 .header(header::CONTENT_TYPE, "application/json");
             if dashboard {
                 request = request.header("x-meshharbor-dashboard", "local-ui-v1");
-            } else {
+            }
+            if bearer {
                 request = request.header(header::AUTHORIZATION, "Bearer private-test-token");
             }
             let response = app
@@ -4630,7 +4745,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn environment_setup_requires_studio_and_explicit_confirmation() {
+    async fn environment_setup_requires_authorization_and_explicit_confirmation() {
         let root =
             std::env::temp_dir().join(format!("meshharbor-environment-{}", uuid::Uuid::new_v4()));
         let core = OperationCore::open(&root).unwrap();
@@ -4641,17 +4756,41 @@ mod tests {
             },
             "private-test-token".into(),
         );
-        for (confirmed, dashboard, expected) in [
-            (true, false, StatusCode::UNAUTHORIZED),
-            (false, true, StatusCode::BAD_REQUEST),
+        for (confirmed, dashboard, bearer, origin, expected) in [
+            (
+                true,
+                false,
+                false,
+                Some("http://127.0.0.1:7432"),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                false,
+                true,
+                false,
+                Some("http://127.0.0.1:7432"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (false, false, true, None, StatusCode::BAD_REQUEST),
+            (
+                true,
+                false,
+                true,
+                Some("http://127.0.0.1:5173"),
+                StatusCode::FORBIDDEN,
+            ),
         ] {
             let mut request = axum::http::Request::builder()
                 .method(Method::POST)
                 .uri("/api/v1/runtime/environment/setup")
                 .header(header::HOST, "127.0.0.1:7432")
-                .header(header::ORIGIN, "http://127.0.0.1:7432")
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::AUTHORIZATION, "Bearer private-test-token");
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(origin) = origin {
+                request = request.header(header::ORIGIN, origin);
+            }
+            if bearer {
+                request = request.header(header::AUTHORIZATION, "Bearer private-test-token");
+            }
             if dashboard {
                 request = request.header("x-meshharbor-dashboard", "local-ui-v1");
             }

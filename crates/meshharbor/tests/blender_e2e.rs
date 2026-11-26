@@ -58,6 +58,8 @@ impl Mcp {
             .arg("mcp")
             .env("MESHHARBOR_API_TOKEN", TOKEN)
             .env("MESHHARBOR_BLENDER_SERVER", address.to_string())
+            .env("MESHHARBOR_SERVER", address.to_string())
+            .env("MESHHARBOR_EXPORT_DIR", root.join("exports"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -173,6 +175,27 @@ async fn cli_and_mcp_send_to_the_same_open_scene_without_studio() {
     let (_server, address) = server(root.path()).await;
     let origin = format!("http://{address}");
     let http = Client::builder().no_proxy().timeout(WAIT).build().unwrap();
+    let status = meshharbor(root.path())
+        .args([
+            "engine",
+            "blender",
+            "status",
+            "--server",
+            &address.to_string(),
+        ])
+        .env("MESHHARBOR_API_TOKEN", TOKEN)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&status.stdout).unwrap(),
+        json!({"connected":false})
+    );
     let mut cli = meshharbor(root.path());
     cli.args([
         "blender",
@@ -216,6 +239,16 @@ async fn cli_and_mcp_send_to_the_same_open_scene_without_studio() {
     assert_eq!(completed["stage"], "succeeded");
 
     let mut mcp = Mcp::start(root.path(), address).await;
+    let addon = root.path().join("exports/meshharbor_bridge.py");
+    let exported = mcp
+        .tool(
+            "engine_blender",
+            json!({"request":{"action":"download_addon","output_path":addon}}),
+        )
+        .await;
+    let addon_source = std::fs::read_to_string(&addon).unwrap();
+    assert_eq!(exported["byte_size"], addon_source.len());
+    assert!(addon_source.contains(&origin));
     let refused = mcp
         .tool("install_blender_addon", json!({"confirmed":false}))
         .await;

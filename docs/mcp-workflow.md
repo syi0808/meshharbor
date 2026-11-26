@@ -7,6 +7,21 @@ diagnostics go to stderr. For mesh-only work, start with `list_operations`,
 `list_assets` or `import_asset`, then use `start_simplification` or
 `start_mesh_processing` and poll `get_job`. No GPU runtime is required.
 
+## Use the same engine and queue as Studio
+
+For workflows shared with Studio or CLI `engine`, run `meshharbor serve` (or the background service), and give the MCP process its bearer token through `MESHHARBOR_API_TOKEN`. Optionally set `MESHHARBOR_SERVER` to a nondefault loopback IP and port; the default is `127.0.0.1:7432`. Use the same data directory for `serve` and `mcp` when combining connected and standalone tools. Never put secrets in tool arguments.
+
+| Tool | `request.action` values |
+| --- | --- |
+| `engine_assets` | `page`, `show`, `versions`, `restore`, `export` |
+| `engine_jobs` | `list`, `show`, `steps`, `submit`, `retry`, `cancel`, `queue`, `swap` |
+| `engine_runtime` | `health`, `status`, `operations`, `jobs`, `setup_environment`, `install`, `remove_model_files`, `setup_pixal3d`, `install_pixal3d_models`, `convert_naf`, `install_multiview`, `check_account`, `check_model_access`, `login_start`, `login_status`, `login_cancel`, `disconnect` |
+| `engine_blender` | `status`, `download_addon` |
+
+Pass fields alongside `action` inside `request`. For example, `engine_assets` with `{"request":{"action":"versions","model_id":"asset_…"}}` lists version history, and `engine_jobs` with `{"request":{"action":"cancel","job_id":"job_…","queued_only":true}}` removes a waiting job without stopping it if it has started. Use `engine_jobs` `submit` with REST `operation`, `input`, and `parameters` to submit into Studio's queue; existing `start_*` tools still run in MCP's standalone queue. Retrying requires owner approval (`confirmed: true`) because runtime retries can download model files. Use `engine_assets` `export` with an `artifact_id` and `output_path` for exact artifact bytes. The asset and Blender download actions use the same local export directory and no-overwrite rules as the standalone export tools.
+
+For Hugging Face, use `login_start`, then `login_status` with the returned `session` and the same `backend`. Let the owner enter the one-time code in their browser and check the session again. The tool never receives a Hugging Face token. The terminal and Studio sign-in flows remain available.
+
 The managed setup below is for Pixal3D. For TRELLIS.2 or TripoSG, follow the
 [manual runtime guide](external-generation-runtimes.md) locally, then pass
 its explicit backend ID to `start_model_generation`. For text generation,
@@ -27,8 +42,8 @@ and set `parameters.backend_id` to `trellis-text-mlx` or `trellis-text-cuda`; no
    dependency ranges into a private per-install lock and runs the upstream
    PyTorch CUDA/SDPA smoke test. It does not download model weights. Poll the
    returned job with `get_job`.
-5. Hugging Face authentication is intentionally not accepted through MCP
-   arguments or environment forwarding. Run `meshharbor runtime hf-login` for
+5. Hugging Face tokens are intentionally not accepted through MCP
+   arguments or environment forwarding. Use the browser device flow above, or run `meshharbor runtime hf-login` for
    MLX or `meshharbor runtime cuda-hf-login` for CUDA in a local terminal. The
    credential stays in a per-backend isolated cache. The user must obtain and
    accept gated DINOv3 access before continuing.
