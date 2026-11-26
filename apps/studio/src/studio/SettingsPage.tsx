@@ -34,7 +34,7 @@ const sections = {
 };
 
 export type SettingsSection = keyof typeof sections;
-export type RuntimeAction = 'multiview' | 'install' | 'install-gated' | 'setup-pixal3d' | 'download-pixal3d' | 'convert-naf';
+export type RuntimeAction = 'multiview' | 'install' | 'install-gated';
 
 const modelCategories = [
   { id: 'generation', title: '3D Generation', empty: 'No generation models reported by the local engine.' },
@@ -315,7 +315,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
             environment={runtime?.environment} disabled={disabled} onSetup={onSetupEnvironment} onConnections={() => onVisit('connections')} />}
           {(section === 'models' || section === 'connections') && !environmentReady && <Alert className="justify-items-start gap-2">
             <AlertTitle>Shared environment required</AlertTitle>
-            <AlertDescription>Set up Python and uv before connecting Hugging Face or installing models.</AlertDescription>
+            <AlertDescription>Prepare or reuse the shared tools before connecting Hugging Face or installing models.</AlertDescription>
             <Button variant="outline" size="sm" onClick={() => onVisit('environment')}>Go to Environment</Button>
           </Alert>}
           {section === 'models' && modelCategories.map(category => {
@@ -377,23 +377,6 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                           description="Adds support for multiple reference views. This separate download can be large; MeshHarbor reuses compatible cached files."
                           consentLabel="I approve installing the additional model files."
                           disabled={disabled || !environmentReady || signInRequired} onConfirm={() => onRuntimeAction(id, 'multiview')} />}
-                        {id.startsWith('pixal3d-') && backend.installable && <Disclosure title="Individual Pixal3D steps">
-                          <div className="mt-2 grid gap-2">
-                            <ModelInstallDialog label={label} action="Set up Pixal3D runtime"
-                              description="Install the isolated Python dependencies without downloading weights."
-                              consentLabel="I approve installing the runtime dependencies."
-                              disabled={disabled || !environmentReady} onConfirm={() => onRuntimeAction(id, 'setup-pixal3d')} />
-                            <ModelInstallDialog label={label} action="Download Pixal3D model files"
-                              description={`Download up to ${accelerators[kind].download} of pinned model files without setting up the runtime.`}
-                              consentLabel="I have DINOv3 access, reviewed the terms, and approve the download."
-                              dino={dino} disabled={disabled || !environmentReady || !backend.environment_ready || signInRequired}
-                              onConfirm={() => onRuntimeAction(id, 'download-pixal3d')} />
-                            {kind === 'mlx' && <ModelInstallDialog label={label} action="Convert NAF weights"
-                              description="Convert the existing NAF checkpoint for MLX without downloading more weights."
-                              consentLabel="I approve converting the local checkpoint."
-                              disabled={disabled || !backend.conversion_enabled} onConfirm={() => onRuntimeAction(id, 'convert-naf')} />}
-                          </div>
-                        </Disclosure>}
                         {needsSignIn && <Button variant="outline" size="sm" className="justify-self-start" onClick={() => onVisit('connections', authBackend)}>Go to Connections</Button>}
                       </CardContent>
                       {environmentReady && <RuntimeActions api={api} id={id} backend={backend} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}
@@ -466,6 +449,10 @@ function EnvironmentSetup({ environment, disabled, onSetup, onConnections }: {
   environment?: RuntimeInfo['environment']; disabled: boolean; onSetup: () => void; onConnections: () => void;
 }) {
   const versions = (environment?.python_versions ?? []).join(' and ');
+  const found = [
+    ...(environment?.uv_found ? ['uv'] : []),
+    ...(environment?.python_versions_found ?? []).map(version => `Python ${version}`),
+  ];
   return <Card>
     <CardHeader>
       <CardTitle className="text-base"><h2>Shared model tools</h2></CardTitle>
@@ -475,10 +462,11 @@ function EnvironmentSetup({ environment, disabled, onSetup, onConnections }: {
     </CardHeader>
     <CardContent className="grid justify-items-start gap-3">
       <p className="text-muted-foreground">These tools are shared across model installs. Each model still uses its own isolated dependencies.</p>
+      {!environment?.ready && found.length > 0 && <p className="text-muted-foreground">Detected: {found.join(', ')}</p>}
       {environment?.ready ? <Button variant="outline" onClick={onConnections}>Go to Connections</Button>
         : <ModelInstallDialog label="Shared model tools" action="Set up environment"
-          description="Installs the shared tools in MeshHarbor’s local data directory. It does not install model runtimes or download model weights."
-          consentLabel="I approve installing the shared tools." disabled={disabled} onConfirm={onSetup} />}
+          description="Reuses compatible Python and uv, installs missing tools, and prepares Hugging Face sign-in in MeshHarbor’s local data directory. It does not download model weights."
+          consentLabel="I approve setting up the shared tools." disabled={disabled} onConfirm={onSetup} />}
     </CardContent>
   </Card>;
 }
@@ -612,7 +600,7 @@ function CatalogInstall({ label, backend, repart, dino, disabled, onInstall }: {
   return <ModelInstallDialog label={label} action="Install model"
     description={repart
       ? 'MeshHarbor installs the GeoSAM2 backend in a private Python environment and downloads one shared 616 MB checkpoint. Existing verified files are reused.'
-      : pixal ? `Installs the Pixal3D backend and downloads up to ${accelerators[accelerator(backend.id)].download} of model files without cached files. DINOv3 access is required.`
+      : pixal ? `Installs the Pixal3D backend and downloads up to ${accelerators[accelerator(backend.id)].download} of model files without cached files.${backend.id.endsWith('-mlx') ? ' Includes NAF conversion.' : ''} DINOv3 access is required.`
         : 'MeshHarbor installs a private Python environment and downloads the model weights for local generation.'}
     consentLabel={gated ? 'I have DINOv3 access, reviewed the terms, and approve installation and download.' : 'I reviewed the terms and approve installation and download.'}
     disabled={disabled} dino={gated ? dino : undefined} onConfirm={onInstall}>

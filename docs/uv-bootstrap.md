@@ -1,8 +1,6 @@
 # Pinned uv bootstrap
 
-When a runtime setup command is explicitly requested, MeshHarbor first uses a valid `MESHHARBOR_UV` override or an already available `uv` on `PATH`. If neither exists, it installs Astral uv 0.13.8 under the runtime data directory at
-`tools/uv-0.13.8` (for Pixal3D MLX,
-`<app-data>/runtimes/pixal3d-mlx/tools/uv-0.13.8`).
+When setup is explicitly requested, MeshHarbor uses `MESHHARBOR_UV` if configured, then checks for its existing pinned uv and for uv on `PATH` or in common install directories such as `~/.local/bin` and `/opt/homebrew/bin`. If no executable is available, it installs Astral uv 0.13.8 under `<app-data>/tools/uv-0.13.8` for the shared model environment.
 
 The release is pinned to the immutable official GitHub release [0.13.8](https://github.com/astral-sh/uv/releases/tag/0.13.8). The selected asset is chosen from the running OS, CPU architecture, and Linux GNU/musl ABI. Supported targets are macOS arm64/x86-64, Windows arm64/x86-64, and Linux arm64/x86-64 with GNU or musl. Other targets fail with an actionable error and can use an explicitly configured uv executable.
 

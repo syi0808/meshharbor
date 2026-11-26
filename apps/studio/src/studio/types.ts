@@ -113,7 +113,7 @@ export interface GenerationModel extends GenerationProfile {
 export interface RuntimeInfo {
   status: string;
   platform: string;
-  environment: { ready: boolean; python_versions: string[] };
+  environment: { ready: boolean; python_versions: string[]; uv_found?: boolean; python_versions_found?: string[] };
   operations: string[];
   model_catalog: Array<{ id: string; title: string; status: string; backend_ids: string[]; category?: 'generation' | 'repart'; output?: 'textured_glb' | 'geometry_glb' }>;
   quadriflow_backend: {

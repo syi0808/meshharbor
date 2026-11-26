@@ -752,32 +752,6 @@ export class MeshHarborApi {
     return this.request('/api/v1/backends/quadriflow/install', { method: 'POST' });
   }
 
-  setupPixal3dRuntime(): Promise<Job> {
-    return this.request('/api/v1/runtime/pixal3d-mlx/setup', { method: 'POST' });
-  }
-
-  installPixal3dModels(): Promise<Job> {
-    return this.request('/api/v1/runtime/pixal3d-mlx/models', {
-      method: 'POST',
-      body: JSON.stringify({ confirm_large_download: true, confirm_gated_access: true }),
-    });
-  }
-
-  setupPixal3dCudaRuntime(): Promise<Job> {
-    return this.request('/api/v1/runtime/pixal3d-cuda/setup', { method: 'POST' });
-  }
-
-  installPixal3dCudaModels(): Promise<Job> {
-    return this.request('/api/v1/runtime/pixal3d-cuda/models', {
-      method: 'POST',
-      body: JSON.stringify({ confirm_large_download: true, confirm_gated_access: true }),
-    });
-  }
-
-  convertPixal3dNaf(): Promise<Job> {
-    return this.request('/api/v1/runtime/pixal3d-mlx/convert-naf', { method: 'POST' });
-  }
-
   operations(): Promise<Operation[]> {
     return this.request('/api/v1/operations');
   }

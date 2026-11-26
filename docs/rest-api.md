@@ -19,7 +19,7 @@ Do not expose the server through a public proxy. These browser-origin checks are
 Selected endpoints:
 
 - `GET /api/v1/health`, `/api/v1/runtime`, `/api/v1/operations`
-- `POST /api/v1/runtime/environment/setup` with `{"confirmed":true}` queues shared uv, Python 3.10/3.12, and Hugging Face tool setup without installing any model. Check `environment.ready` in runtime status.
+- `POST /api/v1/runtime/environment/setup` with `{"confirmed":true}` queues shared uv, Python 3.10/3.12, and Hugging Face tool setup without installing any model. Setup can reuse compatible local tools. Runtime status reports tools found in standard locations (`environment.uv_found` and `environment.python_versions_found`) separately from `environment.ready`.
 - `POST /api/v1/runtime/pixal3d-mlx/setup`, `/models`, `/convert-naf`; `/api/v1/runtime/pixal3d-cuda/setup` and `/models` for explicit asynchronous setup actions
 - `POST /api/v1/runtime/pixal3d-cuda/multiview` with `{"confirm_large_download":true}` installs the additional CUDA multiview weights.
 - `GET /api/v1/runtime/{backend}/jobs` returns the six most recent setup or install jobs for that backend. The runtime status includes model file paths.

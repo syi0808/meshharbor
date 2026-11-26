@@ -457,14 +457,8 @@ test('Studio backend setup and image-generation flow downloads the generated GLB
     const path = String(input);
     calls.push({ path, init });
     if (path === '/api/v1/runtime') return Response.json(runtimeInfo);
-    if (path === '/api/v1/runtime/pixal3d-mlx/setup' || path === '/api/v1/runtime/pixal3d-cuda/setup') {
-      return Response.json({ id: path.includes('cuda') ? 'cuda-setup' : 'mlx-setup', state: 'queued' }, { status: 202 });
-    }
-    if (path === '/api/v1/runtime/pixal3d-mlx/models' || path === '/api/v1/runtime/pixal3d-cuda/models') {
-      return Response.json({ id: path.includes('cuda') ? 'cuda-models' : 'mlx-models', state: 'queued' }, { status: 202 });
-    }
-    if (path === '/api/v1/runtime/pixal3d-mlx/convert-naf') {
-      return Response.json({ id: 'mlx-convert', state: 'queued' }, { status: 202 });
+    if (path === '/api/v1/runtime/pixal3d-mlx/install' || path === '/api/v1/runtime/pixal3d-cuda/install') {
+      return Response.json({ id: path.includes('cuda') ? 'cuda-install' : 'mlx-install', state: 'queued' }, { status: 202 });
     }
     if (path === '/api/v1/assets?filename=source%20image.png') {
       return Response.json(sourceAsset);
@@ -484,11 +478,8 @@ test('Studio backend setup and image-generation flow downloads the generated GLB
     const api = new MeshHarborApi();
     const status = await api.runtime();
     assert.equal(status.model_backends.find((backend) => backend.id === 'pixal3d-cuda').ready, true);
-    await api.setupPixal3dRuntime();
-    await api.installPixal3dModels();
-    await api.convertPixal3dNaf();
-    await api.setupPixal3dCudaRuntime();
-    await api.installPixal3dCudaModels();
+    await api.installCatalogModel('pixal3d-mlx', true);
+    await api.installCatalogModel('pixal3d-cuda', true);
 
     const image = new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' });
     Object.defineProperty(image, 'name', { value: 'source image.png' });
@@ -504,11 +495,8 @@ test('Studio backend setup and image-generation flow downloads the generated GLB
 
     assert.deepEqual(calls.map(({ path }) => path), [
       '/api/v1/runtime',
-      '/api/v1/runtime/pixal3d-mlx/setup',
-      '/api/v1/runtime/pixal3d-mlx/models',
-      '/api/v1/runtime/pixal3d-mlx/convert-naf',
-      '/api/v1/runtime/pixal3d-cuda/setup',
-      '/api/v1/runtime/pixal3d-cuda/models',
+      '/api/v1/runtime/pixal3d-mlx/install',
+      '/api/v1/runtime/pixal3d-cuda/install',
       '/api/v1/assets?filename=source%20image.png',
       '/api/v1/jobs',
       '/api/v1/jobs/job-1',
@@ -519,13 +507,15 @@ test('Studio backend setup and image-generation flow downloads the generated GLB
       assert.equal(new Headers(init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
     }
 
-    assert.deepEqual(JSON.parse(calls[2].init.body), { confirm_large_download: true, confirm_gated_access: true });
-    assert.deepEqual(JSON.parse(calls[5].init.body), { confirm_large_download: true, confirm_gated_access: true });
+    for (const { init } of calls.slice(1, 3)) {
+      assert.equal(init.method, 'POST');
+      assert.deepEqual(JSON.parse(init.body), { confirmed: true, confirm_gated_access: true });
+    }
 
-    const upload = calls[6].init;
+    const upload = calls[3].init;
     assert.equal(new Headers(upload.headers).get('Content-Type'), 'image/png');
     assert.equal(upload.body.type, 'image/png');
-    assert.deepEqual(JSON.parse(calls[7].init.body), {
+    assert.deepEqual(JSON.parse(calls[4].init.body), {
       operation: 'model.generate',
       input: { kind: 'image', asset_id: 'image-1' },
       parameters: { backend_id: 'pixal3d-cuda', texture_size: 1024, target_faces: 50_000 },

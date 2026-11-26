@@ -75,12 +75,14 @@ pub(crate) fn ensure_uv_tracked(
         return Ok(app_managed);
     }
 
-    if let Some(system_uv) = find_on_path() {
-        // Keep user-managed uv usable when already installed. uv.lock fixes
-        // package versions; its presence avoids an unnecessary tool download.
-        if verify_uv_command(&system_uv, execution).is_ok() {
-            execution.note("Reusing the existing uv executable on PATH.")?;
-            return Ok(system_uv);
+    for candidate in uv_candidates().filter(|path| is_executable(path)) {
+        match verify_uv_command(&candidate, execution) {
+            Ok(version) if version.starts_with("uv ") => {
+                execution.note("Reusing an existing uv executable.")?;
+                return Ok(candidate);
+            }
+            Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+            _ => continue,
         }
     }
 
@@ -96,12 +98,55 @@ fn managed_executable(data_root: &Path) -> PathBuf {
     }
 }
 
-fn find_on_path() -> Option<PathBuf> {
+pub(crate) fn uv_available(data_root: &Path) -> bool {
+    if let Some(path) = env::var_os("MESHHARBOR_UV") {
+        return is_executable(Path::new(&path));
+    }
+    is_executable(&managed_executable(data_root))
+        || uv_candidates().any(|path| is_executable(&path))
+}
+
+fn uv_candidates() -> impl Iterator<Item = PathBuf> {
     let executable = if cfg!(windows) { "uv.exe" } else { "uv" };
-    let path = env::var_os("PATH")?;
-    env::split_paths(&path)
-        .map(|directory| directory.join(executable))
-        .find(|candidate| candidate.is_file())
+    local_tool_dirs()
+        .into_iter()
+        .map(move |directory| directory.join(executable))
+}
+
+pub(crate) fn local_tool_dirs() -> Vec<PathBuf> {
+    let path = env::var_os("PATH").unwrap_or_default();
+    let home = env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let mut dirs = Vec::new();
+    for directory in env::split_paths(&path)
+        .chain(env::var_os("XDG_BIN_HOME").map(PathBuf::from))
+        .chain(home.iter().map(|home| home.join(".local/bin")))
+        .chain(home.iter().map(|home| home.join(".cargo/bin")))
+        .chain(
+            ["/opt/homebrew/bin", "/usr/local/bin"]
+                .into_iter()
+                .filter(|_| cfg!(target_os = "macos"))
+                .map(PathBuf::from),
+        )
+    {
+        if directory.is_absolute() && !dirs.contains(&directory) {
+            dirs.push(directory);
+        }
+    }
+    dirs
+}
+
+pub(crate) fn is_executable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            metadata.is_file()
+        }
+    })
 }
 
 fn current_asset() -> CoreResult<UvAsset> {

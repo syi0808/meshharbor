@@ -1241,16 +1241,8 @@ export function App() {
   }
 
   function runRuntimeAction(backend: RuntimeBackendId, action: RuntimeAction) {
-    void startRuntimeAction(() => {
-      const cuda = backend === 'pixal3d-cuda';
-      switch (action) {
-        case 'multiview': return api.installPixal3dMultiview();
-        case 'setup-pixal3d': return cuda ? api.setupPixal3dCudaRuntime() : api.setupPixal3dRuntime();
-        case 'download-pixal3d': return cuda ? api.installPixal3dCudaModels() : api.installPixal3dModels();
-        case 'convert-naf': return api.convertPixal3dNaf();
-        default: return api.installCatalogModel(backend, action === 'install-gated');
-      }
-    });
+    void startRuntimeAction(() => action === 'multiview'
+      ? api.installPixal3dMultiview() : api.installCatalogModel(backend, action === 'install-gated'));
   }
 
   async function downloadBlob(load: () => Promise<Blob>, fileName: (blob: Blob) => string, label: string) {
