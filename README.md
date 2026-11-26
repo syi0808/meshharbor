@@ -55,6 +55,14 @@ MeshHarbor still listens only on loopback, so use [host networking](https://docs
 
 The image includes Studio, the API, and CPU mesh editing. It does not include GPU generation runtimes or model weights; use the native setup guides for MLX or CUDA generation.
 
+### Send to Blender
+
+1. In Studio, select a model version and click **Send to Blender** below the preview.
+2. With Blender 4.2 or newer closed, click **Install locally**. MeshHarbor installs and enables its add-on for the next launch. If Blender is running, MeshHarbor leaves its settings untouched and asks you to quit Blender and retry.
+3. Open Blender, press **N** in the 3D Viewport, and choose **MeshHarbor → Start Bridge**. Back in Studio, click **Send to Blender** again to add the model to the open scene without saving or replacing it.
+
+The bridge works locally with both regular and MeshHarbor meshopt-compressed GLBs. The stored GLB stays unchanged, and the bridge packs embedded textures in Blender. If automatic installation is unavailable or you're using Docker, follow the [manual add-on installation steps](apps/studio/README.md#send-a-model-to-blender).
+
 ## Documentation
 
 | I want to… | Start here |
