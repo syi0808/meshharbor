@@ -81,6 +81,41 @@ test('Retopology can clean a duplicate face and recheck the derived mesh without
   await expect(tools.getByRole('status')).toHaveText('Geometry-only input passed');
 });
 
+test('Retopology offers voxel rebuilding separately from Cleanup and rechecks the new geometry', async ({ page, studioOrigin }) => {
+  await page.goto(studioOrigin);
+  await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  await importCube(page, 'voxel-source.glb', { textured: true, reversedDuplicate: true });
+  await page.getByRole('button', { name: 'Retopology', exact: true }).click();
+  const tools = page.getByRole('complementary', { name: 'Quad retopology (experimental)' });
+  await expect(page.getByText('Retopology input check failed.', { exact: true })).toBeVisible();
+  await expect(tools.getByRole('button', { name: 'Run Cleanup first', exact: true })).toBeEnabled();
+  await expect(tools.getByText(/geometry-only version at resolution 96/)).toBeVisible();
+
+  const submission = page.waitForRequest(request => request.url().endsWith('/api/v1/jobs') && request.method() === 'POST');
+  await tools.getByRole('button', { name: 'Run Voxel Remesh', exact: true }).click();
+  expect((await submission).postDataJSON()).toMatchObject({ operation: 'mesh.voxel_remesh', parameters: {} });
+  await expect(tools.getByTitle('voxel-source-voxel-remeshed.glb', { exact: true })).toBeVisible();
+  await expect(tools.getByRole('status')).toHaveText('Geometry-only input passed');
+});
+
+test('the standalone Voxel Remesh tool accepts a custom grid resolution', async ({ page, studioOrigin }) => {
+  await page.goto(studioOrigin);
+  await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  await importCube(page, 'voxel-cube.glb');
+  await page.getByRole('button', { name: 'Voxel Remesh', exact: true }).click();
+  const tools = page.getByRole('complementary', { name: 'Voxel Remesh', exact: true });
+  const resolution = tools.getByRole('spinbutton', { name: 'Voxel resolution' });
+  const run = tools.getByRole('button', { name: 'Run Voxel Remesh', exact: true });
+  await expect(resolution).toHaveValue('96');
+  await resolution.fill('161');
+  await expect(run).toBeDisabled();
+  await resolution.fill('32');
+  const submission = page.waitForRequest(request => request.url().endsWith('/api/v1/jobs') && request.method() === 'POST');
+  await run.click();
+  expect((await submission).postDataJSON()).toMatchObject({ operation: 'mesh.voxel_remesh', parameters: { resolution: 32 } });
+  await expect(tools.getByTitle('voxel-cube-voxel-remeshed.glb', { exact: true })).toBeVisible();
+});
+
 test('retopology failures use only a toast and superseded requests are cancelled', async ({ page, studioOrigin }) => {
   const detail = 'Retopology accepts either supported untextured geometry or one static embedded PNG PBR mesh';
   await page.route('**/api/v1/operations', route => route.fulfill({

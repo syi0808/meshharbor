@@ -26,6 +26,7 @@ mod retopology;
 mod runtime;
 mod store;
 mod uv_bootstrap;
+mod voxel_remesh;
 
 pub use cuda_runtime::Pixal3dCudaRuntimeManager;
 pub use generation::{
@@ -77,6 +78,7 @@ pub use store::{
     Artifact, Asset, AssetKind, AssetPage, CoreError, CoreResult, Job, JobCommand, JobState,
     JobStep, ModelIdentity, ModelVersion, ModelVersionPage, Store,
 };
+pub use voxel_remesh::{MAX_VOXEL_RESOLUTION, MIN_VOXEL_RESOLUTION};
 
 #[cfg(test)]
 #[path = "../build_support/runtime_bundle.rs"]

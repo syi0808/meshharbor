@@ -2022,6 +2022,150 @@ fn reduce_primitive_indices(
 const MAX_RETOPOLOGY_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETOPOLOGY_OUTPUT_BYTES: usize = 128 * 1024 * 1024;
 
+pub(crate) fn extract_voxel_remesh_geometry(
+    bytes: &[u8],
+) -> Result<(Vec<[f32; 3]>, Vec<u32>), CoreError> {
+    use crate::retopology::{MAX_TRIANGLES, MAX_VERTICES};
+
+    let glb = GlbFile::parse(bytes)?;
+    let binary = glb.binary.as_deref().ok_or_else(|| {
+        CoreError::OperationUnavailable("Voxel Remesh requires an embedded GLB buffer.".into())
+    })?;
+    let document = &glb.document;
+    validate_static_glb(document)?;
+    validate_single_embedded_buffer(document, binary.len())?;
+    if !glb.other_chunks.is_empty() || !array(document, "extensionsRequired").is_empty() {
+        return Err(CoreError::OperationUnavailable(
+            "Voxel Remesh does not support required extensions or unknown GLB chunks.".into(),
+        ));
+    }
+    let geometry_error = || {
+        CoreError::OperationUnavailable(
+            "Voxel Remesh requires one static indexed triangle primitive.".into(),
+        )
+    };
+    let [mesh] = array(document, "meshes") else {
+        return Err(geometry_error());
+    };
+    let [primitive] = array(mesh, "primitives") else {
+        return Err(geometry_error());
+    };
+    if primitive
+        .get("mode")
+        .is_some_and(|mode| mode.as_u64() != Some(4))
+        || mesh.get("weights").is_some()
+    {
+        return Err(geometry_error());
+    }
+    validate_voxel_remesh_scene(document)?;
+
+    let accessors = array(document, "accessors");
+    for (reference, limit) in [
+        (&primitive["attributes"]["POSITION"], MAX_VERTICES),
+        (&primitive["indices"], MAX_TRIANGLES * 3),
+    ] {
+        let count = reference
+            .as_u64()
+            .and_then(|index| accessors.get(index as usize))
+            .and_then(|accessor| accessor["count"].as_u64())
+            .ok_or_else(geometry_error)?;
+        if count == 0 || count > limit as u64 {
+            return Err(CoreError::OperationUnavailable(format!(
+                "Voxel Remesh accepts up to {MAX_VERTICES} vertices and {MAX_TRIANGLES} triangles."
+            )));
+        }
+    }
+    let positions = read_primitive_positions(document, binary, primitive)?;
+    let indices = read_primitive_indices(document, binary, primitive)?;
+    if indices
+        .iter()
+        .any(|index| *index as usize >= positions.len())
+    {
+        return Err(CoreError::InvalidInput(
+            "Voxel Remesh index references a missing position.".into(),
+        ));
+    }
+    Ok((positions, indices))
+}
+
+fn validate_voxel_remesh_scene(document: &Value) -> Result<(), CoreError> {
+    let scene_error = || {
+        CoreError::OperationUnavailable(
+        "Voxel Remesh requires a single scene with one untransformed mesh node or parent chain.".into(),
+    )
+    };
+    let nodes = array(document, "nodes");
+    let [scene] = array(document, "scenes") else {
+        return Err(scene_error());
+    };
+    let [root] = array(scene, "nodes") else {
+        return Err(scene_error());
+    };
+    if !(1..=32).contains(&nodes.len())
+        || document
+            .get("scene")
+            .is_some_and(|active| active.as_u64() != Some(0))
+        || !array(document, "cameras").is_empty()
+    {
+        return Err(scene_error());
+    }
+    let mut next = root.as_u64().ok_or_else(scene_error)?;
+    for depth in 1..=nodes.len() {
+        let node = nodes
+            .get(next as usize)
+            .and_then(Value::as_object)
+            .ok_or_else(scene_error)?;
+        if node
+            .keys()
+            .any(|key| !matches!(key.as_str(), "name" | "extras" | "mesh" | "children"))
+        {
+            return Err(scene_error());
+        }
+        let children = match node.get("children") {
+            None => &[][..],
+            Some(children) => children.as_array().ok_or_else(scene_error)?.as_slice(),
+        };
+        match (node.get("mesh"), children) {
+            (Some(mesh), []) if mesh.as_u64() == Some(0) && depth == nodes.len() => return Ok(()),
+            (None, [child]) => next = child.as_u64().ok_or_else(scene_error)?,
+            _ => return Err(scene_error()),
+        }
+    }
+    Err(scene_error())
+}
+
+pub(crate) fn encode_position_only_glb(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Result<Vec<u8>, CoreError> {
+    let mut document = json!({
+        "asset": { "version": "2.0", "generator": "MeshHarbor Voxel Remesh" },
+        "scene": 0,
+        "scenes": [{ "nodes": [0] }],
+        "nodes": [{ "mesh": 0 }],
+        "meshes": [],
+        "buffers": [],
+        "bufferViews": [],
+        "accessors": [],
+    });
+    let mut binary = Vec::new();
+    let position_accessor =
+        append_float_vec3_accessor(&mut document, &mut binary, positions, true)?;
+    let index_accessor = append_index_accessor(&mut document, &mut binary, indices)?;
+    document["meshes"] = json!([{ "primitives": [{
+        "attributes": { "POSITION": position_accessor },
+        "indices": index_accessor,
+        "mode": 4,
+    }] }]);
+    document["buffers"] = json!([{ "byteLength": binary.len() }]);
+    GlbFile {
+        document,
+        binary: Some(binary),
+        other_chunks: Vec::new(),
+    }
+    .write()
+}
+
 pub(crate) fn extract_retopology_geometry(
     bytes: &[u8],
 ) -> Result<(Vec<[f32; 3]>, Vec<u32>), CoreError> {

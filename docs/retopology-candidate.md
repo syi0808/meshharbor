@@ -60,6 +60,8 @@ it does not resolve a native backend, create a job or asset, run the solver,
 or guarantee valid results or projected appearance. If the server is already
 processing another job, retry the check after the operation ends.
 
+For inputs with open boundaries, overlapping faces, or non-manifold edges, Studio's separate **Run Voxel Remesh** action can rebuild a geometry-only surface and recheck the new version in the same panel. It uses meshoptimizer, does not launch QuadriFlow or transfer textures, and saves no derived asset if the rebuilt geometry fails validation.
+
 ## Verified exact-signed-candidate smoke evidence
 
 The approved candidate run [#43721747855](https://github.com/syi0808/meshharbor/actions/runs/43721747855) used MeshHarbor source commit `9288f601578f8c9b5735a1b255b661f6ebcd1c50` and pinned QuadriFlow source commit `810b7a0967c35b0dc85b4464e3835e26a756c967`. The three platform primary/independent build pairs passed the common byte-equality gate, and the platform signers and fresh candidate-verification jobs passed. The overall run is marked failed because the original Windows native job's SLSA-material recheck failed before execution; do not describe that run as a clean all-platform success.

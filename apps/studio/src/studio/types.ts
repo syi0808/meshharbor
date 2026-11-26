@@ -1,5 +1,5 @@
 export type AssetKind = 'image' | 'mesh';
-export type MeshOperationId = 'mesh.retopology' | 'mesh.cleanup' | 'uv.unwrap' | 'render.optimize' | 'mesh.compress';
+export type MeshOperationId = 'mesh.retopology' | 'mesh.cleanup' | 'mesh.voxel_remesh' | 'uv.unwrap' | 'render.optimize' | 'mesh.compress';
 
 export interface Artifact {
   id: string;

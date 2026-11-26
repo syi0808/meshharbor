@@ -834,6 +834,23 @@ struct PreparedQuadriFlowInput {
     report: QuadRetopologyPreflight,
 }
 
+pub(crate) fn quadriflow_validation_request(
+    positions: Vec<[f32; 3]>,
+    indices: Vec<u32>,
+) -> RemeshRequest {
+    RemeshRequest {
+        protocol_version: crate::REMESH_PROTOCOL_VERSION,
+        positions,
+        indices,
+        // This conservative validation budget is independent of the QuadriFlow face target.
+        // It rejects pathological input surface density before starting a native process.
+        options: RetopologyOptions {
+            target_edge_ratio: 0.25,
+            iterations: 1,
+        },
+    }
+}
+
 fn prepare_quadriflow_input(
     bytes: &[u8],
     options: QuadRetopologyOptions,
@@ -857,17 +874,7 @@ fn prepare_quadriflow_input(
         }
     };
     let input_vertices = positions.len() as u64;
-    let mut validation = RemeshRequest {
-        protocol_version: crate::REMESH_PROTOCOL_VERSION,
-        positions,
-        indices,
-        // This conservative validation budget is independent of the QuadriFlow face target.
-        // It rejects pathological input surface density before starting a native process.
-        options: RetopologyOptions {
-            target_edge_ratio: 0.25,
-            iterations: 1,
-        },
-    };
+    let mut validation = quadriflow_validation_request(positions, indices);
     let mut joined_seam_vertices = false;
     if let Err(original_error) = validate_remesh_request(&validation) {
         if !project_appearance || !rejoin_coincident_boundary_vertices(&mut validation) {

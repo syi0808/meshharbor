@@ -19,6 +19,7 @@ use crate::{
     model_environment::{ModelEnvironment, ModelEnvironmentStatus},
     model_storage::model_path,
     optimize_render_glb, simplify_glb,
+    voxel_remesh::{VoxelRemeshOptions, validate_voxel_source_size, voxel_remesh_glb},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +264,8 @@ impl OperationCore {
                 )));
             }
             validate_retopology_source_size(source_artifact.byte_size)?;
+        } else if operation == "mesh.voxel_remesh" {
+            validate_voxel_source_size(source_artifact.byte_size)?;
         }
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
         execution.stage("process_mesh")?;
@@ -298,6 +301,17 @@ impl OperationCore {
             });
         }
         let (suffix, output, report) = match operation {
+            "mesh.voxel_remesh" => {
+                let options: Option<VoxelRemeshOptions> = serde_json::from_value(parameters)
+                    .map_err(|error| {
+                        CoreError::InvalidInput(format!(
+                            "Invalid mesh.voxel_remesh parameters: {error}"
+                        ))
+                    })?;
+                let (output, report) =
+                    voxel_remesh_glb(&bytes, options.unwrap_or_default(), execution)?;
+                ("voxel-remeshed", output, serde_json::to_value(report)?)
+            }
             "mesh.cleanup" => {
                 let options: Option<MeshCleanupOptions> = serde_json::from_value(parameters)
                     .map_err(|error| {
@@ -705,6 +719,7 @@ impl OperationCore {
             OperationDescriptor { id: IMAGE_GENERATION_OPERATION.into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Compatibility operation for generating a local GLB from an imported image.".into(), implemented: image_generation_ready },
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangles to a hard upper limit with meshoptimizer while retaining original vertex streams, materials, and textures. No result is saved if the limit cannot be met.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces, then simplify eligible primitives within a conservative error tolerance without a triangle target.".into(), implemented: true },
+            OperationDescriptor { id: "mesh.voxel_remesh".into(), title: "Voxel Remesh".into(), category: "mesh".into(), summary: "Rebuild one static indexed triangle GLB with meshoptimizer and validate the closed result before saving a geometry-only version. Does not copy UVs, materials, or textures.".into(), implemented: true },
             OperationDescriptor { id: "mesh.retopology".into(), title: "Quad retopology".into(), category: "mesh".into(), summary: "Experimental QuadriFlow quad remeshing in an isolated worker. Accepts one closed static triangle GLB; textured inputs also require TEXCOORD_0, optional NORMAL, and the narrow supported embedded base-color/metallic-roughness PNG maps. Those maps are projected only into a triangulated GLB preview with distance, normal, coverage, and ambiguity gates; the editable quad OBJ remains geometry-only. Other attributes/maps, self-intersection freedom, and a measured surface-error tolerance are not supported or certified.".into(), implemented: quadriflow_ready },
             OperationDescriptor { id: "uv.unwrap".into(), title: "Atlas UV unwrap".into(), category: "uv".into(), summary: "Use xatlas to unwrap one supported static textured mesh and rebake its embedded base-color and metallic/roughness PNG maps from its existing UVs. Zero-area faces are omitted from the result. This is not high-to-low projection.".into(), implemented: true },
             OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Generic high-to-low and arbitrary texture baking is not implemented; uv.unwrap only rebakes supported same-mesh embedded base-color and metallic/roughness PNG maps.".into(), implemented: false },
@@ -957,6 +972,7 @@ mod tests {
         let doctor = core.runtime_doctor();
         assert!(doctor.operations.contains(&"mesh.simplify".to_string()));
         assert!(doctor.operations.contains(&"mesh.cleanup".to_string()));
+        assert!(doctor.operations.contains(&"mesh.voxel_remesh".to_string()));
         assert!(doctor.operations.contains(&"render.optimize".to_string()));
         assert!(doctor.operations.contains(&"mesh.compress".to_string()));
         assert!(

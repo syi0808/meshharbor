@@ -19,6 +19,8 @@ meshharbor simplify "$ASSET_ID" --target-triangles 4000 --max-error 0.02 --outpu
 
 # Conservative cleanup, atlas UV rebake, render optimization, or required KHR_meshopt compression
 meshharbor process-mesh "$ASSET_ID" --operation mesh.cleanup --output ./scene-cleaned.glb
+# Rebuild a closed geometry-only surface (grid resolution 16–160, default 96)
+meshharbor process-mesh "$ASSET_ID" --operation mesh.voxel_remesh --voxel-resolution 96 --output ./scene-voxel.glb
 meshharbor process-mesh "$ASSET_ID" --operation uv.unwrap --output ./scene-atlas.glb
 # Adjust atlas resolution (64–4,096; default 1,024) and chart padding (0–64; default 8)
 meshharbor process-mesh "$ASSET_ID" --operation uv.unwrap --resolution 2048 --padding 12 --output ./scene-atlas-hd.glb

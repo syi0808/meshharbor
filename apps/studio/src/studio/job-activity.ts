@@ -36,6 +36,8 @@ const stageLabels: Partial<Record<string, string>> = {
   convert_checkpoint: 'Converting checkpoint',
   load_mesh: 'Loading source mesh',
   process_mesh: 'Processing mesh',
+  voxelize_mesh: 'Rebuilding surface',
+  validate_voxel_mesh: 'Checking rebuilt topology',
   prepare_references: 'Preparing reference images',
   initialize_model: 'Initializing model',
   preprocess_camera: 'Preparing images and cameras',

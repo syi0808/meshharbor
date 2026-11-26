@@ -1,4 +1,4 @@
-import { ArrowDownIcon, ArrowsClockwiseIcon, ArrowsInIcon, BoundingBoxIcon, BroomIcon, CubeIcon, DownloadSimpleIcon, FileImageIcon, GaugeIcon, GearSixIcon, GridFourIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SlidersHorizontalIcon, SquaresFourIcon, type Icon } from '@phosphor-icons/react';
+import { ArrowDownIcon, ArrowsClockwiseIcon, ArrowsInIcon, BoundingBoxIcon, BroomIcon, CubeIcon, CubeTransparentIcon, DownloadSimpleIcon, FileImageIcon, GaugeIcon, GearSixIcon, GridFourIcon, ImageSquareIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, SlidersHorizontalIcon, SquaresFourIcon, type Icon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   assetComparisonPairForSelection,
@@ -79,6 +79,9 @@ interface AssetBrowserFilters {
 }
 
 const ASSET_PAGE_SIZE = 50;
+const DEFAULT_VOXEL_RESOLUTION = 96;
+const MIN_VOXEL_RESOLUTION = 16;
+const MAX_VOXEL_RESOLUTION = 160;
 const ASSET_GALLERY_GRID = 'grid min-w-0 grid-cols-2 gap-2 @min-[380px]:grid-cols-3';
 const EMPTY_ASSET_BROWSER_FILTERS: AssetBrowserFilters = { query: '', kind: 'mesh', origin: 'all' };
 
@@ -147,6 +150,12 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; label?: 
     title: 'Cleanup',
     icon: BroomIcon,
     description: 'Remove invalid and duplicate faces, then reduce redundant triangles within a small shape and UV error tolerance. No triangle target is needed.',
+  },
+  {
+    id: 'mesh.voxel_remesh',
+    title: 'Voxel Remesh',
+    icon: CubeTransparentIcon,
+    description: 'Rebuild one indexed triangle mesh as a closed surface. Fine details can change. The new version contains geometry only; UVs, materials, and textures stay on the source.',
   },
   {
     id: 'uv.unwrap',
@@ -219,9 +228,13 @@ export function App() {
   const [targetTriangles, setTargetTriangles] = useState(4000);
   const [quadTargetEnabled, setQuadTargetEnabled] = useState(false);
   const [targetQuads, setTargetQuads] = useState('10000');
+  const [voxelResolution, setVoxelResolution] = useState(String(DEFAULT_VOXEL_RESOLUTION));
   const requestedQuads = quadTargetEnabled ? Number(targetQuads) : undefined;
   const validQuadTarget = requestedQuads === undefined
     || (Number.isInteger(requestedQuads) && requestedQuads >= 4 && requestedQuads <= 50000);
+  const requestedVoxelResolution = Number(voxelResolution);
+  const validVoxelResolution = Number.isInteger(requestedVoxelResolution)
+    && requestedVoxelResolution >= MIN_VOXEL_RESOLUTION && requestedVoxelResolution <= MAX_VOXEL_RESOLUTION;
   const [maxError, setMaxError] = useState(0.02);
   const [generationModelId, setGenerationModelId] = useState('');
   const [generationDrafts, setGenerationDrafts] = useState<Record<string, Record<string, string>>>({});
@@ -860,6 +873,8 @@ export function App() {
             notify('success', removed > 0
               ? `Cleanup complete. Removed ${removed.toLocaleString()} triangles (${simplified.toLocaleString()} by simplification).`
               : 'Cleanup complete. No removable triangles were found.');
+          } else if (latest.operation === 'mesh.voxel_remesh') {
+            notify('success', 'Voxel Remesh complete. The new version contains geometry only.');
           } else if (latest.operation === 'render.optimize') {
             const before = Number(resultReport.vertex_cache_misses_before ?? 0);
             const after = Number(resultReport.vertex_cache_misses_after ?? 0);
@@ -1330,7 +1345,9 @@ export function App() {
     && (typeof beforeTriangles === 'number' || comparisonSizes);
   const meshTool = meshOperationOptions.find(tool => tool.id === openInspector);
   const isRetopology = meshTool?.id === 'mesh.retopology';
+  const isVoxelRemesh = meshTool?.id === 'mesh.voxel_remesh';
   const meshToolAvailable = operations.some(operation => operation.id === meshTool?.id && operation.implemented);
+  const canPrepareRetopology = hasSelectedMesh && !busy && !checkingRetopology && connection === 'connected' && !isRunning;
   const processingTool = isRunning && job.operation === meshTool?.id;
   const inspectorTitle = meshTool?.title ?? (openInspector === 'generation' ? 'Generate model' : 'Optimize mesh');
   const exportIsPrimary = shouldHighlightExport(activeView, isRunning, connection === 'connected');
@@ -1489,6 +1506,15 @@ export function App() {
           <p className="text-muted-foreground">{quadriflowBackend.message}</p>
         )}
         <div className="grid gap-2">
+          {isVoxelRemesh && <Field>
+            <FieldLabel htmlFor="voxel-resolution">Voxel resolution</FieldLabel>
+            <Input id="voxel-resolution" type="number" min={MIN_VOXEL_RESOLUTION} max={MAX_VOXEL_RESOLUTION} step="1"
+              value={voxelResolution} aria-invalid={!validVoxelResolution} aria-describedby="voxel-resolution-hint"
+              onChange={event => setVoxelResolution(event.currentTarget.value)} disabled={busy || isRunning} />
+            <FieldDescription id="voxel-resolution-hint">
+              {MIN_VOXEL_RESOLUTION}–{MAX_VOXEL_RESOLUTION}. Higher values can preserve more detail but may leave gaps unresolved.
+            </FieldDescription>
+          </Field>}
           {isRetopology && <>
             <Field orientation="horizontal">
               <Checkbox id="use-quad-target" checked={quadTargetEnabled}
@@ -1516,18 +1542,27 @@ export function App() {
               </HelpTip>}
             </div>}
             <Button variant="outline" className="w-full"
-              disabled={!hasSelectedMesh || busy || checkingRetopology || connection !== 'connected' || isRunning
-                || !operations.some(operation => operation.id === 'mesh.cleanup' && operation.implemented)}
+              disabled={!canPrepareRetopology || !operations.some(operation => operation.id === 'mesh.cleanup' && operation.implemented)}
               onClick={() => void runMeshOperation('mesh.cleanup', { for_retopology: true })}
             >
               Run Cleanup first
             </Button>
+            <Button variant="outline" className="w-full" aria-describedby="retopology-voxel-hint"
+              disabled={!canPrepareRetopology || !operations.some(operation => operation.id === 'mesh.voxel_remesh' && operation.implemented)}
+              onClick={() => void runMeshOperation('mesh.voxel_remesh')}
+            >
+              Run Voxel Remesh
+            </Button>
+            <p id="retopology-voxel-hint" className="text-muted-foreground">
+              Voxel Remesh rebuilds the surface as a geometry-only version at resolution {DEFAULT_VOXEL_RESOLUTION}.
+            </p>
           </>}
           {!processingTool && (
             <Button
               className="w-full"
-              disabled={!hasSelectedMesh || !meshToolAvailable || busy || connection !== 'connected' || isRunning || (isRetopology && !retopologyCheck)}
-              onClick={() => void runMeshOperation(meshTool.id)}
+              disabled={!hasSelectedMesh || !meshToolAvailable || busy || connection !== 'connected' || isRunning
+                || (isRetopology && !retopologyCheck) || (isVoxelRemesh && !validVoxelResolution)}
+              onClick={() => void runMeshOperation(meshTool.id, isVoxelRemesh ? { resolution: requestedVoxelResolution } : {})}
             >
               Run {meshTool.title}
             </Button>

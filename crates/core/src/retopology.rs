@@ -19,8 +19,8 @@ use uuid::Uuid;
 use crate::{CoreError, CoreResult};
 
 pub const REMESH_PROTOCOL_VERSION: u32 = 1;
-const MAX_VERTICES: usize = 100_000;
-const MAX_TRIANGLES: usize = 200_000;
+pub(crate) const MAX_VERTICES: usize = 100_000;
+pub(crate) const MAX_TRIANGLES: usize = 200_000;
 const MAX_OUTPUT_VERTICES: usize = 250_000;
 const MAX_OUTPUT_TRIANGLES: usize = 500_000;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;

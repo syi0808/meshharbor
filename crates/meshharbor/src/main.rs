@@ -95,7 +95,7 @@ enum Command {
     /// Run a supported local mesh operation. For retopology, --output writes the triangle GLB preview and --quad-output preserves the editable OBJ quads.
     ProcessMesh {
         asset_id: String,
-        #[arg(long, value_parser = ["mesh.cleanup", "uv.unwrap", "render.optimize", "mesh.compress", "mesh.retopology"])]
+        #[arg(long, value_parser = ["mesh.cleanup", "mesh.voxel_remesh", "uv.unwrap", "render.optimize", "mesh.compress", "mesh.retopology"])]
         operation: String,
         /// Approximate quad count for mesh.retopology (4 to 50,000); omit for automatic density.
         #[arg(long)]
@@ -103,6 +103,11 @@ enum Command {
         /// xatlas packing resolution hint for uv.unwrap (64 to 4,096).
         #[arg(long, value_parser = clap::value_parser!(u32).range(64..=4096))]
         resolution: Option<u32>,
+        /// Grid resolution for mesh.voxel_remesh (16 to 160, default 96).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(
+            i64::from(meshharbor_core::MIN_VOXEL_RESOLUTION)..=i64::from(meshharbor_core::MAX_VOXEL_RESOLUTION)
+        ))]
+        voxel_resolution: Option<u32>,
         /// Chart gutter in atlas texels for uv.unwrap (0 to 64).
         #[arg(long, value_parser = clap::value_parser!(u32).range(0..=64))]
         padding: Option<u32>,
@@ -253,9 +258,9 @@ struct RetopologyPreflightArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct MeshProcessArgs {
     asset_id: String,
-    /// One of mesh.cleanup, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology.
+    /// One of mesh.cleanup, mesh.voxel_remesh, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology.
     operation: String,
-    /// Optional operation parameters, such as resolution/padding for uv.unwrap or target_quads for mesh.retopology.
+    /// Optional operation parameters, such as resolution for mesh.voxel_remesh or target_quads for mesh.retopology.
     #[serde(default)]
     parameters: Option<Value>,
 }
@@ -490,7 +495,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local mesh processing job for mesh.cleanup, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires an available QuadriFlow backend and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
+        description = "Start a local mesh processing job for mesh.cleanup, mesh.voxel_remesh, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology. The source asset stays unchanged; poll get_job for the derived asset and report. Voxel Remesh rebuilds a closed geometry-only mesh from one static triangle GLB; it does not copy textures. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires an available QuadriFlow backend and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
     )]
     async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
         let args = params.0;
@@ -983,6 +988,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             operation,
             target_quads,
             resolution,
+            voxel_resolution,
             padding,
             overdraw_threshold,
             output,
@@ -993,6 +999,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 target_quads,
                 quad_output.is_some(),
                 resolution,
+                voxel_resolution,
                 padding,
                 overdraw_threshold,
             )?;
@@ -1002,6 +1009,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &operation,
                 target_quads,
                 resolution,
+                voxel_resolution,
                 padding,
                 overdraw_threshold,
             );
@@ -1983,7 +1991,8 @@ async fn submit_asset_job(
             )
             .await?
         }
-        "mesh.cleanup" | "uv.unwrap" | "render.optimize" | "mesh.compress" | "mesh.retopology" => {
+        "mesh.cleanup" | "mesh.voxel_remesh" | "uv.unwrap" | "render.optimize"
+        | "mesh.compress" | "mesh.retopology" => {
             start_mesh_operation_job(
                 state.core,
                 state.scheduler,
@@ -2887,6 +2896,7 @@ fn validate_process_mesh_cli_options(
     target_quads: Option<u32>,
     has_quad_output: bool,
     resolution: Option<u32>,
+    voxel_resolution: Option<u32>,
     padding: Option<u32>,
     overdraw_threshold: Option<f32>,
 ) -> Result<(), &'static str> {
@@ -2895,6 +2905,9 @@ fn validate_process_mesh_cli_options(
     }
     if operation != "uv.unwrap" && (resolution.is_some() || padding.is_some()) {
         return Err("--resolution and --padding require uv.unwrap.");
+    }
+    if operation != "mesh.voxel_remesh" && voxel_resolution.is_some() {
+        return Err("--voxel-resolution requires mesh.voxel_remesh.");
     }
     if operation != "render.optimize" && overdraw_threshold.is_some() {
         return Err("--overdraw-threshold requires render.optimize.");
@@ -2906,6 +2919,7 @@ fn process_mesh_cli_parameters(
     operation: &str,
     target_quads: Option<u32>,
     resolution: Option<u32>,
+    voxel_resolution: Option<u32>,
     padding: Option<u32>,
     overdraw_threshold: Option<f32>,
 ) -> Value {
@@ -2920,6 +2934,11 @@ fn process_mesh_cli_parameters(
             let defaults = meshharbor_core::AtlasBakeOptions::default();
             parameters["resolution"] = json!(resolution.unwrap_or(defaults.resolution));
             parameters["padding"] = json!(padding.unwrap_or(defaults.padding));
+        }
+        "mesh.voxel_remesh" => {
+            if let Some(voxel_resolution) = voxel_resolution {
+                parameters["resolution"] = json!(voxel_resolution);
+            }
         }
         "render.optimize" => {
             if let Some(threshold) = overdraw_threshold {
@@ -3856,20 +3875,68 @@ mod tests {
     #[test]
     fn process_mesh_cli_settings_are_operation_scoped_and_forwarded() {
         assert!(
-            validate_process_mesh_cli_options("mesh.cleanup", Some(100), false, None, None, None)
+            validate_process_mesh_cli_options(
+                "mesh.cleanup",
+                Some(100),
+                false,
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            validate_process_mesh_cli_options(
+                "mesh.cleanup",
+                None,
+                false,
+                Some(2048),
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            validate_process_mesh_cli_options(
+                "mesh.cleanup",
+                None,
+                false,
+                None,
+                None,
+                None,
+                Some(1.2)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_process_mesh_cli_options(
+                "uv.unwrap",
+                None,
+                false,
+                Some(2048),
+                None,
+                Some(12),
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_process_mesh_cli_options("uv.unwrap", None, false, None, Some(80), None, None)
                 .is_err()
         );
         assert!(
-            validate_process_mesh_cli_options("mesh.cleanup", None, false, Some(2048), None, None)
-                .is_err()
-        );
-        assert!(
-            validate_process_mesh_cli_options("mesh.cleanup", None, false, None, None, Some(1.2))
-                .is_err()
-        );
-        assert!(
-            validate_process_mesh_cli_options("uv.unwrap", None, false, Some(2048), Some(12), None)
-                .is_ok()
+            validate_process_mesh_cli_options(
+                "mesh.voxel_remesh",
+                None,
+                false,
+                None,
+                Some(80),
+                None,
+                None
+            )
+            .is_ok()
         );
         assert!(
             validate_process_mesh_cli_options(
@@ -3878,24 +3945,48 @@ mod tests {
                 false,
                 None,
                 None,
+                None,
                 Some(1.2)
             )
             .is_ok()
         );
 
-        let automatic = process_mesh_cli_parameters("mesh.retopology", None, None, None, None);
+        let automatic =
+            process_mesh_cli_parameters("mesh.retopology", None, None, None, None, None);
         assert_eq!(automatic, json!({}));
-        let targeted = process_mesh_cli_parameters("mesh.retopology", Some(12), None, None, None);
+        let targeted =
+            process_mesh_cli_parameters("mesh.retopology", Some(12), None, None, None, None);
         assert_eq!(targeted, json!({"target_quads": 12}));
-        let uv_defaults = process_mesh_cli_parameters("uv.unwrap", None, None, None, None);
+        let uv_defaults = process_mesh_cli_parameters("uv.unwrap", None, None, None, None, None);
         assert_eq!(uv_defaults["resolution"], 1024);
         assert_eq!(uv_defaults["padding"], 8);
-        let uv_custom = process_mesh_cli_parameters("uv.unwrap", None, Some(2048), Some(12), None);
+        let uv_custom =
+            process_mesh_cli_parameters("uv.unwrap", None, Some(2048), None, Some(12), None);
         assert_eq!(uv_custom["resolution"], 2048);
         assert_eq!(uv_custom["padding"], 12);
-        let render = process_mesh_cli_parameters("render.optimize", None, None, None, Some(1.2));
+        let voxel =
+            process_mesh_cli_parameters("mesh.voxel_remesh", None, None, Some(80), None, None);
+        assert_eq!(voxel, json!({"resolution": 80}));
+        let render =
+            process_mesh_cli_parameters("render.optimize", None, None, None, None, Some(1.2));
         let forwarded_threshold = render["overdraw_threshold"].as_f64().unwrap();
         assert!((forwarded_threshold - 1.2).abs() < 0.000001);
+    }
+
+    #[test]
+    fn process_mesh_cli_parses_bounded_voxel_resolution() {
+        for (value, valid) in [("15", false), ("16", true), ("160", true), ("161", false)] {
+            let parsed = Cli::try_parse_from([
+                "meshharbor",
+                "process-mesh",
+                "asset_example",
+                "--operation",
+                "mesh.voxel_remesh",
+                "--voxel-resolution",
+                value,
+            ]);
+            assert_eq!(parsed.is_ok(), valid, "{value}");
+        }
     }
 
     #[test]

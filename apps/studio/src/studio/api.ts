@@ -376,6 +376,15 @@ const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
     ],
     lists: [{ key: 'preserved', label: 'Preserved data', formatter: 'text-list' }],
   },
+  'mesh.voxel_remesh': {
+    title: 'Voxel Remesh',
+    metrics: [
+      { key: 'resolution', label: 'Voxel resolution', formatter: 'count' },
+      { key: 'input_triangles', label: 'Input triangles', formatter: 'count' },
+      { key: 'output_triangles', label: 'Output triangles', formatter: 'count' },
+      { key: 'output_vertices', label: 'Output vertices', formatter: 'count' },
+    ],
+  },
   'render.optimize': {
     title: 'Render optimization',
     metrics: [
