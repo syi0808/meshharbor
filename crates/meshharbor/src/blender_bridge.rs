@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
@@ -24,14 +24,41 @@ use crate::{ApiError, AppState};
 const ADDON_FILENAME: &str = "meshharbor_bridge.py";
 const ADDON_SOURCE: &str = include_str!("../blender/meshharbor_bridge.py");
 const ADDON_MARKER: &str = "\"name\": \"MeshHarbor Bridge\"";
+const PREFERENCES_FILENAME: &str = "userpref.blend";
+const MAX_PREFERENCES_BYTES: u64 = 64 * 1024 * 1024;
 const HEARTBEAT_LIMIT: Duration = Duration::from_secs(8);
 const TRANSFER_LIMIT: Duration = Duration::from_secs(240);
-const PROBE: &str = r#"import bpy, json; print("MESHHARBOR_BLENDER:" + json.dumps({"version": bpy.app.version, "addons": bpy.utils.user_resource("SCRIPTS", path="addons")}))"#;
+const PROBE: &str = r#"import bpy, json; print("MESHHARBOR_BLENDER:" + json.dumps({"version": bpy.app.version, "addons": bpy.utils.user_resource("SCRIPTS", path="addons"), "config": bpy.utils.user_resource("CONFIG")}))"#;
+const ACTIVATE: &str = r#"
+import addon_utils
+import bpy
+import os
+import sys
+from pathlib import Path
+
+assert Path(bpy.utils.user_resource("CONFIG")).resolve() == Path(os.environ["BLENDER_USER_CONFIG"]).resolve()
+assert not bpy.context.preferences.app_template
+module = "meshharbor_bridge"
+enabled, loaded = addon_utils.check(module)
+if not (enabled and loaded):
+    assert bpy.ops.preferences.addon_enable(module=module) == {"FINISHED"}
+    assert addon_utils.check(module) == (True, True)
+assert Path(sys.modules[module].__file__).resolve() == Path(os.environ["MESHHARBOR_BLENDER_ADDON"]).resolve()
+if enabled and loaded:
+    print("MESHHARBOR_ALREADY_ENABLED")
+else:
+    assert bpy.ops.wm.save_userpref() == {"FINISHED"}
+    print("MESHHARBOR_ACTIVATED")
+"#;
+
+#[path = "blender_processes.rs"]
+mod processes;
 
 #[derive(Clone)]
 struct Bridge {
     listen: SocketAddr,
     queue: Arc<Mutex<Queue>>,
+    installation: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -129,6 +156,7 @@ pub(crate) fn routes(listen: SocketAddr) -> Router<AppState> {
     let bridge = Bridge {
         listen,
         queue: Arc::default(),
+        installation: Arc::default(),
     };
     Router::new()
         .route("/api/v1/blender", get(status))
@@ -347,6 +375,7 @@ async fn download_addon(Extension(bridge): Extension<Bridge>) -> impl IntoRespon
 struct BlenderLocation {
     version: [u16; 3],
     addons: PathBuf,
+    config: PathBuf,
 }
 
 #[derive(Serialize)]
@@ -362,33 +391,191 @@ async fn install_addon(
             "MeshHarbor is running in a container. Download the add-on and install it on the host from Blender.".into(),
         ).into());
     }
-    let location = find_blender().await?;
-    task::spawn_blocking(move || {
+    let _installation = bridge.installation.try_lock().map_err(|_| {
+        CoreError::Conflict("Another Blender add-on installation is in progress.".into())
+    })?;
+    installation_io(ensure_blender_closed).await?;
+    let (executable, location) = find_blender().await?;
+    let [major, minor, patch] = location.version;
+    let addon = location.addons.join(ADDON_FILENAME);
+    let staged = installation_io(move || {
+        ensure_blender_closed()?;
+        let staged = StagedPreferences::open(&location.config)?;
         install_source(&location.addons, &addon_source(bridge.listen))?;
-        let [major, minor, patch] = location.version;
-        Ok(Json(InstallResult {
-            version: format!("{major}.{minor}.{patch}"),
-        }))
+        Ok(staged)
     })
-    .await
-    .map_err(|_| CoreError::OperationUnavailable("Could not install the Blender add-on.".into()))?
+    .await?;
+    let mut command = blender_command(executable);
+    command
+        .args([
+            "--log",
+            "blend,wm.files",
+            "--log-level",
+            if major >= 5 { "info" } else { "1" },
+        ])
+        .args(["--python-expr", ACTIVATE])
+        .env("BLENDER_USER_CONFIG", staged.directory.path())
+        .env("MESHHARBOR_BLENDER_ADDON", addon);
+    let output = timeout(Duration::from_secs(25), command.output())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or_else(activation_failed)?;
+    let saved = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.strip_suffix(b"\r").unwrap_or(line) == b"MESHHARBOR_ACTIVATED");
+    let already_enabled = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.strip_suffix(b"\r").unwrap_or(line) == b"MESHHARBOR_ALREADY_ENABLED");
+    if !output.status.success()
+        || (!saved && !already_enabled)
+        || (staged.original.is_some()
+            && !preferences_loaded(&output.stdout, &staged.staged_path())
+            && !preferences_loaded(&output.stderr, &staged.staged_path()))
+    {
+        return Err(activation_failed().into());
+    }
+    installation_io(move || {
+        if saved {
+            staged.commit(ensure_blender_closed)
+        } else {
+            ensure_blender_closed()
+        }
+    })
+    .await?;
+    Ok(Json(InstallResult {
+        version: format!("{major}.{minor}.{patch}"),
+    }))
 }
 
-async fn find_blender() -> Result<BlenderLocation, CoreError> {
+async fn installation_io<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, CoreError> + Send + 'static,
+) -> Result<T, CoreError> {
+    task::spawn_blocking(work).await.map_err(|_| {
+        CoreError::OperationUnavailable("Could not install the Blender add-on.".into())
+    })?
+}
+
+fn activation_failed() -> CoreError {
+    CoreError::OperationUnavailable(
+        "Could not safely activate the add-on. Blender preferences were not changed. Use Download add-on to install manually.".into(),
+    )
+}
+
+fn ensure_blender_closed() -> Result<(), CoreError> {
+    match processes::blender_running() {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(CoreError::Conflict(
+            "Blender is running. Quit Blender, then click Install locally again.".into(),
+        )),
+        Err(_) => Err(CoreError::OperationUnavailable(
+            "Could not verify that Blender is closed. No Blender preferences were changed. Use Download add-on to install manually.".into(),
+        )),
+    }
+}
+
+fn preferences_loaded(log: &[u8], expected: &FsPath) -> bool {
+    String::from_utf8_lossy(log).lines().any(|line| {
+        line.split_once("Read prefs: \"")
+            .or_else(|| line.split_once("read prefs: \""))
+            .and_then(|(_, rest)| rest.strip_suffix('"'))
+            .is_some_and(|path| FsPath::new(path) == expected)
+    })
+}
+
+struct StagedPreferences {
+    directory: tempfile::TempDir,
+    destination: PathBuf,
+    original: Option<Vec<u8>>,
+}
+
+impl StagedPreferences {
+    fn open(config: &FsPath) -> Result<Self, CoreError> {
+        fs::create_dir_all(config)?;
+        let destination = config.join(PREFERENCES_FILENAME);
+        let original = read_preferences(&destination)?;
+        let directory = tempfile::Builder::new()
+            .prefix(".meshharbor-")
+            .tempdir_in(config)?;
+        let staged = Self {
+            directory,
+            destination,
+            original,
+        };
+        if let Some(original) = &staged.original {
+            fs::write(staged.staged_path(), original)?;
+        }
+        Ok(staged)
+    }
+
+    fn staged_path(&self) -> PathBuf {
+        self.directory.path().join(PREFERENCES_FILENAME)
+    }
+
+    fn commit(
+        self,
+        check_blender_closed: impl FnOnce() -> Result<(), CoreError>,
+    ) -> Result<(), CoreError> {
+        let staged = self.staged_path();
+        if !read_preferences(&staged)?.is_some_and(|bytes| !bytes.is_empty()) {
+            return Err(activation_failed());
+        }
+        if read_preferences(&self.destination)? != self.original {
+            return Err(CoreError::Conflict(
+                "Blender preferences changed during installation. Quit Blender and try again."
+                    .into(),
+            ));
+        }
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&staged)?
+            .sync_all()?;
+        if self.original.is_some() {
+            fs::set_permissions(&staged, fs::metadata(&self.destination)?.permissions())?;
+        }
+        check_blender_closed()?;
+        fs::rename(staged, &self.destination)?;
+        Ok(())
+    }
+}
+
+fn read_preferences(path: &FsPath) -> Result<Option<Vec<u8>>, CoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_PREFERENCES_BYTES => {}
+        Ok(_) => return Err(activation_failed()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_PREFERENCES_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PREFERENCES_BYTES {
+        return Err(activation_failed());
+    }
+    Ok(Some(bytes))
+}
+
+fn blender_command(executable: PathBuf) -> Command {
+    let mut command = Command::new(executable);
+    command.args([
+        "--background",
+        "--disable-autoexec",
+        "--python-exit-code",
+        "1",
+    ]);
+    command.kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    command
+}
+
+async fn find_blender() -> Result<(PathBuf, BlenderLocation), CoreError> {
     for executable in blender_candidates().into_iter().take(12) {
-        let mut command = Command::new(executable);
-        command.args([
-            "--background",
-            "--factory-startup",
-            "--disable-autoexec",
-            "--python-exit-code",
-            "1",
-            "--python-expr",
-            PROBE,
-        ]);
-        command.kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x08000000);
+        let mut command = blender_command(executable.clone());
+        command.args(["--factory-startup", "--python-expr", PROBE]);
         if let Ok(Ok(output)) = timeout(Duration::from_secs(5), command.output()).await
             && output.status.success()
             && let Some(location) =
@@ -402,8 +589,9 @@ async fn find_blender() -> Result<BlenderLocation, CoreError> {
                     })
             && location.version >= [4, 2, 0]
             && location.addons.is_absolute()
+            && location.config.is_absolute()
         {
-            return Ok(location);
+            return Ok((executable, location));
         }
     }
     Err(CoreError::OperationUnavailable(
@@ -599,5 +787,62 @@ mod tests {
         ));
         assert_eq!(fs::read_to_string(destination).unwrap(), "other add-on");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn activation_only_publishes_if_blender_is_closed_and_preferences_are_unchanged() {
+        let config = tempfile::tempdir().unwrap();
+        let destination = config.path().join(PREFERENCES_FILENAME);
+        fs::write(&destination, b"original prefs").unwrap();
+
+        let prepare = || {
+            let staged = StagedPreferences::open(config.path()).unwrap();
+            assert_eq!(fs::read(staged.staged_path()).unwrap(), b"original prefs");
+            fs::write(staged.staged_path(), b"updated prefs").unwrap();
+            staged
+        };
+        assert!(matches!(
+            prepare().commit(|| Err(CoreError::Conflict("Blender is running.".into()))),
+            Err(CoreError::Conflict(_)),
+        ));
+        assert_eq!(fs::read(&destination).unwrap(), b"original prefs");
+
+        let staged = prepare();
+        fs::write(&destination, b"new preferences from Blender").unwrap();
+        assert!(matches!(
+            staged.commit(|| Ok(())),
+            Err(CoreError::Conflict(_))
+        ));
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"new preferences from Blender"
+        );
+
+        fs::write(&destination, b"original prefs").unwrap();
+        prepare().commit(|| Ok(())).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"updated prefs");
+        assert_eq!(fs::read_dir(config.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn reads_preference_load_confirmation_from_supported_blender_logs() {
+        let path = FsPath::new("staging folder").join(PREFERENCES_FILENAME);
+        for line in [
+            "INFO (wm.files): read prefs:",
+            "00:00.123 blend | Read prefs:",
+        ] {
+            assert!(preferences_loaded(
+                format!("{line} \"{}\"\n", path.display()).as_bytes(),
+                &path
+            ));
+        }
+        assert!(!preferences_loaded(
+            b"read prefs: \"different/userpref.blend\"",
+            &path
+        ));
+        assert!(!preferences_loaded(
+            b"Read prefs from app-template: \"staging folder/userpref.blend\"",
+            &path
+        ));
     }
 }

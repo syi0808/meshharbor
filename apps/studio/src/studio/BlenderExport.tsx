@@ -111,18 +111,18 @@ export function BlenderExport({ api, asset, disabled }: { api: MeshHarborApi; as
           <li>
             Choose one installation method for Blender 4.2 or later:
             <ul className="mt-1 list-disc space-y-1 pl-4">
-              <li><strong>Install locally (recommended):</strong> MeshHarbor finds Blender on this computer and installs the add-on for you.</li>
+              <li><strong>Install locally (recommended):</strong> Quit Blender first. MeshHarbor finds Blender on this computer, installs the add-on, and enables it for the next launch.</li>
               <li><strong>Download add-on (manual):</strong> Use this if automatic installation fails or MeshHarbor runs in Docker. In Blender, choose <strong>Preferences → Add-ons → Install from Disk</strong> and select the downloaded file.</li>
             </ul>
           </li>
-          <li>Enable <strong>MeshHarbor Bridge</strong> in Blender’s Add-ons preferences.</li>
+          <li>Open Blender. If you downloaded the add-on, enable <strong>MeshHarbor Bridge</strong> in Blender’s Add-ons preferences.</li>
           <li>In Blender’s 3D Viewport, press <kbd>N</kbd>, open <strong>MeshHarbor</strong>, and select <strong>Start Bridge</strong>.</li>
         </ol>}
         <div role="status" className={connected ? 'grid gap-1' : 'grid gap-1 border-t pt-2'}>
           {!connected && <>
-            {setupAction === 'install' && <p>Looking for Blender and installing the add-on…</p>}
+            {setupAction === 'install' && <p>Checking Blender and preparing the add-on…</p>}
             {setupAction === 'download' && <p>Preparing the add-on download…</p>}
-            {setupState?.stage === 'installed' && <p>Add-on installed for Blender {setupState.version}. Restart Blender if it is already open.</p>}
+            {setupState?.stage === 'installed' && <p>Add-on installed and enabled for Blender {setupState.version}. Open Blender to start the bridge.</p>}
             {setupState?.stage === 'download_started' && <p>Download started. Install the downloaded file in Blender to continue.</p>}
           </>}
           <p className="font-medium">{connected ? 'Blender is connected.' : <>

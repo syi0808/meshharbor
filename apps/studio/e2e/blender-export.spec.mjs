@@ -27,6 +27,15 @@ test('Studio downloads the Blender add-on and sends the selected compressed vers
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await expect(dots).toHaveCSS('animation-name', 'none');
 
+  const install = dialog.getByRole('button', { name: 'Install locally' });
+  const blenderRunning = 'Blender is running. Quit Blender, then click Install locally again.';
+  await page.route('**/api/v1/blender/install', route => route.fulfill({
+    status: 409, json: { error: blenderRunning },
+  }), { times: 1 });
+  await install.click();
+  await expect(dialog.getByRole('alert')).toHaveText(blenderRunning);
+  await expect(install).toBeEnabled();
+
   let finishInstall;
   const installInProgress = new Promise(resolve => { finishInstall = resolve; });
   await page.route('**/api/v1/blender/install', async route => {
@@ -34,13 +43,13 @@ test('Studio downloads the Blender add-on and sends the selected compressed vers
     await route.fulfill({ json: { version: '5.1.2' } });
   });
   try {
-    await dialog.getByRole('button', { name: 'Install locally' }).click();
+    await install.click();
     await expect(dialog.getByRole('button', { name: 'Installing…' })).toBeDisabled();
-    await expect(setupStatus).toContainText('Looking for Blender and installing the add-on…');
+    await expect(setupStatus).toContainText('Checking Blender and preparing the add-on…');
   } finally {
     finishInstall();
   }
-  await expect(setupStatus).toContainText('Add-on installed for Blender 5.1.2. Restart Blender if it is already open.');
+  await expect(setupStatus).toContainText('Add-on installed and enabled for Blender 5.1.2. Open Blender to start the bridge.');
   const downloadReady = page.waitForEvent('download');
   await dialog.getByRole('button', { name: 'Download add-on' }).click();
   const download = await downloadReady;

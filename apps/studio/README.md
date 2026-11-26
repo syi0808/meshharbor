@@ -33,11 +33,11 @@ Each imported or generated model has one Inventory card. Select a queued or runn
 ### Send a model to Blender
 
 1. Select the model version you want to transfer and click **Send to Blender** below the preview.
-2. Choose one installation method for Blender 4.2+. Start with **Install locally**, which detects Blender and installs MeshHarbor Bridge in its user add-ons directory. Wait for the installation confirmation below the numbered steps, then restart Blender if it is already open. If automatic installation fails, or MeshHarbor runs inside Docker, use **Download add-on** instead and select the downloaded `meshharbor_bridge.py` in Blender's **Edit → Preferences → Add-ons → Install from Disk**.
-3. Enable **MeshHarbor Bridge** in Blender's Add-ons preferences. In the 3D Viewport, press **N**, open the **MeshHarbor** tab, and click **Start Bridge**.
+2. Choose one installation method for Blender 4.2+. With Blender closed, click **Install locally** to install and enable MeshHarbor Bridge for the next launch. If Blender is running, quit it and retry. If automatic installation fails, or MeshHarbor runs inside Docker, use **Download add-on** instead and select the downloaded `meshharbor_bridge.py` in Blender's **Edit → Preferences → Add-ons → Install from Disk**.
+3. Open Blender. If you installed the add-on manually, enable **MeshHarbor Bridge** in Blender's Add-ons preferences. In the 3D Viewport, press **N**, open the **MeshHarbor** tab, and click **Start Bridge**.
 4. In Studio, click **Send to Blender** again. The add-on imports the selected version into the open scene and packs embedded textures. It does not save or replace the scene.
 
-**Install locally** checks the system PATH and common installation locations on macOS, Windows, and Linux. It does not enable the add-on or alter Blender preferences. The bridge accepts one Blender instance at a time and connects to the MeshHarbor server address from installation; reinstall or download again if its listen address changes. Everything runs on loopback without a Blender account or cloud service.
+**Install locally** checks the system PATH and common installation locations on macOS, Windows, and Linux. It stages the activation using a copy of the existing preferences and does not update the live preferences while Blender is running. The bridge accepts one Blender instance at a time and connects to the MeshHarbor server address from installation; reinstall or download again if its listen address changes. Everything runs on loopback without a Blender account or cloud service.
 
 MeshHarbor's meshopt-compressed GLBs are decoded specifically for Blender transfer; stored versions and **Export GLB** downloads stay unchanged. Transfer files must be self-contained, and the GLB sent to Blender cannot exceed 512 MiB after decoding.
 
