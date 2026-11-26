@@ -11,7 +11,7 @@ use crate::{
     CoreError, CoreResult,
     huggingface_browser::PACKAGE,
     job_execution::JobExecution,
-    model_storage::{managed_directory, managed_file_size},
+    model_storage::{managed_directory, managed_file_size, symlink_file},
     uv_bootstrap::{
         download_uv_tracked, is_executable, local_tool_dirs, managed_executable, uv_candidates,
         uv_executable_name,
@@ -527,12 +527,7 @@ fn link_executable(target: &Path, link: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    #[cfg(unix)]
-    return std::os::unix::fs::symlink(target, link);
-    #[cfg(windows)]
-    return std::os::windows::fs::symlink_file(target, link);
-    #[cfg(not(any(unix, windows)))]
-    return Err(io::ErrorKind::Unsupported.into());
+    symlink_file(target, link)
 }
 
 fn python_candidates(root: &Path, version: &str) -> impl Iterator<Item = PathBuf> {

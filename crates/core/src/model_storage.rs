@@ -1,12 +1,13 @@
 use std::{
-    fs,
-    io::ErrorKind,
+    fs, io,
+    io::{ErrorKind, Read},
     path::{Path, PathBuf},
 };
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
-use crate::{CoreError, CoreResult};
+use crate::{CoreError, CoreResult, job_execution::JobExecution};
 
 #[derive(Clone, Copy)]
 pub enum Pixal3dProfile {
@@ -144,6 +145,52 @@ pub(crate) fn managed_file_size(root: &Path, relative: &str) -> CoreResult<Optio
     Ok(inspect_entry(&fs::canonicalize(root)?, relative.split('/'), File)?.map(|entry| entry.size))
 }
 
+pub(crate) fn managed_weight_size(root: &Path, relative: &str) -> CoreResult<Option<u64>> {
+    Ok(
+        inspect_entry(&fs::canonicalize(root)?, relative.split('/'), Weight)?
+            .map(|entry| entry.size),
+    )
+}
+
+pub(crate) fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(source, destination);
+    #[cfg(windows)]
+    return std::os::windows::fs::symlink_file(source, destination);
+    #[cfg(not(any(unix, windows)))]
+    return Err(ErrorKind::Unsupported.into());
+}
+
+pub(crate) fn is_real_directory(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return false;
+        }
+    }
+    metadata.is_dir()
+}
+
+pub(crate) fn weight_matches_sha(
+    path: &Path,
+    expected: &str,
+    execution: JobExecution<'_>,
+) -> CoreResult<bool> {
+    let mut file = fs::File::open(path)?;
+    let mut sha = Sha256::new();
+    let mut buffer = vec![0; 1024 * 1024];
+    loop {
+        execution.checkpoint()?;
+        let length = file.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        sha.update(&buffer[..length]);
+    }
+    Ok(format!("{:x}", sha.finalize()) == expected)
+}
+
 pub(crate) fn model_path(path: PathBuf) -> PathBuf {
     std::path::absolute(&path).unwrap_or(path)
 }
@@ -161,9 +208,10 @@ pub(crate) fn remove_managed_directories(root: &Path, relative: &[&str]) -> Core
 enum EntryKind {
     Directory,
     File,
+    Weight,
 }
 
-use EntryKind::{Directory, File};
+use EntryKind::{Directory, File, Weight};
 
 const CREDENTIAL_FILES: &[(&str, EntryKind)] = &[
     ("home/.cache/huggingface/stored_tokens", File),
@@ -190,7 +238,7 @@ const COMMON_MODELS: &[(&str, EntryKind)] = &[
 ];
 const MLX_MODELS: &[(&str, EntryKind)] = &[
     ("weights/download-manifest.json", File),
-    ("weights/naf_release.pth", File),
+    ("weights/naf_release.pth", Weight),
     ("weights/naf_release.download", File),
     ("weights/naf_release.safetensors", File),
     ("weights/.naf_release.safetensors.tmp", File),
@@ -198,7 +246,7 @@ const MLX_MODELS: &[(&str, EntryKind)] = &[
 const CUDA_MODELS: &[(&str, EntryKind)] = &[
     (
         "home/.cache/huggingface/hub/pixal3d-cuda/naf_release.pth",
-        File,
+        Weight,
     ),
     (
         "home/.cache/huggingface/hub/pixal3d-cuda/naf_release.download",
@@ -233,6 +281,13 @@ fn inspect_entry<'a>(
             Err(error) => return Err(error.into()),
         };
         let last = parts.peek().is_none();
+        if last && matches!(kind, Weight) && metadata.is_symlink() {
+            let size = fs::metadata(&path)
+                .ok()
+                .filter(|target| target.is_file())
+                .map_or(0, |target| target.len());
+            return Ok(Some(LocalEntry { path, kind, size }));
+        }
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
@@ -241,7 +296,7 @@ fn inspect_entry<'a>(
                 return Err(non_managed_path());
             }
         }
-        let valid = if last && matches!(kind, File) {
+        let valid = if last && matches!(kind, File | Weight) {
             metadata.file_type().is_file()
         } else {
             metadata.file_type().is_dir()
@@ -264,7 +319,7 @@ fn remove_entries(entries: Vec<LocalEntry>) -> CoreResult<()> {
     for entry in entries {
         match entry.kind {
             Directory => fs::remove_dir_all(entry.path)?,
-            File => fs::remove_file(entry.path)?,
+            File | Weight => fs::remove_file(entry.path)?,
         }
     }
     Ok(())
@@ -296,8 +351,20 @@ mod tests {
 
         fs::remove_file(runtime.join("weights")).unwrap();
         symlink(external.join("naf_release.pth"), repo.join("snapshot-file")).unwrap();
+        fs::create_dir(runtime.join("weights")).unwrap();
+        symlink(
+            external.join("naf_release.pth"),
+            runtime.join("weights/naf_release.pth"),
+        )
+        .unwrap();
         Pixal3dProfile::Mlx.remove_models(&root).unwrap();
         assert!(!repo.exists());
+        assert!(
+            runtime
+                .join("weights/naf_release.pth")
+                .symlink_metadata()
+                .is_err()
+        );
         assert!(external.join("naf_release.pth").is_file());
         fs::remove_dir_all(root).unwrap();
     }

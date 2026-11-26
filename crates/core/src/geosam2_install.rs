@@ -1,20 +1,23 @@
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
     CoreError, CoreResult, Pixal3dCudaRuntimeManager,
     external_installer::Installer,
+    huggingface_download::{link_snapshot_files, shared_hub_cache},
     job_execution::JobExecution,
     model_environment::ModelEnvironment,
-    model_storage::{managed_directory, managed_file_size, model_path, remove_managed_directories},
+    model_storage::{
+        managed_directory, managed_file_size, managed_weight_size, model_path,
+        remove_managed_directories, weight_matches_sha,
+    },
 };
 
 const MANAGED: &str = "runtimes/geosam2-managed";
@@ -253,30 +256,59 @@ fn install_weights(
     fs::create_dir_all(&directory)?;
     let staged = StagedDownload(directory.join(format!(".download-{}", Uuid::new_v4())));
     fs::create_dir(&staged.0)?;
-    let mut download = Command::new(environment.hf_cli());
-    download
-        .env_clear()
-        .env("HOME", &staged.0)
-        .env("HF_HOME", &staged.0)
-        .env("HF_TOKEN_PATH", token)
-        .env("HF_HUB_DISABLE_TELEMETRY", "1")
-        .env("HF_HUB_DISABLE_UPDATE_CHECK", "1")
-        .args([
-            "download",
-            WEIGHTS_REPO,
-            WEIGHTS_NAME,
-            "--revision",
-            WEIGHTS_REVISION,
-            "--local-dir",
-        ])
-        .arg(&staged.0);
-    execution.visible(download, "Could not download the pinned GeoSAM2 checkpoint")?;
-    execution.stage("verify_checkpoint")?;
     let staged_file = staged.0.join(WEIGHTS_NAME);
-    if !verify_sha(&staged_file, execution)? {
-        return Err(CoreError::OperationUnavailable(
-            "GeoSAM2 checkpoint failed size or SHA-256 verification.".into(),
-        ));
+    let files = [WEIGHTS_NAME.to_string()];
+    let linked = if link_snapshot_files(
+        &directory,
+        &staged.0,
+        shared_hub_cache().as_deref(),
+        (WEIGHTS_REPO, WEIGHTS_REVISION),
+        &files,
+        false,
+        execution,
+    )?
+    .is_empty()
+    {
+        execution.stage("verify_checkpoint")?;
+        match verify_sha(&staged_file, execution) {
+            Ok(true) => true,
+            Ok(false) | Err(CoreError::Io(_)) => {
+                fs::remove_file(&staged_file)?;
+                false
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
+    if linked {
+        execution.note("Linked the SHA-256-verified GeoSAM2 checkpoint from the shared cache.")?;
+    } else {
+        execution.stage("download_models")?;
+        let mut download = Command::new(environment.hf_cli());
+        download
+            .env_clear()
+            .env("HOME", &staged.0)
+            .env("HF_HOME", &staged.0)
+            .env("HF_TOKEN_PATH", token)
+            .env("HF_HUB_DISABLE_TELEMETRY", "1")
+            .env("HF_HUB_DISABLE_UPDATE_CHECK", "1")
+            .args([
+                "download",
+                WEIGHTS_REPO,
+                WEIGHTS_NAME,
+                "--revision",
+                WEIGHTS_REVISION,
+                "--local-dir",
+            ])
+            .arg(&staged.0);
+        execution.visible(download, "Could not download the pinned GeoSAM2 checkpoint")?;
+        execution.stage("verify_checkpoint")?;
+        if !verify_sha(&staged_file, execution)? {
+            return Err(CoreError::OperationUnavailable(
+                "GeoSAM2 checkpoint failed size or SHA-256 verification.".into(),
+            ));
+        }
     }
     execution.begin_commit()?;
     fs::rename(&staged_file, &file)?;
@@ -325,7 +357,7 @@ fn weight_size(root: &Path) -> CoreResult<Option<u64>> {
     if !owned(root)? {
         return Ok(None);
     }
-    managed_file_size(root, &format!("{WEIGHTS_DIR}/{WEIGHTS_NAME}"))
+    managed_weight_size(root, &format!("{WEIGHTS_DIR}/{WEIGHTS_NAME}"))
 }
 
 pub(crate) fn remove_weights(root: &Path) -> CoreResult<()> {
@@ -337,21 +369,10 @@ pub(crate) fn remove_weights(root: &Path) -> CoreResult<()> {
 }
 
 fn verify_sha(path: &Path, execution: JobExecution<'_>) -> CoreResult<bool> {
-    let mut file = File::open(path)?;
-    if file.metadata()?.len() != WEIGHTS_BYTES {
-        return Ok(false);
-    }
-    let mut sha = Sha256::new();
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        execution.checkpoint()?;
-        let length = file.read(&mut buffer)?;
-        if length == 0 {
-            break;
-        }
-        sha.update(&buffer[..length]);
-    }
-    Ok(format!("{:x}", sha.finalize()) == WEIGHTS_SHA)
+    let metadata = path.metadata()?;
+    Ok(metadata.is_file()
+        && metadata.len() == WEIGHTS_BYTES
+        && weight_matches_sha(path, WEIGHTS_SHA, execution)?)
 }
 
 struct StagedDownload(PathBuf);
@@ -365,6 +386,7 @@ impl Drop for StagedDownload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
 
     fn test_directory() -> PathBuf {
         let root = std::env::temp_dir().join(format!("meshharbor-geosam2-{}", Uuid::new_v4()));
@@ -420,6 +442,16 @@ mod tests {
         ensure_owned(&root).unwrap();
         std::os::unix::fs::symlink(&external, root.join(WEIGHTS_DIR)).unwrap();
         assert!(remove_weights(&root).is_err());
+        assert_eq!(
+            fs::read(external.join(WEIGHTS_NAME)).unwrap(),
+            b"unmanaged data"
+        );
+        fs::remove_file(root.join(WEIGHTS_DIR)).unwrap();
+        fs::create_dir(root.join(WEIGHTS_DIR)).unwrap();
+        std::os::unix::fs::symlink(external.join(WEIGHTS_NAME), weights_path(&root)).unwrap();
+        assert_eq!(weight_size(&root).unwrap(), Some(14));
+        remove_weights(&root).unwrap();
+        assert_eq!(weight_size(&root).unwrap(), None);
         assert_eq!(
             fs::read(external.join(WEIGHTS_NAME)).unwrap(),
             b"unmanaged data"

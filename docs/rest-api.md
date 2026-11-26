@@ -37,6 +37,8 @@ Selected endpoints:
 - `GET /api/v1/blender` returns bridge connection status. `GET /api/v1/blender/addon` downloads the add-on for manual installation. Studio-only `POST /api/v1/blender/install` installs and enables the bundled add-on for Blender’s next launch and returns `409 Conflict` if Blender is running.
 - `POST /api/v1/blender/send` with `{"asset_id":"..."}` requests a transfer of that exact model version. `GET /api/v1/blender/send/{id}` reports the status of a recent transfer. These two endpoints accept the Studio dashboard or an authenticated local bearer client. The separate native companion routes reject browser requests; the companion has no general asset access and receives only the requested version.
 
+Confirmed model installs symlink matching pinned files from the user's Hugging Face Hub cache into private MeshHarbor storage. Files that cannot be reused are downloaded into that private storage instead. Model-file removal unlinks the private references and leaves the user cache untouched.
+
 ## Model versions
 
 A mesh derived from another mesh is an immutable version of the same model. A GLB import or the result of 3D generation starts a new model. A new edit advances the current version only if it was based on the current version; an edit from an older version creates a branch without replacing the current one. Restoring changes the current pointer, not any stored file. Existing data is grouped by its recorded source lineage on first open; the latest saved version becomes current. The existing asset endpoints, CLI, MCP, and job results still address individual assets.

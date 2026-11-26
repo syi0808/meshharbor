@@ -11,19 +11,17 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{
     CoreError, CoreResult, HuggingFaceAccess, HuggingFaceConnection,
     huggingface_access::{DINO_REVISION, check_connection, check_model_access, require_access},
     huggingface_browser::access_python,
-    huggingface_download::{self, DINO_REPO},
+    huggingface_download::{self, DINO_REPO, NAF_SHA256},
     job_execution::JobExecution,
     model_environment::ModelEnvironment,
 };
 
 const PYTHON_REQUEST: &str = "3.12";
-const NAF_SHA256: &str = "c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f";
 const CONVERTER_PACKAGES: &[&str] = &[
     "torch==2.5.1",
     "safetensors==0.7.0",
@@ -317,12 +315,13 @@ impl Pixal3dRuntimeManager {
         )?;
 
         execution.stage("download_weights")?;
-        huggingface_download::download(
+        huggingface_download::download_snapshot(
             &self.runtime_root,
             &home,
-            DINO_REPO,
-            DINO_REVISION,
-            ["model.safetensors", "config.json", "--max-workers", "1"],
+            shared_cache,
+            (DINO_REPO, DINO_REVISION),
+            vec!["model.safetensors".into(), "config.json".into()],
+            "1",
             execution,
         )?;
         huggingface_download::download_pixal3d(
@@ -333,6 +332,12 @@ impl Pixal3dRuntimeManager {
             execution,
         )?;
         execution.stage("verify_weights")?;
+        huggingface_download::link_cached_naf(
+            &self.runtime_root,
+            &weights.join("naf_release.pth"),
+            shared_cache,
+            execution,
+        )?;
         let mut verify = self.python_command(python);
         verify
             .current_dir(&self.source_root)
@@ -439,8 +444,7 @@ impl Pixal3dRuntimeManager {
                 source.display()
             )));
         }
-        let source_hash = format!("{:x}", Sha256::digest(std::fs::read(&source)?));
-        if source_hash != NAF_SHA256 {
+        if !crate::model_storage::weight_matches_sha(&source, NAF_SHA256, execution)? {
             return Err(CoreError::OperationUnavailable(
                 "Downloaded NAF checkpoint checksum mismatch; refusing to pass it to PyTorch."
                     .into(),

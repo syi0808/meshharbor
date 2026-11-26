@@ -357,12 +357,13 @@ impl Pixal3dCudaRuntimeManager {
         )?;
 
         execution.stage("download_weights")?;
-        huggingface_download::download(
+        huggingface_download::download_snapshot(
             &self.runtime_root,
             &home,
-            DINO_REPO,
-            DINO_REVISION,
-            ["model.safetensors"],
+            shared_cache,
+            (DINO_REPO, DINO_REVISION),
+            vec!["model.safetensors".into()],
+            "1",
             execution,
         )?;
         huggingface_download::download_pixal3d(
@@ -374,6 +375,12 @@ impl Pixal3dCudaRuntimeManager {
         )?;
 
         execution.stage("verify_weights")?;
+        huggingface_download::link_cached_naf(
+            &home,
+            &self.hf_home().join("hub/pixal3d-cuda/naf_release.pth"),
+            shared_cache,
+            execution,
+        )?;
         let mut naf = self.python_command(python);
         naf.current_dir(&self.upstream_root)
             .args([
@@ -1171,7 +1178,9 @@ PIXAL_PAYLOAD
             .unwrap();
         assert_eq!(report.status, "model_files_ready");
         assert!(manager.readiness().models_downloaded);
-        let dino = format!("download {DINO_REPO} --revision {DINO_REVISION} model.safetensors");
+        let dino = format!(
+            "download {DINO_REPO} --revision {DINO_REVISION} model.safetensors --max-workers 1"
+        );
         let pixal = format!(
             "download {} --revision {PIXAL_REVISION} pipeline.json {} --max-workers 2",
             huggingface_download::PIXAL_REPO,
@@ -1184,7 +1193,7 @@ PIXAL_PAYLOAD
         let steps = std::fs::read_to_string(manager.home_path().join("hf.log")).unwrap();
         assert_eq!(
             steps.lines().collect::<Vec<_>>(),
-            [dino.as_str(), pixal.as_str(), dino.as_str(), pixal.as_str()]
+            [dino.as_str(), pixal.as_str(), pixal.as_str()]
         );
         assert_eq!(
             std::fs::read_to_string(&partial).unwrap(),

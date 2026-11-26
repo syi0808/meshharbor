@@ -254,6 +254,11 @@ impl ExternalProfile {
         installer.verify(self.id)?;
         execution.stage("download_models")?;
         let weights = runtime.join("weights");
+        let shared_cache = crate::huggingface_download::shared_hub_cache();
+        managed_directory(
+            &root,
+            &format!("{}/home/.cache/huggingface", self.managed_relative()),
+        )?;
         let model_files_present = || {
             self.required_model_files().iter().all(|file| {
                 weights
@@ -266,20 +271,26 @@ impl ExternalProfile {
             .into_iter()
             .filter(|_| self.id != "triposg-mlx" || !model_files_present())
         {
-            let relative = format!("{}/weights/{}", self.managed_relative(), snapshot.directory);
-            managed_directory(&root, &relative)?;
-            for file in &snapshot.files {
-                if let Some((parent, _)) = file.rsplit_once('/') {
-                    managed_directory(&root, &format!("{relative}/{parent}"))?;
-                }
+            let destination = weights.join(snapshot.directory);
+            let missing = crate::huggingface_download::link_snapshot_files(
+                &runtime,
+                &destination,
+                shared_cache.as_deref(),
+                (snapshot.repo, snapshot.revision),
+                &snapshot.files,
+                false,
+                execution,
+            )?;
+            if missing.is_empty() {
+                continue;
             }
             let mut command = installer.command(environment.hf_cli());
             command
                 .env("HF_TOKEN_PATH", &token)
                 .args(["download", snapshot.repo, "--revision", snapshot.revision])
-                .args(&snapshot.files)
+                .args(missing)
                 .arg("--local-dir")
-                .arg(weights.join(snapshot.directory));
+                .arg(destination);
             execution.visible(command, "Could not download pinned model files")?;
         }
         if self.id == "triposg-mlx" && !model_files_present() {

@@ -2,16 +2,22 @@ use std::{
     env,
     ffi::OsStr,
     fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use serde::Serialize;
-use uuid::Uuid;
 
-use crate::{CoreError, CoreResult, huggingface_browser::installed_browser_cli};
+use crate::{
+    CoreError, CoreResult,
+    huggingface_browser::installed_browser_cli,
+    job_execution::JobExecution,
+    model_storage::{is_real_directory, symlink_file, weight_matches_sha},
+};
 
 pub(crate) const DINO_REPO: &str = "facebook/dinov3-vitl16-pretrain-lvd1689m";
+pub(crate) const NAF_SHA256: &str =
+    "c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f";
 pub(crate) const PIXAL_REPO: &str = "TencentARC/Pixal3D";
 pub(crate) const PIXAL_REVISION: &str = "0b31f9160aa400719af409098bff7936a932f726";
 pub(crate) const PIXAL_MULTIVIEW_REVISION: &str = "b0cb2e1b794cab9aa0ac38a95d794a4d9337437f";
@@ -56,7 +62,15 @@ pub(crate) fn shared_hub_cache() -> Option<PathBuf> {
 }
 
 fn pixal_snapshot(hub: &Path, revision: &str) -> PathBuf {
-    hub.join(PIXAL_REPOSITORY).join("snapshots").join(revision)
+    hub_snapshot(hub, PIXAL_REPOSITORY, revision)
+}
+
+fn hub_snapshot(hub: &Path, repo_directory: &str, revision: &str) -> PathBuf {
+    hub.join(repo_directory).join("snapshots").join(revision)
+}
+
+fn repo_directory(repo: &str) -> String {
+    format!("models--{}", repo.replace('/', "--"))
 }
 
 fn present(path: &Path) -> bool {
@@ -64,15 +78,23 @@ fn present(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
-fn shared_file(hub: &Path, revision: &str, relative: &str) -> Option<PathBuf> {
-    let source = pixal_snapshot(hub, revision)
-        .join(relative)
-        .canonicalize()
-        .ok()?;
-    (present(&source)
-        && (source.starts_with(hub.join(PIXAL_REPOSITORY))
-            || source.starts_with(hub.join("blobs"))))
-    .then_some(source)
+fn shared_file(hub: &Path, repo: &str, revision: &str, relative: &str) -> Option<PathBuf> {
+    let snapshot = hub_snapshot(hub, &repo_directory(repo), revision);
+    let source = snapshot.join(relative).canonicalize().ok()?;
+    (present(&source) && snapshot_owns_file(&snapshot, &source)).then_some(source)
+}
+
+fn snapshot_owns_file(snapshot: &Path, source: &Path) -> bool {
+    source.starts_with(snapshot)
+        || snapshot
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(|repo| {
+                source.parent() == Some(repo.join("blobs").as_path())
+                    && source
+                        .file_name()
+                        .is_some_and(|name| !name.to_string_lossy().ends_with(".incomplete"))
+            })
 }
 
 #[derive(Serialize)]
@@ -96,7 +118,7 @@ pub(crate) fn pixal_cache_status(home: &Path, shared_cache: Option<&Path>) -> Pi
             status.local_checkpoints += 1;
         } else if shared
             .as_deref()
-            .and_then(|hub| shared_file(hub, PIXAL_REVISION, &relative))
+            .and_then(|hub| shared_file(hub, PIXAL_REPO, PIXAL_REVISION, &relative))
             .is_some()
         {
             status.reusable_checkpoints += 1;
@@ -126,12 +148,13 @@ pub(crate) fn download_pixal3d(
     include_configs: bool,
     execution: crate::job_execution::JobExecution<'_>,
 ) -> CoreResult<()> {
-    download_pixal_snapshot(
+    download_snapshot(
         runtime_root,
         home,
         shared_cache,
-        PIXAL_REVISION,
+        (PIXAL_REPO, PIXAL_REVISION),
         pixal_files(include_configs),
+        "2",
         execution,
     )
 }
@@ -151,97 +174,222 @@ pub(crate) fn download_pixal3d_multiview(
     home: &Path,
     execution: crate::job_execution::JobExecution<'_>,
 ) -> CoreResult<()> {
-    download_pixal_snapshot(
+    download_snapshot(
         runtime_root,
         home,
         shared_hub_cache().as_deref(),
-        PIXAL_MULTIVIEW_REVISION,
+        (PIXAL_REPO, PIXAL_MULTIVIEW_REVISION),
         PIXAL_MULTIVIEW_FILES
             .iter()
             .map(ToString::to_string)
             .collect(),
+        "2",
         execution,
     )
 }
 
-fn download_pixal_snapshot(
+pub(crate) fn download_snapshot(
     runtime_root: &Path,
     home: &Path,
     shared_cache: Option<&Path>,
-    revision: &str,
+    snapshot: (&str, &str),
     files: Vec<String>,
-    execution: crate::job_execution::JobExecution<'_>,
+    workers: &str,
+    execution: JobExecution<'_>,
 ) -> CoreResult<()> {
-    let local = pixal_snapshot(&home.join(".cache/huggingface/hub"), revision);
-    let shared = shared_cache.and_then(|path| path.canonicalize().ok());
-    let mut missing = Vec::new();
-    let mut reused = 0;
-    for relative in files {
-        let target = local.join(&relative);
-        if present(&target) {
-            continue;
-        }
-        if let Some(source) = shared
-            .as_deref()
-            .and_then(|hub| shared_file(hub, revision, &relative))
-        {
-            if reuse_file(home, &source, &target)? {
-                reused += 1;
-                continue;
-            }
-        }
-        missing.push(relative);
-    }
+    let (repo, revision) = snapshot;
+    let local = hub_snapshot(
+        &home.join(".cache/huggingface/hub"),
+        &repo_directory(repo),
+        revision,
+    );
+    let missing = link_snapshot_files(
+        home,
+        &local,
+        shared_cache,
+        snapshot,
+        &files,
+        true,
+        execution,
+    )?;
     if missing.is_empty() {
-        execution.note("All pinned Pixal3D files are cached; skipping their transfer.")?;
         return Ok(());
     }
-    execution.note(&format!(
-        "Reused {reused} files from the shared cache; downloading {} missing Pixal3D files.",
-        missing.len()
-    ))?;
     download(
         runtime_root,
         home,
-        PIXAL_REPO,
+        repo,
         revision,
-        missing
-            .iter()
-            .map(String::as_str)
-            .chain(["--max-workers", "2"]),
+        missing.into_iter().chain(["--max-workers", workers]),
         execution,
     )
 }
 
-fn reuse_file(home: &Path, source: &Path, target: &Path) -> io::Result<bool> {
+pub(crate) fn link_snapshot_files<'a>(
+    scope: &Path,
+    destination: &Path,
+    shared_cache: Option<&Path>,
+    snapshot: (&str, &str),
+    files: &'a [String],
+    keep_local: bool,
+    execution: JobExecution<'_>,
+) -> CoreResult<Vec<&'a str>> {
+    let (repo, revision) = snapshot;
+    let shared = shared_cache.and_then(|path| path.canonicalize().ok());
+    let destination = private_path(scope, destination, shared.as_deref())?;
+    let scope = scope.canonicalize()?;
+    let mut missing = Vec::new();
+    let mut linked = 0;
+    for relative in files {
+        execution.checkpoint()?;
+        if !normal_path(Path::new(relative)) {
+            return Err(CoreError::InvalidInput(
+                "Invalid pinned model file path.".into(),
+            ));
+        }
+        let target = destination.join(relative);
+        prepare_private_parent(&scope, &target)?;
+        let source = shared
+            .as_deref()
+            .and_then(|hub| shared_file(hub, repo, revision, relative));
+        match target.symlink_metadata() {
+            Ok(metadata) if metadata.is_symlink() => {
+                if let Ok(resolved) = target.canonicalize()
+                    && present(&resolved)
+                    && (source.as_ref() == Some(&resolved)
+                        || (keep_local && snapshot_owns_file(&destination, &resolved)))
+                {
+                    continue;
+                }
+                fs::remove_file(&target)?;
+            }
+            Ok(metadata) if metadata.is_file() => {
+                if keep_local {
+                    if metadata.len() > 0 {
+                        continue;
+                    }
+                    fs::remove_file(&target)?;
+                } else {
+                    missing.push(relative.as_str());
+                    continue;
+                }
+            }
+            Ok(_) => return Err(not_private_file(&target)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if source.is_some_and(|source| symlink_file(&source, &target).is_ok()) {
+            linked += 1;
+        } else {
+            missing.push(relative.as_str());
+        }
+    }
+    execution.note(&format!(
+        "{repo}: linked {linked} pinned files from the shared cache; {} files need download or verification.",
+        missing.len()
+    ))?;
+    Ok(missing)
+}
+
+fn normal_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
+fn not_private_file(path: &Path) -> CoreError {
+    CoreError::OperationUnavailable(format!(
+        "Model files must stay in private storage: {}",
+        path.display()
+    ))
+}
+
+fn private_path(scope: &Path, target: &Path, shared: Option<&Path>) -> CoreResult<PathBuf> {
+    let relative = target
+        .strip_prefix(scope)
+        .map_err(|_| not_private_file(target))?;
+    if !normal_path(relative) || !is_real_directory(&scope.symlink_metadata()?) {
+        return Err(not_private_file(target));
+    }
+    let path = scope.canonicalize()?.join(relative);
+    if shared.is_some_and(|hub| path.starts_with(hub)) {
+        return Err(not_private_file(&path));
+    }
+    Ok(path)
+}
+
+fn prepare_private_parent(scope: &Path, target: &Path) -> CoreResult<()> {
     let parent = target.parent().expect("pinned file has a parent");
-    let relative = parent
-        .strip_prefix(home)
-        .expect("pinned cache is inside the runtime home");
-    let mut directory = home.to_path_buf();
+    let relative = parent.strip_prefix(scope).expect("checked private path");
+    let mut directory = scope.to_path_buf();
     for component in relative.components() {
         directory.push(component);
         match fs::symlink_metadata(&directory) {
-            Ok(metadata) if !metadata.is_dir() => return Ok(false),
+            Ok(metadata) if !is_real_directory(&metadata) => {
+                return Err(not_private_file(&directory));
+            }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&directory)?,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         }
     }
-    match fs::hard_link(source, target) {
-        Ok(()) => return Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(present(target)),
-        Err(_) => {}
-    }
-    let temporary = parent.join(format!(".meshharbor-copy-{}", Uuid::new_v4()));
-    let copied = fs::copy(source, &temporary).and_then(|_| fs::rename(&temporary, target));
-    if copied.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    copied.map(|_| true)
+    Ok(())
 }
 
-pub(crate) fn download(
+pub(crate) fn link_cached_naf(
+    scope: &Path,
+    file: &Path,
+    shared_cache: Option<&Path>,
+    execution: JobExecution<'_>,
+) -> CoreResult<()> {
+    let shared = shared_cache.and_then(|hub| hub.canonicalize().ok());
+    let target = private_path(scope, file, shared.as_deref())?;
+    prepare_private_parent(&scope.canonicalize()?, &target)?;
+    let temporary = target.with_extension("download");
+    match temporary.symlink_metadata() {
+        Ok(metadata) if !metadata.is_file() => return Err(not_private_file(&temporary)),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if target
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        return Ok(());
+    }
+    let cached = shared.and_then(|hub| {
+        let directory = hub.join("pixal3d-cuda");
+        let source = directory.join("naf_release.pth").canonicalize().ok()?;
+        (present(&source) && source.starts_with(directory)).then_some(source)
+    });
+    let cached = match cached {
+        Some(path) => match weight_matches_sha(&path, NAF_SHA256, execution) {
+            Ok(true) => Some(path),
+            Ok(false) | Err(CoreError::Io(_)) => None,
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
+    match target.symlink_metadata() {
+        Ok(metadata) if metadata.is_symlink() => {
+            if cached.as_ref() == target.canonicalize().ok().as_ref() && cached.is_some() {
+                return Ok(());
+            }
+            fs::remove_file(&target)?;
+        }
+        Ok(_) => return Err(not_private_file(&target)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if cached.is_some_and(|source| symlink_file(&source, &target).is_ok()) {
+        execution.note("Linked the SHA-256-verified NAF checkpoint from the shared cache.")?;
+    }
+    Ok(())
+}
+
+fn download(
     runtime_root: &Path,
     home: &Path,
     repo: &str,
@@ -285,6 +433,7 @@ pub(crate) fn download(
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use uuid::Uuid;
 
     #[test]
     fn complete_pinned_shared_snapshot_is_reused_without_running_hf() {
@@ -315,11 +464,136 @@ mod tests {
         let status = pixal_cache_status(&home, Some(&shared));
         assert_eq!(status.local_checkpoints, PIXAL_CHECKPOINTS.len());
         assert_eq!(status.reusable_checkpoints, 0);
+        let linked = pixal_snapshot(&home.join(".cache/huggingface/hub"), PIXAL_REVISION)
+            .join("pipeline.json");
+        assert!(linked.symlink_metadata().unwrap().is_symlink());
+        assert_eq!(fs::read_link(linked).unwrap(), blob.canonicalize().unwrap());
         fs::remove_dir_all(home.join(".cache")).unwrap();
         assert_eq!(
             fs::read(snapshot.join("pipeline.json")).unwrap(),
             b"cached fixture"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_cache_links_pinned_external_weights_and_repairs_dangling_links() {
+        let root = env::temp_dir().join(format!("meshharbor-cache-external-{}", Uuid::new_v4()));
+        let runtime = root.join("runtime");
+        let weights = runtime.join("weights/model");
+        let hub = root.join("shared");
+        let repo = "microsoft/TRELLIS-image-large";
+        let revision = "reviewed";
+        let snapshot = hub_snapshot(&hub, &repo_directory(repo), revision);
+        let cached = snapshot.join("model.safetensors");
+        let other = hub_snapshot(&hub, &repo_directory(repo), "different").join("config.json");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(&cached, b"pinned fixture").unwrap();
+        fs::write(&other, b"different revision").unwrap();
+        symlink(&other, snapshot.join("config.json")).unwrap();
+        let files = vec!["model.safetensors".into(), "config.json".into()];
+        let prepare = || {
+            link_snapshot_files(
+                &runtime,
+                &weights,
+                Some(&hub),
+                (repo, revision),
+                &files,
+                false,
+                Default::default(),
+            )
+        };
+        assert_eq!(prepare().unwrap(), ["config.json"]);
+        assert_eq!(
+            fs::read_link(weights.join("model.safetensors")).unwrap(),
+            cached.canonicalize().unwrap()
+        );
+        fs::remove_file(&cached).unwrap();
+        assert_eq!(prepare().unwrap(), ["model.safetensors", "config.json"]);
+        assert!(
+            weights
+                .join("model.safetensors")
+                .symlink_metadata()
+                .is_err()
+        );
+        fs::write(weights.join("model.safetensors"), b"private download").unwrap();
+        fs::remove_dir_all(runtime).unwrap();
+        assert_eq!(fs::read(other).unwrap(), b"different revision");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gated_snapshot_reuses_exact_cached_files_without_a_transfer() {
+        let root = env::temp_dir().join(format!("meshharbor-cache-gated-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let hub = root.join("shared");
+        let revision = "reviewed";
+        let directory = repo_directory(DINO_REPO);
+        let snapshot = hub_snapshot(&hub, &directory, revision);
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(snapshot.join("model.safetensors"), b"gated fixture").unwrap();
+        download_snapshot(
+            &root,
+            &home,
+            Some(&hub),
+            (DINO_REPO, revision),
+            vec!["model.safetensors".into()],
+            "1",
+            Default::default(),
+        )
+        .unwrap();
+        assert!(
+            hub_snapshot(&home.join(".cache/huggingface/hub"), &directory, revision)
+                .join("model.safetensors")
+                .symlink_metadata()
+                .unwrap()
+                .is_symlink()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn linked_destination_directory_is_rejected_before_linking_or_downloading() {
+        let root =
+            env::temp_dir().join(format!("meshharbor-cache-linked-parent-{}", Uuid::new_v4()));
+        let runtime = root.join("runtime");
+        let shared = root.join("shared");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        symlink(&shared, runtime.join("weights")).unwrap();
+        assert!(
+            link_snapshot_files(
+                &runtime,
+                &runtime.join("weights"),
+                Some(&shared),
+                (DINO_REPO, "reviewed"),
+                &["model.safetensors".into()],
+                false,
+                Default::default(),
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_dir(&shared).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_shared_naf_is_left_untouched_and_not_reused() {
+        let root = env::temp_dir().join(format!("meshharbor-cache-naf-{}", Uuid::new_v4()));
+        let runtime = root.join("runtime");
+        let hub = root.join("hub");
+        let cached = hub.join("pixal3d-cuda/naf_release.pth");
+        let target = runtime.join("weights/naf_release.pth");
+        fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&cached, b"invalid cached weights").unwrap();
+        symlink(&cached, &target).unwrap();
+        link_cached_naf(&runtime, &target, Some(&hub), Default::default()).unwrap();
+        assert!(target.symlink_metadata().is_err());
+        assert_eq!(fs::read(cached).unwrap(), b"invalid cached weights");
         fs::remove_dir_all(root).unwrap();
     }
 
