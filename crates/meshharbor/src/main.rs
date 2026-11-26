@@ -43,6 +43,7 @@ mod job_scheduler;
 #[cfg(feature = "bundled-quadriflow")]
 mod quadriflow_worker;
 mod service;
+mod uninstall;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:7432";
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -77,6 +78,15 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: service::ServiceCommand,
+    },
+    /// Preview or permanently remove this MeshHarbor installation and its local data.
+    Uninstall {
+        /// Permanently delete the listed files and remove the matching background service.
+        #[arg(long)]
+        confirm: bool,
+        /// Leave the running executable in place (for example, for Cargo to uninstall).
+        #[arg(long)]
+        keep_binary: bool,
     },
     /// Start the stdio MCP server.
     Mcp,
@@ -1142,6 +1152,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
     let root = cli.data_dir;
+    let _store_lock = match cli.command {
+        Command::Import { .. }
+        | Command::Inspect { .. }
+        | Command::Assets { .. }
+        | Command::Simplify { .. }
+        | Command::RetopologyPreflight { .. }
+        | Command::ProcessMesh { .. }
+        | Command::Generate { .. }
+        | Command::Doctor
+        | Command::Backend { .. }
+        | Command::Runtime { .. }
+        | Command::Jobs {
+            command: JobsCommand::List { .. } | JobsCommand::Show { .. },
+        } => Some(data_dir_lock::DataDirLock::try_acquire_for_service(&root)?),
+        _ => None,
+    };
     match cli.command {
         Command::Serve { listen, .. } => {
             serve(&root, listen, shutdown_signal(), |message| {
@@ -1150,6 +1176,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         Command::Service { command } => service::run(command, &root)?,
+        Command::Uninstall {
+            confirm,
+            keep_binary,
+        } => uninstall::run(&root, confirm, keep_binary)?,
         Command::Mcp => {
             let jobs = open_job_service(&root).await?;
             let state = &jobs.state;

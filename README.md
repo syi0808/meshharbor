@@ -50,7 +50,7 @@ meshharbor service start
 meshharbor service status
 ```
 
-Studio and the REST API remain available at **http://127.0.0.1:7432** after you close the terminal. See the [CLI guide](docs/cli.md#background-service) for startup at login, Linux boot without login, logs, and removal.
+Studio and the REST API remain available at **http://127.0.0.1:7432** after you close the terminal. See the [CLI guide](docs/cli.md#background-service) for startup at login, Linux boot without login, and logs. To [remove the native installation and its data](docs/cli.md#uninstall-meshharbor), run `meshharbor uninstall` to preview what will be deleted.
 
 ### Docker
 

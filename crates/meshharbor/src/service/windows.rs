@@ -32,19 +32,7 @@ pub(super) fn run(command: ServiceCommand, root: &Path) -> io::Result<()> {
         ServiceCommand::Status => "status",
         ServiceCommand::Uninstall => "uninstall",
     };
-    let powershell =
-        absolute_env_path("SystemRoot")?.join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let mut task = Command::new(powershell);
-    task.creation_flags(CREATE_NO_WINDOW)
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            include_str!("windows_task.ps1"),
-        ])
-        .env("MESHHARBOR_TASK_OPERATION", operation);
-
+    let mut task = task_command(operation)?;
     if let ServiceCommand::Install { listen } = command {
         validate_listen(listen)?;
         let binary = env::current_exe()?;
@@ -54,7 +42,40 @@ pub(super) fn run(command: ServiceCommand, root: &Path) -> io::Result<()> {
             format!("--data-dir {} serve --listen {listen}", quoted_path(&root)?),
         );
     }
+    run_task(task, operation)
+}
 
+pub(super) fn remove_for_uninstall(root: &Path, binary: &Path) -> io::Result<()> {
+    let operation = "remove-installation";
+    let mut task = task_command(operation)?;
+    task.env("MESHHARBOR_TASK_BINARY", binary).env(
+        "MESHHARBOR_TASK_ARGUMENTS",
+        format!("--data-dir {} serve --listen ", quoted_path(root)?),
+    );
+    run_task(task, operation)
+}
+
+pub(crate) fn powershell(script: &str) -> io::Result<Command> {
+    let powershell =
+        absolute_env_path("SystemRoot")?.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut command = Command::new(powershell);
+    command.creation_flags(CREATE_NO_WINDOW).args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+    ]);
+    Ok(command)
+}
+
+fn task_command(operation: &str) -> io::Result<Command> {
+    let mut task = powershell(include_str!("windows_task.ps1"))?;
+    task.env("MESHHARBOR_TASK_OPERATION", operation);
+    Ok(task)
+}
+
+fn run_task(mut task: Command, operation: &str) -> io::Result<()> {
     let status = task.status()?;
     if !status.success() {
         return Err(io::Error::other(format!(
@@ -62,6 +83,10 @@ pub(super) fn run(command: ServiceCommand, root: &Path) -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+pub(super) fn log_path() -> io::Result<PathBuf> {
+    Ok(absolute_env_path("LOCALAPPDATA")?.join("MeshHarbor/service/serve.log"))
 }
 
 fn absolute_env_path(name: &str) -> io::Result<PathBuf> {
@@ -136,12 +161,12 @@ pub(crate) async fn serve(
     id: Uuid,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_listen(listen)?;
-    let log_dir = absolute_env_path("LOCALAPPDATA")?.join("MeshHarbor/service");
-    fs::create_dir_all(&log_dir)?;
+    let log_path = log_path()?;
+    fs::create_dir_all(log_path.parent().expect("service log has a parent"))?;
     let log = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_dir.join("serve.log"))?;
+        .open(log_path)?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("meshharbor=info".parse()?))
         .with_ansi(false)

@@ -4,6 +4,9 @@ use std::{
     path::Path,
 };
 
+pub(crate) const SERVICE_LOCK_FILE: &str = ".meshharbor.lock";
+pub(crate) const RUNTIME_LOCK_FILE: &str = ".meshharbor.runtime.lock";
+
 /// Coordinates service, recovery, generation, and runtime-install processes using one data directory.
 ///
 /// REST/MCP services share the service lock; recovery takes it exclusively. Generation obtains a
@@ -23,11 +26,11 @@ enum LockMode {
 
 impl DataDirLock {
     pub fn try_acquire_for_service(root: &Path) -> io::Result<Self> {
-        Self::try_acquire(root, ".meshharbor.lock", LockMode::Shared)
+        Self::try_acquire(root, SERVICE_LOCK_FILE, LockMode::Shared)
     }
 
     pub fn try_acquire_for_recovery(root: &Path) -> io::Result<Self> {
-        Self::try_acquire(root, ".meshharbor.lock", LockMode::Exclusive)
+        Self::try_acquire(root, SERVICE_LOCK_FILE, LockMode::Exclusive)
     }
 
     pub fn try_acquire_for_job_owner(root: &Path, owner: uuid::Uuid) -> io::Result<Self> {
@@ -44,7 +47,7 @@ impl DataDirLock {
 
     /// Acquire exclusive access to app-managed runtime state and shared Python caches.
     pub fn try_acquire_for_runtime(root: &Path) -> io::Result<Self> {
-        Self::try_acquire(root, ".meshharbor.runtime.lock", LockMode::Exclusive)
+        Self::try_acquire(root, RUNTIME_LOCK_FILE, LockMode::Exclusive)
     }
 
     pub fn try_acquire_for_blender_install(config: &Path) -> io::Result<Self> {
@@ -57,7 +60,7 @@ impl DataDirLock {
 
     /// Acquire read access for model inference, excluding installs and cache mutation.
     pub fn try_acquire_for_generation(root: &Path) -> io::Result<Self> {
-        Self::try_acquire(root, ".meshharbor.runtime.lock", LockMode::Shared)
+        Self::try_acquire(root, RUNTIME_LOCK_FILE, LockMode::Shared)
     }
 
     fn try_acquire(root: &Path, lock_file_name: &str, mode: LockMode) -> io::Result<Self> {

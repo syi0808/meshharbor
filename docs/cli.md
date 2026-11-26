@@ -67,6 +67,39 @@ By default, the service uses the same data directory as the CLI and listens only
 
 The service uses the OS service manager's environment, not the invoking shell's `PATH` or exported variables. Studio does not need an API token. For direct REST automation, see [REST API authentication](rest-api.md#start-the-server); if no token is configured in the service environment, a temporary token appears in the service logs on each start. Do not share those logs.
 
+## Uninstall MeshHarbor
+
+Run as the same user who installed MeshHarbor, from outside its data directory.
+Back up any models or assets you want to keep, and close any foreground
+`serve` process, MCP client, or other MeshHarbor command. The uninstaller
+stops and unregisters the background service for this executable and data
+directory, if installed.
+
+```sh
+meshharbor uninstall           # Preview only
+meshharbor uninstall --confirm # Permanently delete the listed installation and data
+```
+
+Use the same `--data-dir` (before `uninstall`) or `MESHHARBOR_HOME` you used to
+run MeshHarbor. The command removes that one dedicated data directory,
+including stored assets, job history, managed models and runtimes, isolated
+credentials, and any exports in its `exports` folder. It refuses an
+unrecognized directory or unexpected top-level files. Move such files out and
+preview again. On macOS and Windows it also removes the dedicated
+`serve.log`; Linux's shared systemd journal is left alone.
+
+The command removes only the executable you ran; on Windows a helper deletes
+it after exit. For a Cargo installation, use
+`meshharbor uninstall --confirm --keep-binary` followed by
+`cargo uninstall meshharbor` so Cargo also updates its install records.
+
+Model or export directories outside the selected data directory, shared caches
+referenced by symlinks, the source checkout, the Blender add-on, MCP client
+configuration, and browser site data are not removed. Clean up those
+integrations in their respective apps if needed. For Docker, stop the
+container and remove the image and the `meshharbor-data` volume separately
+if you also want to delete its data.
+
 ## Mesh processing
 
 ```sh

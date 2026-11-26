@@ -68,7 +68,17 @@ if ($operation -eq 'install') {
 }
 
 if ($null -eq $task) {
+    if ($operation -eq 'remove-installation') { return }
     throw 'MeshHarbor service is not installed. Run meshharbor service install first.'
+}
+
+if ($operation -eq 'remove-installation') {
+    $action = $definition.Actions.Item(1)
+    if ($definition.Actions.Count -ne 1 -or
+        $action.Path -ine $env:MESHHARBOR_TASK_BINARY -or
+        -not $action.Arguments.StartsWith($env:MESHHARBOR_TASK_ARGUMENTS, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The registered MeshHarbor service uses a different executable or data directory. Use that installation to uninstall, or explicitly remove the registration with meshharbor service uninstall first.'
+    }
 }
 
 $queued = 2
@@ -84,7 +94,7 @@ switch ($operation) {
             throw ('MeshHarbor service is not running. Task Scheduler last result: 0x{0:X8}. See %LOCALAPPDATA%\MeshHarbor\service\serve.log.' -f [int]$task.LastTaskResult)
         }
     }
-    { $_ -in ('stop', 'uninstall') } {
+    { $_ -in ('stop', 'uninstall', 'remove-installation') } {
         $deadline = [Diagnostics.Stopwatch]::StartNew()
         $signaled = $false
         while ($task.State -in ($queued, $running)) {
@@ -104,9 +114,13 @@ switch ($operation) {
             }
             Start-Sleep -Milliseconds 200
         }
-        if ($operation -eq 'uninstall') {
+        if ($operation -ne 'stop') {
             $folder.DeleteTask($name, 0)
-            Write-Output 'Removed the Windows scheduled task. MeshHarbor data was not changed.'
+            if ($operation -eq 'uninstall') {
+                Write-Output 'Removed the Windows scheduled task. MeshHarbor data was not changed.'
+            } else {
+                Write-Output 'Removed the Windows scheduled task.'
+            }
         }
     }
     default { throw 'Unknown MeshHarbor service operation.' }
