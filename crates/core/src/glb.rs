@@ -1,4 +1,7 @@
 use meshopt::{SimplifyOptions, SimplifyVertex, VertexDataAdapter};
+
+mod blender;
+pub use blender::prepare_blender_glb;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -3783,5 +3786,65 @@ mod tests {
     fn compression_rejects_a_payload_too_small_to_save_space() {
         let original = grid_glb(2);
         assert!(compress_mesh_glb(&original).is_err());
+    }
+
+    #[test]
+    fn blender_export_reconstructs_meshopt_views_without_changing_accessors() {
+        let original = grid_glb(12);
+        assert_eq!(prepare_blender_glb(original.clone()).unwrap(), original);
+        let (compressed, _) = compress_mesh_glb(&original).unwrap();
+        let restored = prepare_blender_glb(compressed).unwrap();
+        let original = GlbFile::parse(&original).unwrap();
+        let restored = GlbFile::parse(&restored).unwrap();
+        assert!(restored.document.get("extensionsRequired").is_none());
+        assert_eq!(array(&restored.document, "buffers").len(), 1);
+        assert_eq!(
+            original.document["accessors"],
+            restored.document["accessors"]
+        );
+        assert_eq!(original.document["meshes"], restored.document["meshes"]);
+        let original_bytes = original.binary.unwrap();
+        let restored_bytes = restored.binary.unwrap();
+        for index in 0..array(&original.document, "bufferViews").len() {
+            let (original_offset, original_size) =
+                buffer_view_range(&original.document, index, original_bytes.len()).unwrap();
+            let (restored_offset, restored_size) =
+                buffer_view_range(&restored.document, index, restored_bytes.len()).unwrap();
+            assert_eq!(original_size, restored_size);
+            assert_eq!(
+                original_bytes[original_offset..original_offset + original_size],
+                restored_bytes[restored_offset..restored_offset + restored_size],
+            );
+        }
+    }
+
+    #[test]
+    fn blender_export_rejects_external_references_and_invalid_meshopt_sizes() {
+        let original = grid_glb(12);
+        let mut glb = GlbFile::parse(&original).unwrap();
+        glb.document["images"] = json!([{"uri": "../outside.png"}]);
+        assert!(matches!(
+            prepare_blender_glb(glb.write().unwrap()),
+            Err(CoreError::OperationUnavailable(_)),
+        ));
+        let (compressed, _) = compress_mesh_glb(&original).unwrap();
+        let mut glb = GlbFile::parse(&compressed).unwrap();
+        let view = glb.document["bufferViews"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|view| view["extensions"].get("KHR_meshopt_compression").is_some())
+            .unwrap();
+        view["extensions"]["KHR_meshopt_compression"]["count"] = json!(u64::MAX);
+        assert!(matches!(
+            prepare_blender_glb(glb.write().unwrap()),
+            Err(CoreError::InvalidInput(_)),
+        ));
+        let mut glb = GlbFile::parse(&compressed).unwrap();
+        glb.document["bufferViews"][0]["byteLength"] = json!(MAX_ASSET_BYTES + 1);
+        assert!(matches!(
+            prepare_blender_glb(glb.write().unwrap()),
+            Err(CoreError::OperationUnavailable(_)),
+        ));
     }
 }

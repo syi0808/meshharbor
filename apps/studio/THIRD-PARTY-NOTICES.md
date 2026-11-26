@@ -2,6 +2,10 @@
 
 See [the bundled dependency license texts](THIRD-PARTY-LICENSES.txt) for the other third-party modules included in `dist`. Keep both notice files with the bundle when redistributing it.
 
+## Blender icon
+
+The Send to Blender button uses the 32px application icon from the Blender Foundation’s [official logo kit](https://download.blender.org/branding/blender_logo_kit.zip) to identify the transfer destination. The icon is subject to the [Blender trademark policy](https://www.blender.org/about/trademark-policy/); MeshHarbor and its add-on are not affiliated with the Blender Foundation.
+
 ## Inter and Noto Sans variable fonts
 
 Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter) Inter-Italic[opsz,wght].ttf: Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)

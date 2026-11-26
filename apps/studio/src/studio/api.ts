@@ -4,6 +4,12 @@ export const MAX_ASSET_IMPORT_FILES = 10;
 export const MAX_IMAGE_IMPORT_BYTES = 16 * 1024 * 1024;
 export const MAX_GLB_IMPORT_BYTES = 512 * 1024 * 1024;
 
+export interface BlenderTransfer {
+  id: string;
+  stage: 'waiting' | 'importing' | 'succeeded' | 'failed';
+  error: string | null;
+}
+
 export type AssetImportKind = 'mesh' | 'image';
 
 export interface AssetImportFailure {
@@ -664,6 +670,28 @@ export class MeshHarborApi {
 
   runtime(): Promise<RuntimeInfo> {
     return this.request('/api/v1/runtime');
+  }
+
+  blenderStatus(signal?: AbortSignal): Promise<{ connected: boolean }> {
+    return this.request('/api/v1/blender', { signal, cache: 'no-store' });
+  }
+
+  installBlenderAddon(): Promise<{ version: string }> {
+    return this.request('/api/v1/blender/install', { method: 'POST' });
+  }
+
+  downloadBlenderAddon(): Promise<Blob> {
+    return this.requestBlob('/api/v1/blender/addon');
+  }
+
+  sendToBlender(assetId: string, signal: AbortSignal): Promise<BlenderTransfer> {
+    return this.request('/api/v1/blender/send', {
+      method: 'POST', body: JSON.stringify({ asset_id: assetId }), signal,
+    });
+  }
+
+  blenderTransfer(transferId: string, signal: AbortSignal): Promise<BlenderTransfer> {
+    return this.request(`/api/v1/blender/send/${encodeURIComponent(transferId)}`, { signal, cache: 'no-store' });
   }
 
   checkHuggingFaceConnection(backend: RuntimeBackendId, token?: string): Promise<HuggingFaceConnectionStatus> {

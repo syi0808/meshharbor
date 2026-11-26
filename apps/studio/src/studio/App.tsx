@@ -47,6 +47,7 @@ import { Toaster } from '@/components/ui/sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { ModelPreview } from './ModelPreview';
+import { BlenderExport } from './BlenderExport';
 import { ModelVersionHistory } from './ModelVersionHistory';
 import { AssetGalleryCard } from './AssetGalleryCard';
 import { Disclosure } from './Disclosure';
@@ -1899,6 +1900,7 @@ export function App() {
                       operationLabel={studioOperationLabel} onView={showModelVersion} />
                   </div>}
                   {quadArtifact && <Button variant="secondary" size="sm" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
+                  <BlenderExport api={api} asset={selectedAsset} disabled={comparisonLoadingSide !== null || connection !== 'connected'} />
                   <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> Export GLB</Button>
                 </div>}
               </div>}

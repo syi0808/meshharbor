@@ -33,6 +33,8 @@ Selected endpoints:
 - `GET /api/v1/jobs/{job_id}/steps` (persisted execution history and command logs)
 - `POST /api/v1/jobs/{job_id}/retry` (start a new attempt from a replayable failed or stopped job)
 - `GET /api/v1/artifacts/{artifact_id}`
+- Studio-only: `GET /api/v1/blender` returns bridge connection status; `POST /api/v1/blender/install` installs the bundled Blender add-on locally, and `GET /api/v1/blender/addon` downloads it for manual installation.
+- Studio-only: `POST /api/v1/blender/send` with `{"asset_id":"..."}` requests a transfer of that exact model version. `GET /api/v1/blender/send/{id}` reports the transfer's status. The native companion uses dedicated loopback-only routes that reject browser requests. It has no general asset access and receives only the version Studio requests.
 
 ## Model versions
 

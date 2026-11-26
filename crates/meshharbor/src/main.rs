@@ -32,6 +32,7 @@ use tracing_subscriber::EnvFilter;
 
 include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
 
+mod blender_bridge;
 mod browser_login;
 mod data_dir_lock;
 mod huggingface_status;
@@ -887,11 +888,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             let token = resolve_api_token(std::env::var("MESHHARBOR_API_TOKEN"))?;
             let listener = TcpListener::bind(listen).await?;
+            let listen = listener.local_addr()?;
             let jobs = open_job_service(&root).await?;
             let state = &jobs.state;
             let statuses = HuggingFaceStatuses::default();
             statuses.start(&root);
-            let app = api_router_with_statuses(state.clone(), token.value.clone(), statuses);
+            let app =
+                api_router_with_statuses(state.clone(), token.value.clone(), statuses, listen);
             eprintln!(
                 "MeshHarbor REST API listening at http://{listen}; {}",
                 token_startup_log(&token)
@@ -1175,15 +1178,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 fn api_router(state: AppState, token: String) -> Router {
-    api_router_with_statuses(state, token, HuggingFaceStatuses::default())
+    api_router_with_statuses(
+        state,
+        token,
+        HuggingFaceStatuses::default(),
+        SocketAddr::from(([127, 0, 0, 1], 7432)),
+    )
 }
 
 fn api_router_with_statuses(
     state: AppState,
     token: String,
     statuses: HuggingFaceStatuses,
+    listen: SocketAddr,
 ) -> Router {
     Router::new()
+        .merge(blender_bridge::routes(listen))
         .route("/api/v1/health", get(api_health))
         .route("/api/v1/runtime", get(api_runtime))
         .route(
@@ -1294,11 +1304,35 @@ fn api_router_with_statuses(
 
 async fn authenticate(State(token): State<String>, request: Request, next: Next) -> Response {
     const DASHBOARD_MARKER: &str = "local-ui-v1";
+    let path = request.uri().path();
     let host = request
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok());
     let host_ok = host.is_some_and(is_loopback_authority);
+    if path.starts_with("/api/v1/blender/client/") {
+        let headers = request.headers();
+        if host_ok
+            && request.method() == Method::POST
+            && ![
+                header::ORIGIN,
+                header::REFERER,
+                header::HeaderName::from_static("sec-fetch-site"),
+            ]
+            .iter()
+            .any(|name| headers.contains_key(name))
+            && headers
+                .get("x-meshharbor-blender")
+                .is_some_and(|value| value == "local-addon-v1")
+        {
+            return next.run(request).await;
+        }
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"A native loopback Blender client is required."})),
+        )
+            .into_response();
+    }
     let origin_ok = request
         .headers()
         .get(header::ORIGIN)
@@ -1328,7 +1362,6 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         )
             .into_response();
     }
-    let path = request.uri().path();
     if !is_api_path(path) || path == "/api/v1/health" {
         return next.run(request).await;
     }
@@ -1359,14 +1392,16 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
         == Some(DASHBOARD_MARKER)
         && (origin_matches_host
             || (safe_read && request.headers().get(header::ORIGIN).is_none() && same_origin_fetch));
-    let dashboard_only = path.starts_with("/api/v1/runtime/")
-        && (path.ends_with("/huggingface")
-            || path.ends_with("/model-files")
-            || path.ends_with("/install")
-            || path == "/api/v1/runtime/environment/setup"
-            || path.ends_with("/model-access")
-            || path.ends_with("/huggingface/browser")
-            || path.contains("/huggingface/browser/"));
+    let dashboard_only = path.starts_with("/api/v1/blender/")
+        || path == "/api/v1/blender"
+        || path.starts_with("/api/v1/runtime/")
+            && (path.ends_with("/huggingface")
+                || path.ends_with("/model-files")
+                || path.ends_with("/install")
+                || path == "/api/v1/runtime/environment/setup"
+                || path.ends_with("/model-access")
+                || path.ends_with("/huggingface/browser")
+                || path.contains("/huggingface/browser/"));
     if dashboard_authorized || (authorized && !dashboard_only) {
         next.run(request).await
     } else {

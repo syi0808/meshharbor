@@ -40,7 +40,8 @@ pub use generation_views::{
 pub use glb::{
     AssetDescriptor, CompressionReport, MAX_ASSET_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS,
     MeshCleanupReport, RenderOptimizationReport, SimplificationReport, cleanup_glb,
-    compress_mesh_glb, inspect_asset, optimize_render_glb, retopology_glb, simplify_glb,
+    compress_mesh_glb, inspect_asset, optimize_render_glb, prepare_blender_glb, retopology_glb,
+    simplify_glb,
 };
 pub use huggingface_access::{HuggingFaceAccess, HuggingFaceConnection};
 pub use huggingface_browser::HuggingFaceBrowserTool;

@@ -30,6 +30,17 @@ Operation failures appear as toasts. Open **Notifications** in the header to rev
 
 Each imported or generated model has one Inventory card. Select a queued or running generation card to open its result automatically when it is ready. If you pick another model first, Studio keeps that selection. Edits such as Cleanup and Optimize create numbered versions under the card. Use **Version history** below the preview to inspect an older version temporarily or **Restore** it as current without deleting later versions. Editing the current version advances the card; editing a historical version records a branch and leaves the current card unchanged until you restore that branch. Use **Original** and **Result** to compare the job input and output at the same angle, and **Export GLB** to download the version being viewed.
 
+### Send a model to Blender
+
+1. Select the model version you want to transfer and click **Send to Blender** below the preview.
+2. Click **Install locally** to install MeshHarbor Bridge in the user add-ons directory of a detected Blender 4.2+ installation. Restart Blender if it is already open. If Blender isn't detected, or MeshHarbor runs inside Docker, click **Download add-on**, then select the downloaded `meshharbor_bridge.py` in Blender's **Edit → Preferences → Add-ons → Install from Disk**.
+3. Enable **MeshHarbor Bridge** in Blender's Add-ons preferences. In the 3D Viewport, press **N**, open the **MeshHarbor** tab, and click **Start Bridge**.
+4. In Studio, click **Send to Blender** again. The add-on imports the selected version into the open scene and packs embedded textures. It does not save or replace the scene.
+
+**Install locally** checks the system PATH and common installation locations on macOS, Windows, and Linux. It does not enable the add-on or alter Blender preferences. The bridge accepts one Blender instance at a time and connects to the MeshHarbor server address from installation; reinstall or download again if its listen address changes. Everything runs on loopback without a Blender account or cloud service.
+
+MeshHarbor's meshopt-compressed GLBs are decoded specifically for Blender transfer; stored versions and **Export GLB** downloads stay unchanged. Transfer files must be self-contained, and the GLB sent to Blender cannot exceed 512 MiB after decoding.
+
 ### Workspace review
 
 [The workspace reference review](../../docs/studio-workspace-layout.md) records the measured Meshy and Tripo layouts, feature entry points, and differences in the MeshHarbor responsive design.
