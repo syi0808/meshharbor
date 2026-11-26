@@ -33,7 +33,7 @@ Each imported or generated model has one Inventory card. Select a queued or runn
 ### Send a model to Blender
 
 1. Select the model version you want to transfer and click **Send to Blender** below the preview.
-2. Click **Install locally** to install MeshHarbor Bridge in the user add-ons directory of a detected Blender 4.2+ installation. Restart Blender if it is already open. If Blender isn't detected, or MeshHarbor runs inside Docker, click **Download add-on**, then select the downloaded `meshharbor_bridge.py` in Blender's **Edit → Preferences → Add-ons → Install from Disk**.
+2. Choose one installation method for Blender 4.2+. Start with **Install locally**, which detects Blender and installs MeshHarbor Bridge in its user add-ons directory. Wait for the installation confirmation below the numbered steps, then restart Blender if it is already open. If automatic installation fails, or MeshHarbor runs inside Docker, use **Download add-on** instead and select the downloaded `meshharbor_bridge.py` in Blender's **Edit → Preferences → Add-ons → Install from Disk**.
 3. Enable **MeshHarbor Bridge** in Blender's Add-ons preferences. In the 3D Viewport, press **N**, open the **MeshHarbor** tab, and click **Start Bridge**.
 4. In Studio, click **Send to Blender** again. The add-on imports the selected version into the open scene and packs embedded textures. It does not save or replace the scene.
 

@@ -7,13 +7,19 @@ import { blenderIcon } from './blender-icon';
 import { notify } from './notify';
 import type { Asset } from './types';
 
+type SetupAction = 'install' | 'download';
+type SetupState =
+  | { stage: 'pending'; action: SetupAction }
+  | { stage: 'installed'; version: string }
+  | { stage: 'download_started' }
+  | { stage: 'failed'; message: string };
+
 export function BlenderExport({ api, asset, disabled }: { api: MeshHarborApi; asset: Asset; disabled: boolean }) {
   const [open, setOpen] = useState(false);
   const [connected, setConnected] = useState(false);
   const [sending, setSending] = useState(false);
-  const [setupAction, setSetupAction] = useState<'install' | 'download' | null>(null);
-  const [installedVersion, setInstalledVersion] = useState('');
-  const [setupError, setSetupError] = useState('');
+  const [setupState, setSetupState] = useState<SetupState | null>(null);
+  const setupAction = setupState?.stage === 'pending' ? setupState.action : null;
 
   useEffect(() => {
     if (!open) return;
@@ -60,14 +66,13 @@ export function BlenderExport({ api, asset, disabled }: { api: MeshHarborApi; as
     }
   }
 
-  async function setup(action: 'install' | 'download') {
+  async function setup(action: SetupAction) {
     if (setupAction) return;
-    setSetupAction(action);
-    setSetupError('');
+    setSetupState({ stage: 'pending', action });
     try {
       if (action === 'install') {
         const { version } = await api.installBlenderAddon();
-        setInstalledVersion(version);
+        setSetupState({ stage: 'installed', version });
         return;
       }
       const blob = await api.downloadBlenderAddon();
@@ -77,10 +82,12 @@ export function BlenderExport({ api, asset, disabled }: { api: MeshHarborApi; as
       anchor.download = 'meshharbor_bridge.py';
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setSetupState({ stage: 'download_started' });
     } catch (cause) {
-      setSetupError(cause instanceof Error ? cause.message : 'Could not prepare the Blender add-on.');
-    } finally {
-      setSetupAction(null);
+      setSetupState({
+        stage: 'failed',
+        message: cause instanceof Error ? cause.message : 'Could not prepare the Blender add-on.',
+      });
     }
   }
 
@@ -94,29 +101,45 @@ export function BlenderExport({ api, asset, disabled }: { api: MeshHarborApi; as
         Send to Blender
       </Button>
     </DialogTrigger>
-    <DialogContent>
+    <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
       <DialogHeader>
         <DialogTitle>Send to Blender</DialogTitle>
         <DialogDescription>Add the selected model version to your current Blender scene without saving or replacing the scene.</DialogDescription>
       </DialogHeader>
       <div className="grid gap-2">
-        <p role="status" className="font-medium">{connected ? 'Blender is connected.' : 'Waiting for Blender to connect.'}</p>
-        {installedVersion && <p role="status">Add-on installed for Blender {installedVersion}. Restart Blender if it is already open.</p>}
-        {!connected && <ol className="list-decimal space-y-1 pl-4 text-muted-foreground">
-          <li>Install the add-on on this computer, or download it and use <strong>Preferences → Add-ons → Install from Disk</strong> in Blender 4.2 or later.</li>
+        {!connected && <ol className="list-decimal space-y-2 pl-4 text-muted-foreground">
+          <li>
+            Choose one installation method for Blender 4.2 or later:
+            <ul className="mt-1 list-disc space-y-1 pl-4">
+              <li><strong>Install locally (recommended):</strong> MeshHarbor finds Blender on this computer and installs the add-on for you.</li>
+              <li><strong>Download add-on (manual):</strong> Use this if automatic installation fails or MeshHarbor runs in Docker. In Blender, choose <strong>Preferences → Add-ons → Install from Disk</strong> and select the downloaded file.</li>
+            </ul>
+          </li>
           <li>Enable <strong>MeshHarbor Bridge</strong> in Blender’s Add-ons preferences.</li>
           <li>In Blender’s 3D Viewport, press <kbd>N</kbd>, open <strong>MeshHarbor</strong>, and select <strong>Start Bridge</strong>.</li>
         </ol>}
-        {setupError && <p role="alert" className="text-destructive">{setupError}</p>}
+        <div role="status" className={connected ? 'grid gap-1' : 'grid gap-1 border-t pt-2'}>
+          {!connected && <>
+            {setupAction === 'install' && <p>Looking for Blender and installing the add-on…</p>}
+            {setupAction === 'download' && <p>Preparing the add-on download…</p>}
+            {setupState?.stage === 'installed' && <p>Add-on installed for Blender {setupState.version}. Restart Blender if it is already open.</p>}
+            {setupState?.stage === 'download_started' && <p>Download started. Install the downloaded file in Blender to continue.</p>}
+          </>}
+          <p className="font-medium">{connected ? 'Blender is connected.' : <>
+            Waiting for Blender to connect<span className="sr-only">.</span><span aria-hidden="true" className="inline-block motion-safe:animate-blender-waiting-dots after:content-['...']" />
+          </>}</p>
+        </div>
+        {!connected && setupState?.stage === 'failed' && <p role="alert" className="text-destructive">{setupState.message}</p>}
       </div>
       <DialogFooter>
         {connected
           ? <Button disabled={sending || disabled} onClick={() => void send()}>Send to Blender</Button>
           : <>
-            <Button variant="outline" disabled={setupAction !== null} onClick={() => void setup('download')}>Download add-on</Button>
+            <Button variant="outline" disabled={setupAction !== null} onClick={() => void setup('download')}>
+              {setupAction === 'download' ? <><Spinner /> Downloading…</> : 'Download add-on'}
+            </Button>
             <Button disabled={setupAction !== null} onClick={() => void setup('install')}>
-              {setupAction === 'install' && <Spinner />}
-              Install locally
+              {setupAction === 'install' ? <><Spinner /> Installing…</> : 'Install locally'}
             </Button>
           </>}
       </DialogFooter>

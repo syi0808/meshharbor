@@ -15,14 +15,38 @@ test('Studio downloads the Blender add-on and sends the selected compressed vers
   await expect(send.locator('img')).toHaveJSProperty('naturalWidth', 32);
   await send.click();
   const dialog = page.getByRole('dialog', { name: 'Send to Blender' });
-  await page.route('**/api/v1/blender/install', route => route.fulfill({ json: { version: '5.1.2' } }));
-  await dialog.getByRole('button', { name: 'Install locally' }).click();
-  await expect(dialog.getByText('Add-on installed for Blender 5.1.2.')).toBeVisible();
+  const instructions = dialog.locator('ol');
+  const setupStatus = dialog.locator('ol + [role="status"]');
+  await expect(instructions).toContainText('Install locally (recommended)');
+  await expect(instructions).toContainText('Download add-on (manual)');
+  await expect(instructions).toContainText('Install from Disk');
+  await expect(setupStatus).toContainText('Waiting for Blender to connect.');
+  const dots = setupStatus.locator('[aria-hidden="true"]');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await expect(dots).toHaveCSS('animation-name', 'blender-waiting-dots');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(dots).toHaveCSS('animation-name', 'none');
+
+  let finishInstall;
+  const installInProgress = new Promise(resolve => { finishInstall = resolve; });
+  await page.route('**/api/v1/blender/install', async route => {
+    await installInProgress;
+    await route.fulfill({ json: { version: '5.1.2' } });
+  });
+  try {
+    await dialog.getByRole('button', { name: 'Install locally' }).click();
+    await expect(dialog.getByRole('button', { name: 'Installing…' })).toBeDisabled();
+    await expect(setupStatus).toContainText('Looking for Blender and installing the add-on…');
+  } finally {
+    finishInstall();
+  }
+  await expect(setupStatus).toContainText('Add-on installed for Blender 5.1.2. Restart Blender if it is already open.');
   const downloadReady = page.waitForEvent('download');
   await dialog.getByRole('button', { name: 'Download add-on' }).click();
   const download = await downloadReady;
   expect(download.suggestedFilename()).toBe('meshharbor_bridge.py');
   expect(await readFile(await download.path(), 'utf8')).toContain(studioOrigin);
+  await expect(setupStatus).toContainText('Download started. Install the downloaded file in Blender to continue.');
   await dialog.getByRole('button', { name: 'Close' }).click();
 
   await page.getByRole('button', { name: 'Compression', exact: true }).click();
