@@ -42,7 +42,7 @@ For the CLI, run `cargo run --locked --bin meshharbor -- --help`.
 
 ### Run the native binary in the background
 
-Put the built `meshharbor` binary in a permanent location on `PATH`. On macOS or Linux with systemd, run as your own user (not with `sudo`):
+Put the built `meshharbor` binary in a permanent location on `PATH`. On macOS, Linux with systemd, or Windows, run as your own user without elevation:
 
 ```sh
 meshharbor service install

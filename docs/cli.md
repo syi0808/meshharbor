@@ -4,7 +4,7 @@ The examples use the built `meshharbor` executable on `PATH`. From a source chec
 
 ## Background service
 
-With a native binary on macOS or Linux with systemd, you can run Studio and its REST API under your account without an open terminal. Use a binary in a permanent location, for example one installed with `cargo install --locked --path crates/meshharbor --bin meshharbor`. Stop any foreground server or container using the same port before starting the service. Do not use `sudo`.
+With a native binary on macOS, Linux with systemd, or Windows, you can run Studio and its REST API under your account without an open terminal. Use a binary in a permanent location, for example one installed with `cargo install --locked --path crates/meshharbor --bin meshharbor`. Stop any foreground server or container using the same port before starting the service. Run without `sudo` or Administrator elevation.
 
 ```sh
 meshharbor service install   # Register automatic startup; does not start it now
@@ -15,11 +15,11 @@ meshharbor service stop      # Stop now, but keep automatic startup enabled
 meshharbor service uninstall # Stop and remove the service; keep assets, jobs and models
 ```
 
-`start` asks the OS to launch the service; check `/api/v1/health` for API readiness. The OS restarts the service if it exits unexpectedly. This does not change how stdio MCP is launched by its client.
+`start` asks the OS to launch the service; check `/api/v1/health` for API readiness (use `curl.exe` in Windows PowerShell). The OS can restart the service if it exits unexpectedly. This does not change how stdio MCP is launched by its client.
 
 - **macOS:** The `io.meshharbor.serve` LaunchAgent starts when you log in to your desktop session, not before login. Logs are in `~/Library/Logs/MeshHarbor/serve.log`.
 - **Linux:** The `meshharbor.service` systemd user unit starts with your user manager. To start at boot and stay running even after you log out, enable lingering for your account with `loginctl enable-linger "$USER"` (subject to system policy). Read logs with `journalctl --user -u meshharbor.service`.
-- **Windows:** `service` is not supported; use `meshharbor serve`.
+- **Windows:** Windows PowerShell and Task Scheduler register a task for the current account. It starts at login, not before login, and saves no account password. After a failure, Task Scheduler can retry up to 10 times at one-minute intervals. Logs are at `%LOCALAPPDATA%\MeshHarbor\service\serve.log`.
 
 By default, the service uses the same data directory as the CLI and listens only on `127.0.0.1:7432`. To change either setting, uninstall the old registration first, then run for example `meshharbor --data-dir /path/to/data service install --listen 127.0.0.1:7440`. The service saves the absolute paths of the binary and data directory. If you move the binary, reinstall the service.
 

@@ -2,6 +2,9 @@ use std::{net::SocketAddr, path::Path};
 
 use clap::Subcommand;
 
+#[cfg(windows)]
+pub(crate) mod windows;
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum ServiceCommand {
     /// Install and enable automatic startup for the current user.
@@ -24,19 +27,33 @@ pub(crate) fn run(command: ServiceCommand, root: &Path) -> std::io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     return unix::run(command, root);
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    return windows::run(command, root);
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (command, root);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "Background service management requires macOS launchd or Linux systemd. Use 'meshharbor serve' on this platform.",
+            "Background service management requires macOS launchd, Linux systemd, or Windows Task Scheduler. Use 'meshharbor serve' on this platform.",
         ))
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn validate_listen(listen: SocketAddr) -> std::io::Result<()> {
+    if !listen.ip().is_loopback() || listen.port() == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Service --listen must use a loopback address and a nonzero port.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix {
-    use super::{Path, ServiceCommand, SocketAddr};
+    use super::{Path, ServiceCommand, SocketAddr, validate_listen};
     use std::{
         env, fs,
         io::{self, Write},
@@ -79,16 +96,6 @@ mod unix {
                     );
                 }
             }
-        }
-        Ok(())
-    }
-
-    fn validate_listen(listen: SocketAddr) -> io::Result<()> {
-        if !listen.ip().is_loopback() || listen.port() == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Service --listen must use a loopback address and a nonzero port.",
-            ));
         }
         Ok(())
     }

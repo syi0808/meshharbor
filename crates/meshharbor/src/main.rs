@@ -66,8 +66,11 @@ enum Command {
     Serve {
         #[arg(long, default_value = DEFAULT_LISTEN)]
         listen: SocketAddr,
+        #[cfg(windows)]
+        #[arg(long, hide = true)]
+        background_id: Option<uuid::Uuid>,
     },
-    /// Manage the background REST API service for the current user (macOS/Linux).
+    /// Manage the background REST API service for the current user.
     Service {
         #[command(subcommand)]
         command: service::ServiceCommand,
@@ -958,6 +961,42 @@ fn open_operation_core(root: &std::path::Path) -> Result<OperationCore, CoreErro
     Ok(core)
 }
 
+async fn serve(
+    root: &std::path::Path,
+    listen: SocketAddr,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    report_startup: impl FnOnce(String),
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !listen.ip().is_loopback() {
+        return Err(
+            "Refusing non-loopback bind; remote listening is not implemented in this build.".into(),
+        );
+    }
+    let token = resolve_api_token(std::env::var("MESHHARBOR_API_TOKEN"))?;
+    let listener = TcpListener::bind(listen).await?;
+    let listen = listener.local_addr()?;
+    let jobs = open_job_service(root).await?;
+    let state = &jobs.state;
+    let statuses = HuggingFaceStatuses::default();
+    statuses.start(root);
+    let app = api_router_with_statuses(state.clone(), token.value.clone(), statuses, listen);
+    report_startup(format!(
+        "MeshHarbor REST API listening at http://{listen}; {}",
+        token_startup_log(&token)
+    ));
+    let shutdown_state = state.clone();
+    let served = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            stop_jobs(&shutdown_state);
+        })
+        .await;
+    stop_jobs(state);
+    state.scheduler.drain().await;
+    served?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "bundled-quadriflow")]
     {
@@ -975,40 +1014,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    #[cfg(windows)]
+    if let Command::Serve {
+        listen,
+        background_id: Some(id),
+    } = &cli.command
+    {
+        return service::windows::serve(&cli.data_dir, *listen, *id).await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("meshharbor=info".parse()?))
         .with_writer(std::io::stderr)
         .init();
-    let cli = Cli::parse();
     let root = cli.data_dir;
     match cli.command {
-        Command::Serve { listen } => {
-            if !listen.ip().is_loopback() {
-                return Err("Refusing non-loopback bind; remote listening is not implemented in this build.".into());
-            }
-            let token = resolve_api_token(std::env::var("MESHHARBOR_API_TOKEN"))?;
-            let listener = TcpListener::bind(listen).await?;
-            let listen = listener.local_addr()?;
-            let jobs = open_job_service(&root).await?;
-            let state = &jobs.state;
-            let statuses = HuggingFaceStatuses::default();
-            statuses.start(&root);
-            let app =
-                api_router_with_statuses(state.clone(), token.value.clone(), statuses, listen);
-            eprintln!(
-                "MeshHarbor REST API listening at http://{listen}; {}",
-                token_startup_log(&token)
-            );
-            let shutdown_state = state.clone();
-            let served = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    shutdown_signal().await;
-                    stop_jobs(&shutdown_state);
-                })
-                .await;
-            stop_jobs(state);
-            state.scheduler.drain().await;
-            served?;
+        Command::Serve { listen, .. } => {
+            serve(&root, listen, shutdown_signal(), |message| {
+                eprintln!("{message}")
+            })
+            .await?;
         }
         Command::Service { command } => service::run(command, &root)?,
         Command::Mcp => {

@@ -153,6 +153,33 @@ jobs:
         shell: pwsh
         run: cargo +1.88.0 test --locked --release --target $env:TARGET --package meshharbor --bin meshharbor cli_output_paths_reject_windows_case_only_aliases
 
+      - name: Test Windows background service helpers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo +1.88.0 test --locked --release --target $env:TARGET --package meshharbor --bin meshharbor service::windows::tests
+
+      - name: Smoke-test Windows task registration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "./target/$env:TARGET/release/meshharbor.exe"
+          $dataDir = Join-Path $env:RUNNER_TEMP 'MeshHarbor service smoke'
+          $installArgs = @('--data-dir', $dataDir, 'service', 'install', '--listen', '127.0.0.1:17432')
+          & $binary @installArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Windows service installation failed.' }
+          try {
+            & $binary @installArgs
+            if ($LASTEXITCODE -ne 0) { throw 'Windows service reinstallation was not idempotent.' }
+            $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $task = Get-ScheduledTask -TaskPath '\' -TaskName "MeshHarbor-$sid"
+            if ($task.Principal.LogonType -ne 'Interactive' -or $task.State -ne 'Ready') {
+              throw 'Expected a login task that is not started yet.'
+            }
+          } finally {
+            & $binary service uninstall
+            if ($LASTEXITCODE -ne 0) { throw 'Windows service cleanup failed.' }
+          }
+
       - name: Install pinned Node.js for smoke tests
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
