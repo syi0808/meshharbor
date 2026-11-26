@@ -1,7 +1,7 @@
 # MeshHarbor
 
 [![MIT license for first-party code](https://img.shields.io/badge/first--party%20license-MIT-blue)](LICENSE)
-[![Embedded Studio smoke](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml/badge.svg)](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml)
+[![Build and Studio smoke](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml/badge.svg)](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml)
 
 **Generate 3D assets locally with open-weight models.**
 
@@ -18,6 +18,8 @@ MeshHarbor is a local-first alternative to [Tripo](https://www.tripo3d.ai/) and 
 **Status:** Early source build, not feature parity with hosted services. No official installer, binary release, or bundled model weights. Some checkpoints require gated access and have separate usage terms. Mesh editing needs no Python or model setup. Generic high-to-low baking is not available. Experimental QuadriFlow retopology is available in an [opt-in linked build](docs/retopology-candidate.md#linked-development-build).
 
 ## Quick start
+
+Unsigned builds for Windows, macOS, and Linux are available as opt-in [GitHub Actions CI artifacts](docs/embedded-studio-package-smoke.md#download-a-ci-build), not as official releases.
 
 ### From source
 

@@ -1,32 +1,49 @@
-name: Embedded Studio package smoke
+name: MeshHarbor build and Studio smoke
 
 on:
+  workflow_dispatch:
+    inputs:
+      upload_artifacts:
+        description: Upload unsigned CI build candidates for download
+        type: boolean
+        default: false
   push:
     branches:
       - main
-      - feat/embedded-studio-package-smoke
     paths:
+      - ".cargo/**"
+      - ".gitattributes"
       - ".github/workflows/embedded-studio-package-smoke.yml"
       - ".github/workflows/studio-client-validation.yml"
       - "apps/studio/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "LICENSE"
+      - "THIRD-PARTY-NOTICES.md"
       - "crates/**"
-      - "runtimes/pixal3d/**"
+      - "registry/**"
+      - "runtimes/**"
       - "scripts/embedded-studio-test-server.mjs"
+      - "scripts/package_ci_binary.ps1"
       - "scripts/smoke_embedded_studio.mjs"
   pull_request:
     branches:
       - main
     paths:
+      - ".cargo/**"
+      - ".gitattributes"
       - ".github/workflows/embedded-studio-package-smoke.yml"
       - ".github/workflows/studio-client-validation.yml"
       - "apps/studio/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "LICENSE"
+      - "THIRD-PARTY-NOTICES.md"
       - "crates/**"
-      - "runtimes/pixal3d/**"
+      - "registry/**"
+      - "runtimes/**"
       - "scripts/embedded-studio-test-server.mjs"
+      - "scripts/package_ci_binary.ps1"
       - "scripts/smoke_embedded_studio.mjs"
 
 permissions:
@@ -34,28 +51,54 @@ permissions:
 
 jobs:
   packaged-studio-smoke:
-    name: Build and launch embedded Studio (${{ matrix.platform }})
+    name: Build and smoke-test ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    env:
+      TARGET: ${{ matrix.target }}
+      CFLAGS: ${{ endsWith(matrix.target, '-msvc') && '/std:c11' || '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: linux
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            arch: x64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            arch: arm64
+          - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-          - platform: macos
+            arch: x64
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            arch: arm64
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            arch: x64
+          - target: aarch64-apple-darwin
             runner: macos-15
-          - platform: windows
+            arch: arm64
+          - target: x86_64-pc-windows-msvc
             runner: windows-2022
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            arch: arm64
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
 
       - name: Install pinned Rust toolchain
+        if: ${{ !endsWith(matrix.target, '-musl') }}
         uses: dtolnay/rust-toolchain@360a4e93673de6630fac2478bc9e35244b01a759
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Install pinned NASM for Windows AWS-LC build
-        if: runner.os == 'Windows'
+      - name: Install pinned NASM for Windows x64 AWS-LC build
+        if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'nasm-3.02-win64.zip'
@@ -73,54 +116,88 @@ jobs:
           $nasmDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build release CLI with the checked-in Studio bundle
-        env:
-          CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
-        run: cargo build --locked --release --package meshharbor --bin meshharbor
+        if: ${{ !endsWith(matrix.target, '-musl') }}
+        shell: pwsh
+        run: cargo +1.88.0 build --locked --release --target $env:TARGET --package meshharbor --bin meshharbor
+
+      - name: Build and check the static Linux musl CLI
+        if: endsWith(matrix.target, '-musl')
+        shell: bash
+        run: |
+          docker build --tag meshharbor-musl-builder - <<'DOCKERFILE'
+          FROM rust:1.88.0-alpine3.22@sha256:9dfaae478ecd298b6b5a039e1f2cc4fc040fc818a2de9aa78fa714dea036574d
+          RUN apk add --no-cache build-base cmake
+          DOCKERFILE
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --env HOME=/tmp --env CARGO_HOME=/tmp/cargo \
+            --env CC=gcc --env CXX=g++ --env CXXSTDLIB_STATIC=1 \
+            --env RUSTFLAGS='-C target-feature=+crt-static' \
+            --mount "type=bind,source=$PWD,target=/work" --workdir /work \
+            meshharbor-musl-builder \
+            cargo build --locked --release --target "$TARGET" --package meshharbor --bin meshharbor
+
+          readelf --program-headers --dynamic "target/$TARGET/release/meshharbor" > "$RUNNER_TEMP/meshharbor-elf.txt"
+          if grep -Eq 'INTERP|NEEDED' "$RUNNER_TEMP/meshharbor-elf.txt"; then
+            cat "$RUNNER_TEMP/meshharbor-elf.txt"
+            echo "The musl binary must not require a dynamic loader or shared libraries." >&2
+            exit 1
+          fi
 
       - name: Test data-directory lock behavior
-        env:
-          CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
-        run: cargo test --locked --release --package meshharbor --bin meshharbor data_dir_lock::tests
+        if: ${{ !endsWith(matrix.target, '-musl') }}
+        shell: pwsh
+        run: cargo +1.88.0 test --locked --release --target $env:TARGET --package meshharbor --bin meshharbor data_dir_lock::tests
 
       - name: Test Windows case-only CLI output aliases
         if: runner.os == 'Windows'
-        env:
-          CFLAGS: ${{ runner.os == 'Windows' && '/std:c11' || '' }}
-        run: cargo test --locked --release --package meshharbor --bin meshharbor cli_output_paths_reject_windows_case_only_aliases
+        shell: pwsh
+        run: cargo +1.88.0 test --locked --release --target $env:TARGET --package meshharbor --bin meshharbor cli_output_paths_reject_windows_case_only_aliases
 
       - name: Install pinned Node.js for smoke tests
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.22.3
+          architecture: ${{ matrix.arch }}
 
-      - name: Launch binary and verify embedded Studio assets
-        shell: bash
-        env:
-          MESHHARBOR_BINARY: target/release/meshharbor${{ runner.os == 'Windows' && '.exe' || '' }}
-        run: node scripts/smoke_embedded_studio.mjs "$MESHHARBOR_BINARY"
+      - name: Package the CLI and smoke-test the extracted binary
+        shell: pwsh
+        run: ./scripts/package_ci_binary.ps1 -Target $env:TARGET
+
+      - name: Upload unsigned CI build candidate
+        if: github.event_name == 'workflow_dispatch' && inputs.upload_artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: meshharbor-ci-${{ matrix.target }}
+          path: |
+            target/ci-packages/meshharbor-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+            target/ci-packages/meshharbor-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
 
       - name: Install pinned pnpm for browser tests
-        if: runner.os == 'Linux'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
         with:
           package_json_file: apps/studio/package.json
 
       - name: Install locked browser test dependencies
-        if: runner.os == 'Linux'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         working-directory: apps/studio
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Install headless Chromium for Studio regression
-        if: runner.os == 'Linux'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         working-directory: apps/studio
         run: pnpm exec playwright install --with-deps --only-shell chromium
 
       - name: Verify Studio workflows in Chromium
         id: studio_browser_regression
-        if: runner.os == 'Linux'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         working-directory: apps/studio
         env:
-          MESHHARBOR_BINARY: ${{ github.workspace }}/target/release/meshharbor
+          MESHHARBOR_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/meshharbor
         run: pnpm run test:e2e
 
       - name: Collect Studio regression diagnostics
