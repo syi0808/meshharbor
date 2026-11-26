@@ -19,6 +19,7 @@ RUN apt-get update \
 
 COPY --from=build /src/target/release/meshharbor /usr/local/bin/meshharbor
 COPY --from=build /src/LICENSE /src/THIRD-PARTY-NOTICES.md /usr/share/doc/meshharbor/
+COPY --from=build /src/docs/licenses/meshharbor-mit.txt /usr/share/doc/meshharbor/docs/licenses/
 COPY --from=build /src/apps/studio/THIRD-PARTY-NOTICES.md /src/apps/studio/THIRD-PARTY-LICENSES.txt /usr/share/doc/meshharbor/apps/studio/
 COPY --from=build /src/runtimes/pixal3d/THIRD-PARTY-NOTICES.md /usr/share/doc/meshharbor/runtimes/pixal3d/
 COPY --from=build /src/runtimes/pixal3d/THIRD-PARTY-LICENSES/ /usr/share/doc/meshharbor/runtimes/pixal3d/THIRD-PARTY-LICENSES/

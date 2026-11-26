@@ -223,7 +223,7 @@ impl Pixal3dCudaRuntimeManager {
             runtime_root: self.runtime_root.clone(),
             python,
             lockfile,
-            message: "The isolated Python environment and CUDA preflight succeeded. Model weights remain a separate, explicitly confirmed 25–30 GB download. Upstream has no committed lock; this install resolved one locally. Gated DINOv3 access and upstream model terms remain separate from MeshHarbor's MIT license.".into(),
+            message: "The isolated Python environment and CUDA preflight succeeded. Model weights remain a separate, explicitly confirmed 25–30 GB download. Upstream has no committed lock; this install resolved one locally. Gated DINOv3 access and upstream model terms remain separate from MeshHarbor's Elastic License 2.0.".into(),
         })
     }
 
@@ -404,7 +404,7 @@ impl Pixal3dCudaRuntimeManager {
             runtime_root: self.runtime_root.clone(),
             python: python.to_path_buf(),
             lockfile: self.managed_root.join("uv.lock"),
-            message: "Pinned Pixal3D and DINOv3 snapshots and SHA-256-verified NAF weights are present in the isolated HF cache. Inference remains offline; model-specific terms are separate from MeshHarbor's MIT license.".into(),
+            message: "Pinned Pixal3D and DINOv3 snapshots and SHA-256-verified NAF weights are present in the isolated HF cache. Inference remains offline; model-specific terms are separate from MeshHarbor's Elastic License 2.0.".into(),
         })
     }
 

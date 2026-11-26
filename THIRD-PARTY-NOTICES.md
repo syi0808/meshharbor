@@ -1,6 +1,6 @@
 # Third-party notices
 
-The root [MIT license](LICENSE) covers MeshHarbor's own code and documentation. It does not relicense vendored code, copied assets, fonts, dependencies, or model materials. Preserve their applicable copyright, attribution, and license notices when redistributing them.
+The root [Elastic License 2.0](LICENSE) covers MeshHarbor's own code and documentation. The [original MIT notice](docs/licenses/meshharbor-mit.txt) is preserved for material previously distributed under MIT. Vendored code, copied assets, fonts, dependencies, and model materials retain their own terms. Preserve their applicable copyright, attribution, and license notices when redistributing them.
 
 | Component | Notices and provenance |
 | --- | --- |

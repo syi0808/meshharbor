@@ -1,6 +1,6 @@
 # MeshHarbor
 
-[![MIT license for first-party code](https://img.shields.io/badge/first--party%20license-MIT-blue)](LICENSE)
+[![Elastic License 2.0 for first-party code](https://img.shields.io/badge/first--party%20license-ELv2-blue)](LICENSE)
 [![Build and Studio smoke](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml/badge.svg)](https://github.com/syi0808/meshharbor/actions/workflows/embedded-studio-package-smoke.yml)
 
 **Generate 3D assets locally with open-weight models.**
@@ -91,4 +91,6 @@ The bridge works locally with both regular and MeshHarbor meshopt-compressed GLB
 
 ## License
 
-MeshHarbor's first-party code and documentation are licensed under [MIT](LICENSE). Vendored code, bundled Studio dependencies, fonts, and model/runtime components retain their own terms. See [third-party notices](THIRD-PARTY-NOTICES.md) and the [licensing status](docs/licensing-status.md) before redistribution; this is not a blanket license for all components or model weights.
+MeshHarbor's first-party code and documentation are licensed under the [Elastic License 2.0 (ELv2)](LICENSE). Under ELv2, you may run MeshHarbor for yourself or internally at your organization. You may not offer it to third parties as a hosted or managed service that exposes a substantial set of its features, whether free or paid. Examples include a hosted Studio instance and a service exposing the generation API.
+
+ELv2 covers MeshHarbor itself, not the 3D assets you create with it. Check any terms that apply to your inputs and chosen models separately. Versions already distributed under [MIT](docs/licenses/meshharbor-mit.txt) keep those terms. Vendored code, bundled Studio dependencies, fonts, and model/runtime components retain their own terms; see the [third-party notices](THIRD-PARTY-NOTICES.md) and [licensing status](docs/licensing-status.md) before redistribution.

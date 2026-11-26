@@ -2,7 +2,7 @@
 
 ## MeshHarbor core
 
-`crates/core` and `crates/meshharbor` are the Rust implementation created for this project under the [first-party MIT license](../LICENSE). GLB simplification uses `meshopt` 0.7.0, pinned in `Cargo.lock`, and the upstream meshoptimizer library. Third-party code and assets retain [their own terms](../THIRD-PARTY-NOTICES.md).
+`crates/core` and `crates/meshharbor` are the Rust implementation created for this project and are currently distributed under the [Elastic License 2.0](../LICENSE). GLB simplification uses `meshopt` 0.7.0, pinned in `Cargo.lock`, and the upstream meshoptimizer library. Third-party code and assets retain [their own terms](../THIRD-PARTY-NOTICES.md).
 
 ## Pixal3D backend snapshots
 

@@ -775,7 +775,7 @@ impl OperationCore {
                 "model_paths": [model_path(cuda_manager.home_path().join(".cache/huggingface/hub"))],
                 "python": readiness.python,
                 "missing": readiness.missing,
-                "license_notice": "MeshHarbor's MIT license covers its own code. Upstream runtime and checkpoint terms remain separate and pending review. User confirmation and gated access are required before model downloads.",
+                "license_notice": "MeshHarbor's Elastic License 2.0 covers its own code. Upstream runtime and checkpoint terms remain separate and pending review. User confirmation and gated access are required before model downloads.",
             }));
         }
         if let Some(readiness) = &mlx {
@@ -881,7 +881,7 @@ impl OperationCore {
                 "Pixal3D CUDA setup is Linux x86_64/NVIDIA only, runs a PyTorch CUDA/SDPA preflight, and resolves upstream's unpinned ranges into an app-private per-install uv.lock; this is not a repository-wide reproducibility guarantee. The combined Studio install may download 25–30 GB. Pixal3D MLX remains Apple Silicon only. Neither backend readiness proves output quality or general GPU memory fit; the latest CUDA source has not been revalidated end-to-end on a GPU.".into(),
                 "TRELLIS Text, TRELLIS.2, and TripoSG are opt-in installs in Studio. The engine provisions an isolated environment and downloads pinned snapshots after explicit consent. Existing operator-provisioned runtimes are kept separately; readiness does not prove license compliance, memory fit, or inference quality.".into(),
                 "GeoSAM2 installs the backend and shared checkpoint in one opt-in job for the guided repart prototype. Installed files do not enable a repart operation in Studio.".into(),
-                "MeshHarbor's MIT license covers its own code. Third-party runtime and model terms, including DINOv3 and NAF, remain separate; gated access is user-controlled. See THIRD-PARTY-NOTICES.md.".into(),
+                "MeshHarbor's Elastic License 2.0 covers its own code. Third-party runtime and model terms, including DINOv3 and NAF, remain separate; gated access is user-controlled. See THIRD-PARTY-NOTICES.md.".into(),
             ],
         }
     }
