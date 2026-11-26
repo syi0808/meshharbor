@@ -5,6 +5,8 @@ export default defineConfig({
   testIgnore: '**/quadriflow-release.spec.mjs',
   timeout: 90_000,
   forbidOnly: !!process.env.CI,
+  workers: process.env.CI ? 1 : undefined,
+  expect: { timeout: process.env.CI ? 15_000 : 5_000 },
   use: {
     browserName: 'chromium',
     viewport: { width: 1280, height: 800 },
