@@ -77,12 +77,22 @@ interface AssetBrowserFilters {
   query: string;
   kind: AssetKind;
   origin: AssetOriginFilter;
+  allVersions?: boolean;
 }
 
 const ASSET_PAGE_SIZE = 50;
 const DEFAULT_VOXEL_RESOLUTION = 96;
 const MIN_VOXEL_RESOLUTION = 16;
 const MAX_VOXEL_RESOLUTION = 160;
+const meshParameterFields = {
+  'uv.unwrap': [
+    { name: 'resolution', label: 'Atlas resolution', min: 64, max: 4096, step: '1', initial: '1024' },
+    { name: 'padding', label: 'Chart padding', min: 0, max: 64, step: '1', initial: '8' },
+  ],
+  'render.optimize': [
+    { name: 'overdraw_threshold', label: 'Overdraw threshold', min: 1, max: 1.5, step: 'any', initial: '1.05' },
+  ],
+} as const;
 const ASSET_GALLERY_GRID = 'grid min-w-0 grid-cols-2 gap-2 @min-[380px]:grid-cols-3';
 const EMPTY_ASSET_BROWSER_FILTERS: AssetBrowserFilters = { query: '', kind: 'mesh', origin: 'all' };
 
@@ -97,20 +107,22 @@ function toAssetPageFilters(filters: AssetBrowserFilters): AssetPageFilters {
   return {
     ...(query ? { query } : {}),
     kind: filters.kind,
-    ...(filters.kind === 'mesh' ? { modelsOnly: true } : {}),
+    ...(filters.kind === 'mesh' && !filters.allVersions ? { modelsOnly: true } : {}),
     ...(filters.origin === 'all' ? {} : { derived: filters.origin === 'derived' }),
   };
 }
 
 function matchesAssetBrowserFilters(asset: Asset, filters: AssetBrowserFilters): boolean {
-  const displayName = asset.model?.name ?? asset.name;
+  const displayName = filters.allVersions ? asset.name : asset.model?.name ?? asset.name;
+  const derived = filters.allVersions ? Boolean(asset.source_asset_id || asset.metadata.origin === 'generated')
+    : asset.model?.generated ?? Boolean(asset.source_asset_id);
   return (!filters.query || displayName.toLowerCase().includes(filters.query.toLowerCase()))
     && asset.kind === filters.kind
-    && (filters.origin === 'all' || (asset.model?.generated ?? Boolean(asset.source_asset_id)) === (filters.origin === 'derived'));
+    && (filters.origin === 'all' || derived === (filters.origin === 'derived'));
 }
 
-function inventoryAssetKey(asset: Asset): string {
-  return asset.model?.id ?? asset.id;
+function inventoryAssetKey(asset: Asset, filters: AssetBrowserFilters): string {
+  return filters.allVersions ? asset.id : asset.model?.id ?? asset.id;
 }
 
 function mergeCachedAssets(incoming: Asset[], cached: Asset[]): Asset[] {
@@ -203,6 +215,7 @@ export function App() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [inventoryAssets, setInventoryAssets] = useState<Asset[]>([]);
   const [assetSearchInput, setAssetSearchInput] = useState('');
+  const [storedItemId, setStoredItemId] = useState('');
   const assetSearchInputRef = useRef('');
   const [assetFilters, setAssetFilters] = useState<AssetBrowserFilters>(EMPTY_ASSET_BROWSER_FILTERS);
   const assetFiltersRef = useRef(assetFilters);
@@ -236,7 +249,10 @@ export function App() {
   const requestedVoxelResolution = Number(voxelResolution);
   const validVoxelResolution = Number.isInteger(requestedVoxelResolution)
     && requestedVoxelResolution >= MIN_VOXEL_RESOLUTION && requestedVoxelResolution <= MAX_VOXEL_RESOLUTION;
-  const [maxError, setMaxError] = useState(0.02);
+  const [maxErrorDraft, setMaxErrorDraft] = useState('0.02');
+  const maxError = Number(maxErrorDraft);
+  const validMaxError = maxErrorDraft !== '' && Number.isFinite(maxError) && maxError >= 0 && maxError <= 1;
+  const [meshParameterDrafts, setMeshParameterDrafts] = useState<Record<string, string>>({});
   const [generationModelId, setGenerationModelId] = useState('');
   const [generationDrafts, setGenerationDrafts] = useState<Record<string, Record<string, string>>>({});
   const [generationSource, setGenerationSource] = useState<Asset | null>(null);
@@ -297,17 +313,17 @@ export function App() {
     selectedComparisonPair?.resultAssetId,
   ].filter((id): id is string => id !== null && id !== undefined));
   const matchingAssets = inventoryAssets.filter(asset => matchesAssetBrowserFilters(asset, assetFilters));
-  const shownAssetKeys = new Set(matchingAssets.map(inventoryAssetKey));
-  const pinnedKeys = new Set(assets.filter(asset => pinnedAssetIds.has(asset.id)).map(inventoryAssetKey));
+  const shownAssetKeys = new Set(matchingAssets.map(asset => inventoryAssetKey(asset, assetFilters)));
+  const pinnedKeys = new Set(assets.filter(asset => pinnedAssetIds.has(asset.id)).map(asset => inventoryAssetKey(asset, assetFilters)));
   const pinnedAssets = assets.filter(asset => {
-    const key = inventoryAssetKey(asset);
-    if (asset.kind !== assetFilters.kind || (asset.model && asset.id !== asset.model.current_asset_id)
+    const key = inventoryAssetKey(asset, assetFilters);
+    if (asset.kind !== assetFilters.kind || (!assetFilters.allVersions && asset.model && asset.id !== asset.model.current_asset_id)
       || !pinnedKeys.has(key) || shownAssetKeys.has(key)) return false;
     shownAssetKeys.add(key);
     return true;
   });
   const hasActiveAssetFilters = assetFilters.query !== ''
-    || assetFilters.origin !== 'all';
+    || assetFilters.origin !== 'all' || assetFilters.allVersions === true;
   const showLibraryFilters = assets.length > 0 || hasActiveAssetFilters;
   const quadArtifact = quadTopologyArtifact(selectedAsset);
   const quadriflowBackend = runtime?.quadriflow_backend;
@@ -384,12 +400,13 @@ export function App() {
   }
 
   const publishInventoryAsset = useCallback((asset: Asset) => {
-    const current = !asset.model || asset.model.current_asset_id === asset.id;
-    if (!current || !matchesAssetBrowserFilters(asset, assetFiltersRef.current)) return;
-    const key = inventoryAssetKey(asset);
+    const filters = assetFiltersRef.current;
+    const current = filters.allVersions || !asset.model || asset.model.current_asset_id === asset.id;
+    if (!current || !matchesAssetBrowserFilters(asset, filters)) return;
+    const key = inventoryAssetKey(asset, filters);
     setInventoryAssets(items => {
-      if (items.some(item => inventoryAssetKey(item) === key)) {
-        return items.map(item => inventoryAssetKey(item) === key ? asset : item);
+      if (items.some(item => inventoryAssetKey(item, filters) === key)) {
+        return items.map(item => inventoryAssetKey(item, filters) === key ? asset : item);
       }
       return key === asset.id ? [asset, ...items] : items;
     });
@@ -438,8 +455,8 @@ export function App() {
       if (!assetPageRequestGuard.current.isCurrent(requestId)) return;
       setInventoryAssets(current => {
         if (!append) return page.items;
-        const pageKeys = new Set(page.items.map(inventoryAssetKey));
-        return [...current.filter(asset => !pageKeys.has(inventoryAssetKey(asset))), ...page.items];
+        const pageKeys = new Set(page.items.map(asset => inventoryAssetKey(asset, filters)));
+        return [...current.filter(asset => !pageKeys.has(inventoryAssetKey(asset, filters))), ...page.items];
       });
       setAssets((current) => {
         const selectedPair = comparisonPairRef.current
@@ -1166,7 +1183,6 @@ export function App() {
     setReportJob(null);
     setComparisonPair(null);
     try {
-      if (operation === 'render.optimize') parameters.overdraw_threshold = 1.05;
       if (operation === 'mesh.retopology' && requestedQuads !== undefined) parameters.target_quads = requestedQuads;
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
       setJob(nextJob);
@@ -1225,22 +1241,30 @@ export function App() {
   }
 
   function runRuntimeAction(backend: RuntimeBackendId, action: RuntimeAction) {
-    void startRuntimeAction(() => action === 'multiview'
-      ? api.installPixal3dMultiview() : api.installCatalogModel(backend, action === 'install-gated'));
+    void startRuntimeAction(() => {
+      const cuda = backend === 'pixal3d-cuda';
+      switch (action) {
+        case 'multiview': return api.installPixal3dMultiview();
+        case 'setup-pixal3d': return cuda ? api.setupPixal3dCudaRuntime() : api.setupPixal3dRuntime();
+        case 'download-pixal3d': return cuda ? api.installPixal3dCudaModels() : api.installPixal3dModels();
+        case 'convert-naf': return api.convertPixal3dNaf();
+        default: return api.installCatalogModel(backend, action === 'install-gated');
+      }
+    });
   }
 
-  async function downloadResult(artifact?: Artifact) {
-    if (!selectedAsset || downloadInFlight.current || connection !== 'connected') return;
+  async function downloadBlob(load: () => Promise<Blob>, fileName: (blob: Blob) => string, label: string) {
+    if (downloadInFlight.current || connection !== 'connected') return;
     downloadInFlight.current = true;
     exportStartedAt.current = Date.now();
     setDownloading(true);
-    const startNotice = window.setTimeout(() => notify('info', 'Preparing export.', selectedAsset.name), 500);
+    const startNotice = window.setTimeout(() => notify('info', 'Preparing export.', label), 500);
     try {
-      const blob = artifact ? await api.downloadArtifact(artifact) : await api.artifact(selectedAsset);
+      const blob = await load();
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = artifact ? `${selectedAsset.name.replace(/\.[^.]+$/, '')}-quads.obj` : selectedAsset.name;
+      anchor.download = fileName(blob);
       anchor.click();
       notify('success', `Export started: ${anchor.download}`);
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -1251,6 +1275,39 @@ export function App() {
       downloadInFlight.current = false;
       setDownloading(false);
     }
+  }
+
+  function downloadResult(artifact?: Artifact) {
+    if (!selectedAsset) return;
+    const filename = artifact ? `${selectedAsset.name.replace(/\.[^.]+$/, '')}-quads.obj` : selectedAsset.name;
+    return downloadBlob(() => artifact ? api.downloadArtifact(artifact) : api.artifact(selectedAsset), () => filename, filename);
+  }
+
+  async function openStoredAsset(id: string) {
+    if (!id || busy || connection !== 'connected') return;
+    if (!/^asset_[a-z0-9_-]+$/i.test(id)) {
+      notify('error', 'Enter a stored asset ID starting with asset_.');
+      return;
+    }
+    const revision = assetSelectionInteractionRevision.current;
+    setBusy(true);
+    try {
+      const asset = await api.derivedAsset(id);
+      if (assetSelectionInteractionRevision.current === revision) showModelVersion(asset);
+    } catch (cause) {
+      notify('error', cause instanceof Error ? cause.message : 'Could not open this asset.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function downloadStoredArtifact(id: string) {
+    if (!/^artifact_[a-z0-9_-]+$/i.test(id)) {
+      notify('error', 'Enter a stored artifact ID starting with artifact_.');
+      return;
+    }
+    const extensions: Record<string, string> = { 'model/gltf-binary': '.glb', 'model/obj': '.obj', 'image/png': '.png', 'image/jpeg': '.jpg' };
+    return downloadBlob(() => api.downloadArtifactById(id), blob => id + (extensions[blob.type] ?? ''), id);
   }
 
   function requestStop(target: Job, trigger: HTMLButtonElement) {
@@ -1324,7 +1381,7 @@ export function App() {
   const triangleInputMax = triangleCount ? Math.min(10_000_000, triangleCount - 1) : 10_000_000;
   const triangleSliderMax = Math.max(2, triangleCount ? triangleInputMax : 20_000);
   const validTriangleLimit = Number.isInteger(targetTriangles) && targetTriangles >= 1 && targetTriangles <= triangleInputMax;
-  const canSimplify = selectedAsset?.kind === 'mesh' && validTriangleLimit
+  const canSimplify = selectedAsset?.kind === 'mesh' && validTriangleLimit && validMaxError
     && operations.some(operation => operation.id === 'mesh.simplify' && operation.implemented);
   const canGenerate = !!operations.find((operation) => operation.id === 'model.generate')?.implemented
     && selectedGenerationProfile !== undefined;
@@ -1347,6 +1404,14 @@ export function App() {
   const meshTool = meshOperationOptions.find(tool => tool.id === openInspector);
   const isRetopology = meshTool?.id === 'mesh.retopology';
   const isVoxelRemesh = meshTool?.id === 'mesh.voxel_remesh';
+  const meshParameters = meshTool?.id === 'uv.unwrap' || meshTool?.id === 'render.optimize'
+    ? meshParameterFields[meshTool.id].map(field => {
+      const draft = meshParameterDrafts[field.name] ?? field.initial;
+      const value = Number(draft);
+      const valid = draft !== '' && Number.isFinite(value) && value >= field.min && value <= field.max
+        && (field.step !== '1' || Number.isInteger(value));
+      return { ...field, draft, value, valid };
+    }) : [];
   const meshToolAvailable = operations.some(operation => operation.id === meshTool?.id && operation.implemented);
   const canPrepareRetopology = hasSelectedMesh && !busy && !checkingRetopology && connection === 'connected' && !isRunning;
   const processingTool = isRunning && job.operation === meshTool?.id;
@@ -1354,8 +1419,8 @@ export function App() {
   const exportIsPrimary = shouldHighlightExport(activeView, isRunning, connection === 'connected');
 
   function renderAssetCard(asset: Asset) {
-    return <AssetGalleryCard key={inventoryAssetKey(asset)} asset={asset} loadPreview={loadPreview}
-      selected={selectedAsset !== null && inventoryAssetKey(asset) === inventoryAssetKey(selectedAsset)}
+    return <AssetGalleryCard key={inventoryAssetKey(asset, assetFilters)} asset={asset} loadPreview={loadPreview} showVersion={assetFilters.allVersions}
+      selected={selectedAsset !== null && inventoryAssetKey(asset, assetFilters) === inventoryAssetKey(selectedAsset, assetFilters)}
       onDragImage={image => {
         draggedImage.current = image;
         if (image && !busy && !isRunning) setInspector('generation');
@@ -1423,9 +1488,13 @@ export function App() {
                   <div className="flex items-center gap-1"><span>Error tolerance</span>
                     <HelpTip label="About error tolerance">Lower tolerance protects the shape but may prevent the mesh from reaching the triangle limit. The limit is never exceeded.</HelpTip>
                   </div>
-                  <span className="font-mono tabular-nums">{maxError.toFixed(3)}</span>
                 </div>
-                <Slider aria-label="Maximum geometric error" min={0.001} max={0.08} step={0.001} value={[maxError]} onValueChange={([value]) => setMaxError(value)} disabled={!hasSelectedMesh || isRunning || busy} />
+                <Slider aria-label="Quick geometric error adjustment" min={0.001} max={0.08} step={0.001}
+                  value={[validMaxError ? Math.max(0.001, Math.min(0.08, maxError)) : 0.02]}
+                  onValueChange={([value]) => setMaxErrorDraft(String(value))} disabled={!hasSelectedMesh || isRunning || busy} />
+                <Input aria-label="Maximum geometric error" aria-invalid={!validMaxError} type="number" min="0" max="1" step="any"
+                  value={maxErrorDraft} onChange={event => setMaxErrorDraft(event.currentTarget.value)} disabled={!hasSelectedMesh || isRunning || busy} />
+                {!validMaxError && <FieldDescription>Enter an error tolerance from 0 to 1.</FieldDescription>}
               </div>
             </AccordionContent>
           </AccordionItem>
@@ -1507,6 +1576,16 @@ export function App() {
           <p className="text-muted-foreground">{quadriflowBackend.message}</p>
         )}
         <div className="grid gap-2">
+          {meshParameters.map(field => <Field key={field.name}>
+            <FieldLabel htmlFor={`mesh-parameter-${field.name}`}>{field.label}</FieldLabel>
+            <Input id={`mesh-parameter-${field.name}`} type="number" min={field.min} max={field.max} step={field.step}
+              value={field.draft} aria-invalid={!field.valid} disabled={!hasSelectedMesh || busy || isRunning}
+              onChange={event => {
+                const draft = event.currentTarget.value;
+                setMeshParameterDrafts(current => ({ ...current, [field.name]: draft }));
+              }} />
+            {!field.valid && <FieldDescription>Enter {field.step === '1' ? 'a whole number' : 'a number'} from {field.min} to {field.max}.</FieldDescription>}
+          </Field>)}
           {isVoxelRemesh && <Field>
             <FieldLabel htmlFor="voxel-resolution">Voxel resolution</FieldLabel>
             <Input id="voxel-resolution" type="number" min={MIN_VOXEL_RESOLUTION} max={MAX_VOXEL_RESOLUTION} step="1"
@@ -1562,8 +1641,10 @@ export function App() {
             <Button
               className="w-full"
               disabled={!hasSelectedMesh || !meshToolAvailable || busy || connection !== 'connected' || isRunning
-                || (isRetopology && !retopologyCheck) || (isVoxelRemesh && !validVoxelResolution)}
-              onClick={() => void runMeshOperation(meshTool.id, isVoxelRemesh ? { resolution: requestedVoxelResolution } : {})}
+                || (isRetopology && !retopologyCheck) || (isVoxelRemesh && !validVoxelResolution)
+                || meshParameters.some(field => !field.valid)}
+              onClick={() => void runMeshOperation(meshTool.id, isVoxelRemesh ? { resolution: requestedVoxelResolution }
+                : Object.fromEntries(meshParameters.map(field => [field.name, field.value])))}
             >
               Run {meshTool.title}
             </Button>
@@ -1726,6 +1807,11 @@ export function App() {
                 </form>
                 <Disclosure className="min-w-0 text-muted-foreground" title={hasActiveAssetFilters ? 'Filters · Active' : 'Filters'}>
                   <div className="mt-2 grid gap-2">
+                  {assetFilters.kind === 'mesh' && <Field orientation="horizontal">
+                    <Checkbox id="show-all-versions" checked={assetFilters.allVersions === true} disabled={connection !== 'connected'}
+                      onCheckedChange={checked => applyAssetBrowserFilters({ ...assetFilters, allVersions: checked === true })} />
+                    <FieldLabel htmlFor="show-all-versions">Show all mesh versions</FieldLabel>
+                  </Field>}
                   <Field className="min-w-0">
                     <FieldLabel htmlFor="asset-origin">Origin</FieldLabel>
                     <NativeSelect
@@ -1741,8 +1827,8 @@ export function App() {
                       })}
                     >
                       <NativeSelectOption value="all">All assets</NativeSelectOption>
-                      <NativeSelectOption value="original">{assetFilters.kind === 'mesh' ? 'Imported models' : 'Originals'}</NativeSelectOption>
-                      <NativeSelectOption value="derived">{assetFilters.kind === 'mesh' ? 'Generated models' : 'Generated results'}</NativeSelectOption>
+                      <NativeSelectOption value="original">{assetFilters.kind === 'mesh' && !assetFilters.allVersions ? 'Imported models' : 'Originals'}</NativeSelectOption>
+                      <NativeSelectOption value="derived">{assetFilters.kind === 'mesh' && !assetFilters.allVersions ? 'Generated models' : 'Generated or derived assets'}</NativeSelectOption>
                     </NativeSelect>
                   </Field>
                   {hasActiveAssetFilters && (
@@ -1752,6 +1838,19 @@ export function App() {
                   )}
                   </div>
                 </Disclosure></>}
+                <Disclosure className="min-w-0 text-muted-foreground" title="Find by ID">
+                  <form className="mt-2 grid gap-2" onSubmit={event => { event.preventDefault(); void openStoredAsset(storedItemId.trim()); }}>
+                    <Field>
+                      <FieldLabel htmlFor="stored-item-id">Asset or artifact ID</FieldLabel>
+                      <Input id="stored-item-id" value={storedItemId} onChange={event => setStoredItemId(event.currentTarget.value)} />
+                    </Field>
+                    <div className="flex flex-wrap gap-1">
+                      <Button type="submit" variant="outline" size="sm" disabled={!storedItemId.trim() || busy || connection !== 'connected'}>Open asset</Button>
+                      <Button type="button" variant="outline" size="sm" disabled={!storedItemId.trim() || downloading || connection !== 'connected'}
+                        onClick={() => void downloadStoredArtifact(storedItemId.trim())}>Download artifact</Button>
+                    </div>
+                  </form>
+                </Disclosure>
                 </div>
                 <div className="grid min-w-0 gap-3 px-3 py-3">
                 {assetFilters.kind === 'mesh' && <PendingGenerationCards jobs={visiblePendingGenerationJobs} sources={referenceNames}
@@ -1902,6 +2001,11 @@ export function App() {
                   {quadArtifact && <Button variant="secondary" size="sm" title="Editable quad topology without textures or UVs" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult(quadArtifact)}>Quad OBJ</Button>}
                   <BlenderExport api={api} asset={selectedAsset} disabled={comparisonLoadingSide !== null || connection !== 'connected'} />
                   <Button variant={exportIsPrimary ? 'default' : 'secondary'} size="sm" data-review-action={exportIsPrimary || undefined} title="Export GLB" aria-label="Export selected GLB" disabled={downloading || comparisonLoadingSide !== null || connection !== 'connected'} onClick={() => void downloadResult()}><DownloadSimpleIcon aria-hidden="true" /> Export GLB</Button>
+                </div>}
+                {selectedAsset.kind === 'image' && <div className="flex shrink-0 justify-end border-t bg-card px-3 py-2">
+                  <Button variant="secondary" size="sm" disabled={downloading || connection !== 'connected'} onClick={() => void downloadResult()}>
+                    <DownloadSimpleIcon aria-hidden="true" /> Export image
+                  </Button>
                 </div>}
               </div>}
 

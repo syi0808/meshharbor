@@ -1,4 +1,5 @@
 import { expect } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 import { PNG } from 'pngjs';
 import { test } from './studio-fixture.mjs';
 import { disconnectedPartsGlb } from './textured-glb.mjs';
@@ -58,7 +59,10 @@ test('edits stay on one inventory card and restored versions survive reload', as
     page.waitForEvent('filechooser'),
     inventory.getByRole('button', { name: 'Open GLB' }).click(),
   ]);
-  await chooser.setFiles({ name: 'panels.glb', mimeType: 'model/gltf-binary', buffer: disconnectedPartsGlb() });
+  const sourceBytes = disconnectedPartsGlb();
+  const upload = page.waitForResponse('**/api/v1/assets?filename=panels.glb');
+  await chooser.setFiles({ name: 'panels.glb', mimeType: 'model/gltf-binary', buffer: sourceBytes });
+  const sourceAsset = await (await upload).json();
   await expect(card).toBeVisible();
   await expect(selected.getByTitle('panels.glb')).toBeVisible();
 
@@ -69,7 +73,13 @@ test('edits stay on one inventory card and restored versions survive reload', as
   await expect(card).toHaveCount(1);
 
   await page.getByRole('button', { name: 'Render optimization', exact: true }).click();
+  const threshold = page.getByRole('spinbutton', { name: 'Overdraw threshold' });
+  await threshold.fill('0.9');
+  await expect(page.getByRole('button', { name: 'Run Render optimization' })).toBeDisabled();
+  await threshold.fill('1.2');
+  const renderRequest = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/v1/jobs'));
   await page.getByRole('button', { name: 'Run Render optimization' }).click();
+  expect((await renderRequest).postDataJSON().parameters).toEqual({ overdraw_threshold: 1.2 });
   const optimizedName = selected.getByTitle('panels-cleaned-render-optimized.glb', { exact: true });
   await expect(optimizedName).toBeVisible();
   await expect(card).toHaveCount(1);
@@ -98,6 +108,24 @@ test('edits stay on one inventory card and restored versions survive reload', as
   await history.getByRole('button', { name: 'Restore version 3' }).click();
   await expect(optimizedName).toBeVisible();
   await expect(card).toHaveCount(1);
+
+  await inventory.getByRole('button', { name: 'Filters', exact: true }).click();
+  await inventory.getByRole('checkbox', { name: 'Show all mesh versions' }).check();
+  await expect(inventory.getByTitle('panels-cleaned.glb', { exact: true })).toBeVisible();
+  await expect(inventory.getByTitle('panels-cleaned-render-optimized.glb', { exact: true })).toBeVisible();
+  await inventory.getByRole('button', { name: 'Find by ID' }).click();
+  const id = inventory.getByLabel('Asset or artifact ID');
+  await id.fill(sourceAsset.id);
+  await inventory.getByRole('button', { name: 'Open asset', exact: true }).click();
+  await expect(selected.getByTitle('panels.glb', { exact: true })).toBeVisible();
+  const artifactId = sourceAsset.artifacts[0].id;
+  await id.fill(artifactId);
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    inventory.getByRole('button', { name: 'Download artifact' }).click(),
+  ]);
+  expect(download.suggestedFilename()).toBe(`${artifactId}.glb`);
+  expect(await readFile(await download.path())).toEqual(sourceBytes);
 });
 
 test('Studio can still highlight and isolate parts on a legacy split asset', async ({ page, studioOrigin }) => {

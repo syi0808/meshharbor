@@ -9,10 +9,11 @@ import type { Asset } from './types';
 const compactCount = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
 
 export function AssetGalleryCard({
-  asset, selected, loadPreview, onSelect, onDragImage,
+  asset, selected, loadPreview, onSelect, onDragImage, showVersion,
 }: {
   asset: Asset;
   selected: boolean;
+  showVersion?: boolean;
   loadPreview: (asset: Asset, signal: AbortSignal) => Promise<Blob>;
   onSelect: () => void;
   onDragImage: (image: Asset | null) => void;
@@ -21,7 +22,7 @@ export function AssetGalleryCard({
   const [visible, setVisible] = useState(false);
   const [image, setImage] = useState<{ hash: string; url: string } | null>(null);
   const Icon = asset.kind === 'mesh' ? CubeIcon : ImageSquareIcon;
-  const name = asset.model?.name ?? asset.name;
+  const name = showVersion ? asset.name : asset.model?.name ?? asset.name;
   const triangles = Number(asset.metadata.triangles);
 
   useEffect(() => {
@@ -81,7 +82,8 @@ export function AssetGalleryCard({
         <span dir="rtl" className="block min-w-0 truncate text-left text-xs font-medium" title={name}><bdi>{name}</bdi></span>
         <span className="block min-w-0 truncate text-[10px] tabular-nums text-muted-foreground">
           {asset.kind === 'image' ? 'Image' : Number.isFinite(triangles) ? `${compactCount.format(triangles)} tris` : 'Mesh'}
-          {' · '}{asset.model ? asset.model.generated ? 'Generated' : 'Imported' : asset.source_asset_id ? 'Result' : 'Original'}
+          {' · '}{showVersion && asset.model_version ? `Version ${asset.model_version}`
+            : asset.model ? asset.model.generated ? 'Generated' : 'Imported' : asset.source_asset_id ? 'Result' : 'Original'}
         </span>
       </span>
     </Button>

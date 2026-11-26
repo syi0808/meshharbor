@@ -135,7 +135,11 @@ test('Studio rebakes a supported GLB UV atlas and exports both PBR maps', async 
   const selected = page.getByRole('region', { name: 'Selected asset' });
   await expect(selected.getByTitle(sourceName, { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'UV atlas rebake', exact: true }).click();
+  await page.getByRole('spinbutton', { name: 'Atlas resolution' }).fill('512');
+  await page.getByRole('spinbutton', { name: 'Chart padding' }).fill('12');
+  const rebake = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/v1/jobs'));
   await page.getByRole('button', { name: 'Run UV atlas rebake' }).click();
+  expect((await rebake).postDataJSON().parameters).toEqual({ resolution: 512, padding: 12 });
   await expect(selected.getByTitle(resultName, { exact: true })).toBeVisible();
   await selected.getByRole('button', { name: 'Operation report' }).click();
   const report = selected.getByRole('region', { name: 'Report details' });

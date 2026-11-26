@@ -30,6 +30,8 @@ Operation failures appear as toasts. Open **Notifications** in the header to rev
 
 Each imported or generated model has one Inventory card. Select a queued or running generation card to open its result automatically when it is ready. If you pick another model first, Studio keeps that selection. Edits such as Cleanup and Optimize create numbered versions under the card. Use **Version history** below the preview to inspect an older version temporarily or **Restore** it as current without deleting later versions. Editing the current version advances the card; editing a historical version records a branch and leaves the current card unchanged until you restore that branch. Use **Original** and **Result** to compare the job input and output at the same angle, and **Export GLB** to download the version being viewed.
 
+In **Inventory → Filters**, enable **Show all mesh versions** to search and browse individual mesh assets by their own filenames. **Find by ID** opens a specific asset or downloads the exact bytes of a stored artifact. Imported images can also be downloaded from their preview.
+
 ### Send a model to Blender
 
 1. Select the model version you want to transfer and click **Send to Blender** below the preview.
@@ -84,6 +86,7 @@ Settings has its own URLs and keeps the workbench selection and preview intact. 
 
 - **Environment** prepares one shared installation of uv, Python 3.10 and 3.12, and Hugging Face account tools. Model cards stay disabled until this is ready. Setup does not install model-specific dependencies or download any weights.
 - **Models → 3D Generation** lists generation models, supported inputs, and Apple MLX and NVIDIA CUDA profiles. **Install model** installs both the backend and weights in one job after confirmation, including for Pixal3D.
+- Under **Individual Pixal3D steps**, approved profiles also offer separate runtime setup, weight download, and MLX NAF conversion. Use these to run or retry one step without repeating the combined install.
 - **Models → Repart** lists GeoSAM2 for guided mesh separation. **Install model** installs the selected backend and its shared 616 MB checkpoint in one job, reusing existing verified files. These installs are for the [command-line prototype](../../runtimes/geosam2/README.md); Studio cannot run Repart yet.
 - Both model sections show **Recent logs** for supported backends with job history and can copy full downloaded **Model file locations**, one per line. **Delete model files** removes managed weights (and their private download caches, where applicable) without deleting the environment, credentials, shared Hugging Face cache, or Studio assets.
 - **Connections** manages the Hugging Face sign-in used by all Hugging Face model downloads, including public weights. **Sign in with browser** shows a one-time authorization code using the shared account tool. **Check sign-in** verifies the account, not model access. **Use an access token instead** remains available. **Disconnect locally** clears the local credentials without revoking the remote token.
@@ -144,6 +147,7 @@ Studio loads active jobs and up to 20 recent finished records on connection. Ope
 ## Operation limits
 
 - **Optimize mesh** treats the triangle limit as a hard maximum across all primitives. If it cannot reach that count while keeping primitive boundaries and respecting the error tolerance, no result is saved. Increase the limit or loosen the error tolerance and try again.
+- Under **Shape protection**, enter an exact geometric error tolerance from 0 to 1. UV atlas rebake exposes the atlas resolution (64–4096) and chart padding (0–64). Render optimization exposes the overdraw threshold (1.0–1.5).
 - **Cleanup** removes repeated-index, exact zero-area, and same-winding duplicate faces, then reduces redundant triangles where a conservative error tolerance allows it. No target count is required. The report separates the two kinds of reduction.
 - **UV atlas rebake** (`uv.unwrap`) accepts one supported static mesh/primitive/material with existing float UVs and embedded PNG base-color and metallic/roughness maps with linear filtering and repeat wrapping. It creates a new atlas from the existing UVs and reports any zero-area faces omitted from the result. This is not a high-to-low projection or generic texture bake; unsupported maps and layouts are rejected.
 - **Render optimization** reorders opaque and alpha-masked triangles to improve vertex reuse and reduce overdraw, without changing the triangle count. Blended triangles retain their order. Reported cache misses are estimates, not a speed benchmark.

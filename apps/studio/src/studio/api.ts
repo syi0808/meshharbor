@@ -847,7 +847,11 @@ export class MeshHarborApi {
   }
 
   downloadArtifact(artifact: Artifact, signal?: AbortSignal): Promise<Blob> {
-    return this.requestBlob(`/api/v1/artifacts/${encodeURIComponent(artifact.id)}`, signal);
+    return this.downloadArtifactById(artifact.id, signal);
+  }
+
+  downloadArtifactById(id: string, signal?: AbortSignal): Promise<Blob> {
+    return this.requestBlob(`/api/v1/artifacts/${encodeURIComponent(id)}`, signal);
   }
 
   private async requestBlob(path: string, signal?: AbortSignal): Promise<Blob> {

@@ -34,7 +34,7 @@ const sections = {
 };
 
 export type SettingsSection = keyof typeof sections;
-export type RuntimeAction = 'multiview' | 'install' | 'install-gated';
+export type RuntimeAction = 'multiview' | 'install' | 'install-gated' | 'setup-pixal3d' | 'download-pixal3d' | 'convert-naf';
 
 const modelCategories = [
   { id: 'generation', title: '3D Generation', empty: 'No generation models reported by the local engine.' },
@@ -377,6 +377,23 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                           description="Adds support for multiple reference views. This separate download can be large; MeshHarbor reuses compatible cached files."
                           consentLabel="I approve installing the additional model files."
                           disabled={disabled || !environmentReady || signInRequired} onConfirm={() => onRuntimeAction(id, 'multiview')} />}
+                        {id.startsWith('pixal3d-') && backend.installable && <Disclosure title="Individual Pixal3D steps">
+                          <div className="mt-2 grid gap-2">
+                            <ModelInstallDialog label={label} action="Set up Pixal3D runtime"
+                              description="Install the isolated Python dependencies without downloading weights."
+                              consentLabel="I approve installing the runtime dependencies."
+                              disabled={disabled || !environmentReady} onConfirm={() => onRuntimeAction(id, 'setup-pixal3d')} />
+                            <ModelInstallDialog label={label} action="Download Pixal3D model files"
+                              description={`Download up to ${accelerators[kind].download} of pinned model files without setting up the runtime.`}
+                              consentLabel="I have DINOv3 access, reviewed the terms, and approve the download."
+                              dino={dino} disabled={disabled || !environmentReady || !backend.environment_ready || signInRequired}
+                              onConfirm={() => onRuntimeAction(id, 'download-pixal3d')} />
+                            {kind === 'mlx' && <ModelInstallDialog label={label} action="Convert NAF weights"
+                              description="Convert the existing NAF checkpoint for MLX without downloading more weights."
+                              consentLabel="I approve converting the local checkpoint."
+                              disabled={disabled || !backend.conversion_enabled} onConfirm={() => onRuntimeAction(id, 'convert-naf')} />}
+                          </div>
+                        </Disclosure>}
                         {needsSignIn && <Button variant="outline" size="sm" className="justify-self-start" onClick={() => onVisit('connections', authBackend)}>Go to Connections</Button>}
                       </CardContent>
                       {environmentReady && <RuntimeActions api={api} id={id} backend={backend} jobs={jobs} operationLabel={operationLabel} onJobDetails={onJobDetails}

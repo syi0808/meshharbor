@@ -177,6 +177,46 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   await expect(cuda.getByRole('button', { name: 'Recent logs' })).toHaveCount(0);
 });
 
+test('individual Pixal3D steps submit separate jobs only after confirmation', async ({ page, studioOrigin }) => {
+  const steps = [
+    ['Set up Pixal3D runtime', 'setup', 'runtime.pixal3d.setup', null],
+    ['Download Pixal3D model files', 'models', 'runtime.pixal3d.install_models', { confirm_large_download: true, confirm_gated_access: true }],
+    ['Convert NAF weights', 'convert-naf', 'runtime.pixal3d.convert_naf', null],
+  ];
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: {
+    platform: 'macos', environment: readyEnvironment,
+    model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', backend_ids: ['pixal3d-mlx'] }],
+    model_backends: [{ id: 'pixal3d-mlx', installable: true, environment_ready: true,
+      conversion_enabled: true, gated_model_access_required: true,
+      huggingface: { account: 'connected', model_access: 'verified' } }],
+  } }));
+  const submitted = [];
+  for (const [, endpoint, operation, expectedBody] of steps) {
+    const job = { id: `job-${endpoint}`, operation, state: 'running', progress: 5,
+      parameters: { backend_id: 'pixal3d-mlx' }, created_at: '1', updated_at: '1' };
+    await page.route(`**/api/v1/runtime/pixal3d-mlx/${endpoint}`, route => {
+      expect(route.request().method()).toBe('POST');
+      expect(route.request().postDataJSON()).toEqual(expectedBody);
+      submitted.push(endpoint);
+      return route.fulfill({ status: 202, json: job });
+    });
+    await page.route(`**/api/v1/jobs/${job.id}`, route => route.fulfill({ json: { ...job, state: 'succeeded', progress: 100, updated_at: '2' } }));
+  }
+
+  await page.goto(studioOrigin + '/settings/models');
+  await page.getByRole('button', { name: 'Individual Pixal3D steps' }).click();
+  for (const [index, [label, endpoint]] of steps.entries()) {
+    await page.getByRole('button', { name: label, exact: true }).click();
+    const dialog = page.getByRole('alertdialog', { name: `${label}?` });
+    const confirm = dialog.getByRole('button', { name: label, exact: true });
+    await expect(confirm).toBeDisabled();
+    expect(submitted).toHaveLength(index);
+    await dialog.getByRole('checkbox').check();
+    await confirm.click();
+    await expect.poll(() => submitted[index]).toBe(endpoint);
+  }
+});
+
 test('Repart installs the GeoSAM2 backend and weights in one job', async ({ page, studioOrigin }) => {
   let requests = 0;
   let backendInstalled = false;
