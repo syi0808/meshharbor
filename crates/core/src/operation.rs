@@ -12,7 +12,8 @@ use crate::{
     HuggingFaceConnection, IMAGE_GENERATION_OPERATION, MODEL_GENERATION_OPERATION,
     Pixal3dCudaRuntimeManager, Pixal3dMlxRuntime, Pixal3dProfile, Pixal3dRuntimeManager,
     QuadriFlowBackendStatus, QuadriFlowInstallResult, RuntimeSetupReport, SimplificationReport,
-    Store, bake_glb, cleanup_glb, compress_mesh_glb, external_generation, geosam2_install,
+    Store, bake_glb, compress_mesh_glb, external_generation, geosam2_install,
+    glb::{MeshCleanupOptions, cleanup_glb_with_options},
     inspect_asset, install_bundled_quadriflow_sidecar,
     job_execution::JobExecution,
     model_environment::{ModelEnvironment, ModelEnvironmentStatus},
@@ -275,6 +276,7 @@ impl OperationCore {
                 options,
                 self.store.data_root(),
                 self.linked_quadriflow_worker.as_deref(),
+                execution,
             )?;
             let report_value = serde_json::to_value(&report)?;
             let name = derived_mesh_name(&source.name, "quad-retopologized");
@@ -297,8 +299,12 @@ impl OperationCore {
         }
         let (suffix, output, report) = match operation {
             "mesh.cleanup" => {
-                reject_unused_parameters(&parameters, operation)?;
-                let (output, report) = cleanup_glb(&bytes)?;
+                let options: Option<MeshCleanupOptions> = serde_json::from_value(parameters)
+                    .map_err(|error| {
+                        CoreError::InvalidInput(format!("Invalid mesh.cleanup parameters: {error}"))
+                    })?;
+                let (output, report) =
+                    cleanup_glb_with_options(&bytes, options.unwrap_or_default())?;
                 ("cleaned", output, serde_json::to_value(report)?)
             }
             "render.optimize" => {

@@ -845,7 +845,7 @@ export class MeshHarborApi {
   createMeshOperationJob(
     assetId: string,
     operation: MeshOperationId,
-    parameters: Record<string, number> = {},
+    parameters: Record<string, number | boolean> = {},
   ): Promise<Job> {
     return this.request('/api/v1/jobs', {
       method: 'POST',

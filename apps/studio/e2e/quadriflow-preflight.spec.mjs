@@ -5,12 +5,12 @@ import { test } from './studio-fixture.mjs';
 const preflightPath = '**/retopology-preflight';
 const isPreflight = request => request.url().endsWith('/retopology-preflight');
 
-async function importCube(page, name, textured = false) {
+async function importCube(page, name, options) {
   const [chooser] = await Promise.all([
     page.waitForEvent('filechooser'),
     page.getByRole('button', { name: 'Open GLB', exact: true }).click(),
   ]);
-  await chooser.setFiles({ name, mimeType: 'model/gltf-binary', buffer: quadriflowCube({ textured }) });
+  await chooser.setFiles({ name, mimeType: 'model/gltf-binary', buffer: quadriflowCube(options) });
   await expect(page.getByRole('region', { name: 'Selected asset' }).getByTitle(name, { exact: true })).toBeVisible();
 }
 
@@ -55,7 +55,7 @@ test('Studio automatically preflights the open retopology tool without queuing a
   await expect(page.getByRole('tooltip')).toHaveCount(0);
   expect(requests).toEqual([{}, { target_quads: 10000 }, { target_quads: 12 }]);
 
-  await importCube(page, 'textured-source.glb', true);
+  await importCube(page, 'textured-source.glb', { textured: true });
   await expect(tools.getByRole('status')).toHaveText('Textured input passed');
   await customTarget.uncheck();
   await expect(target).toHaveCount(0);
@@ -63,6 +63,22 @@ test('Studio automatically preflights the open retopology tool without queuing a
   expect(requests).toEqual([{}, { target_quads: 10000 }, { target_quads: 12 }, { target_quads: 12 }, {}]);
   await page.getByRole('button', { name: 'Jobs', exact: true }).click();
   await expect(page.getByText('No finished jobs yet.')).toBeVisible();
+});
+
+test('Retopology can clean a duplicate face and recheck the derived mesh without leaving the panel', async ({ page, studioOrigin }) => {
+  await page.goto(studioOrigin);
+  await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  await importCube(page, 'duplicate.glb', { reversedDuplicate: true });
+  await page.getByRole('button', { name: 'Retopology', exact: true }).click();
+  const tools = page.getByRole('complementary', { name: 'Quad retopology (experimental)' });
+  await expect(page.getByText(/Remesh input contains duplicate triangles/)).toBeVisible();
+  const [cleanup] = await Promise.all([
+    page.waitForRequest(request => request.url().endsWith('/api/v1/jobs') && request.method() === 'POST'),
+    tools.getByRole('button', { name: 'Run Cleanup first', exact: true }).click(),
+  ]);
+  expect(cleanup.postDataJSON()).toMatchObject({ operation: 'mesh.cleanup', parameters: { for_retopology: true } });
+  await expect(tools.getByTitle('duplicate-cleaned.glb', { exact: true })).toBeVisible();
+  await expect(tools.getByRole('status')).toHaveText('Geometry-only input passed');
 });
 
 test('retopology failures use only a toast and superseded requests are cancelled', async ({ page, studioOrigin }) => {

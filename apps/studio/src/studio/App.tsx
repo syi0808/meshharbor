@@ -1143,14 +1143,13 @@ export function App() {
     }
   }
 
-  async function runMeshOperation(operation: MeshOperationId) {
+  async function runMeshOperation(operation: MeshOperationId, parameters: Record<string, number | boolean> = {}) {
     if (!selectedAsset || selectedAsset.kind !== 'mesh' || (operation === 'mesh.retopology' && !retopologyCheck)) return;
     invalidateHistoryRequests();
     setBusy(true);
     setReportJob(null);
     setComparisonPair(null);
     try {
-      const parameters: Record<string, number> = {};
       if (operation === 'render.optimize') parameters.overdraw_threshold = 1.05;
       if (operation === 'mesh.retopology' && requestedQuads !== undefined) parameters.target_quads = requestedQuads;
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
@@ -1516,6 +1515,13 @@ export function App() {
                 {retopologyCheck.coincident_boundary_vertices_joined && ' Exact seams can be joined without changing the source.'}
               </HelpTip>}
             </div>}
+            <Button variant="outline" className="w-full"
+              disabled={!hasSelectedMesh || busy || checkingRetopology || connection !== 'connected' || isRunning
+                || !operations.some(operation => operation.id === 'mesh.cleanup' && operation.implemented)}
+              onClick={() => void runMeshOperation('mesh.cleanup', { for_retopology: true })}
+            >
+              Run Cleanup first
+            </Button>
           </>}
           {!processingTool && (
             <Button

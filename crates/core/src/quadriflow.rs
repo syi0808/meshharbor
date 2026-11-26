@@ -9,8 +9,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
 };
 
 use meshharbor_atlas_baker::{
@@ -22,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     CoreError, CoreResult, RemeshRequest, RetopologyOptions, glb::extract_retopology_geometry,
-    validate_remesh_request,
+    job_execution::JobExecution, validate_remesh_request,
 };
 
 const MAX_OBJ_BYTES: usize = 64 * 1024 * 1024;
@@ -630,8 +628,6 @@ const MAX_INPUT_OBJ_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_QUAD_TARGET: u32 = 50_000;
 pub const LINKED_QUADRIFLOW_WORKER_ARG: &str = "--internal-quadriflow-worker";
 pub const MAX_LINKED_QUADRIFLOW_REQUEST_BYTES: usize = 64 * 1024 * 1024;
-const QUADRIFLOW_TIMEOUT: Duration = Duration::from_secs(180);
-const QUADRIFLOW_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Default, Clone, Copy, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -726,7 +722,7 @@ pub fn quadriflow_retopology_glb(
     options: QuadRetopologyOptions,
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
     let data_root = crate::quadriflow_installer::default_data_root();
-    quadriflow_retopology_glb_at(bytes, options, &data_root, None)
+    quadriflow_retopology_glb_at(bytes, options, &data_root, None, JobExecution::default())
 }
 
 enum QuadriFlowWorker<'worker> {
@@ -739,6 +735,7 @@ pub(crate) fn quadriflow_retopology_glb_at(
     options: QuadRetopologyOptions,
     data_root: &Path,
     linked_worker: Option<&Path>,
+    execution: JobExecution<'_>,
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
     quadriflow_retopology_glb_with_runner(bytes, options, || {
         let worker = match linked_worker {
@@ -747,12 +744,20 @@ pub(crate) fn quadriflow_retopology_glb_at(
         };
         Some(
             move |request: &RemeshRequest, output_path: &Path, target_quads| match worker {
-                QuadriFlowWorker::Linked(path) => {
-                    execute_linked_quadriflow_worker(path, request, output_path, target_quads)
-                }
-                QuadriFlowWorker::Managed(path) => {
-                    execute_managed_quadriflow_job(&path, request, output_path, target_quads)
-                }
+                QuadriFlowWorker::Linked(path) => execute_linked_quadriflow_worker(
+                    path,
+                    request,
+                    output_path,
+                    target_quads,
+                    execution,
+                ),
+                QuadriFlowWorker::Managed(path) => execute_managed_quadriflow_job(
+                    &path,
+                    request,
+                    output_path,
+                    target_quads,
+                    execution,
+                ),
             },
         )
     })
@@ -979,8 +984,14 @@ pub(crate) fn execute_archive_rehearsal_cube(
     input_path: &Path,
     output_path: &Path,
 ) -> CoreResult<()> {
-    // Reuse production subprocess arguments, environment filtering and timeout.
-    execute_quadriflow_worker(worker, input_path, output_path, Some(12))
+    // Reuse production subprocess arguments and environment filtering.
+    execute_quadriflow_worker(
+        worker,
+        input_path,
+        output_path,
+        Some(12),
+        JobExecution::default(),
+    )
 }
 
 #[cfg(test)]
@@ -994,7 +1005,13 @@ pub(crate) fn rehearse_textured_cube_with_worker(
         },
         || {
             Some(|request: &RemeshRequest, output: &Path, target| {
-                execute_managed_quadriflow_job(worker, request, output, target)
+                execute_managed_quadriflow_job(
+                    worker,
+                    request,
+                    output,
+                    target,
+                    JobExecution::default(),
+                )
             })
         },
     )
@@ -1005,13 +1022,14 @@ fn execute_managed_quadriflow_job(
     request: &RemeshRequest,
     output_path: &Path,
     target_quads: Option<u32>,
+    execution: JobExecution<'_>,
 ) -> CoreResult<()> {
     let input_path = output_path.with_file_name("input.obj");
     fs::write(
         &input_path,
         triangle_geometry_obj(&request.positions, &request.indices)?,
     )?;
-    execute_quadriflow_worker(worker, &input_path, output_path, target_quads)
+    execute_quadriflow_worker(worker, &input_path, output_path, target_quads, execution)
 }
 
 fn execute_linked_quadriflow_worker(
@@ -1019,6 +1037,7 @@ fn execute_linked_quadriflow_worker(
     request: &RemeshRequest,
     output_path: &Path,
     target_quads: Option<u32>,
+    execution: JobExecution<'_>,
 ) -> CoreResult<()> {
     let input_path = output_path.with_file_name("input.json");
     let bytes = serde_json::to_vec(request)?;
@@ -1036,7 +1055,7 @@ fn execute_linked_quadriflow_worker(
     command
         .current_dir(output_path.parent().expect("worker output directory"))
         .stdin(fs::File::open(input_path)?);
-    wait_for_quadriflow_worker(command)
+    wait_for_quadriflow_worker(command, execution)
 }
 
 fn execute_quadriflow_worker(
@@ -1044,13 +1063,12 @@ fn execute_quadriflow_worker(
     input_path: &Path,
     output_path: &Path,
     target_quads: Option<u32>,
+    execution: JobExecution<'_>,
 ) -> CoreResult<()> {
-    wait_for_quadriflow_worker(quadriflow_worker_command(
-        worker,
-        input_path,
-        output_path,
-        target_quads,
-    ))
+    wait_for_quadriflow_worker(
+        quadriflow_worker_command(worker, input_path, output_path, target_quads),
+        execution,
+    )
 }
 
 fn quadriflow_worker_command(
@@ -1068,7 +1086,13 @@ fn quadriflow_worker_command(
     command
 }
 
-fn wait_for_quadriflow_worker(mut command: Command) -> CoreResult<()> {
+fn wait_for_quadriflow_worker(mut command: Command, execution: JobExecution<'_>) -> CoreResult<()> {
+    execution.checkpoint()?;
+    #[cfg(unix)]
+    if execution.is_tracked() {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .env_clear()
         .stdout(Stdio::null())
@@ -1080,26 +1104,7 @@ fn wait_for_quadriflow_worker(mut command: Command) -> CoreResult<()> {
             ))
         })?;
 
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error.into());
-            }
-        }
-        if started.elapsed() >= QUADRIFLOW_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(CoreError::OperationUnavailable(
-                "QuadriFlow exceeded its 180-second process limit.".into(),
-            ));
-        }
-        thread::sleep(QUADRIFLOW_POLL_INTERVAL);
-    };
+    let status = execution.wait_for_child(&mut child)?;
     if status.success() {
         Ok(())
     } else {
@@ -1584,6 +1589,32 @@ f 4 1 5 8\n";
             )
             .is_err()
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tracked_quadriflow_worker_can_be_cancelled_while_running() {
+        let temp = QuadriflowTempDir::create().unwrap();
+        let store = crate::Store::open(&temp.0).unwrap();
+        let job = store
+            .create_running_job("mesh.retopology", None, &json!({}))
+            .unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", ": > started; exec /bin/sleep 10"])
+            .current_dir(&temp.0);
+        let execution = JobExecution::for_job(&store, &job.id);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(move || wait_for_quadriflow_worker(command, execution));
+            let marker = temp.0.join("started");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !marker.is_file() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            store.request_job_cancellation(&job.id, false).unwrap();
+            assert!(marker.is_file());
+            assert!(matches!(worker.join().unwrap(), Err(CoreError::Cancelled)));
+        });
     }
 
     #[test]

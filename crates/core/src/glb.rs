@@ -1297,6 +1297,19 @@ fn ensure_extension(document: &mut Value, list_name: &str, extension: &str) {
 /// low-error simplification within supported primitives without welding or
 /// compacting vertex streams.
 pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreError> {
+    cleanup_glb_with_options(bytes, MeshCleanupOptions::default())
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct MeshCleanupOptions {
+    pub(crate) for_retopology: bool,
+}
+
+pub(crate) fn cleanup_glb_with_options(
+    bytes: &[u8],
+    options: MeshCleanupOptions,
+) -> Result<(Vec<u8>, MeshCleanupReport), CoreError> {
     const CLEANUP_MAX_ERROR: f32 = 0.001;
     let mut glb = GlbFile::parse(bytes)?;
     validate_static_glb(&glb.document)?;
@@ -1316,6 +1329,7 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
     let mut repeated_removed = 0u64;
     let mut zero_area_removed = 0u64;
     let mut duplicate_removed = 0u64;
+    let mut reversed_removed = 0u64;
     let mut simplified_removed = 0u64;
     let mut per_primitive = Vec::new();
 
@@ -1362,8 +1376,12 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
                     duplicate_removed += 1;
                     continue;
                 }
-                has_opposite_winding |= seen_faces.contains(&canonical_oriented_triangle(a, c, b));
+                has_opposite_winding |= has_reversed_face([a, b, c], &seen_faces);
                 cleaned.extend_from_slice(&[a, b, c]);
+            }
+            if options.for_retopology && has_opposite_winding {
+                reversed_removed +=
+                    remove_resolvable_reversed_duplicates(&mut cleaned, &seen_faces);
             }
             if cleaned.is_empty() {
                 return Err(CoreError::OperationUnavailable(format!(
@@ -1371,6 +1389,7 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
                 )));
             }
             if cleaned.len() > 3
+                && !options.for_retopology
                 && !has_opposite_winding
                 && primitive["attributes"]
                     .as_object()
@@ -1416,8 +1435,11 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
             json!(accessor_index);
     }
 
-    let total_removed =
-        repeated_removed + zero_area_removed + duplicate_removed + simplified_removed;
+    let total_removed = repeated_removed
+        + zero_area_removed
+        + duplicate_removed
+        + reversed_removed
+        + simplified_removed;
     let encoded = if total_removed == 0 {
         bytes.to_vec()
     } else {
@@ -1429,6 +1451,21 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
         buffers[0]["byteLength"] = json!(binary.len());
         glb.write()?
     };
+    let mut preserved = vec![
+        "vertex streams, including UV seams".into(),
+        "materials and texture references".into(),
+        "mesh and node hierarchy".into(),
+    ];
+    if reversed_removed == 0 {
+        preserved.push("opposite-winding faces".into());
+    }
+    let mut warnings = vec![
+        "Cleanup intentionally does not weld vertices or compact unused vertex data.".into(),
+        "Defect removal detects exact zero area in decoded FLOAT POSITION space, not near-zero area.".into(),
+    ];
+    if options.for_retopology {
+        warnings.push("Retopology cleanup only removes reversed duplicates with matching indices and unambiguous neighboring winding; it does not simplify the mesh.".into());
+    }
     Ok((
         encoded,
         MeshCleanupReport {
@@ -1436,19 +1473,11 @@ pub fn cleanup_glb(bytes: &[u8]) -> Result<(Vec<u8>, MeshCleanupReport), CoreErr
             triangles_after: total_before - total_removed,
             repeated_index_triangles_removed: repeated_removed,
             zero_area_triangles_removed: zero_area_removed,
-            duplicate_triangles_removed: duplicate_removed,
+            duplicate_triangles_removed: duplicate_removed + reversed_removed,
             simplified_triangles_removed: simplified_removed,
             modified_primitives,
-            preserved: vec![
-                "vertex streams, including UV seams".into(),
-                "materials and texture references".into(),
-                "mesh and node hierarchy".into(),
-                "opposite-winding faces".into(),
-            ],
-            warnings: vec![
-                "Cleanup intentionally does not weld vertices or compact unused vertex data.".into(),
-                "Defect removal detects exact zero area in decoded FLOAT POSITION space, not near-zero area.".into(),
-            ],
+            preserved,
+            warnings,
         },
     ))
 }
@@ -1660,6 +1689,63 @@ fn canonical_oriented_triangle(a: u32, b: u32, c: u32) -> [u32; 3] {
     } else {
         [c, a, b]
     }
+}
+
+fn remove_resolvable_reversed_duplicates(
+    indices: &mut Vec<u32>,
+    oriented_faces: &HashSet<[u32; 3]>,
+) -> u64 {
+    let mut edge_faces = HashMap::<[u32; 2], [u8; 2]>::new();
+    for triangle in indices.chunks_exact(3) {
+        let face = [triangle[0], triangle[1], triangle[2]];
+        if has_reversed_face(face, oriented_faces) {
+            for (edge, _) in directed_triangle_edges(face) {
+                edge_faces.entry(edge).or_default();
+            }
+        }
+    }
+    for triangle in indices.chunks_exact(3) {
+        for (edge, direction) in directed_triangle_edges([triangle[0], triangle[1], triangle[2]]) {
+            if let Some(count) = edge_faces.get_mut(&edge) {
+                count[direction] = count[direction].saturating_add(1);
+            }
+        }
+    }
+
+    let mut retained = 0;
+    for offset in (0..indices.len()).step_by(3) {
+        let face = [indices[offset], indices[offset + 1], indices[offset + 2]];
+        let wrong_winding_on_all_edges = has_reversed_face(face, oriented_faces)
+            && directed_triangle_edges(face).all(|(edge, direction)| {
+                let counts = edge_faces[&edge];
+                counts[direction] == 2 && counts[1 - direction] == 1
+            });
+        if !wrong_winding_on_all_edges {
+            indices[retained..retained + 3].copy_from_slice(&face);
+            retained += 3;
+        }
+    }
+    let removed = (indices.len() - retained) / 3;
+    indices.truncate(retained);
+    removed as u64
+}
+
+fn has_reversed_face([first, second, third]: [u32; 3], faces: &HashSet<[u32; 3]>) -> bool {
+    faces.contains(&canonical_oriented_triangle(first, third, second))
+}
+
+fn directed_triangle_edges(
+    [first, second, third]: [u32; 3],
+) -> impl Iterator<Item = ([u32; 2], usize)> {
+    [(first, second), (second, third), (third, first)]
+        .into_iter()
+        .map(|(start, end)| {
+            if start < end {
+                ([start, end], 0)
+            } else {
+                ([end, start], 1)
+            }
+        })
 }
 
 fn primitive_uses_blending(document: &Value, primitive: &Value) -> Result<bool, CoreError> {
@@ -2045,6 +2131,13 @@ pub fn retopology_glb(
     })?;
     validate_single_embedded_buffer(&glb.document, binary.len())?;
     validate_retopology_glb_document(&glb.document)?;
+    if array(&glb.document, "accessors").len() != 2
+        || array(&glb.document, "bufferViews").len() != 2
+    {
+        return Err(CoreError::OperationUnavailable(
+            "Retopology requires one POSITION accessor and one index accessor.".into(),
+        ));
+    }
 
     let primitive = &glb.document["meshes"][0]["primitives"][0];
     let attributes = primitive
@@ -2245,11 +2338,6 @@ fn validate_retopology_glb_document(document: &Value) -> Result<(), CoreError> {
         ));
     }
 
-    if array(document, "accessors").len() != 2 || array(document, "bufferViews").len() != 2 {
-        return Err(CoreError::OperationUnavailable(
-            "Retopology requires one POSITION accessor and one index accessor.".into(),
-        ));
-    }
     Ok(())
 }
 
@@ -3336,6 +3424,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(indices.len(), 6);
+    }
+
+    #[test]
+    fn retopology_cleanup_keeps_the_face_that_matches_its_neighbors() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let closed = [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
+        for indices in [
+            [&[0, 1, 2][..], &closed].concat(),
+            [&closed[..], &[0, 1, 2]].concat(),
+        ] {
+            let source = triangle_list_glb(&positions, &indices, None);
+            let options = crate::QuadRetopologyOptions::default();
+            assert!(crate::quadriflow_preflight_glb(&source, options).is_err());
+            let (cleaned, report) = cleanup_glb_with_options(
+                &source,
+                MeshCleanupOptions {
+                    for_retopology: true,
+                },
+            )
+            .unwrap();
+            assert_eq!(report.duplicate_triangles_removed, 1);
+            assert_eq!(report.simplified_triangles_removed, 0);
+            let (_, cleaned_indices) = extract_retopology_geometry(&cleaned).unwrap();
+            assert_eq!(cleaned_indices, closed.map(u32::from));
+            assert!(crate::quadriflow_preflight_glb(&cleaned, options).is_ok());
+        }
+    }
+
+    #[test]
+    fn retopology_cleanup_preserves_duplicates_without_winding_evidence() {
+        let source = triangle_list_glb(
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            &[0, 1, 2, 0, 2, 1],
+            None,
+        );
+        let (cleaned, report) = cleanup_glb_with_options(
+            &source,
+            MeshCleanupOptions {
+                for_retopology: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.duplicate_triangles_removed, 0);
+        assert_eq!(cleaned, source);
     }
 
     #[test]

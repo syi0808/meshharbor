@@ -7,7 +7,7 @@ const cube = readFileSync(new URL('../../../crates/core/tests/fixtures/quadriflo
 const positions = cube.filter(([type]) => type === 'v').map(([, ...xyz]) => xyz.map(Number));
 const indices = cube.filter(([type]) => type === 'f').flatMap(([, ...face]) => face.map(index => Number(index) - 1));
 
-export function quadriflowCube({ textured = false } = {}) {
+export function quadriflowCube({ textured = false, reversedDuplicate = false } = {}) {
   const data = [];
   const bufferViews = [];
   const accessors = [];
@@ -29,12 +29,14 @@ export function quadriflowCube({ textured = false } = {}) {
   const attributes = {
     POSITION: addAttribute(vertices, 'VEC3', { min: [-1, -1, -1], max: [1, 1, 1] }),
   };
-  const faces = Buffer.alloc(indices.length * 2);
-  indices.forEach((index, corner) => faces.writeUInt16LE(textured && corner < 6 ? index + 8 : index, corner * 2));
+  const corners = indices.map((index, corner) => textured && corner < 6 ? index + 8 : index);
+  if (reversedDuplicate) corners.push(corners[0], corners[2], corners[1]);
+  const faces = Buffer.alloc(corners.length * 2);
+  corners.forEach((index, corner) => faces.writeUInt16LE(index, corner * 2));
   const indexView = addView(faces, 34963);
   const primitive = {
     attributes,
-    indices: accessors.push({ bufferView: indexView, componentType: 5123, count: indices.length, type: 'SCALAR' }) - 1,
+    indices: accessors.push({ bufferView: indexView, componentType: 5123, count: corners.length, type: 'SCALAR' }) - 1,
     mode: 4,
   };
   const document = {
