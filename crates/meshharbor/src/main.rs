@@ -40,6 +40,9 @@ mod huggingface_status;
 mod job_scheduler;
 #[cfg(feature = "bundled-quadriflow")]
 mod quadriflow_worker;
+mod service;
+
+const DEFAULT_LISTEN: &str = "127.0.0.1:7432";
 /// Prevents fork/exec lock tests from inheriting another test's live advisory-lock descriptor.
 #[cfg(test)]
 pub(crate) static DATA_DIR_LOCK_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -61,8 +64,13 @@ struct Cli {
 enum Command {
     /// Start the localhost REST API.
     Serve {
-        #[arg(long, default_value = "127.0.0.1:7432")]
+        #[arg(long, default_value = DEFAULT_LISTEN)]
         listen: SocketAddr,
+    },
+    /// Manage the background REST API service for the current user (macOS/Linux).
+    Service {
+        #[command(subcommand)]
+        command: service::ServiceCommand,
     },
     /// Start the stdio MCP server.
     Mcp,
@@ -1002,6 +1010,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             state.scheduler.drain().await;
             served?;
         }
+        Command::Service { command } => service::run(command, &root)?,
         Command::Mcp => {
             let jobs = open_job_service(&root).await?;
             let state = &jobs.state;

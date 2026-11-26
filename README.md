@@ -40,6 +40,18 @@ Open **http://127.0.0.1:7432**. The server is single-user and loopback-only; do 
 
 For the CLI, run `cargo run --locked --bin meshharbor -- --help`.
 
+### Run the native binary in the background
+
+Put the built `meshharbor` binary in a permanent location on `PATH`. On macOS or Linux with systemd, run as your own user (not with `sudo`):
+
+```sh
+meshharbor service install
+meshharbor service start
+meshharbor service status
+```
+
+Studio and the REST API remain available at **http://127.0.0.1:7432** after you close the terminal. See the [CLI guide](docs/cli.md#background-service) for startup at login, Linux boot without login, logs, and removal.
+
 ### Docker
 
 From the repository root, build and start MeshHarbor:
