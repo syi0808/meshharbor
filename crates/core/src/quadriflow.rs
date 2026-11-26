@@ -633,19 +633,11 @@ pub const MAX_LINKED_QUADRIFLOW_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const QUADRIFLOW_TIMEOUT: Duration = Duration::from_secs(180);
 const QUADRIFLOW_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuadRetopologyOptions {
-    /// Approximate requested number of output quads; the upstream solver may miss it.
-    pub target_quads: u32,
-}
-
-impl Default for QuadRetopologyOptions {
-    fn default() -> Self {
-        Self {
-            target_quads: 10_000,
-        }
-    }
+    /// Approximate requested output quad count, or None for QuadriFlow's automatic density.
+    pub target_quads: Option<u32>,
 }
 
 /// Eligibility of the source mesh alone. This is not backend readiness,
@@ -655,7 +647,7 @@ pub struct QuadRetopologyPreflight {
     pub input_vertices: u64,
     pub input_triangles: u64,
     pub solver_vertices: u64,
-    pub requested_quads: u32,
+    pub requested_quads: Option<u32>,
     pub coincident_boundary_vertices_joined: bool,
     pub appearance_projection_required: bool,
 }
@@ -665,7 +657,7 @@ pub struct QuadRetopologyReport {
     pub algorithm: String,
     pub input_vertices: u64,
     pub input_triangles: u64,
-    pub requested_quads: u32,
+    pub requested_quads: Option<u32>,
     pub output_vertices: u64,
     pub output_quads: u64,
     pub preview_triangles: u64,
@@ -720,8 +712,8 @@ pub(crate) fn quadriflow_sidecar_available_at(data_root: &Path) -> bool {
     quadriflow_sidecar_path(data_root).is_some()
 }
 
-fn validate_quad_target(target_quads: u32) -> CoreResult<()> {
-    if !(4..=MAX_QUAD_TARGET).contains(&target_quads) {
+fn validate_quad_target(target_quads: Option<u32>) -> CoreResult<()> {
+    if target_quads.is_some_and(|target| !(4..=MAX_QUAD_TARGET).contains(&target)) {
         return Err(CoreError::InvalidInput(format!(
             "target_quads must be between 4 and {MAX_QUAD_TARGET}."
         )));
@@ -754,7 +746,7 @@ pub(crate) fn quadriflow_retopology_glb_at(
             None => QuadriFlowWorker::Managed(quadriflow_sidecar_path(data_root)?),
         };
         Some(
-            move |request: &RemeshRequest, output_path: &Path, target_quads: u32| match worker {
+            move |request: &RemeshRequest, output_path: &Path, target_quads| match worker {
                 QuadriFlowWorker::Linked(path) => {
                     execute_linked_quadriflow_worker(path, request, output_path, target_quads)
                 }
@@ -905,7 +897,7 @@ fn quadriflow_retopology_glb_with_runner<F>(
     resolve_runner: impl FnOnce() -> Option<F>,
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)>
 where
-    F: FnOnce(&RemeshRequest, &Path, u32) -> CoreResult<()>,
+    F: FnOnce(&RemeshRequest, &Path, Option<u32>) -> CoreResult<()>,
 {
     let PreparedQuadriFlowInput { validation, report } = prepare_quadriflow_input(bytes, options)?;
     let QuadRetopologyPreflight {
@@ -959,10 +951,12 @@ where
         "This candidate does not certify self-intersection freedom or a measured surface-error tolerance; inspect the result before production use.".into(),
         "Native QuadriFlow validation is limited to selected QA fixtures; broad model quality and platform packaging remain unverified.".into(),
     ]);
-    if parsed_report.output_quads != u64::from(options.target_quads) {
+    if let Some(target_quads) = options.target_quads
+        && parsed_report.output_quads != u64::from(target_quads)
+    {
         warnings.push(format!(
-            "The solver returned {} quads for a target of {}; the target is approximate.",
-            parsed_report.output_quads, options.target_quads
+            "The solver returned {} quads for a target of {target_quads}; the target is approximate.",
+            parsed_report.output_quads
         ));
     }
     let report = QuadRetopologyReport {
@@ -986,7 +980,7 @@ pub(crate) fn execute_archive_rehearsal_cube(
     output_path: &Path,
 ) -> CoreResult<()> {
     // Reuse production subprocess arguments, environment filtering and timeout.
-    execute_quadriflow_worker(worker, input_path, output_path, 12)
+    execute_quadriflow_worker(worker, input_path, output_path, Some(12))
 }
 
 #[cfg(test)]
@@ -995,7 +989,9 @@ pub(crate) fn rehearse_textured_cube_with_worker(
 ) -> CoreResult<(Vec<u8>, Vec<u8>, QuadRetopologyReport)> {
     quadriflow_retopology_glb_with_runner(
         &tests::closed_textured_cube_glb(true),
-        QuadRetopologyOptions { target_quads: 384 },
+        QuadRetopologyOptions {
+            target_quads: Some(384),
+        },
         || {
             Some(|request: &RemeshRequest, output: &Path, target| {
                 execute_managed_quadriflow_job(worker, request, output, target)
@@ -1008,7 +1004,7 @@ fn execute_managed_quadriflow_job(
     worker: &Path,
     request: &RemeshRequest,
     output_path: &Path,
-    target_quads: u32,
+    target_quads: Option<u32>,
 ) -> CoreResult<()> {
     let input_path = output_path.with_file_name("input.obj");
     fs::write(
@@ -1022,7 +1018,7 @@ fn execute_linked_quadriflow_worker(
     worker: &Path,
     request: &RemeshRequest,
     output_path: &Path,
-    target_quads: u32,
+    target_quads: Option<u32>,
 ) -> CoreResult<()> {
     let input_path = output_path.with_file_name("input.json");
     let bytes = serde_json::to_vec(request)?;
@@ -1033,9 +1029,11 @@ fn execute_linked_quadriflow_worker(
     }
     fs::write(&input_path, bytes)?;
     let mut command = Command::new(worker);
+    command.arg(LINKED_QUADRIFLOW_WORKER_ARG);
+    if let Some(target_quads) = target_quads {
+        command.arg(target_quads.to_string());
+    }
     command
-        .arg(LINKED_QUADRIFLOW_WORKER_ARG)
-        .arg(target_quads.to_string())
         .current_dir(output_path.parent().expect("worker output directory"))
         .stdin(fs::File::open(input_path)?);
     wait_for_quadriflow_worker(command)
@@ -1045,20 +1043,29 @@ fn execute_quadriflow_worker(
     worker: &Path,
     input_path: &Path,
     output_path: &Path,
-    target_quads: u32,
+    target_quads: Option<u32>,
 ) -> CoreResult<()> {
+    wait_for_quadriflow_worker(quadriflow_worker_command(
+        worker,
+        input_path,
+        output_path,
+        target_quads,
+    ))
+}
+
+fn quadriflow_worker_command(
+    worker: &Path,
+    input_path: &Path,
+    output_path: &Path,
+    target_quads: Option<u32>,
+) -> Command {
     let mut command = Command::new(worker);
+    command.arg("-i").arg(input_path).arg("-o").arg(output_path);
+    if let Some(target_quads) = target_quads {
+        command.arg("-f").arg(target_quads.to_string());
+    }
+    command.arg("-seed").arg("0").stdin(Stdio::null());
     command
-        .arg("-i")
-        .arg(input_path)
-        .arg("-o")
-        .arg(output_path)
-        .arg("-f")
-        .arg(target_quads.to_string())
-        .arg("-seed")
-        .arg("0")
-        .stdin(Stdio::null());
-    wait_for_quadriflow_worker(command)
 }
 
 fn wait_for_quadriflow_worker(mut command: Command) -> CoreResult<()> {
@@ -1560,16 +1567,54 @@ f 4 1 5 8\n";
 
     #[test]
     fn bounds_quad_target_and_rejects_unknown_parameters() {
-        assert!(validate_quad_target(4).is_ok());
-        assert!(validate_quad_target(MAX_QUAD_TARGET).is_ok());
-        assert!(validate_quad_target(3).is_err());
-        assert!(validate_quad_target(MAX_QUAD_TARGET + 1).is_err());
+        assert!(validate_quad_target(None).is_ok());
+        assert!(validate_quad_target(Some(4)).is_ok());
+        assert!(validate_quad_target(Some(MAX_QUAD_TARGET)).is_ok());
+        assert!(validate_quad_target(Some(3)).is_err());
+        assert!(validate_quad_target(Some(MAX_QUAD_TARGET + 1)).is_err());
+        assert_eq!(
+            serde_json::from_value::<QuadRetopologyOptions>(json!({}))
+                .unwrap()
+                .target_quads,
+            None
+        );
         assert!(
             serde_json::from_value::<QuadRetopologyOptions>(
                 json!({"target_quads": 12, "arbitrary_flag": true})
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn managed_worker_only_gets_face_flag_for_an_explicit_target() {
+        let automatic = quadriflow_worker_command(
+            Path::new("quadriflow"),
+            Path::new("input.obj"),
+            Path::new("output.obj"),
+            None,
+        );
+        assert!(
+            automatic
+                .get_args()
+                .eq(["-i", "input.obj", "-o", "output.obj", "-seed", "0"])
+        );
+        let manual = quadriflow_worker_command(
+            Path::new("quadriflow"),
+            Path::new("input.obj"),
+            Path::new("output.obj"),
+            Some(432),
+        );
+        assert!(manual.get_args().eq([
+            "-i",
+            "input.obj",
+            "-o",
+            "output.obj",
+            "-f",
+            "432",
+            "-seed",
+            "0"
+        ]));
     }
 
     #[test]
@@ -1608,11 +1653,13 @@ f 4 1 5 8\n";
         let original_source = source.clone();
         let (preview, quad_obj, report) = quadriflow_retopology_glb_with_runner(
             &source,
-            QuadRetopologyOptions { target_quads: 6 },
+            QuadRetopologyOptions {
+                target_quads: Some(6),
+            },
             || {
                 Some(
-                    |request: &RemeshRequest, output_path: &Path, target_quads: u32| {
-                        assert_eq!(target_quads, 6);
+                    |request: &RemeshRequest, output_path: &Path, target_quads| {
+                        assert_eq!(target_quads, Some(6));
                         let input =
                             triangle_geometry_obj(&request.positions, &request.indices).unwrap();
                         assert_eq!(
@@ -1638,7 +1685,7 @@ f 4 1 5 8\n";
         assert_eq!(report.algorithm, "quadriflow_quad_retopology");
         assert_eq!(report.input_vertices, 8);
         assert_eq!(report.input_triangles, 12);
-        assert_eq!(report.requested_quads, 6);
+        assert_eq!(report.requested_quads, Some(6));
         assert_eq!(report.output_quads, 6);
         assert_eq!(report.preview_triangles, 12);
         assert!(report.appearance_projection.is_none());
@@ -1646,6 +1693,30 @@ f 4 1 5 8\n";
         let descriptor = crate::inspect_asset("quadriflow-fixture-preview.glb", &preview).unwrap();
         assert_eq!(descriptor.kind, crate::AssetKind::Mesh);
         assert_eq!(descriptor.metadata["triangles"], 12);
+    }
+
+    #[test]
+    fn automatic_retopology_reports_no_requested_count_or_target_warning() {
+        let (_, _, report) = quadriflow_retopology_glb_with_runner(
+            &cube_triangle_glb(false),
+            QuadRetopologyOptions::default(),
+            || {
+                Some(|_: &RemeshRequest, output_path: &Path, target_quads| {
+                    assert_eq!(target_quads, None);
+                    fs::write(output_path, CUBE_OBJ)?;
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(report.requested_quads, None);
+        assert_eq!(report.output_quads, 6);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("target"))
+        );
     }
 
     #[test]
@@ -1659,7 +1730,7 @@ f 4 1 5 8\n";
                 input_vertices: 8,
                 input_triangles: 12,
                 solver_vertices: 8,
-                requested_quads: 10_000,
+                requested_quads: None,
                 coincident_boundary_vertices_joined: false,
                 appearance_projection_required: false,
             },
@@ -1679,13 +1750,15 @@ f 4 1 5 8\n";
     #[test]
     fn preflight_repeats_actual_input_rejection_before_worker_resolution() {
         let open = cube_triangle_glb(true);
-        let preflight_error =
-            quadriflow_preflight_glb(&open, QuadRetopologyOptions { target_quads: 6 })
-                .unwrap_err()
-                .to_string();
+        let options = QuadRetopologyOptions {
+            target_quads: Some(6),
+        };
+        let preflight_error = quadriflow_preflight_glb(&open, options)
+            .unwrap_err()
+            .to_string();
         let worker_error = quadriflow_retopology_glb_with_runner::<
-            fn(&RemeshRequest, &Path, u32) -> CoreResult<()>,
-        >(&open, QuadRetopologyOptions { target_quads: 6 }, || {
+            fn(&RemeshRequest, &Path, Option<u32>) -> CoreResult<()>,
+        >(&open, options, || {
             panic!("invalid geometry cannot resolve the native worker")
         })
         .unwrap_err()
@@ -1697,10 +1770,10 @@ f 4 1 5 8\n";
     #[test]
     fn open_geometry_only_input_does_not_resolve_a_runner() {
         let error = quadriflow_retopology_glb_with_runner::<
-            fn(&RemeshRequest, &Path, u32) -> CoreResult<()>,
+            fn(&RemeshRequest, &Path, Option<u32>) -> CoreResult<()>,
         >(
             &cube_triangle_glb(true),
-            QuadRetopologyOptions { target_quads: 6 },
+            QuadRetopologyOptions::default(),
             || panic!("open geometry-only input must not resolve a sidecar"),
         )
         .unwrap_err();
@@ -1718,9 +1791,11 @@ f 4 1 5 8\n";
 
         let (_, quad_obj, report) = quadriflow_retopology_glb_with_runner(
             &source,
-            QuadRetopologyOptions { target_quads: 6 },
+            QuadRetopologyOptions {
+                target_quads: Some(6),
+            },
             || {
-                Some(|request: &RemeshRequest, output_path: &Path, _: u32| {
+                Some(|request: &RemeshRequest, output_path: &Path, _| {
                     let obj = triangle_geometry_obj(&request.positions, &request.indices).unwrap();
                     assert_eq!(obj.lines().filter(|line| line.starts_with("v ")).count(), 8);
                     assert_eq!(
@@ -1819,11 +1894,13 @@ f 4 1 5 8\n";
     fn textured_closed_mesh_keeps_quad_obj_separate_and_rebakes_preview_maps() {
         let (preview, quad_obj, report) = quadriflow_retopology_glb_with_runner(
             &closed_textured_cube_glb(false),
-            QuadRetopologyOptions { target_quads: 6 },
+            QuadRetopologyOptions {
+                target_quads: Some(6),
+            },
             || {
                 Some(
-                    |_request: &RemeshRequest, output_path: &Path, target_quads: u32| {
-                        assert_eq!(target_quads, 6);
+                    |_request: &RemeshRequest, output_path: &Path, target_quads| {
+                        assert_eq!(target_quads, Some(6));
                         fs::write(output_path, CUBE_OBJ).unwrap();
                         Ok(())
                     },

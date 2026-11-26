@@ -10,9 +10,15 @@ pub(crate) fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target_quads = args
         .next()
-        .and_then(|value| value.to_str()?.parse::<u32>().ok())
-        .filter(|target| (4..=MAX_QUADRIFLOW_TARGET).contains(target))
-        .ok_or("Invalid QuadriFlow worker target.")?;
+        .map(|value| {
+            value
+                .to_str()
+                .and_then(|text| text.parse::<u32>().ok())
+                .filter(|target| (4..=MAX_QUADRIFLOW_TARGET).contains(target))
+                .ok_or("Invalid QuadriFlow worker target.")
+        })
+        .transpose()?
+        .unwrap_or_default();
     if args.next().is_some() {
         return Err("Unexpected QuadriFlow worker arguments.".into());
     }

@@ -31,6 +31,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
@@ -216,9 +217,11 @@ export function App() {
   const comparisonPairRef = useRef(comparisonPair);
   const [comparisonLoadingSide, setComparisonLoadingSide] = useState<AssetComparisonSide | null>(null);
   const [targetTriangles, setTargetTriangles] = useState(4000);
+  const [quadTargetEnabled, setQuadTargetEnabled] = useState(false);
   const [targetQuads, setTargetQuads] = useState('10000');
-  const requestedQuads = Number(targetQuads);
-  const validQuadTarget = Number.isInteger(requestedQuads) && requestedQuads >= 4 && requestedQuads <= 50000;
+  const requestedQuads = quadTargetEnabled ? Number(targetQuads) : undefined;
+  const validQuadTarget = requestedQuads === undefined
+    || (Number.isInteger(requestedQuads) && requestedQuads >= 4 && requestedQuads <= 50000);
   const [maxError, setMaxError] = useState(0.02);
   const [generationModelId, setGenerationModelId] = useState('');
   const [generationDrafts, setGenerationDrafts] = useState<Record<string, Record<string, string>>>({});
@@ -1149,7 +1152,7 @@ export function App() {
     try {
       const parameters: Record<string, number> = {};
       if (operation === 'render.optimize') parameters.overdraw_threshold = 1.05;
-      if (operation === 'mesh.retopology') parameters.target_quads = requestedQuads;
+      if (operation === 'mesh.retopology' && requestedQuads !== undefined) parameters.target_quads = requestedQuads;
       const nextJob = await api.createMeshOperationJob(selectedAsset.id, operation, parameters);
       setJob(nextJob);
       notify('info', `${studioOperationLabel(operation)} ${nextJob.state === 'queued' ? 'queued' : 'started'}.`);
@@ -1488,16 +1491,21 @@ export function App() {
         )}
         <div className="grid gap-2">
           {isRetopology && <>
-            <Field>
+            <Field orientation="horizontal">
+              <Checkbox id="use-quad-target" checked={quadTargetEnabled}
+                onCheckedChange={checked => setQuadTargetEnabled(checked === true)} disabled={busy || isRunning} />
+              <FieldLabel htmlFor="use-quad-target">Set target quads</FieldLabel>
+              <HelpTip label="About the quad target">Leave off to let QuadriFlow choose the mesh density. A custom target is approximate.</HelpTip>
+            </Field>
+            {quadTargetEnabled && <Field>
               <div className="flex items-center gap-1">
                 <FieldLabel htmlFor="quad-target">Target quads</FieldLabel>
                 <span id="quad-range" className="text-muted-foreground">4–50,000</span>
-                <HelpTip label="About the quad target">The output count is approximate. Studio checks the input automatically without running the solver.</HelpTip>
               </div>
               <Input id="quad-target" type="number" min="4" max="50000" step="1"
                 value={targetQuads} aria-invalid={!validQuadTarget} aria-describedby="quad-range"
                 onChange={event => setTargetQuads(event.currentTarget.value)} disabled={busy || isRunning} />
-            </Field>
+            </Field>}
             {(checkingRetopology || retopologyCheck) && <div className="flex items-center gap-1 text-muted-foreground">
               <span role="status" className="flex items-center gap-1">
                 {checkingRetopology ? <><Spinner aria-hidden="true" /> Checking input…</>

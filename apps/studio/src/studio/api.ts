@@ -318,7 +318,7 @@ export interface JobReportCardModel {
   warningFormatIssue: boolean;
 }
 
-type JobReportFormatter = 'count' | 'bytes' | 'milliseconds' | 'decimal' | 'percent' | 'text' | 'boolean';
+type JobReportFormatter = 'count' | 'bytes' | 'milliseconds' | 'decimal' | 'percent' | 'text' | 'boolean' | 'quad-target';
 
 interface JobReportField {
   key: string;
@@ -437,7 +437,7 @@ const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
     metrics: [
       { key: 'input_vertices', label: 'Input vertices', formatter: 'count' },
       { key: 'input_triangles', label: 'Input triangles', formatter: 'count' },
-      { key: 'requested_quads', label: 'Requested quads', formatter: 'count' },
+      { key: 'requested_quads', label: 'Requested quads', formatter: 'quad-target' },
       { key: 'output_vertices', label: 'Output vertices', formatter: 'count' },
       { key: 'output_quads', label: 'Output quads', formatter: 'count' },
       { key: 'preview_triangles', label: 'Preview triangles', formatter: 'count' },
@@ -453,6 +453,7 @@ function reportObject(value: unknown): Record<string, unknown> | null {
 }
 
 function formatReportField(value: unknown, formatter: JobReportFormatter): string {
+  if (formatter === 'quad-target' && value === null) return 'Automatic';
   if (formatter === 'text') {
     return typeof value === 'string' && value.trim() ? value : 'Not reported';
   }

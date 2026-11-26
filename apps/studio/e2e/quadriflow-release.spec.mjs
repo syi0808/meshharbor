@@ -113,7 +113,10 @@ test('reviewed QuadriFlow release installs, retopologizes and exports GLB and OB
       await expect(page.getByRole('tooltip')).toContainText('A verified, manifest-matched managed QuadriFlow sidecar is available.');
     }
 
-    await page.getByRole('spinbutton', { name: 'Target quads' }).fill(textured ? '384' : '12');
+    if (textured) {
+      await page.getByRole('checkbox', { name: 'Set target quads' }).check();
+      await page.getByRole('spinbutton', { name: 'Target quads' }).fill('384');
+    }
     await expect(page.getByText(textured ? 'Textured input passed' : 'Geometry-only input passed', { exact: false })).toBeVisible();
     const [completed] = await Promise.all([
       page.waitForResponse(async response => {
@@ -126,6 +129,7 @@ test('reviewed QuadriFlow release installs, retopologizes and exports GLB and OB
     ]);
     const job = await completed.json();
     expect(job.state, job.error?.message).toBe('succeeded');
+    expect(job.result.report.requested_quads).toBe(textured ? 384 : null);
     if (textured) {
       expect(job.result.report.appearance_projection.projection_coverage).toBeGreaterThanOrEqual(0.995);
     }

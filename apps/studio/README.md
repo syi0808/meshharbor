@@ -20,7 +20,7 @@ Pixal3D on Apple Silicon uses one reference. The NVIDIA profile also supports 4-
 
 Mesh tools target the selected GLB. Use **Material**, **Solid**, or **Wireframe** to inspect the model and **Fit view** to restore its framing. When opening a result saved by the retired connected-part operation, **Parts** uses a different color for each output part. Click a part in the preview or choose it from the dropdown to dim the others, then toggle **Isolate** to hide them completely. Click empty space or choose **All parts** to clear the selection. Dragging still orbits the model. When small fragments share an output primitive, they appear together as **Grouped fragments**. These controls do not modify the GLB.
 
-Opening **Quad retopology (experimental)** checks the selected GLB and quad target automatically. Changing the model or target rechecks the input. The check does not run the solver or queue a job; **Run** also requires an available QuadriFlow backend.
+Opening **Quad retopology (experimental)** checks the selected GLB automatically. QuadriFlow chooses the mesh density by default; enable **Set target quads** to request an approximate output count instead. Changing the model or target rechecks the input. The check does not run the solver or queue a job; **Run** also requires an available QuadriFlow backend.
 
 Operation failures appear as toasts. Open **Notifications** in the header to review the last 50 toasts since opening or reloading Studio, even after they close. Use **Details** on a failed job to see its saved error in a dialog. Hover, focus, or tap a **?** icon for extra information.
 

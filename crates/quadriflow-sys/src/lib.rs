@@ -2,6 +2,7 @@
 
 unsafe extern "C" {
     /// Runs the solver once in a disposable worker process and writes `output.obj` in its cwd.
+    /// A target of zero lets QuadriFlow choose the density automatically.
     ///
     /// # Safety
     /// Both pointers must cover the given numbers of packed triples for the whole call.

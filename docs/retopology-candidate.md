@@ -42,18 +42,18 @@ For supported textured input, MeshHarbor creates a fresh xatlas UV layout for th
 
 Input validation requires closed, consistently oriented, edge- and vertex-manifold geometry, rejects duplicate or degenerate faces, and enforces the conservative output budget used by the existing geometry validator. If an otherwise supported textured GLB fails validation, coincident boundary vertices (such as vertices split at an attribute seam) may be rejoined in the solver geometry only. Matching coordinates must be exactly equal; no tolerance, movement, or face removal is applied, and the result must pass the same full validator. The bake still reads the original UVs and textures, and `input_vertices` reports the original GLB vertex count. Geometry-only input is not changed by this fallback. The managed sidecar receives a generated positions-and-triangle-faces OBJ; the linked worker receives a bounded geometry request over stdin and validates it again before entering C++. Arbitrary OBJ from a user is never passed directly to QuadriFlow. Both paths use a fixed seed, never enable the external SAT solver, clear the child environment, discard logs, use a private per-job temporary directory, bound inputs/outputs, and terminate the child after 180 seconds. This is process isolation, not an OS sandbox, and it does not impose a hard memory or CPU quota.
 
-Current limits are 64 MiB input GLB, 100,000 input vertices, 200,000 input triangles, a requested target of 4–50,000 quads (default 10,000), 64 MiB output OBJ, 250,000 output vertices, 500,000 output quads, and 180 seconds. QuadriFlow's target count is approximate.
+Current limits are 64 MiB input GLB, 100,000 input vertices, 200,000 input triangles, 64 MiB output OBJ, 250,000 output vertices, 500,000 output quads, and 180 seconds. QuadriFlow chooses the mesh density by default. An explicit target of 4–50,000 quads is approximate; preflight and job reports use `"requested_quads": null` for automatic density.
 
 The output parser enforces UTF-8 and byte/record/count bounds, finite positions in a broad source-bounds envelope, four distinct in-range vertices per triangulable quad, duplicate-face rejection, nonzero face area, closed and consistently oriented edge manifoldness, and connected vertex links. It creates smooth-normal triangle GLB previews and optionally projects the two supported maps under the gates above. It does **not** certify self-intersection freedom, a Hausdorff/surface-error tolerance, thin-feature retention, or high-to-low texture fidelity. The UI and operation report label this limitation; inspect experimental output before production use.
 
 ## Check an asset without installing QuadriFlow
 
-In Studio, select a mesh and choose **Check retopology input** even if the backend is unavailable.
-From the CLI after importing the GLB, run `meshharbor retopology-preflight <asset-id> --target-quads 1500`.
-REST clients can POST `{"target_quads":1500}` to
+In Studio, select a mesh and open **Retopology** to run the check even if the backend is unavailable.
+From the CLI after importing the GLB, run `meshharbor retopology-preflight <asset-id>`; add `--target-quads 1500` to check a custom target.
+REST clients can POST `{}` for automatic density or `{"target_quads":1500}` for a custom target to
 `/api/v1/assets/<asset-id>/retopology-preflight` under the normal local API authorization.
 Use the MCP `preflight_retopology` tool with `asset_id` and optional `target_quads` for the same check.
-The default target is 10,000. The response checks source eligibility only:
+The response checks source eligibility only:
 it does not resolve a native backend, create a job or asset, run the solver,
 or guarantee valid results or projected appearance. If the server is already
 processing another job, retry the check after the operation ends.

@@ -594,7 +594,7 @@ test('retopology preflight checks the mesh without creating a job', async () => 
   const originalFetch = globalThis.fetch;
   const calls = [];
   const report = {
-    input_vertices: 12, input_triangles: 12, solver_vertices: 8, requested_quads: 10_000,
+    input_vertices: 12, input_triangles: 12, solver_vertices: 8, requested_quads: null,
     coincident_boundary_vertices_joined: true, appearance_projection_required: true,
   };
   globalThis.fetch = async (path, init) => {
@@ -618,6 +618,15 @@ test('retopology preflight checks the mesh without creating a job', async () => 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('retopology report distinguishes automatic density from a missing count', () => {
+  const job = { id: 'job-retopology', operation: 'mesh.retopology', state: 'succeeded' };
+  const requestedQuads = report => jobResultCardModel({ ...job, result: { report } }).metrics
+    .find(metric => metric.label === 'Requested quads').value;
+  assert.equal(requestedQuads({ requested_quads: null }), 'Automatic');
+  assert.equal(requestedQuads({ requested_quads: 12 }), '12');
+  assert.equal(requestedQuads({}), 'Not reported');
 });
 
 test('retopology submits a job and downloads quad OBJ separately from GLB preview', async () => {

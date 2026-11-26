@@ -240,7 +240,7 @@ export interface RetopologyPreflight {
   input_vertices: number;
   input_triangles: number;
   solver_vertices: number;
-  requested_quads: number;
+  requested_quads: number | null;
   coincident_boundary_vertices_joined: boolean;
   appearance_projection_required: boolean;
 }

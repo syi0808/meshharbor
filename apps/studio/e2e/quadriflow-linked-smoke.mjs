@@ -33,10 +33,14 @@ test('linked QuadriFlow works with a clean store and no sidecar', () => {
       const source = quadriflowCube({ textured });
       writeFileSync(sourcePath, source);
       const asset = run('import', sourcePath);
+      const targetArgs = textured ? ['--target-quads', '384'] : [];
+      const preflight = run('retopology-preflight', asset.id, ...targetArgs);
+      assert.equal(preflight.requested_quads, textured ? 384 : null);
       const result = run(
-        'process-mesh', asset.id, '--operation', 'mesh.retopology', '--target-quads',
-        textured ? '384' : '12', '--output', previewPath, '--quad-output', objPath,
+        'process-mesh', asset.id, '--operation', 'mesh.retopology', ...targetArgs,
+        '--output', previewPath, '--quad-output', objPath,
       );
+      assert.equal(result.report.requested_quads, preflight.requested_quads);
       assert(result.asset.artifacts.some(artifact => artifact.kind === 'quad_topology'));
       const records = readFileSync(objPath, 'utf8').trim().split(/\r?\n/);
       const faces = records.filter(line => line.startsWith('f '));

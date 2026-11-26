@@ -3,8 +3,8 @@ import type { MeshHarborApi } from './api';
 import { notify } from './notify';
 import type { RetopologyPreflight } from './types';
 
-export function useRetopologyPreflight(api: MeshHarborApi, assetId: string | null, targetQuads: number) {
-  const [result, setResult] = useState<{ assetId: string; targetQuads: number; report: RetopologyPreflight | null } | null>(null);
+export function useRetopologyPreflight(api: MeshHarborApi, assetId: string | null, targetQuads: number | undefined) {
+  const [result, setResult] = useState<{ assetId: string; targetQuads: number | undefined; report: RetopologyPreflight | null } | null>(null);
 
   useEffect(() => {
     setResult(null);

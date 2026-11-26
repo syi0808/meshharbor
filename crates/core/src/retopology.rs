@@ -670,9 +670,16 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_input_faces() {
-        let mut request = valid_request();
-        request.indices = vec![0, 1, 2, 0, 2, 1];
-        assert!(validate_remesh_request(&request).is_err());
+        for duplicate in [[0, 2, 1], [0, 1, 2]] {
+            let mut request = valid_request();
+            request.indices.extend(duplicate);
+            assert!(
+                validate_remesh_request(&request)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("duplicate triangles")
+            );
+        }
     }
 
     #[test]

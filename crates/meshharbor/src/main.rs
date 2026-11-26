@@ -88,7 +88,7 @@ enum Command {
     /// Check an imported GLB for retopology without installing or running a backend.
     RetopologyPreflight {
         asset_id: String,
-        /// Approximate requested quad count (4 to 50,000).
+        /// Approximate requested quad count (4 to 50,000); omit for automatic density.
         #[arg(long)]
         target_quads: Option<u32>,
     },
@@ -97,7 +97,7 @@ enum Command {
         asset_id: String,
         #[arg(long, value_parser = ["mesh.cleanup", "uv.unwrap", "render.optimize", "mesh.compress", "mesh.retopology"])]
         operation: String,
-        /// Requested approximate quad count for mesh.retopology (4 to 50,000).
+        /// Approximate quad count for mesh.retopology (4 to 50,000); omit for automatic density.
         #[arg(long)]
         target_quads: Option<u32>,
         /// xatlas packing resolution hint for uv.unwrap (64 to 4,096).
@@ -246,6 +246,7 @@ struct SimplifyArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct RetopologyPreflightArgs {
     asset_id: String,
+    /// Approximate quad count (4 to 50,000); omit for automatic density.
     target_quads: Option<u32>,
 }
 
@@ -254,7 +255,7 @@ struct MeshProcessArgs {
     asset_id: String,
     /// One of mesh.cleanup, uv.unwrap, render.optimize, mesh.compress, or mesh.retopology.
     operation: String,
-    /// Optional operation parameters, such as resolution/padding for uv.unwrap.
+    /// Optional operation parameters, such as resolution/padding for uv.unwrap or target_quads for mesh.retopology.
     #[serde(default)]
     parameters: Option<Value>,
 }
@@ -1482,11 +1483,7 @@ async fn api_runtime_jobs(
 }
 
 fn retopology_options(target_quads: Option<u32>) -> meshharbor_core::QuadRetopologyOptions {
-    let mut options = meshharbor_core::QuadRetopologyOptions::default();
-    if let Some(target_quads) = target_quads {
-        options.target_quads = target_quads;
-    }
-    options
+    meshharbor_core::QuadRetopologyOptions { target_quads }
 }
 
 async fn run_retopology_preflight(
@@ -2915,7 +2912,9 @@ fn process_mesh_cli_parameters(
     let mut parameters = json!({});
     match operation {
         "mesh.retopology" => {
-            parameters["target_quads"] = json!(target_quads.unwrap_or(10_000));
+            if let Some(target_quads) = target_quads {
+                parameters["target_quads"] = json!(target_quads);
+            }
         }
         "uv.unwrap" => {
             let defaults = meshharbor_core::AtlasBakeOptions::default();
@@ -3884,6 +3883,10 @@ mod tests {
             .is_ok()
         );
 
+        let automatic = process_mesh_cli_parameters("mesh.retopology", None, None, None, None);
+        assert_eq!(automatic, json!({}));
+        let targeted = process_mesh_cli_parameters("mesh.retopology", Some(12), None, None, None);
+        assert_eq!(targeted, json!({"target_quads": 12}));
         let uv_defaults = process_mesh_cli_parameters("uv.unwrap", None, None, None, None);
         assert_eq!(uv_defaults["resolution"], 1024);
         assert_eq!(uv_defaults["padding"], 8);
