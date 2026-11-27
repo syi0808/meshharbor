@@ -4,25 +4,19 @@ import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 
-export function MeshToMeshSettings({ backends, disabled, running, sourceTriangles, onRun, onSetup }: {
+export function MeshToMeshSettings({ backends, disabled, running, onRun, onSetup }: {
   backends: { id: string; label: string; ready: boolean }[];
   disabled: boolean;
   running: boolean;
-  sourceTriangles: number;
   onRun: (parameters: Record<string, number | string>) => void;
   onSetup: () => void;
 }) {
-  const [targetVertices, setTargetVertices] = useState('2000');
-  const [maxTriangles, setMaxTriangles] = useState('');
+  const [targetTriangles, setTargetTriangles] = useState('4000');
   const [atlasResolution, setAtlasResolution] = useState(1024);
   const [chosenBackend, setChosenBackend] = useState('');
   const backend = backends.find(item => item.id === chosenBackend) ?? backends.find(item => item.ready) ?? backends[0];
-  const vertices = Number(targetVertices);
-  const limit = Number(maxTriangles);
-  const maxLimit = sourceTriangles > 0 ? Math.min(20_000, sourceTriangles - 1) : 20_000;
-  const verticesValid = Number.isInteger(vertices) && vertices >= 200 && vertices <= 5000;
-  const hasLimit = maxTriangles.trim() !== '';
-  const limitValid = !hasLimit || Number.isInteger(limit) && limit >= 4 && limit <= maxLimit;
+  const triangles = Number(targetTriangles);
+  const trianglesValid = Number.isSafeInteger(triangles) && triangles >= 4;
 
   return <div className="grid gap-3">
     <Field>
@@ -40,16 +34,10 @@ export function MeshToMeshSettings({ backends, disabled, running, sourceTriangle
       <Button variant="outline" size="sm" onClick={onSetup}>View model setup</Button>
     </>}
     <Field>
-      <FieldLabel htmlFor="lato2-target-vertices">Target vertices</FieldLabel>
-      <Input id="lato2-target-vertices" type="number" min={200} max={5000} step={1} value={targetVertices}
-        aria-invalid={!verticesValid} disabled={running} onChange={event => setTargetVertices(event.currentTarget.value)} />
-      <FieldDescription>Approximate. The exported vertex count can increase at UV seams.</FieldDescription>
-    </Field>
-    <Field>
-      <FieldLabel htmlFor="lato2-max-triangles">Maximum triangles (optional)</FieldLabel>
-      <Input id="lato2-max-triangles" type="number" min={4} max={maxLimit} step={1} value={maxTriangles}
-        aria-invalid={!limitValid} disabled={running} onChange={event => setMaxTriangles(event.currentTarget.value)} />
-      <FieldDescription>The job fails without saving if the new mesh exceeds this limit.</FieldDescription>
+      <FieldLabel htmlFor="lato2-target-triangles">Target triangles</FieldLabel>
+      <Input id="lato2-target-triangles" type="number" min={4} step={1} value={targetTriangles}
+        aria-invalid={!trianglesValid} disabled={running} onChange={event => setTargetTriangles(event.currentTarget.value)} />
+      <FieldDescription>Approximate, not a limit. The result may have more or fewer triangles.</FieldDescription>
     </Field>
     <Field>
       <FieldLabel htmlFor="lato2-atlas-resolution">Texture atlas size</FieldLabel>
@@ -58,8 +46,8 @@ export function MeshToMeshSettings({ backends, disabled, running, sourceTriangle
         {[512, 1024, 2048].map(size => <NativeSelectOption key={size} value={size}>{size} × {size}</NativeSelectOption>)}
       </NativeSelect>
     </Field>
-    {!running && <Button className="w-full" disabled={disabled || !backend?.ready || !verticesValid || !limitValid || sourceTriangles <= 4}
-      onClick={() => { if (backend) onRun({ backend_id: backend.id, target_vertices: vertices, atlas_resolution: atlasResolution, ...(hasLimit ? { max_triangles: limit } : {}) }); }}>
+    {!running && <Button className="w-full" disabled={disabled || !backend?.ready || !trianglesValid}
+      onClick={() => { if (backend) onRun({ backend_id: backend.id, target_triangles: triangles, atlas_resolution: atlasResolution }); }}>
       Run Mesh to Mesh
     </Button>}
   </div>;

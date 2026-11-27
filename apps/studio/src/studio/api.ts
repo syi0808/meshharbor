@@ -464,8 +464,8 @@ const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
     metrics: [
       { key: 'backend_id', label: 'Backend', formatter: 'text' },
       { key: 'input_triangles', label: 'Input triangles', formatter: 'count' },
+      { key: 'target_triangles', label: 'Target triangles', formatter: 'count' },
       { key: 'output_triangles', label: 'Output triangles', formatter: 'count' },
-      { key: 'requested_vertices', label: 'Requested vertices', formatter: 'count' },
       { key: 'retopology_vertices', label: 'Geometry vertices', formatter: 'count' },
       { key: 'projection_coverage', label: 'Texture projection coverage', formatter: 'percent' },
       { key: 'unfilled_texels', label: 'Unfilled texels', formatter: 'count' },

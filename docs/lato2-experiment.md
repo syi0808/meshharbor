@@ -6,7 +6,7 @@
 
 Open **Studio → Settings → Models → LATO.2** after setting up the shared environment and connecting Hugging Face under **Connections**. Choose **Apple MLX** on Apple Silicon or **NVIDIA CUDA** on Linux x86-64 with an NVIDIA GPU, confirm the install, and track it in Jobs. This uses the same model-install and model-removal flow as the other managed models. The installation checks out pinned upstream code, creates a per-backend Python environment, and fetches local LATO.2, DINOv2, TRELLIS sparse structure, and BiRefNet files. Allow several gigabytes for the weights and extra space for the environment and caches.
 
-- `lato2-cuda` uses the upstream CUDA graphs, spconv, and xFormers attention. Installing the pinned voxelizer requires the CUDA 12.4 toolkit (`nvcc` and a supported host compiler); Mesh to Mesh uses Open3D/EGL for the conditioning view. Only the o-voxel converter is used, not the TRELLIS textured export path.
+- `lato2-cuda` uses the upstream CUDA graphs, spconv, and xFormers attention. Installing the pinned voxelizer requires the CUDA 12.4 toolkit (`nvcc` and a supported host compiler); the pinned Open3D wheel requires glibc 2.31 or newer, and Mesh to Mesh uses EGL for the conditioning view. Only the o-voxel converter is used, not the TRELLIS textured export path.
 - `lato2-mlx` uses Metal for linear projections, masked attention, dense 3D convolution, and submanifold sparse convolution. Upstream PyTorch orchestration, 2D preprocessing, and an independent mesh voxelizer and conditioning renderer run on the CPU. It does not require CUDA, MPS, or Blender. This is a hybrid experimental port, not a pure-MLX rewrite or a guarantee of identical results to CUDA.
 
 Both workers run offline for inference. `GET /api/v1/runtime` exposes image readiness and `mesh_to_mesh_ready` for each backend; these are environment/path checks, not model-quality guarantees. The existing operator-provisioned CUDA path (`MESHHARBOR_LATO2_DIR` and `MESHHARBOR_LATO2_PYTHON`) remains a fallback if a standard local CUDA runtime is not ready.
@@ -23,16 +23,15 @@ Submit to `POST /api/v1/jobs`:
 {
   "operation": "mesh.retopology_lato2",
   "input": {"asset_id": "<imported GLB asset id>"},
-  "parameters": {"backend_id": "lato2-mlx", "target_vertices": 1200, "max_triangles": 3200, "atlas_resolution": 1024}
+  "parameters": {"backend_id": "lato2-mlx", "target_triangles": 3008, "atlas_resolution": 1024}
 }
 ```
 
 - `backend_id`: `lato2-cuda`, `lato2-mlx`, or `auto` (default: an available LATO.2 backend). Explicit selection does not fall back.
-- `target_vertices`: approximate model conditioning, 200–5000, default 2000. It is not a limit or a guaranteed vertex count. UV seams can increase the exported vertex count.
-- `max_triangles`: optional hard cap, 4–20,000. The result must also have fewer triangles than the source. A prediction over the cap fails rather than being simplified again.
+- `target_triangles`: approximate output face count, at least 4, default 4000. It replaces the former Mesh to Mesh `target_vertices` and `max_triangles` fields. MeshHarbor converts the target using the closed genus-zero estimate `ceil(target_triangles / 2) + 2`, clamped to LATO.2's 200–5000 vertex conditioning range. The actual output can be below or above the target or source face count. The job does not reject or resimplify a prediction just for missing this target.
 - `atlas_resolution`: square atlas size, 512, 1024, or 2048; default 1024.
 
-Poll `GET /api/v1/jobs/{job_id}` for the derived asset and report. The report records the selected backend, triangle and vertex counts, topology check, baked maps, direct ray-hit coverage, and counts of ambiguous, locally filled, and unfilled texels. Use `GET /api/v1/jobs/{job_id}/steps` for stage and worker logs. Inference timeouts are five minutes on CUDA and fifteen on MLX. Cancellation during native baking is checked after the bake, before saving.
+Poll `GET /api/v1/jobs/{job_id}` for the derived asset and report. The report distinguishes the triangle target, the internal vertex conditioning, and actual output counts, and records the selected backend, topology check, baked maps, direct ray-hit coverage, and counts of ambiguous, locally filled, and unfilled texels. Use `GET /api/v1/jobs/{job_id}/steps` for stage and worker logs. Inference timeouts are five minutes on CUDA and fifteen on MLX. Cancellation during native baking is checked after the bake, before saving.
 
 ## Supported Inputs
 

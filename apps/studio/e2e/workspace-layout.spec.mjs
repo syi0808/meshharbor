@@ -70,13 +70,14 @@ test('LATO.2 submits distinct Mesh to Mesh and Image to 3D jobs', async ({ page,
     'lato2-panel.glb', 'model/gltf-binary', texturedGlb({ singleMaterial: true }));
   await tools.getByRole('button', { name: 'Mesh to Mesh', exact: true }).click();
   const mesh = page.getByRole('complementary', { name: 'Mesh to Mesh' });
-  await mesh.getByLabel('Target vertices').fill('220');
-  await mesh.getByLabel('Maximum triangles (optional)').fill('250');
+  await expect(mesh.getByLabel('Target vertices')).toHaveCount(0);
+  await expect(mesh.getByLabel('Maximum triangles (optional)')).toHaveCount(0);
+  await mesh.getByLabel('Target triangles').fill('21000');
   await mesh.getByLabel('Texture atlas size').selectOption('512');
   await mesh.getByRole('button', { name: 'Run Mesh to Mesh' }).click();
   await expect.poll(() => submissions[0]).toEqual({
     operation: 'mesh.retopology_lato2', input: { asset_id: reference.id },
-    parameters: { backend_id: 'lato2-mlx', target_vertices: 220, max_triangles: 250, atlas_resolution: 512 },
+    parameters: { backend_id: 'lato2-mlx', target_triangles: 21000, atlas_resolution: 512 },
   });
 
   await tools.getByRole('button', { name: 'New model' }).click();

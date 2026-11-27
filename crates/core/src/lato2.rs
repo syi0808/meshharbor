@@ -54,10 +54,9 @@ pub(crate) const DINO_SOURCE: &str = "facebookresearch_dinov2_main";
 pub(crate) const DEFAULT_TARGET_VERTICES: u32 = 2000;
 pub(crate) const MIN_TARGET_VERTICES: u32 = 200;
 pub(crate) const MAX_TARGET_VERTICES: u32 = 5000;
+const DEFAULT_TARGET_TRIANGLES: usize = 4000;
 const MAX_GLB_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OBJ_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_VERTICES: usize = 10_000;
-const MAX_TRIANGLES: usize = 20_000;
 const SEED: u32 = 42;
 const RAY_DISTANCE_RATIO: f32 = 0.03;
 
@@ -93,8 +92,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Lato2Options {
     backend_id: String,
-    target_vertices: u32,
-    max_triangles: Option<usize>,
+    target_triangles: usize,
     atlas_resolution: u32,
 }
 
@@ -102,8 +100,7 @@ impl Default for Lato2Options {
     fn default() -> Self {
         Self {
             backend_id: "auto".into(),
-            target_vertices: DEFAULT_TARGET_VERTICES,
-            max_triangles: None,
+            target_triangles: DEFAULT_TARGET_TRIANGLES,
             atlas_resolution: 1024,
         }
     }
@@ -118,18 +115,10 @@ impl Lato2Options {
     }
 
     fn validate(&self) -> CoreResult<()> {
-        if !(MIN_TARGET_VERTICES..=MAX_TARGET_VERTICES).contains(&self.target_vertices) {
+        if self.target_triangles < 4 {
             return Err(CoreError::InvalidInput(
-                "target_vertices must be 200–5000.".into(),
+                "target_triangles must be at least 4.".into(),
             ));
-        }
-        if self
-            .max_triangles
-            .is_some_and(|limit| !(4..=MAX_TRIANGLES).contains(&limit))
-        {
-            return Err(CoreError::InvalidInput(format!(
-                "max_triangles must be 4–{MAX_TRIANGLES}."
-            )));
         }
         if !matches!(self.atlas_resolution, 512 | 1024 | 2048) {
             return Err(CoreError::InvalidInput(
@@ -138,14 +127,19 @@ impl Lato2Options {
         }
         Ok(())
     }
+
+    fn conditioning_vertices(&self) -> u32 {
+        (self.target_triangles.div_ceil(2) + 2)
+            .clamp(MIN_TARGET_VERTICES as usize, MAX_TARGET_VERTICES as usize) as u32
+    }
 }
 
 #[derive(Serialize)]
 pub(crate) struct Lato2Report {
     algorithm: &'static str,
     backend_id: &'static str,
-    requested_vertices: u32,
-    max_triangles: Option<usize>,
+    target_triangles: usize,
+    conditioning_vertices: u32,
     seed: u32,
     input_triangles: usize,
     output_triangles: usize,
@@ -437,11 +431,7 @@ impl Lato2Runtime {
         compact_positions(&mut source.positions, &mut source.indices);
         let frame = Frame::from_positions(&source.positions)?;
         let input_triangles = source.indices.len() / 3;
-        if input_triangles <= 4 {
-            return Err(CoreError::InvalidInput(
-                "LATO.2 requires more than four input triangles.".into(),
-            ));
-        }
+        let conditioning_vertices = options.conditioning_vertices();
         let work = WorkDir::create()?;
         let input = work.0.join("input");
         let predictions = work.0.join("predictions");
@@ -463,7 +453,7 @@ impl Lato2Runtime {
             .args(["--num_workers", "0", "--batch_size", "1", "--seed"])
             .arg(SEED.to_string())
             .arg("--vert_num")
-            .arg(options.target_vertices.to_string());
+            .arg(conditioning_vertices.to_string());
         execution
             .with_timeout(Duration::from_secs(if self.id == LATO2_MLX_BACKEND {
                 900
@@ -475,15 +465,6 @@ impl Lato2Runtime {
         execution.stage("validate_lato2_topology")?;
         let mut geometry = load_prediction(&predictions)?;
         let output_triangles = geometry.indices.len() / 3;
-        let max_triangles = options
-            .max_triangles
-            .unwrap_or(MAX_TRIANGLES)
-            .min(input_triangles - 1);
-        if output_triangles > max_triangles {
-            return Err(bad_prediction(format!(
-                "returned {output_triangles} triangles, exceeding the limit of {max_triangles}"
-            )));
-        }
         orient_closed_mesh(&mut geometry)?;
         let request = RemeshRequest {
             protocol_version: 1,
@@ -540,8 +521,8 @@ impl Lato2Runtime {
             Lato2Report {
                 algorithm: "lato2+xatlas-normal-rays",
                 backend_id: self.id,
-                requested_vertices: options.target_vertices,
-                max_triangles: options.max_triangles,
+                target_triangles: options.target_triangles,
+                conditioning_vertices,
                 seed: SEED,
                 input_triangles,
                 output_triangles,
@@ -745,7 +726,7 @@ fn parse_prediction(obj: &str) -> CoreResult<RemeshResponse> {
         match tokens.next() {
             None => (),
             Some(comment) if comment.starts_with('#') => (),
-            Some("v") if positions.len() < MAX_VERTICES => {
+            Some("v") => {
                 let mut position = [0.0_f32; 3];
                 for value in &mut position {
                     *value = tokens
@@ -759,7 +740,7 @@ fn parse_prediction(obj: &str) -> CoreResult<RemeshResponse> {
                 }
                 positions.push(position);
             }
-            Some("f") if indices.len() / 3 < MAX_TRIANGLES => {
+            Some("f") => {
                 for _ in 0..3 {
                     let index = tokens
                         .next()
@@ -772,11 +753,7 @@ fn parse_prediction(obj: &str) -> CoreResult<RemeshResponse> {
                     return Err(bad_prediction("only triangle faces are accepted"));
                 }
             }
-            _ => {
-                return Err(bad_prediction(
-                    "unexpected OBJ record or mesh size limit exceeded",
-                ));
-            }
+            _ => return Err(bad_prediction("unexpected OBJ record")),
         }
     }
     if positions.is_empty()
@@ -915,11 +892,7 @@ mod tests {
         assert!(parse_prediction(&TETRA.replace("0.5 0 0", "NaN 0 0")).is_err());
         assert!(parse_prediction(&TETRA.replace("f 1 2 4", "f 1 2 8")).is_err());
         assert!(parse_prediction(&TETRA.replace("f 1 2 4", "f 1 2 3 4")).is_err());
-        for params in [
-            r#"{"target_vertices":199}"#,
-            r#"{"atlas_resolution":4096}"#,
-            r#"{"max_triangles":0}"#,
-        ] {
+        for params in [r#"{"target_triangles":3}"#, r#"{"atlas_resolution":4096}"#] {
             assert!(
                 serde_json::from_str::<Lato2Options>(params)
                     .unwrap()
@@ -927,6 +900,31 @@ mod tests {
                     .is_err()
             );
         }
-        assert!(serde_json::from_str::<Lato2Options>(r#"{"script":"ignored"}"#).is_err());
+        for obsolete in [
+            r#"{"script":"ignored"}"#,
+            r#"{"max_triangles":6000}"#,
+            r#"{"target_vertices":1200}"#,
+        ] {
+            assert!(serde_json::from_str::<Lato2Options>(obsolete).is_err());
+        }
+    }
+
+    #[test]
+    fn triangle_target_only_conditions_density() {
+        for (target_triangles, conditioning_vertices) in
+            [(4, 200), (3008, 1506), (3009, 1507), (usize::MAX, 5000)]
+        {
+            let options = Lato2Options {
+                target_triangles,
+                ..Lato2Options::default()
+            };
+            assert!(options.validate().is_ok());
+            assert_eq!(options.conditioning_vertices(), conditioning_vertices);
+        }
+        let large_obj = format!("{TETRA}{}", "f 1 2 3\n".repeat(20_000));
+        assert_eq!(
+            parse_prediction(&large_obj).unwrap().indices.len() / 3,
+            20_004
+        );
     }
 }

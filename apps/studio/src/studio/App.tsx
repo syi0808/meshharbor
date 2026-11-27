@@ -156,7 +156,7 @@ const meshOperationOptions: Array<{ id: MeshOperationId; title: string; label?: 
     id: 'mesh.retopology_lato2',
     title: 'Mesh to Mesh',
     icon: SquaresFourIcon,
-    description: 'Rebuild a smaller closed triangle mesh with LATO.2 and rebake the original colors. Requires a static GLB with one indexed primitive and an embedded PNG base-color map.',
+    description: 'Rebuild a closed triangle mesh with LATO.2 and rebake the original colors. Requires a static GLB with one indexed primitive and an embedded PNG base-color map.',
   },
   {
     id: 'mesh.retopology',
@@ -1590,7 +1590,7 @@ export function App() {
           <p className="text-muted-foreground">{quadriflowBackend.message}</p>
         )}
         {isMeshToMesh ? <MeshToMeshSettings backends={lato2Backends} running={processingTool}
-          disabled={!hasSelectedMesh || busy || connection !== 'connected' || isRunning} sourceTriangles={triangleCount}
+          disabled={!hasSelectedMesh || busy || connection !== 'connected' || isRunning}
           onRun={parameters => void runMeshOperation('mesh.retopology_lato2', parameters)}
           onSetup={() => openSettings('models')} /> : <div className="grid gap-2">
           {meshParameters.map(field => <Field key={field.name}>
