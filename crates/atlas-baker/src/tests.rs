@@ -1,6 +1,7 @@
 use super::{
-    AtlasBakeError, AtlasBakeOptions, bake_glb, bake_projected_mesh, encode_projected_mesh_glb,
-    extract_projection_source_mesh, extract_texture_rebake_source, project_point_to_surface,
+    AtlasBakeError, AtlasBakeOptions, bake_glb, bake_normal_ray_projected_mesh,
+    bake_projected_mesh, encode_projected_mesh_glb, extract_projection_source_mesh,
+    extract_texture_rebake_source, project_point_to_surface,
 };
 use serde_json::{Value, json};
 
@@ -115,6 +116,8 @@ fn texture_rebake_accepts_base_only_without_relaxing_native_projection() {
         .remove("metallicRoughnessTexture");
     glb.document["images"].as_array_mut().unwrap().truncate(1);
     glb.document["textures"].as_array_mut().unwrap().truncate(1);
+    glb.document["materials"][0]["pbrMetallicRoughness"]["metallicFactor"] = json!(0.75);
+    glb.document["materials"][0]["pbrMetallicRoughness"]["roughnessFactor"] = json!(0.625);
     let base_only = glb.write().unwrap();
     let (mesh, has_mr) = extract_texture_rebake_source(&base_only).unwrap();
     assert_eq!(mesh.indices.len(), 6);
@@ -122,11 +125,111 @@ fn texture_rebake_accepts_base_only_without_relaxing_native_projection() {
     assert!(extract_projection_source_mesh(&base_only).is_err());
     assert!(bake_glb(&base_only, AtlasBakeOptions::default()).is_err());
 
+    let normals = vec![[0.0, 0.0, 1.0]; mesh.positions.len()];
+    let positioned = mesh
+        .positions
+        .iter()
+        .map(|[x, y, _]| [*x, *y, 0.01])
+        .collect::<Vec<_>>();
+    let options = AtlasBakeOptions {
+        resolution: 128,
+        padding: 4,
+    };
+    let bake = bake_normal_ray_projected_mesh(
+        &base_only,
+        &positioned,
+        &normals,
+        &mesh.indices,
+        options,
+        0.03,
+    )
+    .unwrap();
+    assert_eq!(
+        (bake.report.atlas_width, bake.report.atlas_height),
+        (128, 128)
+    );
+    assert_eq!(bake.report.projection_coverage, 1.0);
+    assert!((bake.report.maximum_projection_distance - 0.01).abs() < 1e-5);
+    assert_eq!(bake.report.projection_infilled_texels, Some(0));
+    assert!(bake.metallic_roughness_png.is_empty());
+    let output = encode_projected_mesh_glb(&bake).unwrap();
+    assert!(!extract_texture_rebake_source(&output).unwrap().1);
+    let material =
+        &super::Glb::parse(&output).unwrap().document["materials"][0]["pbrMetallicRoughness"];
+    assert_eq!(material["metallicFactor"], 0.75);
+    assert_eq!(material["roughnessFactor"], 0.625);
+
+    let with_mr =
+        bake_normal_ray_projected_mesh(&bytes, &positioned, &normals, &mesh.indices, options, 0.03)
+            .unwrap();
+    assert!(
+        extract_texture_rebake_source(&encode_projected_mesh_glb(&with_mr).unwrap())
+            .unwrap()
+            .1
+    );
+
     glb.document["images"]
         .as_array_mut()
         .unwrap()
         .push(json!({"uri": "external.png"}));
     assert!(extract_texture_rebake_source(&glb.write().unwrap()).is_err());
+}
+
+#[test]
+fn normal_ray_does_not_borrow_color_from_a_laterally_displaced_surface() {
+    let source = fixture(false, false, false);
+    let target = [
+        [1.01, 0.25, 0.0],
+        [1.03, 0.25, 0.0],
+        [1.03, 0.27, 0.0],
+        [1.01, 0.27, 0.0],
+    ];
+    let normals = [[0.0, 0.0, 1.0]; 4];
+    let indices = [0, 1, 2, 0, 2, 3];
+    let options = AtlasBakeOptions {
+        resolution: 128,
+        padding: 4,
+    };
+    let nearest = bake_projected_mesh(&source, &target, &normals, &indices, options, 0.03).unwrap();
+    assert_eq!(nearest.report.projection_coverage, 1.0);
+    let error = bake_normal_ray_projected_mesh(&source, &target, &normals, &indices, options, 0.03)
+        .unwrap_err();
+    let AtlasBakeError::Native(message) = error else {
+        panic!("expected native projection failure, got {error}")
+    };
+    let (projected, attempted) = projection_failure_counts(&message);
+    assert_eq!(projected, 0);
+    assert_eq!(projection_failure_count(&message, "no-hit="), attempted);
+}
+
+#[test]
+fn normal_ray_rejects_a_close_opposing_surface() {
+    let source = opposing_shell_fixture();
+    let target = [
+        [0.1, 0.1, 0.005],
+        [0.9, 0.1, 0.005],
+        [0.9, 0.9, 0.005],
+        [0.1, 0.9, 0.005],
+    ];
+    let error = bake_normal_ray_projected_mesh(
+        &source,
+        &target,
+        &[[0.0, 0.0, 1.0]; 4],
+        &[0, 1, 2, 0, 2, 3],
+        AtlasBakeOptions {
+            resolution: 128,
+            padding: 4,
+        },
+        0.03,
+    )
+    .unwrap_err();
+    let AtlasBakeError::Native(message) = error else {
+        panic!("expected native projection failure, got {error}")
+    };
+    let (projected, attempted) = projection_failure_counts(&message);
+    assert_eq!(projected, 0);
+    assert!(attempted > 0);
+    assert_eq!(projection_failure_count(&message, "ambiguous="), attempted);
 }
 
 #[test]

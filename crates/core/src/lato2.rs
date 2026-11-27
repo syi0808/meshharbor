@@ -7,7 +7,10 @@ use std::{
     time::Duration,
 };
 
-use meshharbor_atlas_baker::extract_texture_rebake_source;
+use meshharbor_atlas_baker::{
+    AtlasBakeOptions, bake_normal_ray_projected_mesh, encode_projected_mesh_glb,
+    extract_texture_rebake_source,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -24,7 +27,7 @@ const MAX_OBJ_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_VERTICES: usize = 10_000;
 const MAX_TRIANGLES: usize = 20_000;
 const SEED: u32 = 42;
-const MIN_COVERAGE: f64 = 0.95;
+const RAY_DISTANCE_RATIO: f32 = 0.03;
 
 const INFERENCE_ENTRY: &str = r#"
 import runpy
@@ -92,32 +95,31 @@ pub(crate) struct Lato2Report {
     retopology_vertices: usize,
     output_vertices: usize,
     atlas_resolution: u32,
-    rebaked_maps: Vec<&'static str>,
+    atlas_width: u32,
+    atlas_height: u32,
+    rebaked_maps: Vec<String>,
     projected_texels: u64,
     occupied_texels: u64,
-    projection_coverage: f64,
+    projection_coverage: f32,
+    ambiguous_texels: u64,
+    infilled_texels: u64,
+    unfilled_texels: u64,
+    projection_distance_limit: f32,
+    maximum_projection_distance: f32,
     topology: &'static str,
-    warnings: Vec<&'static str>,
-}
-
-#[derive(Deserialize)]
-struct BakeStats {
-    projected_texels: u64,
-    occupied_texels: u64,
+    warnings: Vec<String>,
 }
 
 pub(crate) struct Lato2Runtime {
     checkout: PathBuf,
     python: PathBuf,
-    blender: PathBuf,
 }
 
 impl Lato2Runtime {
     pub(crate) fn discover() -> Option<Self> {
         let checkout = configured_path("MESHHARBOR_LATO2_DIR")?;
         let python = configured_path("MESHHARBOR_LATO2_PYTHON")?;
-        let blender = configured_path("MESHHARBOR_LATO2_BLENDER")?;
-        if !python.is_file() || !blender.is_file() {
+        if !python.is_file() {
             return None;
         }
         for required in [
@@ -134,16 +136,12 @@ impl Lato2Runtime {
                 return None;
             }
         }
-        Some(Self {
-            checkout,
-            python,
-            blender,
-        })
+        Some(Self { checkout, python })
     }
 
     pub(crate) fn require() -> CoreResult<Self> {
         Self::discover().ok_or_else(|| CoreError::OperationUnavailable(
-            "Configure a trusted local LATO.2 checkout with checkpoints, Python and Blender via MESHHARBOR_LATO2_DIR, MESHHARBOR_LATO2_PYTHON and MESHHARBOR_LATO2_BLENDER.".into(),
+            "Configure a trusted local LATO.2 checkout with checkpoints and Python via MESHHARBOR_LATO2_DIR and MESHHARBOR_LATO2_PYTHON.".into(),
         ))
     }
 
@@ -229,52 +227,26 @@ impl Lato2Runtime {
         validate_remesh_response(&geometry, &request)?;
 
         execution.stage("lato2_texture_rebake")?;
-        fs::write(work.0.join("source.glb"), bytes)?;
-        fs::write(work.0.join("rebake.py"), include_bytes!("lato2_rebake.py"))?;
-        let mut bake_input = BufWriter::new(File::create(work.0.join("bake-input.json"))?);
-        serde_json::to_writer(
-            &mut bake_input,
-            &serde_json::json!({
-                "geometry": geometry,
-                "frame": frame,
-                "atlas_resolution": options.atlas_resolution,
-                "has_mr": has_mr,
-                "min_coverage": MIN_COVERAGE,
-            }),
-        )?;
-        bake_input.flush()?;
-        let mut blender = Command::new(&self.blender);
-        blender
-            .current_dir(&work.0)
-            .env_remove("MESHHARBOR_API_TOKEN")
-            .args([
-                "--background",
-                "--factory-startup",
-                "--disable-autoexec",
-                "--threads",
-                "4",
-                "--python-exit-code",
-                "1",
-                "--python",
-                "rebake.py",
-                "--",
-            ])
-            .arg(&work.0);
-        execution
-            .with_timeout(Duration::from_secs(180))
-            .visible(blender, "LATO.2 texture rebake failed")?;
+        let normals = smooth_normals(&geometry);
+        let positions = geometry
+            .positions
+            .iter()
+            .map(|position| frame.restore(*position))
+            .collect::<Vec<_>>();
+        let baked = bake_normal_ray_projected_mesh(
+            bytes,
+            &positions,
+            &normals,
+            &geometry.indices,
+            AtlasBakeOptions {
+                resolution: options.atlas_resolution,
+                padding: options.atlas_resolution / 128,
+            },
+            RAY_DISTANCE_RATIO,
+        )
+        .map_err(map_atlas_bake_error)?;
         execution.stage("validate_lato2_output")?;
-        let stats: BakeStats =
-            serde_json::from_slice(&read_bounded(&work.0.join("bake-stats.json"), 4096)?)?;
-        let coverage = stats.projected_texels as f64 / stats.occupied_texels as f64;
-        if !(MIN_COVERAGE..=1.0).contains(&coverage)
-            || stats.occupied_texels > u64::from(options.atlas_resolution).pow(2)
-        {
-            return Err(CoreError::OperationUnavailable(
-                "LATO.2 rebake did not meet the projection coverage threshold.".into(),
-            ));
-        }
-        let output = read_bounded(&work.0.join("rebaked.glb"), MAX_GLB_BYTES)?;
+        let output = encode_projected_mesh_glb(&baked).map_err(map_atlas_bake_error)?;
         let (result, output_has_mr) =
             extract_texture_rebake_source(&output).map_err(map_atlas_bake_error)?;
         if result.indices.len() / 3 != output_triangles || output_has_mr != has_mr {
@@ -282,20 +254,20 @@ impl Lato2Runtime {
                 "LATO.2 export changed the triangle count or lost a texture map.".into(),
             ));
         }
-        let mut rebaked_maps = vec!["baseColorTexture"];
-        if has_mr {
-            rebaked_maps.push("metallicRoughnessTexture");
-        }
-        let mut warnings = vec![
-            "Coverage measures ray hits, not correct-side projection, geometric error, or self-intersection freedom.",
-        ];
-        if stats.projected_texels < stats.occupied_texels {
-            warnings.push("Some destination texels had no projection hit.");
+        let report = baked.report;
+        let infilled = report.projection_infilled_texels.unwrap_or(0);
+        let unfilled = report
+            .projection_attempted_texels
+            .saturating_sub(report.projection_covered_texels + infilled);
+        let mut warnings = report.warnings;
+        if unfilled != 0 {
+            warnings
+                .push("Some atlas texels could not be locally filled and may show gaps.".into());
         }
         Ok((
             output,
             Lato2Report {
-                algorithm: "lato2+blender",
+                algorithm: "lato2+xatlas-normal-rays",
                 requested_vertices: options.target_vertices,
                 max_triangles: options.max_triangles,
                 seed: SEED,
@@ -304,10 +276,17 @@ impl Lato2Runtime {
                 retopology_vertices: geometry.positions.len(),
                 output_vertices: result.positions.len(),
                 atlas_resolution: options.atlas_resolution,
-                rebaked_maps,
-                projected_texels: stats.projected_texels,
-                occupied_texels: stats.occupied_texels,
-                projection_coverage: coverage,
+                atlas_width: report.atlas_width,
+                atlas_height: report.atlas_height,
+                rebaked_maps: report.rebaked_maps,
+                projected_texels: report.projection_covered_texels,
+                occupied_texels: report.projection_attempted_texels,
+                projection_coverage: report.projection_coverage,
+                ambiguous_texels: report.ambiguous_texels,
+                infilled_texels: infilled,
+                unfilled_texels: unfilled,
+                projection_distance_limit: report.projection_distance_limit,
+                maximum_projection_distance: report.maximum_projection_distance,
                 topology: "closed_oriented_manifold",
                 warnings,
             },
@@ -352,7 +331,6 @@ impl Drop for WorkDir {
     }
 }
 
-#[derive(Serialize)]
 struct Frame {
     center: [f64; 3],
     extent: f64,
@@ -385,6 +363,48 @@ impl Frame {
             ((f64::from(position[axis]) - self.center[axis]) / self.extent) as f32
         })
     }
+
+    fn restore(&self, position: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|axis| {
+            (f64::from(position[axis]) * self.extent + self.center[axis]) as f32
+        })
+    }
+}
+
+fn smooth_normals(geometry: &RemeshResponse) -> Vec<[f32; 3]> {
+    let mut averages = vec![[0.0_f64; 3]; geometry.positions.len()];
+    let mut fallback = averages.clone();
+    for triangle in geometry.indices.chunks_exact(3) {
+        let first = geometry.positions[triangle[0] as usize].map(f64::from);
+        let second = geometry.positions[triangle[1] as usize].map(f64::from);
+        let third = geometry.positions[triangle[2] as usize].map(f64::from);
+        let along: [f64; 3] = std::array::from_fn(|axis| second[axis] - first[axis]);
+        let across: [f64; 3] = std::array::from_fn(|axis| third[axis] - first[axis]);
+        let face: [f64; 3] = std::array::from_fn(|axis| {
+            along[(axis + 1) % 3] * across[(axis + 2) % 3]
+                - along[(axis + 2) % 3] * across[(axis + 1) % 3]
+        });
+        for &index in triangle {
+            let index = index as usize;
+            for (sum, weight) in averages[index].iter_mut().zip(face) {
+                *sum += weight;
+            }
+            fallback[index] = face;
+        }
+    }
+    averages
+        .into_iter()
+        .zip(fallback)
+        .map(|(mut normal, fallback)| {
+            let length =
+                |normal: [f64; 3]| normal.iter().map(|axis| axis * axis).sum::<f64>().sqrt();
+            if length(normal) <= 1e-14 {
+                normal = fallback;
+            }
+            let scale = length(normal);
+            normal.map(|axis| (axis / scale) as f32)
+        })
+        .collect()
 }
 
 fn write_source_obj(path: &Path, positions: &[[f32; 3]], indices: &[u32]) -> CoreResult<()> {

@@ -23,6 +23,7 @@ pub struct ProjectionStats {
     pub attempted_texels: u64,
     pub projected_texels: u64,
     pub ambiguous_texels: u64,
+    pub infilled_texels: u64,
     pub maximum_distance: f32,
     pub distance_limit: f32,
 }
@@ -46,6 +47,7 @@ struct RawResult {
     projection_attempted: u64,
     projection_projected: u64,
     projection_ambiguous: u64,
+    projection_infilled: u64,
     projection_max_distance: f32,
     projection_distance_limit: f32,
 }
@@ -70,6 +72,7 @@ impl Default for RawResult {
             projection_attempted: 0,
             projection_projected: 0,
             projection_ambiguous: 0,
+            projection_infilled: 0,
             projection_max_distance: 0.0,
             projection_distance_limit: 0.0,
         }
@@ -97,6 +100,7 @@ unsafe extern "C" {
         source_index_count: u32,
         max_distance_ratio: f32,
         min_coverage: f32,
+        normal_rays: u32,
         output: *mut RawResult,
         error: *mut c_char,
         error_capacity: usize,
@@ -151,14 +155,30 @@ pub fn unwrap_and_bake_projected(
     unwrap_and_bake_internal(
         input,
         settings,
-        Some((source, max_distance_ratio, min_coverage)),
+        Some((source, max_distance_ratio, min_coverage, false)),
+    )
+}
+
+/// Transfer source texture samples along target normals. An empty MR slice
+/// represents a material without a metallic/roughness texture.
+pub fn unwrap_and_bake_normal_rays(
+    input: AtlasInput<'_>,
+    settings: AtlasSettings,
+    source: ProjectionSource<'_>,
+    max_distance_ratio: f32,
+    min_coverage: f32,
+) -> Result<AtlasResult, String> {
+    unwrap_and_bake_internal(
+        input,
+        settings,
+        Some((source, max_distance_ratio, min_coverage, true)),
     )
 }
 
 fn unwrap_and_bake_internal(
     input: AtlasInput<'_>,
     settings: AtlasSettings,
-    projection: Option<(ProjectionSource<'_>, f32, f32)>,
+    projection: Option<(ProjectionSource<'_>, f32, f32, bool)>,
 ) -> Result<AtlasResult, String> {
     let AtlasInput {
         positions,
@@ -211,7 +231,7 @@ fn unwrap_and_bake_internal(
     {
         return Err("an index points outside the POSITION array".into());
     }
-    if let Some((source, max_distance_ratio, min_coverage)) = &projection {
+    if let Some((source, max_distance_ratio, min_coverage, _)) = &projection {
         if source.positions.is_empty()
             || source.positions.len() != source.uv.len()
             || source.indices.is_empty()
@@ -251,10 +271,12 @@ fn unwrap_and_bake_internal(
     {
         return Err("resolution must be 64..4096, the atlas may not exceed 16M texels, and padding must be 0..64".into());
     }
+    let normal_rays = projection.as_ref().is_some_and(|(_, _, _, rays)| *rays);
+    let has_mr = !mr_png.is_empty();
     if base_png.len() > 128 * 1024 * 1024
         || mr_png.len() > 128 * 1024 * 1024
         || !base_png.starts_with(b"\x89PNG\r\n\x1a\n")
-        || !mr_png.starts_with(b"\x89PNG\r\n\x1a\n")
+        || !(normal_rays && !has_mr || mr_png.starts_with(b"\x89PNG\r\n\x1a\n"))
     {
         return Err("base-color and metallic-roughness inputs must be PNGs under 128 MiB".into());
     }
@@ -268,15 +290,15 @@ fn unwrap_and_bake_internal(
     let flat_uv: Vec<f32> = original_uv.iter().flatten().copied().collect();
     let flat_source_positions: Vec<f32> = projection
         .as_ref()
-        .map(|(source, _, _)| source.positions.iter().flatten().copied().collect())
+        .map(|(source, _, _, _)| source.positions.iter().flatten().copied().collect())
         .unwrap_or_default();
     let flat_source_uv: Vec<f32> = projection
         .as_ref()
-        .map(|(source, _, _)| source.uv.iter().flatten().copied().collect())
+        .map(|(source, _, _, _)| source.uv.iter().flatten().copied().collect())
         .unwrap_or_default();
     let (source_indices, max_distance_ratio, min_coverage) = projection
         .as_ref()
-        .map(|(source, distance, coverage)| (source.indices, *distance, *coverage))
+        .map(|(source, distance, coverage, _)| (source.indices, *distance, *coverage))
         .unwrap_or((&[][..], 0.0, 0.0));
     let mut raw = RawResult::default();
     let mut error: [c_char; 1024] = [0; 1024];
@@ -324,6 +346,7 @@ fn unwrap_and_bake_internal(
             u32::try_from(source_indices.len()).map_err(|_| "too many source indices")?,
             max_distance_ratio,
             min_coverage,
+            u32::from(normal_rays),
             &mut raw,
             error.as_mut_ptr(),
             error.len(),
@@ -348,7 +371,8 @@ fn unwrap_and_bake_internal(
         || raw.xref.is_null()
         || raw.indices.is_null()
         || raw.base_png.is_null()
-        || raw.mr_png.is_null()
+        || has_mr && (raw.mr_png.is_null() || raw.mr_png_len == 0)
+        || !has_mr && raw.mr_png_len != 0
     {
         unsafe { meshharbor_atlas_free(&mut raw) };
         return Err("xatlas returned an incomplete native result".into());
@@ -362,8 +386,11 @@ fn unwrap_and_bake_internal(
         let xref = std::slice::from_raw_parts(raw.xref, raw.vertex_count as usize).to_vec();
         let indices = std::slice::from_raw_parts(raw.indices, raw.index_count as usize).to_vec();
         let base_color_png = std::slice::from_raw_parts(raw.base_png, raw.base_png_len).to_vec();
-        let metallic_roughness_png =
-            std::slice::from_raw_parts(raw.mr_png, raw.mr_png_len).to_vec();
+        let metallic_roughness_png = if has_mr {
+            std::slice::from_raw_parts(raw.mr_png, raw.mr_png_len).to_vec()
+        } else {
+            Vec::new()
+        };
         AtlasResult {
             uv,
             xref,
@@ -379,6 +406,7 @@ fn unwrap_and_bake_internal(
                 attempted_texels: raw.projection_attempted,
                 projected_texels: raw.projection_projected,
                 ambiguous_texels: raw.projection_ambiguous,
+                infilled_texels: raw.projection_infilled,
                 maximum_distance: raw.projection_max_distance,
                 distance_limit: raw.projection_distance_limit,
             }),

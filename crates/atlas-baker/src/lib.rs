@@ -103,6 +103,8 @@ pub struct ProjectedMeshBakeReport {
     pub projection_covered_texels: u64,
     pub projection_coverage: f32,
     pub ambiguous_texels: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_infilled_texels: Option<u64>,
     pub maximum_projection_distance: f32,
     pub projection_distance_limit: f32,
     pub rebaked_maps: Vec<String>,
@@ -663,7 +665,7 @@ pub fn extract_projection_source_mesh(
     extract_projection_source(bytes, false).map(|(mesh, _)| mesh)
 }
 
-/// Validate the narrower GLB profile used by the experimental Blender rebaker.
+/// Validate the GLB profile used by the experimental normal-ray rebaker.
 /// The second result indicates whether the source has a metallic/roughness map.
 pub fn extract_texture_rebake_source(
     bytes: &[u8],
@@ -794,6 +796,46 @@ pub fn bake_projected_mesh(
     options: AtlasBakeOptions,
     max_distance_ratio: f32,
 ) -> Result<ProjectedMeshBake, AtlasBakeError> {
+    bake_with_projection(
+        source_glb,
+        target_positions,
+        target_normals,
+        target_indices,
+        options,
+        max_distance_ratio,
+        false,
+    )
+}
+
+/// Rebake along target normals, with local same-chart infill for rejected texels.
+pub fn bake_normal_ray_projected_mesh(
+    source_glb: &[u8],
+    target_positions: &[[f32; 3]],
+    target_normals: &[[f32; 3]],
+    target_indices: &[u32],
+    options: AtlasBakeOptions,
+    max_distance_ratio: f32,
+) -> Result<ProjectedMeshBake, AtlasBakeError> {
+    bake_with_projection(
+        source_glb,
+        target_positions,
+        target_normals,
+        target_indices,
+        options,
+        max_distance_ratio,
+        true,
+    )
+}
+
+fn bake_with_projection(
+    source_glb: &[u8],
+    target_positions: &[[f32; 3]],
+    target_normals: &[[f32; 3]],
+    target_indices: &[u32],
+    options: AtlasBakeOptions,
+    max_distance_ratio: f32,
+    normal_rays: bool,
+) -> Result<ProjectedMeshBake, AtlasBakeError> {
     validate_options(options)?;
     if target_positions.is_empty()
         || target_positions.len() > MAX_VERTICES
@@ -816,12 +858,14 @@ pub fn bake_projected_mesh(
             "projection distance ratio must be between 0.0001 and 0.05",
         ));
     }
-    let source = extract_projection_source_mesh(source_glb)?;
+    let (source, _) = extract_projection_source(source_glb, normal_rays)?;
     let glb = Glb::parse(source_glb)?;
-    let snapshot = validate_supported(&glb.document)?;
-    let (_, mr_image) = snapshot.required_mr()?;
+    let snapshot = validate_supported_profile(&glb.document, normal_rays)?;
     let base_png = read_png_image(&glb.document, &glb.binary, snapshot.base_image)?;
-    let mr_png = read_png_image(&glb.document, &glb.binary, mr_image)?;
+    let mr_png = snapshot
+        .mr
+        .map(|(_, image)| read_png_image(&glb.document, &glb.binary, image))
+        .transpose()?;
     let material = &glb.document["materials"][snapshot.material];
     let pbr = &material["pbrMetallicRoughness"];
     let base_color_factor = factor_vec4(pbr.get("baseColorFactor"), [1.0; 4], "baseColorFactor")?;
@@ -836,26 +880,41 @@ pub fn bake_projected_mesh(
         .get("doubleSided")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let native = meshharbor_xatlas_sys::unwrap_and_bake_projected(
+    let normalized = if normal_rays {
+        Some(normalize_projection_frame(&source, target_positions)?)
+    } else {
+        None
+    };
+    let (source_positions, projection_target, distance_scale) = normalized.as_ref().map_or(
+        (source.positions.as_slice(), target_positions, 1.0),
+        |(source, target, scale)| (source.as_slice(), target.as_slice(), *scale),
+    );
+    let min_coverage = if normal_rays { 0.95 } else { 0.995 };
+    let bake = if normal_rays {
+        meshharbor_xatlas_sys::unwrap_and_bake_normal_rays
+    } else {
+        meshharbor_xatlas_sys::unwrap_and_bake_projected
+    };
+    let native = bake(
         meshharbor_xatlas_sys::AtlasInput {
-            positions: target_positions,
+            positions: projection_target,
             normals: Some(target_normals),
             original_uv: &[],
             indices: target_indices,
             base_png: &base_png,
-            mr_png: &mr_png,
+            mr_png: mr_png.as_deref().unwrap_or_default(),
         },
         meshharbor_xatlas_sys::AtlasSettings {
             resolution: options.resolution,
             padding: options.padding,
         },
         meshharbor_xatlas_sys::ProjectionSource {
-            positions: &source.positions,
+            positions: source_positions,
             uv: &source.uv,
             indices: &source.indices,
         },
         max_distance_ratio,
-        0.995,
+        min_coverage,
     )
     .map_err(AtlasBakeError::Native)?;
     if native.xref.is_empty()
@@ -889,7 +948,7 @@ pub fn bake_projected_mesh(
     } else {
         projection.projected_texels as f32 / projection.attempted_texels as f32
     };
-    if coverage < 0.995 || projection.ambiguous_texels > 0 {
+    if coverage < min_coverage || (!normal_rays && projection.ambiguous_texels > 0) {
         return Err(AtlasBakeError::Unsupported(
             "projected atlas failed its coverage or thin-shell ambiguity gate".into(),
         ));
@@ -904,6 +963,10 @@ pub fn bake_projected_mesh(
         .iter()
         .map(|index| target_normals[*index as usize])
         .collect();
+    let mut rebaked_maps = vec!["baseColorTexture".into()];
+    if mr_png.is_some() {
+        rebaked_maps.push("metallicRoughnessTexture".into());
+    }
     let report = ProjectedMeshBakeReport {
         source_triangles: (source.indices.len() / 3) as u64,
         target_triangles: (target_indices.len() / 3) as u64,
@@ -918,11 +981,16 @@ pub fn bake_projected_mesh(
         projection_covered_texels: projection.projected_texels,
         projection_coverage: coverage,
         ambiguous_texels: projection.ambiguous_texels,
-        maximum_projection_distance: projection.maximum_distance,
-        projection_distance_limit: projection.distance_limit,
-        rebaked_maps: vec!["baseColorTexture".into(), "metallicRoughnessTexture".into()],
+        projection_infilled_texels: normal_rays.then_some(projection.infilled_texels),
+        maximum_projection_distance: projection.maximum_distance * distance_scale,
+        projection_distance_limit: projection.distance_limit * distance_scale,
+        rebaked_maps,
         warnings: vec![
-            "Appearance was projected from the nearest similarly-facing source surface; projection coverage is not a visual-quality certification.".into(),
+            if normal_rays {
+                "Coverage counts accepted normal-ray hits before local infill. It does not certify correct-side projection or visual fidelity."
+            } else {
+                "Appearance was projected from the nearest similarly-facing source surface; projection coverage is not a visual-quality certification."
+            }.into(),
             "Normal, occlusion, emissive, alpha, and other non-PBR texture maps are not transferred.".into(),
         ],
     };
@@ -939,6 +1007,54 @@ pub fn bake_projected_mesh(
         double_sided,
         report,
     })
+}
+
+fn normalize_projection_frame(
+    source: &ProjectionSourceMesh,
+    target: &[[f32; 3]],
+) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>, f32), AtlasBakeError> {
+    let mut lower = [f64::INFINITY; 3];
+    let mut upper = [f64::NEG_INFINITY; 3];
+    let mut referenced = vec![false; source.positions.len()];
+    for &index in &source.indices {
+        referenced[index as usize] = true;
+    }
+    for (position, used) in source.positions.iter().zip(&referenced) {
+        if *used {
+            for axis in 0..3 {
+                let value = f64::from(position[axis]);
+                lower[axis] = lower[axis].min(value);
+                upper[axis] = upper[axis].max(value);
+            }
+        }
+    }
+    let extent = (0..3)
+        .map(|axis| upper[axis] - lower[axis])
+        .fold(0.0_f64, f64::max);
+    if !extent.is_finite() || extent <= 0.0 || extent > f32::MAX as f64 {
+        return Err(invalid(
+            "source projection bounds are degenerate or out of range",
+        ));
+    }
+    let normalize = |position: &[f32; 3]| {
+        std::array::from_fn(|axis| {
+            ((f64::from(position[axis]) - (upper[axis] + lower[axis]) * 0.5) / extent) as f32
+        })
+    };
+    Ok((
+        source
+            .positions
+            .iter()
+            .zip(referenced)
+            .map(
+                |(position, used)| {
+                    if used { normalize(position) } else { [0.0; 3] }
+                },
+            )
+            .collect(),
+        target.iter().map(normalize).collect(),
+        extent as f32,
+    ))
 }
 
 /// Encode a projected mesh bake as a standalone, textured triangle-preview GLB.
@@ -973,8 +1089,9 @@ pub fn encode_projected_mesh_glb(bake: &ProjectedMeshBake) -> Result<Vec<u8>, At
             "projected mesh streams are inconsistent or out of range",
         ));
     }
+    let has_mr = !bake.metallic_roughness_png.is_empty();
     if !bake.base_color_png.starts_with(PNG_MAGIC)
-        || !bake.metallic_roughness_png.starts_with(PNG_MAGIC)
+        || has_mr && !bake.metallic_roughness_png.starts_with(PNG_MAGIC)
         || bake.base_color_png.len() > MAX_PNG_BYTES
         || bake.metallic_roughness_png.len() > MAX_PNG_BYTES
     {
@@ -1037,12 +1154,6 @@ pub fn encode_projected_mesh_glb(bake: &ProjectedMeshBake) -> Result<Vec<u8>, At
         .collect();
     let index_view = append_view(&mut document, &mut binary, &index_bytes, Some(34963))?;
     let base_view = append_view(&mut document, &mut binary, &bake.base_color_png, None)?;
-    let mr_view = append_view(
-        &mut document,
-        &mut binary,
-        &bake.metallic_roughness_png,
-        None,
-    )?;
     let position_accessor = append_new_accessor(
         &mut document,
         position_view,
@@ -1063,10 +1174,25 @@ pub fn encode_projected_mesh_glb(bake: &ProjectedMeshBake) -> Result<Vec<u8>, At
         "SCALAR",
         None,
     )?;
-    document["images"] = json!([
-        { "bufferView": base_view, "mimeType": "image/png" },
-        { "bufferView": mr_view, "mimeType": "image/png" }
-    ]);
+    if has_mr {
+        let mr_view = append_view(
+            &mut document,
+            &mut binary,
+            &bake.metallic_roughness_png,
+            None,
+        )?;
+        document["images"] = json!([
+            { "bufferView": base_view, "mimeType": "image/png" },
+            { "bufferView": mr_view, "mimeType": "image/png" }
+        ]);
+    } else {
+        document["images"] = json!([{ "bufferView": base_view, "mimeType": "image/png" }]);
+        document["textures"] = json!([{ "source": 0 }]);
+        document["materials"][0]["pbrMetallicRoughness"]
+            .as_object_mut()
+            .unwrap()
+            .remove("metallicRoughnessTexture");
+    }
     document["buffers"][0]["byteLength"] = json!(binary.len());
     if binary.len() > 128 * 1024 * 1024 {
         return Err(AtlasBakeError::Output(

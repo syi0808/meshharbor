@@ -587,7 +587,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local mesh processing job for mesh.cleanup, mesh.voxel_remesh, uv.unwrap, render.optimize, mesh.compress, mesh.retopology, or mesh.retopology_lato2. The source asset stays unchanged; poll get_job for the derived asset and report. Experimental mesh.retopology_lato2 requires a configured local LATO.2 and Blender runtime and outputs one retopologized triangle GLB with rebaked embedded PBR maps. Voxel Remesh rebuilds a closed geometry-only mesh from one static triangle GLB; it does not copy textures. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires an available QuadriFlow backend and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
+        description = "Start a local mesh processing job for mesh.cleanup, mesh.voxel_remesh, uv.unwrap, render.optimize, mesh.compress, mesh.retopology, or mesh.retopology_lato2. The source asset stays unchanged; poll get_job for the derived asset and report. Experimental mesh.retopology_lato2 requires a configured local LATO.2 runtime and outputs one retopologized triangle GLB with embedded PBR maps rebaked by xatlas and CPU normal rays. Voxel Remesh rebuilds a closed geometry-only mesh from one static triangle GLB; it does not copy textures. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires an available QuadriFlow backend and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
     )]
     async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
         let args = params.0;
@@ -2656,7 +2656,7 @@ async fn start_mesh_operation_job(
     if !descriptor.implemented {
         if operation == meshharbor_core::LATO2_OPERATION {
             return Err(CoreError::OperationUnavailable(
-                "Configure MESHHARBOR_LATO2_DIR, MESHHARBOR_LATO2_PYTHON, and MESHHARBOR_LATO2_BLENDER before submitting mesh.retopology_lato2.".into(),
+                "Configure MESHHARBOR_LATO2_DIR and MESHHARBOR_LATO2_PYTHON before submitting mesh.retopology_lato2.".into(),
             ));
         }
         return Err(CoreError::OperationUnavailable(format!(

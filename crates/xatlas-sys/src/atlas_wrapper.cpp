@@ -28,7 +28,7 @@ struct MhAtlasResult {
     uint8_t *mr_png;
     size_t mr_png_len;
     uint64_t covered_texels, gutter_texels;
-    uint64_t projection_attempted, projection_projected, projection_ambiguous;
+    uint64_t projection_attempted, projection_projected, projection_ambiguous, projection_infilled;
     float projection_max_distance, projection_distance_limit;
 };
 
@@ -124,7 +124,7 @@ std::array<float, 4> read_pixel(const Image &image, size_t index) {
 struct BakedTextures {
     std::vector<uint8_t> base, mr;
     uint64_t covered = 0, gutter = 0;
-    uint64_t projection_attempted = 0, projection_projected = 0, projection_ambiguous = 0;
+    uint64_t projection_attempted = 0, projection_projected = 0, projection_ambiguous = 0, projection_infilled = 0;
     float projection_max_distance = 0.0f, projection_distance_limit = 0.0f;
 };
 
@@ -262,6 +262,44 @@ float point_box_distance2(const Vec3 &p, const Vec3 &lo, const Vec3 &hi) {
     return sum;
 }
 
+bool segment_intersects_box(const Vec3 &origin, const Vec3 &direction, const ProjectionNode &node, float limit) {
+    float from = -limit, to = limit;
+    constexpr float epsilon = 1e-7f;
+    for (int axis = 0; axis < 3; ++axis) {
+        const float lo = node.lo[axis] - epsilon - origin[axis];
+        const float hi = node.hi[axis] + epsilon - origin[axis];
+        if (std::abs(direction[axis]) < epsilon) {
+            if (lo > 0 || hi < 0) return false;
+            continue;
+        }
+        const float first = lo / direction[axis], second = hi / direction[axis];
+        from = std::max(from, std::min(first, second));
+        to = std::min(to, std::max(first, second));
+        if (from > to) return false;
+    }
+    return true;
+}
+
+bool intersect_triangle(const Vec3 &origin, const Vec3 &direction,
+    const Vec3 &first, const Vec3 &second, const Vec3 &third, float &distance, Vec3 &bary) {
+    const Vec3 edge_a = sub3(second, first), edge_b = sub3(third, first);
+    const Vec3 cross = cross3(direction, edge_b);
+    const float determinant = dot3(edge_a, cross);
+    if (std::abs(determinant) < 1e-12f) return false;
+    const float inverse = 1.0f / determinant;
+    const Vec3 relative = sub3(origin, first);
+    const float weights_b = dot3(relative, cross) * inverse;
+    const Vec3 other_cross = cross3(relative, edge_a);
+    const float weights_c = dot3(direction, other_cross) * inverse;
+    const float weights_a = 1 - weights_b - weights_c;
+    constexpr float tolerance = -2e-6f;
+    if (weights_a < tolerance || weights_b < tolerance || weights_c < tolerance) return false;
+    distance = dot3(edge_b, other_cross) * inverse;
+    const Vec3 clamped = {std::max(weights_a, 0.0f), std::max(weights_b, 0.0f), std::max(weights_c, 0.0f)};
+    bary = scale3(clamped, 1.0f / (clamped[0] + clamped[1] + clamped[2]));
+    return true;
+}
+
 std::pair<Vec3, std::array<float, 3>> closest_point_triangle(
     const Vec3 &p, const Vec3 &a, const Vec3 &b, const Vec3 &c) {
     const Vec3 ab = sub3(b, a), ac = sub3(c, a), ap = sub3(p, a);
@@ -327,11 +365,47 @@ public:
         query_node(0, point, target_normal, max_distance * max_distance, ambiguity_tolerance, result);
         return result;
     }
+    Result query_normal_segment(const Vec3 &point, const Vec3 &direction, const Vec3 &face_normal,
+        float limit, float tolerance) const {
+        Result result;
+        ray_node(0, point, direction, face_normal, limit, tolerance, result);
+        return result;
+    }
     const ProjectionTriangle &triangle(uint32_t index) const { return triangles_[index]; }
     Vec3 position(uint32_t index) const {
         return {positions_[size_t(index) * 3], positions_[size_t(index) * 3 + 1], positions_[size_t(index) * 3 + 2]};
     }
 private:
+    void ray_node(uint32_t index, const Vec3 &origin, const Vec3 &direction, const Vec3 &face_normal,
+        float limit, float tolerance, Result &result) const {
+        const ProjectionNode &node = nodes_[index];
+        const float search_distance = std::min(limit, std::sqrt(result.nearest.distance2) + tolerance);
+        if (!segment_intersects_box(origin, direction, node, search_distance)) return;
+        if (!node.leaf) {
+            ray_node(node.left, origin, direction, face_normal, limit, tolerance, result);
+            ray_node(node.right, origin, direction, face_normal, limit, tolerance, result);
+            return;
+        }
+        for (uint32_t item = node.begin; item < node.end; ++item) {
+            const uint32_t tri_index = order_[item];
+            const auto &tri = triangles_[tri_index];
+            const float facing = dot3(face_normal, tri.normal);
+            if (std::abs(facing) < 0.25f) continue;
+            float distance;
+            Vec3 bary;
+            if (!intersect_triangle(origin, direction,
+                position(tri.a), position(tri.b), position(tri.c), distance, bary)
+                || std::abs(distance) > limit) continue;
+            const float distance2 = distance * distance;
+            if (facing < 0) {
+                result.opposing_distance = std::min(result.opposing_distance, std::abs(distance));
+            } else if (distance2 < result.nearest.distance2
+                || (distance2 == result.nearest.distance2 && tri_index < result.nearest.triangle)) {
+                result.nearest = {tri_index, bary, {}, distance2, facing};
+            }
+        }
+    }
+
     uint32_t build(uint32_t begin, uint32_t end) {
         const uint32_t node_index = static_cast<uint32_t>(nodes_.size());
         nodes_.push_back({});
@@ -413,7 +487,7 @@ BakedTextures bake_projected_textures(
     const std::vector<std::array<float, 2>> &atlas_uv,
     const std::vector<uint32_t> &xref, const std::vector<uint32_t> &chart_ids,
     const std::vector<uint32_t> &indices, const uint32_t *atlas_image,
-    int width, int height, float max_distance_ratio, float min_coverage) {
+    int width, int height, float max_distance_ratio, float min_coverage, bool normal_rays, uint32_t padding) {
     if (source_index_count / 3 > 500000) throw std::runtime_error("source projection is limited to 500,000 triangles");
     if (!target_normals || !source_positions || !source_uv || !source_indices)
         throw std::runtime_error("projected rebaking requires target normals and source mesh streams");
@@ -428,9 +502,10 @@ BakedTextures bake_projected_textures(
     const float diagonal = std::sqrt(dot3(sub3(source_hi, source_lo), sub3(source_hi, source_lo)));
     if (!std::isfinite(diagonal) || diagonal <= 1.0e-12f) throw std::runtime_error("source projection bounds are degenerate");
     const float distance_limit = diagonal * max_distance_ratio;
-    const float ambiguity_tolerance = std::max(distance_limit * 0.1f, diagonal * 1.0e-6f);
+    const float ambiguity_tolerance = std::max(distance_limit * (normal_rays ? 0.025f : 0.1f), diagonal * 1.0e-6f);
+    const bool has_mr = !source_mr.rgba.empty();
     Image output_base{width, height, std::vector<uint8_t>(size_t(width) * height * 4, 0)};
-    Image output_mr{width, height, std::vector<uint8_t>(size_t(width) * height * 4, 0)};
+    Image output_mr{width, height, std::vector<uint8_t>(has_mr ? size_t(width) * height * 4 : 0, 0)};
     std::vector<uint8_t> covered(size_t(width) * height, 0);
     std::vector<uint32_t> pixel_chart(size_t(width) * height, UINT32_MAX);
     BakedTextures result;
@@ -454,6 +529,16 @@ BakedTextures bake_projected_textures(
         const uint32_t chart = chart_ids[ids[0]];
         if (chart_ids[ids[1]] != chart || chart_ids[ids[2]] != chart)
             throw std::runtime_error("xatlas output triangle spans multiple charts");
+        const uint32_t target_ids[3] = {xref[ids[0]], xref[ids[1]], xref[ids[2]]};
+        if (target_ids[0] >= target_vertex_count || target_ids[1] >= target_vertex_count || target_ids[2] >= target_vertex_count)
+            throw std::runtime_error("xatlas returned an out-of-range target vertex reference");
+        auto load_vector = [&](const float *stream, int corner) {
+            const size_t offset = size_t(target_ids[corner]) * 3;
+            return Vec3{stream[offset], stream[offset + 1], stream[offset + 2]};
+        };
+        const Vec3 points[] = {load_vector(target_positions, 0), load_vector(target_positions, 1), load_vector(target_positions, 2)};
+        const Vec3 normals[] = {load_vector(target_normals, 0), load_vector(target_normals, 1), load_vector(target_normals, 2)};
+        const Vec3 face_normal = normal_rays ? normalize3(cross3(sub3(points[1], points[0]), sub3(points[2], points[0]))) : Vec3{};
         for (int py = ymin; py <= ymax; ++py) for (int px = xmin; px <= xmax; ++px) {
             const float qx = px + 0.5f, qy = py + 0.5f;
             const float a = ((x[1] - qx) * (y[2] - qy) - (y[1] - qy) * (x[2] - qx)) / determinant;
@@ -461,30 +546,41 @@ BakedTextures bake_projected_textures(
             const float c = 1.0f - a - b;
             if (a < -1e-5f || b < -1e-5f || c < -1e-5f) continue;
             const size_t pixel = size_t(py) * width + px;
-            if (covered[pixel]) continue;
+            if (covered[pixel] || (normal_rays && pixel_chart[pixel] != UINT32_MAX)) continue;
+            if (normal_rays) pixel_chart[pixel] = chart;
             ++result.projection_attempted;
-            const uint32_t target_ids[3] = {xref[ids[0]], xref[ids[1]], xref[ids[2]]};
-            if (target_ids[0] >= target_vertex_count || target_ids[1] >= target_vertex_count || target_ids[2] >= target_vertex_count)
-                throw std::runtime_error("xatlas returned an out-of-range target vertex reference");
-            auto target_position = [&](int corner) {
-                const uint32_t id = target_ids[corner];
-                return Vec3{target_positions[size_t(id) * 3], target_positions[size_t(id) * 3 + 1], target_positions[size_t(id) * 3 + 2]};
+            const Vec3 target_point = add3(scale3(points[0], a), add3(scale3(points[1], b), scale3(points[2], c)));
+            const Vec3 normal = normalize3(add3(scale3(normals[0], a), add3(scale3(normals[1], b), scale3(normals[2], c))));
+            const Vec3 primary_normal = normal_rays ? face_normal : normal;
+            if (dot3(primary_normal, primary_normal) < 0.5f) { ++no_normal; continue; }
+            auto hit = normal_rays
+                ? bvh.query_normal_segment(target_point, face_normal, face_normal, distance_limit, ambiguity_tolerance)
+                : bvh.query(target_point, normal, distance_limit, ambiguity_tolerance);
+            auto safe_ray = [&](const ProjectionBvh::Result &candidate) {
+                return std::isfinite(candidate.nearest.distance2)
+                    && candidate.opposing_distance > std::sqrt(candidate.nearest.distance2) + ambiguity_tolerance;
             };
-            auto target_normal = [&](int corner) {
-                const uint32_t id = target_ids[corner];
-                return Vec3{target_normals[size_t(id) * 3], target_normals[size_t(id) * 3 + 1], target_normals[size_t(id) * 3 + 2]};
-            };
-            const Vec3 target_point = add3(scale3(target_position(0), a), add3(scale3(target_position(1), b), scale3(target_position(2), c)));
-            const Vec3 normal = normalize3(add3(scale3(target_normal(0), a), add3(scale3(target_normal(1), b), scale3(target_normal(2), c))));
-            if (dot3(normal, normal) < 0.5f) { ++no_normal; continue; }
-            const auto hit = bvh.query(target_point, normal, distance_limit, ambiguity_tolerance);
+            if (normal_rays && !safe_ray(hit)) {
+                bool opposing = std::isfinite(hit.opposing_distance);
+                const float alignment = dot3(normal, face_normal);
+                if (alignment > 0.5f && alignment < 0.9999f) {
+                    const auto alternative = bvh.query_normal_segment(target_point, normal, face_normal, distance_limit, ambiguity_tolerance);
+                    opposing = opposing || std::isfinite(alternative.opposing_distance);
+                    if (safe_ray(alternative)) hit = alternative;
+                }
+                if (!safe_ray(hit)) {
+                    if (opposing) ++result.projection_ambiguous;
+                    else ++no_hit;
+                    continue;
+                }
+            }
             if (!std::isfinite(hit.nearest.distance2)) {
                 ++no_hit;
                 continue;
             }
             const float hit_distance = std::sqrt(hit.nearest.distance2);
             if (hit.nearest.normal_dot < 0.25f) { ++backface; continue; }
-            if (std::isfinite(hit.opposing_distance) && std::abs(hit.opposing_distance - hit_distance) <= ambiguity_tolerance) {
+            if (!normal_rays && std::isfinite(hit.opposing_distance) && std::abs(hit.opposing_distance - hit_distance) <= ambiguity_tolerance) {
                 ++result.projection_ambiguous;
                 continue;
             }
@@ -493,7 +589,8 @@ BakedTextures bake_projected_textures(
             const float u = hit.nearest.bary[0] * source_uv[size_t(tri_ids[0]) * 2] + hit.nearest.bary[1] * source_uv[size_t(tri_ids[1]) * 2] + hit.nearest.bary[2] * source_uv[size_t(tri_ids[2]) * 2];
             const float v = hit.nearest.bary[0] * source_uv[size_t(tri_ids[0]) * 2 + 1] + hit.nearest.bary[1] * source_uv[size_t(tri_ids[1]) * 2 + 1] + hit.nearest.bary[2] * source_uv[size_t(tri_ids[2]) * 2 + 1];
             write_pixel(output_base, pixel, sample(source_base, u, v, true));
-            write_pixel(output_mr, pixel, sample(source_mr, u, v, false));
+            if (normal_rays) output_base.rgba[pixel * 4 + 3] = 255;
+            if (has_mr) write_pixel(output_mr, pixel, sample(source_mr, u, v, false));
             covered[pixel] = 1;
             pixel_chart[pixel] = chart;
             ++result.projection_projected;
@@ -502,8 +599,8 @@ BakedTextures bake_projected_textures(
     }
     if (result.projection_attempted == 0) throw std::runtime_error("target atlas contains no rasterized texels");
     const double coverage = static_cast<double>(result.projection_projected) / static_cast<double>(result.projection_attempted);
-    if (result.projection_ambiguous > 0 || coverage < min_coverage) {
-        const bool ambiguous = result.projection_ambiguous > 0;
+    if ((!normal_rays && result.projection_ambiguous > 0) || coverage < min_coverage) {
+        const bool ambiguous = !normal_rays && result.projection_ambiguous > 0;
         const std::string reason = ambiguous
             ? "texture projection encountered ambiguous opposing surfaces; refusing to bake thin shells"
             : "texture projection coverage is below the configured safety threshold";
@@ -520,6 +617,8 @@ BakedTextures bake_projected_textures(
         if (atlas_image[i] & xatlas::kImageHasChartIndexBit)
             owner[i] = static_cast<int32_t>(atlas_image[i] & xatlas::kImageChartIndexMask);
     std::vector<int32_t> source(owner.size(), -1);
+    std::vector<uint8_t> fill_distance(normal_rays ? owner.size() : 0, 0);
+    const uint32_t fill_limit = std::min(64u, std::max(12u, 2 * padding));
     std::deque<int32_t> queue;
     for (size_t i = 0; i < owner.size(); ++i) {
         if (covered[i] && owner[i] >= 0 && pixel_chart[i] == static_cast<uint32_t>(owner[i])) {
@@ -530,13 +629,17 @@ BakedTextures bake_projected_textures(
     const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
     while (!queue.empty()) {
         const int32_t current = queue.front(); queue.pop_front();
+        if (normal_rays && fill_distance[current] >= fill_limit) continue;
         const int px = current % width, py = current / width;
         for (int k = 0; k < 4; ++k) {
             const int nx = px + dx[k], ny = py + dy[k];
             if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
             const int32_t neighbor = ny * width + nx;
             if (source[neighbor] >= 0 || owner[neighbor] < 0 || owner[neighbor] != owner[current]) continue;
+            if (normal_rays && pixel_chart[neighbor] != UINT32_MAX
+                && pixel_chart[neighbor] != static_cast<uint32_t>(owner[neighbor])) continue;
             source[neighbor] = source[current]; queue.push_back(neighbor);
+            if (normal_rays) fill_distance[neighbor] = fill_distance[current] + 1;
         }
     }
     for (size_t i = 0; i < covered.size(); ++i) {
@@ -544,12 +647,16 @@ BakedTextures bake_projected_textures(
         else if (source[i] >= 0) {
             const size_t seed = static_cast<size_t>(source[i]);
             write_pixel(output_base, i, read_pixel(output_base, seed));
-            write_pixel(output_mr, i, read_pixel(output_mr, seed));
-            ++result.gutter;
+            if (has_mr) write_pixel(output_mr, i, read_pixel(output_mr, seed));
+            if (normal_rays && pixel_chart[i] != UINT32_MAX) ++result.projection_infilled;
+            else ++result.gutter;
         }
     }
+    if (normal_rays && (result.projection_attempted - result.projection_projected - result.projection_infilled) * 200
+        > result.projection_attempted)
+        throw std::runtime_error("more than 0.5% of occupied texels remained unfilled after normal-ray projection");
     result.base = encode_png(output_base);
-    result.mr = encode_png(output_mr);
+    if (has_mr) result.mr = encode_png(output_mr);
     return result;
 }
 
@@ -569,7 +676,7 @@ extern "C" int meshharbor_atlas_bake(
     uint32_t resolution, uint32_t padding,
     const float *source_positions, const float *source_uv, uint32_t source_vertex_count,
     const uint32_t *source_indices, uint32_t source_index_count,
-    float max_distance_ratio, float min_coverage,
+    float max_distance_ratio, float min_coverage, uint32_t normal_rays,
     MhAtlasResult *output, char *error, size_t error_capacity) {
     if (output) std::memset(output, 0, sizeof(*output));
     try {
@@ -602,7 +709,7 @@ extern "C" int meshharbor_atlas_bake(
                 if (!std::isfinite(source_uv[i])) throw std::runtime_error("projection source UVs must be finite");
         }
         Image source_base = decode_png(base_png, base_png_len);
-        Image source_mr = decode_png(mr_png, mr_png_len);
+        Image source_mr = projected && normal_rays && mr_png_len == 0 ? Image{} : decode_png(mr_png, mr_png_len);
         std::unique_ptr<xatlas::Atlas, void (*)(xatlas::Atlas *)> atlas(xatlas::Create(), xatlas::Destroy);
         if (!atlas) throw std::runtime_error("could not allocate xatlas context");
         xatlas::MeshDecl declaration;
@@ -629,10 +736,40 @@ extern "C" int meshharbor_atlas_bake(
         pack.createImage = true;
         pack.rotateCharts = true;
         pack.rotateChartsToAxis = true;
-        xatlas::Generate(atlas.get(), {}, pack);
+        if (normal_rays) {
+            xatlas::ComputeCharts(atlas.get());
+            double area = 0.0;
+            auto position_at = [&](uint32_t vertex) {
+                const size_t offset = size_t(vertex) * 3;
+                return Vec3{positions[offset], positions[offset + 1], positions[offset + 2]};
+            };
+            for (uint32_t face = 0; face < index_count; face += 3) {
+                const Vec3 origin = position_at(indices[face]);
+                const Vec3 cross = cross3(sub3(position_at(indices[face + 1]), origin),
+                    sub3(position_at(indices[face + 2]), origin));
+                area += 0.5 * std::sqrt(dot3(cross, cross));
+            }
+            if (!(area > 0) || !std::isfinite(area))
+                throw std::runtime_error("target projection surface area is invalid");
+            pack.texelsPerUnit = float(resolution * std::sqrt(0.45 / area));
+            pack.createImage = false;
+            for (int attempt = 0; attempt < 5; ++attempt) {
+                xatlas::PackCharts(atlas.get(), pack);
+                if (atlas->atlasCount == 1) {
+                    pack.createImage = true;
+                    xatlas::PackCharts(atlas.get(), pack);
+                    break;
+                }
+                pack.texelsPerUnit *= 0.8f;
+            }
+        } else {
+            xatlas::Generate(atlas.get(), {}, pack);
+        }
         if (atlas->atlasCount != 1 || atlas->meshCount != 1 || !atlas->image || !atlas->meshes) {
             throw std::runtime_error("xatlas could not produce one packed image atlas");
         }
+        if (normal_rays && (atlas->width != resolution || atlas->height != resolution))
+            throw std::runtime_error("xatlas could not preserve the requested square resolution");
         const xatlas::Mesh &mesh = atlas->meshes[0];
         if (!mesh.vertexArray || !mesh.indexArray || mesh.vertexCount > index_count
             || mesh.indexCount != index_count || mesh.indexCount % 3 != 0) {
@@ -660,7 +797,7 @@ extern "C" int meshharbor_atlas_bake(
             ? bake_projected_textures(source_base, source_mr, positions, normals, vertex_count,
                 source_positions, source_uv, source_vertex_count, source_indices, source_index_count,
                 atlas_uv, xref, chart_ids, atlas_indices, atlas->image, width, height,
-                max_distance_ratio, min_coverage)
+                max_distance_ratio, min_coverage, normal_rays != 0, padding)
             : bake_textures(source_base, source_mr, direct_uv, atlas_uv, xref,
                 chart_ids, atlas_indices, atlas->image, width, height);
         output->vertex_count = mesh.vertexCount;
@@ -685,6 +822,7 @@ extern "C" int meshharbor_atlas_bake(
         output->projection_attempted = baked.projection_attempted;
         output->projection_projected = baked.projection_projected;
         output->projection_ambiguous = baked.projection_ambiguous;
+        output->projection_infilled = baked.projection_infilled;
         output->projection_max_distance = baked.projection_max_distance;
         output->projection_distance_limit = baked.projection_distance_limit;
         return 0;
