@@ -16,8 +16,8 @@ use clap::{Parser, Subcommand};
 use huggingface_status::HuggingFaceStatuses;
 use job_scheduler::JobScheduler;
 use meshharbor_core::{
-    CoreError, GenerationInput, GenerationOptions, IMAGE_GENERATION_OPERATION, MAX_ASSET_BYTES,
-    MODEL_GENERATION_OPERATION, OperationCore, Pixal3dProfile, RuntimeDoctor, RuntimeJobKind,
+    CoreError, GenerationInput, GenerationOptions, MAX_ASSET_BYTES, MODEL_GENERATION_OPERATION,
+    OperationCore, Pixal3dProfile, RuntimeDoctor, RuntimeJobKind,
 };
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -33,8 +33,8 @@ use tracing_subscriber::EnvFilter;
 
 include!(concat!(env!("OUT_DIR"), "/studio_assets.rs"));
 
+mod actions;
 mod blender_bridge;
-mod blender_client;
 mod browser_login;
 mod data_dir_lock;
 mod engine_client;
@@ -99,14 +99,25 @@ enum Command {
         #[command(subcommand)]
         command: engine_client::Command,
     },
-    /// Install the Blender add-on or send a model to the open Blender scene.
-    Blender {
-        /// Loopback address of the MeshHarbor REST server.
-        #[arg(long, global = true, env = blender_client::SERVER_ENV, default_value = blender_client::DEFAULT_SERVER, value_parser = blender_client::parse_server)]
+    /// Install and enable the add-on on this machine with Blender closed.
+    InstallBlenderAddon {
+        #[arg(long, env = engine_client::SERVER_ENV, default_value = DEFAULT_LISTEN, value_parser = engine_client::parse_server)]
         server: SocketAddr,
-        #[command(subcommand)]
-        command: BlenderCommand,
     },
+    /// Run offline against the explicitly selected local data directory.
+    Local {
+        #[command(subcommand)]
+        command: LocalCommand,
+    },
+    /// Mark unfinished jobs as failed after stopping all engine processes for this data directory.
+    RecoverJobs {
+        #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
+        confirm_no_running_meshharbor: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LocalCommand {
     /// Import a PNG, JPEG, or GLB asset (up to 512 MiB; images up to 16 MiB/16 MP).
     Import { file: PathBuf },
     /// Inspect a supported asset file (up to 512 MiB; images up to 16 MiB/16 MP).
@@ -201,98 +212,6 @@ enum Command {
     },
     /// Show implemented operations and detected runtime capabilities.
     Doctor,
-    /// Inspect or request installation of a local mesh backend.
-    Backend {
-        #[command(subcommand)]
-        command: BackendCommand,
-    },
-    /// Reconcile background jobs left unfinished by an earlier exit.
-    Jobs {
-        #[command(subcommand)]
-        command: JobsCommand,
-    },
-    /// Manage the optional local Pixal3D MLX runtime.
-    Runtime {
-        #[command(subcommand)]
-        command: RuntimeCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum BlenderCommand {
-    /// Install and enable the add-on for the next Blender launch. Quit Blender first.
-    Install,
-    /// Send a stored GLB version to the open Blender scene. Requires MESHHARBOR_API_TOKEN.
-    Send {
-        asset_id: String,
-        /// Return the transfer ID without waiting for Blender to import the model.
-        #[arg(long)]
-        no_wait: bool,
-    },
-    /// Check an existing Blender transfer. Requires MESHHARBOR_API_TOKEN.
-    TransferStatus { transfer_id: uuid::Uuid },
-}
-
-#[derive(Debug, Subcommand)]
-enum BackendCommand {
-    /// Show QuadriFlow availability and the next supported action.
-    Status,
-    /// Request the guarded installation for the named backend.
-    Install {
-        #[arg(value_parser = ["quadriflow"])]
-        backend_id: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum JobsCommand {
-    /// List recent persisted job records without resuming or changing them.
-    List {
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-    },
-    /// Show the last persisted state for one job without resuming it.
-    Show { job_id: String },
-    /// Mark unfinished jobs as failed after stopping every MeshHarbor process using this data directory.
-    RecoverInterrupted {
-        #[arg(
-            long,
-            required = true,
-            action = clap::ArgAction::SetTrue,
-            help = "Acknowledge that no MeshHarbor serve or mcp process is using this data directory."
-        )]
-        confirm_no_running_meshharbor: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum RuntimeCommand {
-    /// Set up shared Python, uv, and Hugging Face account tools for model installs.
-    EnvironmentSetup,
-    /// Install pinned Pixal3D MLX backend dependencies using the shared environment.
-    Setup,
-    /// Sign into Hugging Face inside MeshHarbor's isolated model cache using an interactive terminal prompt.
-    HfLogin,
-    /// Download pinned Pixal3D and gated DINOv3 model files (~24 GB) after explicit confirmation.
-    InstallModels {
-        #[arg(long)]
-        confirm_large_download: bool,
-        #[arg(long)]
-        confirm_gated_access: bool,
-    },
-    /// Retry the isolated one-time NAF checkpoint conversion after model files are downloaded.
-    ConvertNaf,
-    /// Install a Linux x86_64 NVIDIA CUDA Python 3.12 runtime and run its CUDA/SDPA preflight.
-    CudaSetup,
-    /// Sign into Hugging Face inside the isolated Pixal3D CUDA model cache.
-    CudaHfLogin,
-    /// Download roughly 25–30 GB of pinned CUDA model files after gated DINOv3 access is granted.
-    CudaInstallModels {
-        #[arg(long)]
-        confirm_large_download: bool,
-        #[arg(long)]
-        confirm_gated_access: bool,
-    },
 }
 
 #[derive(Clone)]
@@ -303,132 +222,23 @@ struct AppState {
 
 #[derive(Clone)]
 struct McpServer {
-    core: OperationCore,
-    scheduler: Arc<JobScheduler>,
+    data_dir: PathBuf,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct SimplifyArgs {
-    asset_id: String,
-    target_triangles: u64,
-    #[serde(default = "default_max_error")]
-    max_error: f32,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct RetopologyPreflightArgs {
-    asset_id: String,
-    /// Approximate quad count (4 to 50,000); omit for automatic density.
-    target_quads: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct MeshProcessArgs {
-    asset_id: String,
-    /// Mesh operation ID from list_operations, such as mesh.retopology_lato2.
-    operation: String,
-    /// Optional operation parameters, such as resolution for mesh.voxel_remesh or target_quads for mesh.retopology.
-    #[serde(default)]
-    parameters: Option<Value>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct GenerateArgs {
-    asset_id: String,
-    #[serde(default = "default_generation_backend")]
-    backend_id: String,
-    #[serde(default = "default_generation_seed")]
-    seed: u64,
-    #[serde(default = "default_generation_resolution")]
-    resolution: u16,
-    #[serde(default = "default_generation_texture_size")]
-    texture_size: u16,
-    #[serde(default = "default_generation_target_faces")]
-    target_faces: u32,
-    target_vertices: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct GenerateModelArgs {
-    input: GenerationInput,
-    #[serde(default)]
-    parameters: GenerationOptions,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct AssetListArgs {
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct JobListArgs {
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct JobIdArgs {
-    job_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct CancelJobArgs {
-    job_id: String,
-    /// Leave a job alone if it has already started.
-    #[serde(default)]
-    queued_only: bool,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ImportArgs {
     filename: String,
-    /// Base64-encoded PNG, JPEG, or GLB bytes (decoded asset size limited to 512 MiB).
+    /// Base64-encoded PNG, JPEG, or GLB bytes.
     bytes_base64: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct ExportGlbArgs {
-    asset_id: String,
-    /// Absolute destination path on the computer running the local MCP server.
-    /// The file must not already exist; MeshHarbor never overwrites exports.
-    output_path: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ExportQuadObjArgs {
-    asset_id: String,
-    /// Absolute .obj destination path inside the MeshHarbor export directory; must not already exist.
-    output_path: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 struct BlenderInstallArgs {
-    /// Set true only after the user approves installing the add-on and changing Blender preferences.
-    #[serde(default)]
+    /// Set true only after the owner approves updating the local Blender preferences.
     confirmed: bool,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct BlenderSendArgs {
-    /// ID of the exact GLB asset version stored by the running MeshHarbor server.
-    asset_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct BlenderTransferArgs {
-    /// Transfer ID returned by send_to_blender.
-    transfer_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ModelInstallConfirmation {
-    /// Must be true to queue the approximately 25–30 GB model download.
-    confirm_large_download: bool,
-    /// Must be true only after the owner has obtained/accepted the gated DINOv3 access terms.
-    confirm_gated_access: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -474,468 +284,197 @@ impl From<CoreError> for ApiError {
 
 #[tool_router]
 impl McpServer {
-    fn new(core: OperationCore, scheduler: Arc<JobScheduler>) -> Self {
+    fn new(data_dir: PathBuf) -> Self {
         Self {
-            core,
-            scheduler,
+            data_dir,
             tool_router: Self::tool_router(),
         }
     }
 
     #[tool(
-        description = "List MeshHarbor operations and their implementation status. A listed operation with implemented=false is not available yet."
+        description = "Upload base64-encoded PNG, JPEG, or GLB bytes into the running Studio engine. Large local files can be uploaded with the CLI without base64."
     )]
-    async fn list_operations(&self) -> String {
-        serde_json::to_string_pretty(&self.core.list_operations())
-            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
-    }
-
-    #[tool(
-        description = "Report QuadriFlow sidecar availability and the next step. A managed sidecar is verified using its activation marker and binary digest without being executed."
-    )]
-    async fn quadriflow_backend_status(&self) -> String {
-        serde_json::to_string_pretty(&self.core.quadriflow_backend_status())
-            .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}"))
-    }
-
-    #[tool(
-        description = "Request a guarded installation of the pinned QuadriFlow backend. An in-process verifier checks Sigstore signature/provenance and the executable digest against the trusted manifest before any download or installation; the current manifest is empty, so this request fails closed without network or backend-directory writes. Unsigned temporary Actions artifacts are never installed."
-    )]
-    async fn install_quadriflow_backend(&self) -> String {
-        let core = self.core.clone();
-        match task::spawn_blocking(move || core.install_quadriflow_backend()).await {
-            Ok(Ok(installed)) => serde_json::to_string_pretty(&installed)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
-            Err(error) => {
-                json!({"error": format!("QuadriFlow installer worker failed: {error}")}).to_string()
+    async fn import_engine_asset(&self, params: Parameters<ImportArgs>) -> CallToolResult {
+        engine_tool_result(
+            async {
+                let bytes = decode_base64(&params.0.bytes_base64)?;
+                engine_client::Client::configured()?
+                    .import_asset(&params.0.filename, bytes)
+                    .await
             }
-        }
-    }
-
-    #[tool(
-        description = "Check one local GLB for quad retopology before installing or starting a backend. This is read-only and creates no job or asset. Passing confirms source eligibility only, not solver success or texture quality."
-    )]
-    async fn preflight_retopology(&self, params: Parameters<RetopologyPreflightArgs>) -> String {
-        let args = params.0;
-        match run_retopology_preflight(
-            self.core.clone(),
-            self.scheduler.clone(),
-            args.asset_id,
-            retopology_options(args.target_quads),
+            .await,
         )
-        .await
-        {
-            Ok(report) => serde_json::to_string_pretty(&report)
-                .unwrap_or_else(|error| json!({"error": error.to_string()}).to_string()),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(description = "List local assets in the MeshHarbor asset store.")]
-    async fn list_assets(&self, params: Parameters<AssetListArgs>) -> String {
-        let limit = params.0.limit.clamp(1, 200);
-        match self.core.store().list_assets(limit) {
-            Ok(assets) => serde_json::to_string_pretty(&assets)
-                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-            Err(error) => format!("{{\"error\":\"{}\"}}", error),
-        }
     }
 
     #[tool(
-        description = "List the newest persisted MeshHarbor jobs (default 50, maximum 200). This is read-only: it never resumes or modifies a job."
+        description = "Generate a new 3D model from a stored image or text in the running Studio engine. Returns its job ID."
     )]
-    async fn list_jobs(&self, params: Parameters<JobListArgs>) -> String {
-        match read_job_history(&self.core, params.0.limit) {
-            Ok(jobs) => serde_json::to_string_pretty(&jobs)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Import base64-encoded PNG, JPEG, or GLB bytes into the local MeshHarbor store (512 MiB maximum; PNG/JPEG 16 MiB and 16 MP maximum). This does not download assets or models from the network."
-    )]
-    async fn import_asset(&self, params: Parameters<ImportArgs>) -> String {
-        let decoded = match decode_base64(&params.0.bytes_base64) {
-            Ok(bytes) => bytes,
-            Err(error) => return json!({"error": error.to_string()}).to_string(),
-        };
-        let core = self.core.clone();
-        let filename = params.0.filename;
-        match task::spawn_blocking(move || core.import_asset(&filename, &decoded)).await {
-            Ok(Ok(asset)) => serde_json::to_string_pretty(&asset)
-                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-            Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
-            Err(error) => json!({"error": format!("import worker failed: {error}")}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Start a persistent asynchronous mesh.simplify job. Returns the job record immediately; poll get_job for completion."
-    )]
-    async fn start_simplification(&self, params: Parameters<SimplifyArgs>) -> String {
-        let args = params.0;
-        match start_simplify_job(
-            self.core.clone(),
-            self.scheduler.clone(),
-            &args.asset_id,
-            args.target_triangles,
-            args.max_error,
-        )
-        .await
-        {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Start a local mesh processing job for mesh.cleanup, mesh.voxel_remesh, uv.unwrap, render.optimize, mesh.compress, mesh.retopology, or mesh.retopology_lato2. The source asset stays unchanged; poll get_job for the derived asset and report. Experimental mesh.retopology_lato2 requires a configured local LATO.2 runtime and outputs one retopologized triangle GLB with embedded PBR maps rebaked by xatlas and CPU normal rays. Voxel Remesh rebuilds a closed geometry-only mesh from one static triangle GLB; it does not copy textures. uv.unwrap omits zero-area faces and rebakes the same mesh, not a high-to-low projection. Quad retopology requires an available QuadriFlow backend and one closed static triangle GLB. Supported embedded base-color/metallic-roughness PNG maps can be projected into the triangulated GLB preview with distance, facing-normal, coverage, and ambiguity gates; the separate quad-topology OBJ remains geometry-only. Unsupported textures/streams fail closed, and no self-intersection or measured geometric-error certification is claimed."
-    )]
-    async fn start_mesh_processing(&self, params: Parameters<MeshProcessArgs>) -> String {
-        let args = params.0;
-        match start_mesh_operation_job(
-            self.core.clone(),
-            self.scheduler.clone(),
-            &args.asset_id,
-            &args.operation,
-            args.parameters.unwrap_or_else(|| json!({})),
-        )
-        .await
-        {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Start a local image.generate job with a ready backend listed in runtime_doctor. The default auto selects platform Pixal3D. Choose lato2-cuda or lato2-mlx with optional target_vertices for single-image geometry-only generation. This tool never downloads models or installs packages."
-    )]
-    async fn start_image_generation(&self, params: Parameters<GenerateArgs>) -> String {
-        let args = params.0;
-        let options = GenerationOptions {
-            backend_id: args.backend_id,
-            seed: args.seed,
-            resolution: args.resolution,
-            texture_size: args.texture_size,
-            target_faces: args.target_faces,
-            target_vertices: args.target_vertices,
-            ..GenerationOptions::default()
-        };
-        match start_generation_job(
-            self.core.clone(),
-            self.scheduler.clone(),
-            GenerationInput::Image {
-                asset_id: args.asset_id,
-            },
-            options,
-            IMAGE_GENERATION_OPERATION,
-        )
-        .await
-        {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Start a local model.generate job. Check runtime_doctor for each backend's input_modes. Text input requires a text-conditioned backend. This tool never installs packages or downloads weights."
-    )]
-    async fn start_model_generation(&self, params: Parameters<GenerateModelArgs>) -> String {
-        let args = params.0;
-        match start_generation_job(
-            self.core.clone(),
-            self.scheduler.clone(),
-            args.input,
-            args.parameters,
-            MODEL_GENERATION_OPERATION,
-        )
-        .await
-        {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|error| json!({"error":error.to_string()}).to_string()),
-            Err(error) => json!({"error":error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Export a completed mesh asset as a GLB to an absolute path inside MESHHARBOR_EXPORT_DIR (defaults to the MeshHarbor data directory's exports folder) on the local MCP host. The destination must not exist; existing files are never overwritten. Maximum export size is 512 MiB."
-    )]
-    async fn export_glb(&self, params: Parameters<ExportGlbArgs>) -> String {
-        let core = self.core.clone();
-        let asset_id = params.0.asset_id;
-        let output_path = PathBuf::from(params.0.output_path);
-        match task::spawn_blocking(move || export_glb_file(&core, &asset_id, &output_path)).await {
-            Ok(Ok(result)) => serde_json::to_string_pretty(&result)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
-            Err(error) => {
-                json!({"error": format!("GLB export worker failed: {error}")}).to_string()
+    async fn generate_model(&self, params: Parameters<actions::GenerateModel>) -> CallToolResult {
+        engine_tool_result(
+            async {
+                engine_client::Client::configured()?
+                    .generate(params.0)
+                    .await
             }
-        }
-    }
-
-    #[tool(
-        description = "Install and enable the bundled MeshHarbor Bridge add-on on the local Blender host for its next launch. Only call after explicit user approval. Blender must be closed; if it is running, this does not change its files or preferences. No MeshHarbor REST server or API token is needed to install."
-    )]
-    async fn install_blender_addon(&self, params: Parameters<BlenderInstallArgs>) -> String {
-        if !params.0.confirmed {
-            return json!({"error": "Installing and enabling the Blender add-on requires the user's explicit confirmation."}).to_string();
-        }
-        let result = async {
-            let server = blender_client::configured_server()?;
-            blender_bridge::install_local(server).await
-        }
-        .await;
-        blender_tool_result(result)
-    }
-
-    #[tool(
-        description = "Send the exact stored GLB version to the current scene in the connected Blender. Supports MeshHarbor meshopt-compressed GLBs without changing the source. Requires a running local MeshHarbor REST server, MESHHARBOR_API_TOKEN in the MCP process environment, and Start Bridge enabled in Blender. Returns a transfer ID immediately; poll get_blender_transfer to confirm import. Does not install the add-on or save the scene."
-    )]
-    async fn send_to_blender(&self, params: Parameters<BlenderSendArgs>) -> String {
-        let result = async {
-            let client = blender_client::Client::new(blender_client::configured_server()?)?;
-            client.send(params.0.asset_id).await
-        }
-        .await;
-        blender_tool_result(result)
-    }
-
-    #[tool(
-        description = "Check a recent Blender transfer without sending it again. Reports waiting, importing, succeeded or failed."
-    )]
-    async fn get_blender_transfer(&self, params: Parameters<BlenderTransferArgs>) -> String {
-        let Ok(id) = uuid::Uuid::parse_str(&params.0.transfer_id) else {
-            return json!({"error": "The Blender transfer ID is invalid."}).to_string();
-        };
-        let result = async {
-            let client = blender_client::Client::new(blender_client::configured_server()?)?;
-            client.status(id).await
-        }
-        .await;
-        blender_tool_result(result)
-    }
-
-    #[tool(
-        description = "Export a completed QuadriFlow retopology result's editable quad OBJ artifact to an absolute path inside MESHHARBOR_EXPORT_DIR (defaults to the MeshHarbor data directory's exports folder) on the local MCP host. The destination must not exist; existing files are never overwritten. Maximum export size is 64 MiB."
-    )]
-    async fn export_quad_obj(&self, params: Parameters<ExportQuadObjArgs>) -> String {
-        let core = self.core.clone();
-        let asset_id = params.0.asset_id;
-        let output_path = PathBuf::from(params.0.output_path);
-        match task::spawn_blocking(move || export_quad_obj_file(&core, &asset_id, &output_path))
-            .await
-        {
-            Ok(Ok(result)) => serde_json::to_string_pretty(&result)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Ok(Err(error)) => json!({"error": error.to_string()}).to_string(),
-            Err(error) => {
-                json!({"error": format!("OBJ export worker failed: {error}")}).to_string()
-            }
-        }
-    }
-
-    #[tool(
-        description = "Queue the isolated Pixal3D MLX Python 3.12 environment setup. This bootstraps the pinned uv tool when needed, then installs the pinned dependencies. Poll get_job for status."
-    )]
-    async fn setup_pixal3d_mlx_runtime(&self) -> String {
-        match start_runtime_job(
-            self.core.clone(),
-            self.scheduler.clone(),
-            RuntimeJobKind::Setup,
+            .await,
         )
-        .await
-        {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
     }
 
     #[tool(
-        description = "Queue the explicit approximately 24 GB Pixal3D/DINOv3 model download. Invoke only when the owner has explicitly confirmed this large download and already obtained the required gated DINOv3 access. No credentials are accepted by this tool; authenticate separately with `meshharbor runtime hf-login`. Poll get_job for status."
+        description = "Install and enable the Blender add-on on this machine after explicit owner approval. Blender must be closed."
     )]
-    async fn install_pixal3d_mlx_models(
+    async fn install_blender_addon(
         &self,
-        params: Parameters<ModelInstallConfirmation>,
-    ) -> String {
-        if !params.0.confirm_large_download || !params.0.confirm_gated_access {
-            return json!({
-                "error": "Model installation requires explicit confirmation of the approximately 24 GB download and prior owner-approved DINOv3 gated access."
-            })
-            .to_string();
-        }
-        match start_runtime_job(
-            self.core.clone(),
-            self.scheduler.clone(),
-            RuntimeJobKind::InstallModels,
+        params: Parameters<BlenderInstallArgs>,
+    ) -> CallToolResult {
+        engine_tool_result(
+            async {
+                if !params.0.confirmed {
+                    return Err(
+                        "Installing the Blender add-on requires explicit owner approval.".into(),
+                    );
+                }
+                let server = engine_client::configured_address()?;
+                Ok(serde_json::to_value(
+                    blender_bridge::install_local(server).await?,
+                )?)
+            }
+            .await,
         )
-        .await
-        {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
     }
 
     #[tool(
-        description = "Queue the isolated one-time NAF checkpoint conversion after the model download succeeds. Poll get_job for status."
-    )]
-    async fn convert_pixal3d_mlx_naf(&self) -> String {
-        match start_runtime_job(
-            self.core.clone(),
-            self.scheduler.clone(),
-            RuntimeJobKind::ConvertNaf,
-        )
-        .await
-        {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Queue the managed Linux x86_64/NVIDIA CUDA environment setup. It bootstraps pinned uv and managed Python 3.12, resolves upstream dependency ranges into a private per-install lock, installs the PyTorch 2.6.0/CUDA 12.4 profile and runs the CUDA/SDPA preflight. No model weights are downloaded. Poll get_job for status."
-    )]
-    async fn setup_pixal3d_cuda_runtime(&self) -> String {
-        match start_runtime_job(
-            self.core.clone(),
-            self.scheduler.clone(),
-            RuntimeJobKind::CudaSetup,
-        )
-        .await
-        {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Queue the explicit roughly 25–30 GB Pixal3D/DINOv3/NAF model download for CUDA. Invoke only after the owner explicitly confirms the large download and has obtained gated DINOv3 access. Login is separate via `meshharbor runtime cuda-hf-login`; this tool accepts no credentials. Poll get_job for status."
-    )]
-    async fn install_pixal3d_cuda_models(
-        &self,
-        params: Parameters<ModelInstallConfirmation>,
-    ) -> String {
-        if !params.0.confirm_large_download || !params.0.confirm_gated_access {
-            return json!({
-                "error": "CUDA model installation requires explicit confirmation of the 25–30 GB download and prior owner-approved DINOv3 access."
-            })
-            .to_string();
-        }
-        match start_runtime_job(
-            self.core.clone(),
-            self.scheduler.clone(),
-            RuntimeJobKind::CudaInstallModels,
-        )
-        .await
-        {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Get the latest state, progress, result, and failure details for a MeshHarbor job."
-    )]
-    async fn get_job(&self, params: Parameters<JobIdArgs>) -> String {
-        match read_job_record(&self.core, &params.0.job_id) {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Cancel a queued job or request a stop for a running job before it commits its result. Mesh processing stops at a safe checkpoint; runtime jobs keep partial downloads for a retry."
-    )]
-    async fn cancel_job(&self, params: Parameters<CancelJobArgs>) -> String {
-        let args = params.0;
-        match cancel_job(&self.core, &self.scheduler, &args.job_id, args.queued_only) {
-            Ok(job) => serde_json::to_string_pretty(&job)
-                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-            Err(error) => json!({"error": error.to_string()}).to_string(),
-        }
-    }
-
-    #[tool(
-        description = "Report local runtime capabilities and clearly distinguish ready mesh operations from unavailable model backends."
-    )]
-    async fn runtime_doctor(&self) -> String {
-        serde_json::to_string_pretty(&self.core.runtime_doctor())
-            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
-    }
-
-    #[tool(
-        description = "Browse or manage assets on the running Studio engine: page, show, versions, restore, or export the exact bytes of an artifact to a new absolute path within MESHHARBOR_EXPORT_DIR. Requires the local server bearer token in the MCP process environment, never in a tool argument."
+        description = "List or show stored versions, or export one exact artifact to a new absolute path inside MESHHARBOR_EXPORT_DIR."
     )]
     async fn engine_assets(
         &self,
         params: Parameters<engine_client::Request<engine_client::Assets>>,
     ) -> CallToolResult {
-        let result = async {
-            engine_client::Client::configured()?
-                .assets(params.0.request, Some(self.core.store().root()))
-                .await
-        }
-        .await;
-        engine_tool_result(result)
+        engine_tool_result(
+            async {
+                engine_client::Client::configured()?
+                    .assets(params.0.request, Some(&self.data_dir))
+                    .await
+            }
+            .await,
+        )
+    }
+
+    #[tool(description = "List 3D models or their versions, or make a saved version current.")]
+    async fn engine_models(
+        &self,
+        params: Parameters<engine_client::Request<engine_client::Models>>,
+    ) -> CallToolResult {
+        engine_tool_result(
+            async {
+                engine_client::Client::configured()?
+                    .models(params.0.request)
+                    .await
+            }
+            .await,
+        )
     }
 
     #[tool(
-        description = "Manage the running Studio engine's job queue: list, show, steps (including saved command logs), submit, retry, cancel, queue, or swap. Use submit for jobs that should appear in Studio's live generation queue. Confirm retries with the owner first, as runtime retries can download models."
+        description = "Simplify, clean up, remesh, unwrap UVs, optimize rendering, compress, run retopology, or preflight QuadriFlow on a saved mesh version."
+    )]
+    async fn engine_mesh(
+        &self,
+        params: Parameters<engine_client::Request<engine_client::Mesh>>,
+    ) -> CallToolResult {
+        engine_tool_result(
+            async {
+                engine_client::Client::configured()?
+                    .mesh(params.0.request)
+                    .await
+            }
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "List waiting generation jobs or swap two adjacent jobs before they start."
+    )]
+    async fn engine_generation_queue(
+        &self,
+        params: Parameters<engine_client::Request<engine_client::GenerationQueue>>,
+    ) -> CallToolResult {
+        engine_tool_result(
+            async {
+                engine_client::Client::configured()?
+                    .generation_queue(params.0.request)
+                    .await
+            }
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "List, inspect, cancel, or retry a recorded job. Confirm downloads with the owner before retrying runtime installations."
     )]
     async fn engine_jobs(
         &self,
         params: Parameters<engine_client::Request<engine_client::Jobs>>,
     ) -> CallToolResult {
-        let result = async {
-            engine_client::Client::configured()?
-                .jobs(params.0.request)
-                .await
-        }
-        .await;
-        engine_tool_result(result)
+        engine_tool_result(
+            async {
+                engine_client::Client::configured()?
+                    .jobs(params.0.request)
+                    .await
+            }
+            .await,
+        )
     }
 
     #[tool(
-        description = "Use the running Studio engine's runtime status, operations, per-backend jobs, catalog and Pixal3D setup/downloads, model removal, and Hugging Face connection checks, device login, and disconnect. Ask the owner before changing runtime files or authentication, honor download and gated confirmations, and have the owner complete device authorization in their browser. Never accept or request a Hugging Face token in tool arguments."
+        description = "Check readiness and manage runtime environments, verified backends, and model files. Ask the owner before installations and removals."
     )]
     async fn engine_runtime(
         &self,
         params: Parameters<engine_client::Request<engine_client::Runtime>>,
     ) -> CallToolResult {
-        let result = async {
-            engine_client::Client::configured()?
-                .runtime(params.0.request)
-                .await
-        }
-        .await;
-        engine_tool_result(result)
+        engine_tool_result(
+            async {
+                engine_client::Client::configured()?
+                    .runtime(params.0.request)
+                    .await
+            }
+            .await,
+        )
     }
 
     #[tool(
-        description = "Check the connection to Blender, or save the bundled .py add-on for manual installation to a new absolute path inside MESHHARBOR_EXPORT_DIR. Downloading does not install or execute the add-on."
+        description = "Check a Hugging Face connection or manage browser device authorization for the mlx or cuda account scope. Never accept an access token as a tool argument."
+    )]
+    async fn engine_connections(
+        &self,
+        params: Parameters<engine_client::Request<engine_client::Connections>>,
+    ) -> CallToolResult {
+        engine_tool_result(
+            async {
+                engine_client::Client::configured()?
+                    .connections(params.0.request)
+                    .await
+            }
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Check Blender, transfer an exact model version, track a transfer, or download the bundled add-on."
     )]
     async fn engine_blender(
         &self,
         params: Parameters<engine_client::Request<engine_client::Blender>>,
     ) -> CallToolResult {
-        let result = async {
-            engine_client::Client::configured()?
-                .blender(params.0.request, Some(self.core.store().root()))
-                .await
-        }
-        .await;
-        engine_tool_result(result)
+        engine_tool_result(
+            async {
+                engine_client::Client::configured()?
+                    .blender(params.0.request, Some(&self.data_dir))
+                    .await
+            }
+            .await,
+        )
     }
 }
 
@@ -944,18 +483,9 @@ impl ServerHandler for McpServer {}
 
 fn engine_tool_result(result: Result<Value, BoxError>) -> CallToolResult {
     match result {
+        Ok(value) if value.is_object() => CallToolResult::structured(value),
         Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
-        Err(error) => CallToolResult::error(vec![ContentBlock::text(
-            json!({"error": error.to_string()}).to_string(),
-        )]),
-    }
-}
-
-fn blender_tool_result(result: Result<impl Serialize, impl std::fmt::Display>) -> String {
-    match result {
-        Ok(value) => serde_json::to_string_pretty(&value)
-            .unwrap_or_else(|error| json!({"error": error.to_string()}).to_string()),
-        Err(error) => json!({"error": error.to_string()}).to_string(),
+        Err(error) => CallToolResult::structured_error(json!({"error": error.to_string()})),
     }
 }
 
@@ -1158,21 +688,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
     let root = cli.data_dir;
-    let _store_lock = match cli.command {
-        Command::Import { .. }
-        | Command::Inspect { .. }
-        | Command::Assets { .. }
-        | Command::Simplify { .. }
-        | Command::RetopologyPreflight { .. }
-        | Command::ProcessMesh { .. }
-        | Command::Generate { .. }
-        | Command::Doctor
-        | Command::Backend { .. }
-        | Command::Runtime { .. }
-        | Command::Jobs {
-            command: JobsCommand::List { .. } | JobsCommand::Show { .. },
-        } => Some(data_dir_lock::DataDirLock::try_acquire_for_service(&root)?),
-        _ => None,
+    let _store_lock = if matches!(cli.command, Command::Local { .. }) {
+        Some(data_dir_lock::DataDirLock::try_acquire_for_service(&root)?)
+    } else {
+        None
     };
     match cli.command {
         Command::Serve { listen, .. } => {
@@ -1187,9 +706,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             keep_binary,
         } => uninstall::run(&root, confirm, keep_binary)?,
         Command::Mcp => {
-            let jobs = open_job_service(&root).await?;
-            let state = &jobs.state;
-            let server = McpServer::new(state.core.clone(), state.scheduler.clone());
+            let server = McpServer::new(root);
             let service = server.serve(rmcp::transport::stdio()).await?;
             let cancellation = service.cancellation_token();
             let waiting = service.waiting();
@@ -1197,13 +714,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let closed = tokio::select! {
                 result = &mut waiting => result,
                 _ = shutdown_signal() => {
-                    stop_jobs(state);
                     cancellation.cancel();
                     waiting.await
                 }
             };
-            stop_jobs(state);
-            state.scheduler.drain().await;
             closed?;
         }
         Command::Engine { server, command } => {
@@ -1213,292 +727,185 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|error| -> Box<dyn std::error::Error> { error })?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        Command::Blender { server, command } => match command {
-            BlenderCommand::Install => {
-                let result = blender_bridge::install_local(server).await?;
+        Command::InstallBlenderAddon { server } => {
+            let result = blender_bridge::install_local(server).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Command::Local { command } => match command {
+            LocalCommand::Import { file } => {
+                let bytes = read_bounded_asset(&file, MAX_ASSET_BYTES).await?;
+                let name = file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("asset");
+                let asset = OperationCore::open(&root)?.import_asset(name, &bytes)?;
+                println!("{}", serde_json::to_string_pretty(&asset)?);
+            }
+            LocalCommand::Inspect { file } => {
+                let bytes = read_bounded_asset(&file, MAX_ASSET_BYTES).await?;
+                let name = file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("asset");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &OperationCore::open(&root)?.inspect_bytes(name, &bytes)?
+                    )?
+                );
+            }
+            LocalCommand::Assets { limit } => {
+                let assets = OperationCore::open(&root)?.store().list_assets(limit)?;
+                println!("{}", serde_json::to_string_pretty(&assets)?);
+            }
+            LocalCommand::Simplify {
+                asset_id,
+                target_triangles,
+                max_error,
+                output,
+            } => {
+                preflight_cli_output_paths(output.as_deref(), None)?;
+                let core = OperationCore::open(&root)?;
+                let result = core.simplify_asset(&asset_id, target_triangles, max_error)?;
+                if let Some(path) = output {
+                    let artifact = result
+                        .asset
+                        .artifacts
+                        .iter()
+                        .find(|artifact| artifact.kind == "derived")
+                        .ok_or("Simplification output artifact was not found.")?;
+                    let bytes = core.store().read_artifact(&artifact.id)?.bytes;
+                    write_cli_output(&path, &bytes)?;
+                }
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
-            BlenderCommand::Send { asset_id, no_wait } => {
-                let client = blender_client::Client::new(server)?;
-                let transfer = client.send(asset_id).await?;
-                let transfer = if no_wait {
-                    transfer
-                } else {
-                    client.wait(transfer).await?
-                };
-                if transfer.stage == blender_bridge::Stage::Failed {
-                    return Err(format!(
-                        "Blender transfer {} failed: {}",
-                        transfer.id,
-                        transfer
-                            .error
-                            .as_deref()
-                            .unwrap_or("Blender could not import the model."),
-                    )
-                    .into());
+            LocalCommand::RetopologyPreflight {
+                asset_id,
+                target_quads,
+            } => {
+                let core = OperationCore::open(&root)?;
+                let result =
+                    core.preflight_retopology_asset(&asset_id, retopology_options(target_quads))?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            LocalCommand::ProcessMesh {
+                asset_id,
+                operation,
+                target_quads,
+                resolution,
+                voxel_resolution,
+                padding,
+                overdraw_threshold,
+                for_retopology,
+                output,
+                quad_output,
+            } => {
+                validate_process_mesh_cli_options(
+                    &operation,
+                    target_quads,
+                    quad_output.is_some(),
+                    resolution,
+                    voxel_resolution,
+                    padding,
+                    overdraw_threshold,
+                )?;
+                if for_retopology && operation != "mesh.cleanup" {
+                    return Err("--for-retopology requires mesh.cleanup.".into());
                 }
-                println!("{}", serde_json::to_string_pretty(&transfer)?);
+                preflight_cli_output_paths(output.as_deref(), quad_output.as_deref())?;
+                let core = open_operation_core(&root)?;
+                let mut parameters = process_mesh_cli_parameters(
+                    &operation,
+                    target_quads,
+                    resolution,
+                    voxel_resolution,
+                    padding,
+                    overdraw_threshold,
+                );
+                if for_retopology {
+                    parameters["for_retopology"] = json!(true);
+                }
+                let result = core.process_mesh_asset(&asset_id, &operation, parameters)?;
+                if let Some(path) = output {
+                    let artifact = result
+                        .asset
+                        .artifacts
+                        .iter()
+                        .find(|artifact| artifact.kind == "derived")
+                        .ok_or("Mesh processing output artifact was not found.")?;
+                    let bytes = core.store().read_artifact(&artifact.id)?.bytes;
+                    write_cli_output(&path, &bytes)?;
+                }
+                if let Some(path) = quad_output {
+                    let artifact = result
+                        .asset
+                        .artifacts
+                        .iter()
+                        .find(|artifact| artifact.kind == "quad_topology")
+                        .ok_or("Quad retopology OBJ artifact was not found.")?;
+                    let bytes = core.store().read_artifact(&artifact.id)?.bytes;
+                    write_cli_output(&path, &bytes)?;
+                }
+                println!("{}", serde_json::to_string_pretty(&result)?);
             }
-            BlenderCommand::TransferStatus { transfer_id } => {
-                let transfer = blender_client::Client::new(server)?
-                    .status(transfer_id)
-                    .await?;
-                println!("{}", serde_json::to_string_pretty(&transfer)?);
-            }
-        },
-        Command::Import { file } => {
-            let bytes = read_bounded_asset(&file, MAX_ASSET_BYTES).await?;
-            let name = file
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("asset");
-            let asset = OperationCore::open(&root)?.import_asset(name, &bytes)?;
-            println!("{}", serde_json::to_string_pretty(&asset)?);
-        }
-        Command::Inspect { file } => {
-            let bytes = read_bounded_asset(&file, MAX_ASSET_BYTES).await?;
-            let name = file
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("asset");
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &OperationCore::open(&root)?.inspect_bytes(name, &bytes)?
-                )?
-            );
-        }
-        Command::Assets { limit } => {
-            let assets = OperationCore::open(&root)?.store().list_assets(limit)?;
-            println!("{}", serde_json::to_string_pretty(&assets)?);
-        }
-        Command::Simplify {
-            asset_id,
-            target_triangles,
-            max_error,
-            output,
-        } => {
-            preflight_cli_output_paths(output.as_deref(), None)?;
-            let core = OperationCore::open(&root)?;
-            let result = core.simplify_asset(&asset_id, target_triangles, max_error)?;
-            if let Some(path) = output {
-                let artifact = result
-                    .asset
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.kind == "derived")
-                    .ok_or("Simplification output artifact was not found.")?;
-                let bytes = core.store().read_artifact(&artifact.id)?.bytes;
-                write_cli_output(&path, &bytes)?;
-            }
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
-        Command::RetopologyPreflight {
-            asset_id,
-            target_quads,
-        } => {
-            let core = OperationCore::open(&root)?;
-            let result =
-                core.preflight_retopology_asset(&asset_id, retopology_options(target_quads))?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
-        Command::ProcessMesh {
-            asset_id,
-            operation,
-            target_quads,
-            resolution,
-            voxel_resolution,
-            padding,
-            overdraw_threshold,
-            for_retopology,
-            output,
-            quad_output,
-        } => {
-            validate_process_mesh_cli_options(
-                &operation,
-                target_quads,
-                quad_output.is_some(),
-                resolution,
-                voxel_resolution,
-                padding,
-                overdraw_threshold,
-            )?;
-            if for_retopology && operation != "mesh.cleanup" {
-                return Err("--for-retopology requires mesh.cleanup.".into());
-            }
-            preflight_cli_output_paths(output.as_deref(), quad_output.as_deref())?;
-            let core = open_operation_core(&root)?;
-            let mut parameters = process_mesh_cli_parameters(
-                &operation,
-                target_quads,
-                resolution,
-                voxel_resolution,
-                padding,
-                overdraw_threshold,
-            );
-            if for_retopology {
-                parameters["for_retopology"] = json!(true);
-            }
-            let result = core.process_mesh_asset(&asset_id, &operation, parameters)?;
-            if let Some(path) = output {
-                let artifact = result
-                    .asset
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.kind == "derived")
-                    .ok_or("Mesh processing output artifact was not found.")?;
-                let bytes = core.store().read_artifact(&artifact.id)?.bytes;
-                write_cli_output(&path, &bytes)?;
-            }
-            if let Some(path) = quad_output {
-                let artifact = result
-                    .asset
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.kind == "quad_topology")
-                    .ok_or("Quad retopology OBJ artifact was not found.")?;
-                let bytes = core.store().read_artifact(&artifact.id)?.bytes;
-                write_cli_output(&path, &bytes)?;
-            }
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
-        Command::Generate {
-            asset_id,
-            prompt,
-            backend_id,
-            seed,
-            resolution,
-            texture_size,
-            target_faces,
-            target_vertices,
-            tuning,
-            view_input,
-            output,
-        } => {
-            preflight_cli_output_paths(output.as_deref(), None)?;
-            let _runtime_lock = acquire_generation_runtime_lock(&root)?;
-            let core = OperationCore::open(&root)?;
-            let options = GenerationOptions {
+            LocalCommand::Generate {
+                asset_id,
+                prompt,
                 backend_id,
                 seed,
                 resolution,
                 texture_size,
                 target_faces,
                 target_vertices,
-                tuning: tuning.unwrap_or_default(),
+                tuning,
                 view_input,
-            };
-            let result = match (asset_id, prompt) {
-                (Some(asset_id), None) => core.generate_image(&asset_id, options)?,
-                (None, Some(prompt)) => {
-                    core.generate_model(&GenerationInput::Text { prompt }, options)?
-                }
-                _ => unreachable!("Clap requires one generation input"),
-            };
-            if let Some(path) = output {
-                let artifact = result
-                    .asset
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.kind == "derived")
-                    .ok_or("Generation output artifact was not found.")?;
-                let bytes = core.store().read_artifact(&artifact.id)?.bytes;
-                write_cli_output(&path, &bytes)?;
-            }
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
-        Command::Doctor => println!(
-            "{}",
-            serde_json::to_string_pretty(&open_operation_core(&root)?.runtime_doctor())?
-        ),
-        Command::Backend { command } => {
-            let core = open_operation_core(&root)?;
-            match command {
-                BackendCommand::Status => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&core.quadriflow_backend_status())?
-                    );
-                }
-                BackendCommand::Install { backend_id: _ } => {
-                    let installed = core.install_quadriflow_backend()?;
-                    println!("{}", serde_json::to_string_pretty(&installed)?);
-                }
-            }
-        }
-        Command::Jobs { command } => match command {
-            JobsCommand::List { limit } => {
+                output,
+            } => {
+                preflight_cli_output_paths(output.as_deref(), None)?;
+                let _runtime_lock = acquire_generation_runtime_lock(&root)?;
                 let core = OperationCore::open(&root)?;
-                let jobs = read_job_history(&core, limit)?;
-                println!("{}", serde_json::to_string_pretty(&jobs)?);
+                let options = GenerationOptions {
+                    backend_id,
+                    seed,
+                    resolution,
+                    texture_size,
+                    target_faces,
+                    target_vertices,
+                    tuning: tuning.unwrap_or_default(),
+                    view_input,
+                };
+                let result = match (asset_id, prompt) {
+                    (Some(asset_id), None) => core.generate_image(&asset_id, options)?,
+                    (None, Some(prompt)) => {
+                        core.generate_model(&GenerationInput::Text { prompt }, options)?
+                    }
+                    _ => unreachable!("Clap requires one generation input"),
+                };
+                if let Some(path) = output {
+                    let artifact = result
+                        .asset
+                        .artifacts
+                        .iter()
+                        .find(|artifact| artifact.kind == "derived")
+                        .ok_or("Generation output artifact was not found.")?;
+                    let bytes = core.store().read_artifact(&artifact.id)?.bytes;
+                    write_cli_output(&path, &bytes)?;
+                }
+                println!("{}", serde_json::to_string_pretty(&result)?);
             }
-            JobsCommand::Show { job_id } => {
-                let core = OperationCore::open(&root)?;
-                let job = read_job_record(&core, &job_id)?;
-                println!("{}", serde_json::to_string_pretty(&job)?);
-            }
-            JobsCommand::RecoverInterrupted { .. } => {
-                let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_recovery(&root)?;
-                let core = OperationCore::open(&root)?;
-                let recovered = core.store().recover_interrupted_jobs()?;
-                eprintln!(
-                    "Marked {} interrupted job(s) as failed. Existing assets and download caches were left untouched; inspect them before retrying.",
-                    recovered.len()
-                );
-                println!("{}", serde_json::to_string_pretty(&recovered)?);
-            }
+            LocalCommand::Doctor => println!(
+                "{}",
+                serde_json::to_string_pretty(&open_operation_core(&root)?.runtime_doctor())?
+            ),
         },
-        Command::Runtime { command } => {
-            let _runtime_lock = acquire_runtime_write_lock(&root)?;
+        Command::RecoverJobs { .. } => {
+            let _data_dir_lock = data_dir_lock::DataDirLock::try_acquire_for_recovery(&root)?;
             let core = OperationCore::open(&root)?;
-            match command {
-                RuntimeCommand::EnvironmentSetup => {
-                    let report = core.setup_model_environment()?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-                RuntimeCommand::Setup => {
-                    let report = core.setup_pixal3d_mlx_environment()?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-                RuntimeCommand::HfLogin => {
-                    core.login_pixal3d_mlx_huggingface()?;
-                    println!(
-                        "Hugging Face authentication is configured in the isolated MeshHarbor cache."
-                    );
-                }
-                RuntimeCommand::InstallModels {
-                    confirm_large_download,
-                    confirm_gated_access,
-                } => {
-                    let report = core
-                        .install_pixal3d_mlx_models(confirm_large_download, confirm_gated_access)?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-                RuntimeCommand::ConvertNaf => {
-                    let report = core.convert_pixal3d_mlx_naf()?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-                RuntimeCommand::CudaSetup => {
-                    let report = core.setup_pixal3d_cuda_environment()?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-                RuntimeCommand::CudaHfLogin => {
-                    core.login_pixal3d_cuda_huggingface()?;
-                    println!(
-                        "Hugging Face authentication is configured in the isolated Pixal3D CUDA cache."
-                    );
-                }
-                RuntimeCommand::CudaInstallModels {
-                    confirm_large_download,
-                    confirm_gated_access,
-                } => {
-                    let report = core.install_pixal3d_cuda_models(
-                        confirm_large_download,
-                        confirm_gated_access,
-                    )?;
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                }
-            }
+            let recovered = core.store().recover_interrupted_jobs()?;
+            eprintln!(
+                "Marked {} interrupted job(s) as failed. Existing assets and download caches were left untouched; inspect them before retrying.",
+                recovered.len()
+            );
         }
     }
     Ok(())
@@ -1530,25 +937,25 @@ fn api_router_with_statuses(
             post(api_start_model_environment).layer(DefaultBodyLimit::max(1024)),
         )
         .route(
-            "/api/v1/runtime/{backend}/huggingface/browser",
+            "/api/v1/connections/huggingface/{scope}/sessions",
             post(browser_login::start),
         )
         .route(
-            "/api/v1/runtime/{backend}/huggingface/browser/{session}",
+            "/api/v1/connections/huggingface/{scope}/sessions/{session}",
             get(browser_login::status).delete(browser_login::cancel),
         )
         .route(
-            "/api/v1/runtime/{backend}/huggingface",
+            "/api/v1/connections/huggingface/{scope}",
             post(api_huggingface_connection)
                 .delete(api_disconnect_huggingface)
                 .layer(DefaultBodyLimit::max(2048)),
         )
         .route(
-            "/api/v1/runtime/{backend}/huggingface/check",
+            "/api/v1/connections/huggingface/{scope}/check",
             post(api_check_huggingface_connection),
         )
         .route(
-            "/api/v1/runtime/{backend}/model-access",
+            "/api/v1/connections/huggingface/{scope}/model-access",
             post(api_model_access),
         )
         .route(
@@ -1561,45 +968,21 @@ fn api_router_with_statuses(
         )
         .route("/api/v1/runtime/{backend}/jobs", get(api_runtime_jobs))
         .route(
-            "/api/v1/backends/quadriflow",
+            "/api/v1/runtime/quadriflow",
             get(api_quadriflow_backend_status),
         )
         .route(
-            "/api/v1/backends/quadriflow/install",
+            "/api/v1/runtime/quadriflow/install",
             post(api_install_quadriflow_backend),
-        )
-        .route(
-            "/api/v1/runtime/pixal3d-mlx/setup",
-            post(api_start_runtime_setup),
-        )
-        .route(
-            "/api/v1/runtime/pixal3d-mlx/models",
-            post(api_start_runtime_models),
-        )
-        .route(
-            "/api/v1/runtime/pixal3d-mlx/convert-naf",
-            post(api_start_runtime_naf_conversion),
-        )
-        .route(
-            "/api/v1/runtime/pixal3d-cuda/setup",
-            post(api_start_cuda_runtime_setup),
-        )
-        .route(
-            "/api/v1/runtime/pixal3d-cuda/models",
-            post(api_start_cuda_runtime_models),
-        )
-        .route(
-            "/api/v1/runtime/pixal3d-cuda/multiview",
-            post(api_start_cuda_multiview_models),
         )
         .route("/api/v1/operations", get(api_operations))
         .route(
             "/api/v1/assets",
-            get(api_list_assets)
+            get(api_list_asset_page)
                 .post(api_import_asset)
                 .layer(DefaultBodyLimit::max(MAX_ASSET_BYTES)),
         )
-        .route("/api/v1/assets/page", get(api_list_asset_page))
+        .route("/api/v1/models", get(api_list_model_page))
         .route(
             "/api/v1/models/{model_id}/versions",
             get(api_model_versions),
@@ -1610,13 +993,30 @@ fn api_router_with_statuses(
         )
         .route("/api/v1/assets/{asset_id}", get(api_get_asset))
         .route("/api/v1/assets/{asset_id}/simplify", post(api_simplify))
+        .route("/api/v1/assets/{asset_id}/cleanup", post(api_cleanup))
+        .route(
+            "/api/v1/assets/{asset_id}/voxel-remesh",
+            post(api_voxel_remesh),
+        )
+        .route("/api/v1/assets/{asset_id}/unwrap-uv", post(api_unwrap_uv))
+        .route(
+            "/api/v1/assets/{asset_id}/optimize-rendering",
+            post(api_optimize_rendering),
+        )
+        .route("/api/v1/assets/{asset_id}/compress", post(api_compress))
+        .route("/api/v1/assets/{asset_id}/retopology", post(api_retopology))
+        .route(
+            "/api/v1/assets/{asset_id}/retopology-lato2",
+            post(api_lato2_retopology),
+        )
         .route(
             "/api/v1/assets/{asset_id}/retopology-preflight",
             post(api_retopology_preflight).layer(DefaultBodyLimit::max(1024)),
         )
-        .route("/api/v1/jobs", get(api_list_jobs).post(api_create_job))
+        .route("/api/v1/generation", post(api_generate_model))
+        .route("/api/v1/jobs", get(api_list_jobs))
         .route(
-            "/api/v1/jobs/generation-queue",
+            "/api/v1/generation/queue",
             get(api_generation_queue)
                 .post(api_swap_generation_queue)
                 .layer(DefaultBodyLimit::max(1024)),
@@ -1677,16 +1077,17 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
                 .is_some_and(|(origin, authority)| is_same_http_origin(origin, authority))
         })
         .unwrap_or(true);
-    let bearer_authorized = request
+    let authorization = request
         .headers()
         .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.to_str().ok());
+    let bearer_authorized = authorization
         .and_then(|value| value.strip_prefix("Bearer "))
         .is_some_and(|provided| constant_time_equal(provided.as_bytes(), token.as_bytes()));
     let origin_required = is_api_path(request.uri().path())
         && request.method() != Method::GET
         && request.method() != Method::HEAD
-        && !bearer_authorized;
+        && authorization.is_none();
     let origin_present = request.headers().contains_key(header::ORIGIN);
     if !host_ok || !origin_ok || (origin_required && !origin_present) {
         return (
@@ -1727,8 +1128,8 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
             || (safe_read && request.headers().get(header::ORIGIN).is_none() && same_origin_fetch));
     let dashboard_only = path == "/api/v1/blender/install"
         || (request.method() == Method::POST
-            && path.starts_with("/api/v1/runtime/")
-            && path.ends_with("/huggingface"));
+            && path.starts_with("/api/v1/connections/huggingface/")
+            && path.split('/').count() == 6);
     if dashboard_authorized || (authorized && !dashboard_only) {
         next.run(request).await
     } else {
@@ -1914,29 +1315,28 @@ struct HuggingFaceConnectionRequest {
 async fn api_huggingface_connection(
     State(state): State<AppState>,
     Extension(statuses): Extension<HuggingFaceStatuses>,
-    Path(backend): Path<String>,
+    Path(scope): Path<actions::AccountScope>,
     payload: Result<Json<HuggingFaceConnectionRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let Json(payload) = payload
         .map_err(|_| CoreError::InvalidInput("Invalid Hugging Face connection request.".into()))?;
-    check_huggingface_connection(state, statuses, backend, payload.token).await
+    check_huggingface_connection(state, statuses, scope.into(), payload.token).await
 }
 
 async fn api_check_huggingface_connection(
     State(state): State<AppState>,
     Extension(statuses): Extension<HuggingFaceStatuses>,
-    Path(backend): Path<String>,
+    Path(scope): Path<actions::AccountScope>,
 ) -> Result<impl IntoResponse, ApiError> {
-    check_huggingface_connection(state, statuses, backend, None).await
+    check_huggingface_connection(state, statuses, scope.into(), None).await
 }
 
 async fn check_huggingface_connection(
     state: AppState,
     statuses: HuggingFaceStatuses,
-    backend: String,
+    profile: Pixal3dProfile,
     token: Option<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let profile = Pixal3dProfile::from_backend(&backend)?;
     let access = task::spawn_blocking(move || {
         let root = state.core.store().root();
         let _runtime_lock = if token.is_some() {
@@ -1965,9 +1365,9 @@ async fn check_huggingface_connection(
 async fn api_model_access(
     State(state): State<AppState>,
     Extension(statuses): Extension<HuggingFaceStatuses>,
-    Path(backend): Path<String>,
+    Path(scope): Path<actions::AccountScope>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let profile = Pixal3dProfile::from_backend(&backend)?;
+    let profile = Pixal3dProfile::from(scope);
     let access = task::spawn_blocking(move || {
         let root = state.core.store().root();
         let _runtime_lock = acquire_generation_runtime_lock(root)?;
@@ -1989,10 +1389,10 @@ struct RuntimeRemovalConfirmation {
 async fn api_disconnect_huggingface(
     State(state): State<AppState>,
     Extension(statuses): Extension<HuggingFaceStatuses>,
-    Path(backend): Path<String>,
+    Path(scope): Path<actions::AccountScope>,
     Json(confirmation): Json<RuntimeRemovalConfirmation>,
 ) -> Result<Json<RuntimeDoctor>, ApiError> {
-    let profile = Pixal3dProfile::from_backend(&backend)?;
+    let profile = Pixal3dProfile::from(scope);
     remove_runtime_files(state.core, confirmation, statuses.clone(), move |core| {
         profile.disconnect_huggingface(core.store().root())?;
         statuses.disconnected(profile);
@@ -2042,14 +1442,6 @@ async fn remove_runtime_files(
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct CatalogInstallConfirmation {
-    confirmed: bool,
-    #[serde(default)]
-    confirm_gated_access: bool,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct EnvironmentSetupConfirmation {
     confirmed: bool,
 }
@@ -2076,7 +1468,7 @@ async fn api_start_model_environment(
 async fn api_start_catalog_install(
     State(state): State<AppState>,
     Path(backend): Path<String>,
-    Json(confirmation): Json<CatalogInstallConfirmation>,
+    Json(confirmation): Json<actions::InstallBackend>,
 ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
     if !confirmation.confirmed {
         return Err(CoreError::InvalidInput(
@@ -2084,86 +1476,20 @@ async fn api_start_catalog_install(
         )
         .into());
     }
-    let kind = state
-        .core
-        .catalog_install_job(&backend, confirmation.confirm_gated_access)?;
+    let kind = match confirmation.package {
+        actions::RuntimePackage::Base => state
+            .core
+            .catalog_install_job(&backend, confirmation.confirm_gated_access)?,
+        actions::RuntimePackage::Multiview if backend == "pixal3d-cuda" => {
+            RuntimeJobKind::CudaInstallMultiview
+        }
+        actions::RuntimePackage::Multiview => {
+            return Err(
+                CoreError::InvalidInput("This backend has no multiview package.".into()).into(),
+            );
+        }
+    };
     let job = start_runtime_job(state.core, state.scheduler, kind).await?;
-    Ok((StatusCode::ACCEPTED, Json(job)))
-}
-
-async fn api_start_runtime_setup(
-    State(state): State<AppState>,
-) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
-    let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::Setup).await?;
-    Ok((StatusCode::ACCEPTED, Json(job)))
-}
-
-async fn api_start_runtime_models(
-    State(state): State<AppState>,
-    Json(confirmation): Json<ModelInstallConfirmation>,
-) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
-    if !confirmation.confirm_large_download || !confirmation.confirm_gated_access {
-        return Err(ApiError(CoreError::InvalidInput(
-            "MLX model installation requires explicit confirmation of the large download and prior DINOv3 gated access.".into(),
-        )));
-    }
-    let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::InstallModels).await?;
-    Ok((StatusCode::ACCEPTED, Json(job)))
-}
-
-async fn api_start_runtime_naf_conversion(
-    State(state): State<AppState>,
-) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
-    let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::ConvertNaf).await?;
-    Ok((StatusCode::ACCEPTED, Json(job)))
-}
-
-async fn api_start_cuda_runtime_setup(
-    State(state): State<AppState>,
-) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
-    let job = start_runtime_job(state.core, state.scheduler, RuntimeJobKind::CudaSetup).await?;
-    Ok((StatusCode::ACCEPTED, Json(job)))
-}
-
-async fn api_start_cuda_runtime_models(
-    State(state): State<AppState>,
-    Json(confirmation): Json<ModelInstallConfirmation>,
-) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
-    if !confirmation.confirm_large_download || !confirmation.confirm_gated_access {
-        return Err(ApiError(CoreError::InvalidInput(
-            "CUDA model installation requires explicit confirmation of the 25–30 GB download and prior DINOv3 gated access.".into(),
-        )));
-    }
-    let job = start_runtime_job(
-        state.core,
-        state.scheduler,
-        RuntimeJobKind::CudaInstallModels,
-    )
-    .await?;
-    Ok((StatusCode::ACCEPTED, Json(job)))
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct MultiviewInstallConfirmation {
-    confirm_large_download: bool,
-}
-
-async fn api_start_cuda_multiview_models(
-    State(state): State<AppState>,
-    Json(confirmation): Json<MultiviewInstallConfirmation>,
-) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
-    if !confirmation.confirm_large_download {
-        return Err(ApiError(CoreError::InvalidInput(
-            "Explicit confirmation is required to install the multiview weights.".into(),
-        )));
-    }
-    let job = start_runtime_job(
-        state.core,
-        state.scheduler,
-        RuntimeJobKind::CudaInstallMultiview,
-    )
-    .await?;
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 async fn api_operations(
@@ -2171,51 +1497,48 @@ async fn api_operations(
 ) -> Json<Vec<meshharbor_core::OperationDescriptor>> {
     Json(state.core.list_operations())
 }
-async fn api_list_assets(
-    State(state): State<AppState>,
-    Query(query): Query<LimitQuery>,
-) -> Result<Json<Vec<meshharbor_core::Asset>>, ApiError> {
-    Ok(Json(
-        state.core.store().list_assets(query.limit.unwrap_or(50))?,
-    ))
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct LimitQuery {
-    /// Maximum number of assets (default 50).
-    limit: Option<usize>,
-}
-
 async fn api_list_asset_page(
     State(state): State<AppState>,
     Query(query): Query<AssetPageQuery>,
 ) -> Result<Json<meshharbor_core::AssetPage>, ApiError> {
-    let store = state.core.store();
-    let limit = query.limit.unwrap_or(50);
-    let cursor = query.cursor.as_deref();
-    let search = query.q.as_deref();
-    let page = if query.models_only.unwrap_or(false) {
-        if query.kind == Some(meshharbor_core::AssetKind::Image) {
-            return Err(CoreError::InvalidInput(
-                "The model inventory only contains meshes.".into(),
-            )
-            .into());
-        }
-        store.list_models_page(limit, cursor, search, query.derived)?
-    } else {
-        store.list_assets_page(limit, cursor, search, query.kind, query.derived)?
-    };
-    Ok(Json(page))
+    Ok(Json(state.core.store().list_assets_page(
+        query.limit.unwrap_or(50),
+        query.cursor.as_deref(),
+        query.q.as_deref(),
+        query.kind,
+        query.derived,
+    )?))
+}
+
+async fn api_list_model_page(
+    State(state): State<AppState>,
+    Query(query): Query<ModelPageQuery>,
+) -> Result<Json<meshharbor_core::AssetPage>, ApiError> {
+    Ok(Json(state.core.store().list_models_page(
+        query.limit.unwrap_or(50),
+        query.cursor.as_deref(),
+        query.q.as_deref(),
+        query.generated,
+    )?))
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ModelPageQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+    q: Option<String>,
+    generated: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct AssetPageQuery {
     limit: Option<usize>,
     cursor: Option<String>,
     q: Option<String>,
     kind: Option<meshharbor_core::AssetKind>,
     derived: Option<bool>,
-    models_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2288,7 +1611,7 @@ async fn api_get_asset(
 async fn api_simplify(
     State(state): State<AppState>,
     Path(asset_id): Path<String>,
-    Json(body): Json<SimplifyBody>,
+    Json(body): Json<actions::SimplifyMesh>,
 ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
     let job = start_simplify_job(
         state.core,
@@ -2301,125 +1624,60 @@ async fn api_simplify(
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-struct SimplifyBody {
-    target_triangles: u64,
-    #[serde(default = "default_max_error")]
-    max_error: f32,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct JobStartBody {
-    /// Operation ID from GET /api/v1/operations.
-    operation: String,
-    /// An asset_id for mesh jobs, or tagged image/text input for model.generate.
-    input: Value,
-    /// Operation-specific options. For generation, consult GET /api/v1/runtime.
-    #[serde(default)]
-    parameters: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JobStartInput {
-    asset_id: String,
-}
-
-async fn api_create_job(
-    State(state): State<AppState>,
-    Json(body): Json<JobStartBody>,
-) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(submit_asset_job(state, body).await?),
-    ))
-}
-
-async fn submit_asset_job(
-    state: AppState,
-    body: JobStartBody,
-) -> Result<meshharbor_core::Job, ApiError> {
-    let parameters = body.parameters.unwrap_or_else(|| json!({}));
-    if body.operation == MODEL_GENERATION_OPERATION {
-        let input = serde_json::from_value(body.input).map_err(|error| {
-            CoreError::InvalidInput(format!("Invalid model.generate input: {error}"))
-        })?;
-        let parameters = serde_json::from_value(parameters).map_err(|error| {
-            CoreError::InvalidInput(format!("Invalid model.generate parameters: {error}"))
-        })?;
-        let job = start_generation_job(
-            state.core,
-            state.scheduler,
-            input,
-            parameters,
-            MODEL_GENERATION_OPERATION,
-        )
-        .await?;
-        return Ok(job);
-    }
-    let input: JobStartInput = serde_json::from_value(body.input)
-        .map_err(|error| CoreError::InvalidInput(format!("Invalid asset job input: {error}")))?;
-    let job = match body.operation.as_str() {
-        "mesh.simplify" => {
-            let parameters: SimplifyBody = serde_json::from_value(parameters).map_err(|error| {
-                ApiError(CoreError::InvalidInput(format!(
-                    "Invalid mesh.simplify parameters: {error}"
-                )))
-            })?;
-            start_simplify_job(
+macro_rules! mesh_endpoint {
+    ($name:ident, $options:ty, $operation:expr) => {
+        async fn $name(
+            State(state): State<AppState>,
+            Path(asset_id): Path<String>,
+            Json(body): Json<$options>,
+        ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+            let parameters = serde_json::to_value(body).map_err(CoreError::from)?;
+            let job = start_mesh_operation_job(
                 state.core,
                 state.scheduler,
-                &input.asset_id,
-                parameters.target_triangles,
-                parameters.max_error,
-            )
-            .await?
-        }
-        "mesh.cleanup"
-        | "mesh.voxel_remesh"
-        | "uv.unwrap"
-        | "render.optimize"
-        | "mesh.compress"
-        | "mesh.retopology"
-        | meshharbor_core::LATO2_OPERATION => {
-            start_mesh_operation_job(
-                state.core,
-                state.scheduler,
-                &input.asset_id,
-                &body.operation,
+                &asset_id,
+                $operation,
                 parameters,
             )
-            .await?
-        }
-        IMAGE_GENERATION_OPERATION => {
-            let parameters: GenerationOptions =
-                serde_json::from_value(parameters).map_err(|error| {
-                    ApiError(CoreError::InvalidInput(format!(
-                        "Invalid image.generate parameters: {error}"
-                    )))
-                })?;
-            start_generation_job(
-                state.core,
-                state.scheduler,
-                GenerationInput::Image {
-                    asset_id: input.asset_id,
-                },
-                parameters,
-                IMAGE_GENERATION_OPERATION,
-            )
-            .await?
-        }
-        operation => {
-            return Err(ApiError(CoreError::OperationUnavailable(format!(
-                "Operation '{operation}' is not implemented by this build."
-            ))));
+            .await?;
+            Ok((StatusCode::ACCEPTED, Json(job)))
         }
     };
-    Ok(job)
+}
+
+mesh_endpoint!(api_cleanup, actions::CleanupMesh, "mesh.cleanup");
+mesh_endpoint!(api_voxel_remesh, actions::VoxelRemesh, "mesh.voxel_remesh");
+mesh_endpoint!(api_unwrap_uv, actions::UnwrapUv, "uv.unwrap");
+mesh_endpoint!(
+    api_optimize_rendering,
+    actions::OptimizeRendering,
+    "render.optimize"
+);
+mesh_endpoint!(api_compress, actions::CompressMesh, "mesh.compress");
+mesh_endpoint!(
+    api_retopology,
+    meshharbor_core::QuadRetopologyOptions,
+    "mesh.retopology"
+);
+mesh_endpoint!(
+    api_lato2_retopology,
+    actions::RetopologizeLato2,
+    meshharbor_core::LATO2_OPERATION
+);
+
+async fn api_generate_model(
+    State(state): State<AppState>,
+    Json(body): Json<actions::GenerateModel>,
+) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
+    let job =
+        start_generation_job(state.core, state.scheduler, body.input, body.parameters).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
 async fn api_retry_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
+    Json(confirmation): Json<actions::RetryJob>,
 ) -> Result<(StatusCode, Json<meshharbor_core::Job>), ApiError> {
     let saved = read_job_record(&state.core, &job_id)?;
     if !matches!(
@@ -2432,11 +1690,6 @@ async fn api_retry_job(
     }
     let kind = match saved.operation.as_str() {
         "runtime.environment.setup" => Some(RuntimeJobKind::EnvironmentSetup),
-        "runtime.pixal3d.setup" => Some(RuntimeJobKind::Setup),
-        "runtime.pixal3d.install_models" => Some(RuntimeJobKind::InstallModels),
-        "runtime.pixal3d.convert_naf" => Some(RuntimeJobKind::ConvertNaf),
-        "runtime.pixal3d.cuda_setup" => Some(RuntimeJobKind::CudaSetup),
-        "runtime.pixal3d.cuda_install_models" => Some(RuntimeJobKind::CudaInstallModels),
         "runtime.pixal3d.cuda_install_multiview" => Some(RuntimeJobKind::CudaInstallMultiview),
         "runtime.models.install" => {
             let backend = saved.parameters["backend_id"].as_str().ok_or_else(|| {
@@ -2454,6 +1707,12 @@ async fn api_retry_job(
         _ => None,
     };
     let job = if let Some(kind) = kind {
+        if kind.downloads_weights() && !confirmation.confirm_download {
+            return Err(CoreError::InvalidInput(
+                "Confirm the model download before retrying this installation.".into(),
+            )
+            .into());
+        }
         start_runtime_job(state.core, state.scheduler, kind).await?
     } else {
         if saved.parameters["input_mode"] == "text" {
@@ -2469,15 +1728,52 @@ async fn api_retry_job(
         if let Some(parameters) = parameters.as_object_mut() {
             parameters.remove("input_mode");
         }
-        submit_asset_job(
-            state,
-            JobStartBody {
-                operation: saved.operation,
-                input: json!({"kind":"image","asset_id":asset_id}),
-                parameters: Some(parameters),
-            },
-        )
-        .await?
+        match saved.operation.as_str() {
+            MODEL_GENERATION_OPERATION => {
+                let options = serde_json::from_value(parameters).map_err(CoreError::from)?;
+                start_generation_job(
+                    state.core,
+                    state.scheduler,
+                    GenerationInput::Image { asset_id },
+                    options,
+                )
+                .await?
+            }
+            "mesh.simplify" => {
+                let options: actions::SimplifyMesh =
+                    serde_json::from_value(parameters).map_err(CoreError::from)?;
+                start_simplify_job(
+                    state.core,
+                    state.scheduler,
+                    &asset_id,
+                    options.target_triangles,
+                    options.max_error,
+                )
+                .await?
+            }
+            operation @ ("mesh.cleanup"
+            | "mesh.voxel_remesh"
+            | "uv.unwrap"
+            | "render.optimize"
+            | "mesh.compress"
+            | "mesh.retopology"
+            | meshharbor_core::LATO2_OPERATION) => {
+                start_mesh_operation_job(
+                    state.core,
+                    state.scheduler,
+                    &asset_id,
+                    operation,
+                    parameters,
+                )
+                .await?
+            }
+            _ => {
+                return Err(CoreError::OperationUnavailable(
+                    "This recorded operation is no longer available for retry.".into(),
+                )
+                .into());
+            }
+        }
     };
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
@@ -2718,7 +2014,6 @@ async fn start_generation_job(
     scheduler: Arc<JobScheduler>,
     input: GenerationInput,
     options: GenerationOptions,
-    operation: &'static str,
 ) -> Result<meshharbor_core::Job, CoreError> {
     core.check_model_generation(&input, &options)?;
 
@@ -2730,11 +2025,13 @@ async fn start_generation_job(
             parameters.remove(field);
         }
     }
-    if operation == MODEL_GENERATION_OPERATION {
-        parameters["input_mode"] = json!(input.mode());
-    }
-    let (job, reserved) =
-        scheduler.submit(core.store(), operation, input.asset_id(), &parameters)?;
+    parameters["input_mode"] = json!(input.mode());
+    let (job, reserved) = scheduler.submit(
+        core.store(),
+        MODEL_GENERATION_OPERATION,
+        input.asset_id(),
+        &parameters,
+    )?;
     let job_id = job.id.clone();
     tokio::spawn(async move {
         let Some(permit) = scheduler.start(core.store(), &job_id, reserved).await else {
@@ -2749,12 +2046,7 @@ async fn start_generation_job(
                 .store()
                 .update_running_job_stage(&worker_job_id, "check_runtime")?;
             let _runtime_lock = acquire_generation_runtime_lock(&worker_data_dir)?;
-            let result = match (&input, operation) {
-                (GenerationInput::Image { asset_id }, IMAGE_GENERATION_OPERATION) => {
-                    worker_core.generate_image_for_job(asset_id, options, &worker_job_id)?
-                }
-                _ => worker_core.generate_model_for_job(&input, options, &worker_job_id)?,
-            };
+            let result = worker_core.generate_model_for_job(&input, options, &worker_job_id)?;
             let mut payload = json!({
                 "asset_id": result.asset.id,
                 "backend_id": result.backend_id,
@@ -2873,8 +2165,6 @@ async fn api_read_artifact(
     );
     Ok((headers, content.bytes).into_response())
 }
-
-const MAX_MCP_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
 
 fn canonical_cli_output_path(path: &std::path::Path) -> Result<PathBuf, CoreError> {
     let file_name = path
@@ -3043,171 +2333,6 @@ fn canonical_mcp_export_path(
     Ok(destination)
 }
 
-/// Write a stored mesh GLB to a caller-selected local path without clobbering
-/// existing data. This is used only by the explicit MCP export tool.
-fn export_glb_file(
-    core: &OperationCore,
-    asset_id: &str,
-    output_path: &std::path::Path,
-) -> Result<Value, CoreError> {
-    if !output_path.is_absolute() {
-        return Err(CoreError::InvalidInput(
-            "Export path must be absolute on the local MCP host.".into(),
-        ));
-    }
-    if !output_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
-    {
-        return Err(CoreError::InvalidInput(
-            "GLB exports must use a .glb filename.".into(),
-        ));
-    }
-    let asset = core
-        .store()
-        .get_asset(asset_id)?
-        .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' was not found.")))?;
-    if asset.kind != meshharbor_core::AssetKind::Mesh {
-        return Err(CoreError::InvalidInput(
-            "Only mesh assets can be exported as GLB.".into(),
-        ));
-    }
-    let artifact = asset
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "source" || artifact.kind == "derived")
-        .ok_or_else(|| CoreError::NotFound("Mesh asset has no GLB artifact.".into()))?;
-    if artifact.mime_type != "model/gltf-binary" || artifact.byte_size > MAX_MCP_EXPORT_BYTES {
-        return Err(CoreError::InvalidInput(
-            "Artifact is not a supported GLB or exceeds the 512 MiB MCP export limit.".into(),
-        ));
-    }
-
-    let destination = canonical_mcp_export_path(core.store().root(), output_path)?;
-    let content = core.store().read_artifact(&artifact.id)?;
-    if content.bytes.len() as u64 > MAX_MCP_EXPORT_BYTES || !content.bytes.starts_with(b"glTF") {
-        return Err(CoreError::InvalidInput(
-            "Stored artifact is not a valid-size binary GLB.".into(),
-        ));
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&destination)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                CoreError::Conflict(format!(
-                    "Export destination already exists and was not overwritten: {}",
-                    destination.display()
-                ))
-            } else {
-                CoreError::Io(error)
-            }
-        })?;
-    let write_result =
-        std::io::Write::write_all(&mut file, &content.bytes).and_then(|()| file.sync_all());
-    if let Err(error) = write_result {
-        drop(file);
-        let _ = std::fs::remove_file(&destination);
-        return Err(CoreError::Io(error));
-    }
-
-    Ok(json!({
-        "asset_id": asset.id,
-        "artifact_id": artifact.id,
-        "output_path": destination,
-        "byte_size": content.bytes.len(),
-        "sha256": artifact.sha256,
-        "overwritten": false
-    }))
-}
-
-fn export_quad_obj_file(
-    core: &OperationCore,
-    asset_id: &str,
-    output_path: &std::path::Path,
-) -> Result<Value, CoreError> {
-    const MAX_QUAD_OBJ_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
-    if !output_path.is_absolute() {
-        return Err(CoreError::InvalidInput(
-            "Export path must be absolute on the local MCP host.".into(),
-        ));
-    }
-    if !output_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("obj"))
-    {
-        return Err(CoreError::InvalidInput(
-            "Quad topology exports must use a .obj filename.".into(),
-        ));
-    }
-    let asset = core
-        .store()
-        .get_asset(asset_id)?
-        .ok_or_else(|| CoreError::NotFound(format!("Asset '{asset_id}' was not found.")))?;
-    if asset.kind != meshharbor_core::AssetKind::Mesh {
-        return Err(CoreError::InvalidInput(
-            "Only mesh assets can contain a quad topology artifact.".into(),
-        ));
-    }
-    let artifact = asset
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "quad_topology")
-        .ok_or_else(|| {
-            CoreError::NotFound("Mesh asset has no QuadriFlow quad topology OBJ artifact.".into())
-        })?;
-    if artifact.mime_type != "model/obj" || artifact.byte_size > MAX_QUAD_OBJ_EXPORT_BYTES {
-        return Err(CoreError::InvalidInput(
-            "Artifact is not a supported OBJ or exceeds the 64 MiB export limit.".into(),
-        ));
-    }
-
-    let destination = canonical_mcp_export_path(core.store().root(), output_path)?;
-    let content = core.store().read_artifact(&artifact.id)?;
-    if content.bytes.len() as u64 > MAX_QUAD_OBJ_EXPORT_BYTES
-        || std::str::from_utf8(&content.bytes).is_err()
-    {
-        return Err(CoreError::InvalidInput(
-            "Stored quad topology artifact is not a valid-size UTF-8 OBJ.".into(),
-        ));
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&destination)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                CoreError::Conflict(format!(
-                    "Export destination already exists and was not overwritten: {}",
-                    destination.display()
-                ))
-            } else {
-                CoreError::Io(error)
-            }
-        })?;
-    let write_result =
-        std::io::Write::write_all(&mut file, &content.bytes).and_then(|()| file.sync_all());
-    if let Err(error) = write_result {
-        drop(file);
-        let _ = std::fs::remove_file(&destination);
-        return Err(CoreError::Io(error));
-    }
-
-    Ok(json!({
-        "asset_id": asset.id,
-        "artifact_id": artifact.id,
-        "output_path": destination,
-        "byte_size": content.bytes.len(),
-        "sha256": artifact.sha256,
-        "overwritten": false
-    }))
-}
-
 fn default_data_dir() -> PathBuf {
     default_data_dir_for(
         std::env::consts::OS,
@@ -3341,25 +2466,6 @@ fn process_mesh_cli_parameters(
 
 fn default_max_error() -> f32 {
     0.02
-}
-fn default_generation_seed() -> u64 {
-    GenerationOptions::default().seed
-}
-
-fn default_generation_backend() -> String {
-    "auto".into()
-}
-fn default_generation_resolution() -> u16 {
-    GenerationOptions::default().resolution
-}
-fn default_generation_texture_size() -> u16 {
-    GenerationOptions::default().texture_size
-}
-fn default_generation_target_faces() -> u32 {
-    GenerationOptions::default().target_faces
-}
-fn default_limit() -> usize {
-    50
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3584,7 +2690,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/v1/assets/page?limit=1&q=oak%25panel&kind=image&derived=true")
+                    .uri("/api/v1/assets?limit=1&q=oak%25panel&kind=image&derived=true")
                     .header(header::HOST, "localhost:7432")
                     .header(header::AUTHORIZATION, "Bearer token")
                     .body(Body::empty())
@@ -3608,7 +2714,7 @@ mod tests {
         let response = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/v1/assets/page?limit=1")
+                    .uri("/api/v1/assets?limit=1")
                     .header(header::HOST, "localhost:7432")
                     .header(header::AUTHORIZATION, "Bearer token")
                     .body(Body::empty())
@@ -3675,7 +2781,7 @@ mod tests {
         };
         let (status, page) = request(
             Method::GET,
-            "/api/v1/assets/page?models_only=true&q=original".into(),
+            "/api/v1/models?q=original".into(),
             Body::empty(),
         )
         .await;
@@ -3835,11 +2941,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(new_job.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(new_job.status(), StatusCode::METHOD_NOT_ALLOWED);
         let retry = request(
             Method::POST,
             format!("/api/v1/jobs/{}/retry", failed.id),
-            Body::empty(),
+            Body::from("{}"),
         )
         .await
         .unwrap();
@@ -3928,7 +3034,7 @@ mod tests {
                 .body(body)
                 .unwrap()
         };
-        let endpoint = "/api/v1/jobs/generation-queue";
+        let endpoint = "/api/v1/generation/queue";
         let response = app
             .clone()
             .oneshot(request(Method::GET, endpoint, Body::empty()))
@@ -3976,44 +3082,32 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test]
-    async fn mcp_backend_tools_report_clean_store_without_side_effects() {
-        let root =
-            std::env::temp_dir().join(format!("meshharbor-mcp-backend-{}", uuid::Uuid::new_v4()));
-        let server = McpServer::new(
-            OperationCore::open(&root).unwrap(),
-            Arc::new(JobScheduler::default()),
-        );
-        let status: Value =
-            serde_json::from_str(&server.quadriflow_backend_status().await).unwrap();
-        assert_eq!(status["backend_id"], "quadriflow");
-        assert_eq!(status["available"], false);
-        if status["install_available"] == false {
-            let install: Value =
-                serde_json::from_str(&server.install_quadriflow_backend().await).unwrap();
-            assert!(install["error"].as_str().unwrap().contains("QuadriFlow"));
-        }
-        assert!(!root.join("backends").exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[test]
-    fn backend_cli_exposes_status_and_guarded_install_commands() {
-        let status = Cli::try_parse_from(["meshharbor", "backend", "status"]).unwrap();
-        assert!(matches!(
-            status.command,
-            Command::Backend {
-                command: BackendCommand::Status
-            }
-        ));
-        let install =
-            Cli::try_parse_from(["meshharbor", "backend", "install", "quadriflow"]).unwrap();
-        assert!(matches!(
-            install.command,
-            Command::Backend {
-                command: BackendCommand::Install { backend_id }
-            } if backend_id == "quadriflow"
-        ));
+    fn connected_cli_exposes_features_not_generic_job_submission() {
+        for args in [
+            vec!["meshharbor", "engine", "runtime", "quadriflow"],
+            vec![
+                "meshharbor",
+                "engine",
+                "mesh",
+                "simplify",
+                "asset_demo",
+                "--target-triangles",
+                "40",
+            ],
+            vec!["meshharbor", "engine", "generation", "image", "asset_demo"],
+            vec!["meshharbor", "engine", "generation", "text", "a cup"],
+            vec!["meshharbor", "engine", "models", "list"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec!["meshharbor", "engine", "jobs", "submit"],
+            vec!["meshharbor", "runtime", "setup"],
+            vec!["meshharbor", "import", "./test.glb"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     fn data_dir_for_test(os: &str, vars: &[(&str, &str)]) -> PathBuf {
@@ -4125,6 +3219,7 @@ mod tests {
     fn process_mesh_cli_parses_uv_and_render_settings_with_bounds() {
         let uv = Cli::try_parse_from([
             "meshharbor",
+            "local",
             "process-mesh",
             "asset_example",
             "--operation",
@@ -4137,15 +3232,18 @@ mod tests {
         .unwrap();
         assert!(matches!(
             uv.command,
-            Command::ProcessMesh {
-                resolution: Some(2048),
-                padding: Some(12),
-                ..
+            Command::Local {
+                command: LocalCommand::ProcessMesh {
+                    resolution: Some(2048),
+                    padding: Some(12),
+                    ..
+                }
             }
         ));
 
         let render = Cli::try_parse_from([
             "meshharbor",
+            "local",
             "process-mesh",
             "asset_example",
             "--operation",
@@ -4156,15 +3254,16 @@ mod tests {
         .unwrap();
         assert!(matches!(
             render.command,
-            Command::ProcessMesh {
+            Command::Local { command: LocalCommand::ProcessMesh {
                 overdraw_threshold: Some(value),
                 ..
-            } if (value - 1.2).abs() < 0.0001
+            } } if (value - 1.2).abs() < 0.0001
         ));
 
         assert!(
             Cli::try_parse_from([
                 "meshharbor",
+                "local",
                 "process-mesh",
                 "asset_example",
                 "--operation",
@@ -4177,6 +3276,7 @@ mod tests {
         assert!(
             Cli::try_parse_from([
                 "meshharbor",
+                "local",
                 "process-mesh",
                 "asset_example",
                 "--operation",
@@ -4190,6 +3290,7 @@ mod tests {
         for (resolution, padding) in [("64", "0"), ("4096", "64")] {
             let cli = Cli::try_parse_from([
                 "meshharbor",
+                "local",
                 "process-mesh",
                 "asset_example",
                 "--operation",
@@ -4204,17 +3305,18 @@ mod tests {
             let expected_padding = padding.parse::<u32>().unwrap();
             assert!(matches!(
                 cli.command,
-                Command::ProcessMesh {
+                Command::Local { command: LocalCommand::ProcessMesh {
                     resolution: Some(parsed_resolution),
                     padding: Some(parsed_padding),
                     ..
-                } if parsed_resolution == expected_resolution
+                } } if parsed_resolution == expected_resolution
                     && parsed_padding == expected_padding
             ));
         }
         assert!(
             Cli::try_parse_from([
                 "meshharbor",
+                "local",
                 "process-mesh",
                 "asset_example",
                 "--operation",
@@ -4228,6 +3330,7 @@ mod tests {
         for (value, expected) in [("1.0", 1.0), ("1.5", 1.5)] {
             let cli = Cli::try_parse_from([
                 "meshharbor",
+                "local",
                 "process-mesh",
                 "asset_example",
                 "--operation",
@@ -4238,16 +3341,17 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 cli.command,
-                Command::ProcessMesh {
+                Command::Local { command: LocalCommand::ProcessMesh {
                     overdraw_threshold: Some(parsed),
                     ..
-                } if parsed == expected
+                } } if parsed == expected
             ));
         }
         for value in ["NaN", "inf", "0.99", "1.51"] {
             assert!(
                 Cli::try_parse_from([
                     "meshharbor",
+                    "local",
                     "process-mesh",
                     "asset_example",
                     "--operation",
@@ -4367,6 +3471,7 @@ mod tests {
         for (value, valid) in [("15", false), ("16", true), ("160", true), ("161", false)] {
             let parsed = Cli::try_parse_from([
                 "meshharbor",
+                "local",
                 "process-mesh",
                 "asset_example",
                 "--operation",
@@ -4380,28 +3485,23 @@ mod tests {
 
     #[test]
     fn jobs_cli_parses_read_only_history_commands() {
-        let default_list = Cli::try_parse_from(["meshharbor", "jobs", "list"]).unwrap();
+        let list = Cli::try_parse_from(["meshharbor", "engine", "jobs", "list", "--limit", "200"])
+            .unwrap();
         assert!(matches!(
-            default_list.command,
-            Command::Jobs {
-                command: JobsCommand::List { limit: 50 }
+            list.command,
+            Command::Engine {
+                command: engine_client::Command::Jobs {
+                    action: engine_client::Jobs::List {
+                        limit: Some(200),
+                        ..
+                    }
+                },
+                ..
             }
         ));
-        let bounded_list =
-            Cli::try_parse_from(["meshharbor", "jobs", "list", "--limit", "201"]).unwrap();
-        assert!(matches!(
-            bounded_list.command,
-            Command::Jobs {
-                command: JobsCommand::List { limit: 201 }
-            }
-        ));
-        let show = Cli::try_parse_from(["meshharbor", "jobs", "show", "job_example"]).unwrap();
-        assert!(matches!(
-            show.command,
-            Command::Jobs {
-                command: JobsCommand::Show { job_id }
-            } if job_id == "job_example"
-        ));
+        assert!(
+            Cli::try_parse_from(["meshharbor", "engine", "jobs", "show", "job_example"]).is_ok()
+        );
     }
 
     #[test]
@@ -4453,84 +3553,13 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test]
-    async fn mcp_list_jobs_returns_json_and_does_not_resume_saved_jobs() {
-        let root = std::env::temp_dir().join(format!(
-            "meshharbor-mcp-job-history-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let core = OperationCore::open(&root).unwrap();
-        let queued = core
-            .store()
-            .create_job("mesh.cleanup", None, &json!({}))
-            .unwrap();
-        let running = core
-            .store()
-            .create_job("mesh.simplify", None, &json!({}))
-            .unwrap();
-        core.store()
-            .update_job(
-                &running.id,
-                meshharbor_core::JobState::Running,
-                25,
-                None,
-                None,
-            )
-            .unwrap();
-        let server = McpServer::new(core.clone(), Arc::new(JobScheduler::default()));
-
-        let response = server
-            .list_jobs(Parameters(JobListArgs { limit: 200 }))
-            .await;
-        let listed: Vec<meshharbor_core::Job> = serde_json::from_str(&response).unwrap();
-        assert_eq!(listed.len(), 2);
-        assert!(listed.iter().any(|job| job.id == queued.id));
-        let listed_running = listed.iter().find(|job| job.id == running.id).unwrap();
-        assert_eq!(listed_running.state, meshharbor_core::JobState::Running);
-        assert_eq!(listed_running.progress, 25);
-
-        let shown: meshharbor_core::Job = serde_json::from_str(
-            &server
-                .get_job(Parameters(JobIdArgs {
-                    job_id: running.id.clone(),
-                }))
-                .await,
-        )
-        .unwrap();
-        assert_eq!(shown.state, meshharbor_core::JobState::Running);
-        assert!(
-            serde_json::from_str::<Value>(
-                &server
-                    .get_job(Parameters(JobIdArgs {
-                        job_id: "job_missing".into(),
-                    }))
-                    .await
-            )
-            .unwrap()["error"]
-                .as_str()
-                .unwrap()
-                .contains("job_missing")
-        );
-
-        drop(server);
-        drop(core);
-        let reopened = OperationCore::open(&root).unwrap();
-        assert_eq!(
-            read_job_record(&reopened, &running.id).unwrap().state,
-            meshharbor_core::JobState::Running
-        );
-        drop(reopened);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[test]
     fn interrupted_job_recovery_requires_an_explicit_stopped_process_acknowledgement() {
-        assert!(Cli::try_parse_from(["meshharbor", "jobs", "recover-interrupted"]).is_err());
+        assert!(Cli::try_parse_from(["meshharbor", "recover-jobs"]).is_err());
         assert!(
             Cli::try_parse_from([
                 "meshharbor",
-                "jobs",
-                "recover-interrupted",
+                "recover-jobs",
                 "--confirm-no-running-meshharbor",
             ])
             .is_ok()
@@ -4575,7 +3604,7 @@ mod tests {
         let interrupted = core
             .store()
             .create_owned_job(
-                RuntimeJobKind::InstallModels.operation(),
+                RuntimeJobKind::InstallCatalogModel("pixal3d-mlx").operation(),
                 None,
                 &json!({}),
                 true,
@@ -4727,7 +3756,7 @@ mod tests {
             },
             "private-test-token".into(),
         );
-        for backend in ["pixal3d-mlx", "pixal3d-cuda"] {
+        for scope in ["mlx", "cuda"] {
             for (origin, dashboard, bearer, status) in [
                 (
                     Some("http://127.0.0.1:5173"),
@@ -4752,7 +3781,7 @@ mod tests {
             ] {
                 let mut request = axum::http::Request::builder()
                     .method(Method::POST)
-                    .uri(format!("/api/v1/runtime/{backend}/huggingface"))
+                    .uri(format!("/api/v1/connections/huggingface/{scope}"))
                     .header(header::HOST, "127.0.0.1:7432")
                     .header(header::CONTENT_TYPE, "application/json");
                 if let Some(origin) = origin {
@@ -4830,6 +3859,74 @@ mod tests {
         }
         assert!(core.store().list_jobs(20).unwrap().is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn removed_submit_routes_and_unapproved_download_retry_cannot_queue_jobs() {
+        let root = tempfile::tempdir().unwrap();
+        let core = OperationCore::open(root.path()).unwrap();
+        let saved = core
+            .store()
+            .create_running_job(
+                RuntimeJobKind::CudaInstallMultiview.operation(),
+                None,
+                &json!({}),
+            )
+            .unwrap();
+        core.store()
+            .finish_job(&saved.id, Err(CoreError::Cancelled))
+            .unwrap();
+        let app = api_router(
+            AppState {
+                core: core.clone(),
+                scheduler: Arc::default(),
+            },
+            "token".into(),
+        );
+        for (path, payload, expected) in [
+            (
+                "/api/v1/jobs".to_owned(),
+                json!({"operation":"mesh.cleanup"}),
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
+            (
+                "/api/v1/runtime/pixal3d-mlx/setup".to_owned(),
+                json!({}),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/api/v1/assets/example/cleanup".to_owned(),
+                json!({"target_triangles":32}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "/api/v1/runtime/pixal3d-mlx/install".to_owned(),
+                json!({"confirmed":true,"package":"multiview"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                format!("/api/v1/jobs/{}/retry", saved.id),
+                json!({}),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::POST)
+                        .uri(&path)
+                        .header(header::HOST, "localhost:7432")
+                        .header(header::AUTHORIZATION, "Bearer token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{path}");
+        }
+        assert_eq!(core.store().list_jobs(10).unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -4975,9 +4072,14 @@ mod tests {
             "private-test-token".into(),
         );
         let request = |scope: &str, origin: &str, confirmed: bool| {
+            let path = if scope == "huggingface" {
+                "/api/v1/connections/huggingface/mlx"
+            } else {
+                "/api/v1/runtime/pixal3d-mlx/model-files"
+            };
             axum::http::Request::builder()
                 .method(Method::DELETE)
-                .uri(format!("/api/v1/runtime/pixal3d-mlx/{scope}"))
+                .uri(path)
                 .header(header::HOST, "127.0.0.1:7432")
                 .header(header::ORIGIN, origin)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -5103,14 +4205,6 @@ mod tests {
         assert_eq!(error["error"], expected.to_string());
         assert!(!expected.to_string().contains("sidecar"));
 
-        let server = McpServer::new(core.clone(), scheduler.clone());
-        let mcp = server
-            .preflight_retopology(Parameters(RetopologyPreflightArgs {
-                asset_id: asset.id.clone(),
-                target_quads: Some(12),
-            }))
-            .await;
-        assert_eq!(serde_json::from_str::<Value>(&mcp).unwrap(), error);
         let permit = scheduler.try_acquire_owned().unwrap();
         let busy = app.oneshot(request(&endpoint, "{}", true)).await.unwrap();
         assert_eq!(busy.status(), StatusCode::CONFLICT);
@@ -5119,7 +4213,6 @@ mod tests {
         let existing = core.store().list_assets(10).unwrap();
         assert_eq!(existing.len(), 1);
         assert_eq!(existing[0].sha256, asset.sha256);
-        drop(server);
         drop(core);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -5181,7 +4274,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/v1/backends/quadriflow")
+                    .uri("/api/v1/runtime/quadriflow")
                     .header(header::HOST, "localhost:7432")
                     .header(header::ORIGIN, "http://localhost:7432")
                     .header("x-meshharbor-dashboard", "local-ui-v1")
@@ -5205,7 +4298,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/v1/backends/quadriflow/install")
+                    .uri("/api/v1/runtime/quadriflow/install")
                     .header(header::HOST, "localhost:7432")
                     .header(header::ORIGIN, "http://localhost:7432")
                     .body(Body::empty())
@@ -5220,7 +4313,7 @@ mod tests {
                 .oneshot(
                     axum::http::Request::builder()
                         .method("POST")
-                        .uri("/api/v1/backends/quadriflow/install")
+                        .uri("/api/v1/runtime/quadriflow/install")
                         .header(header::HOST, "localhost:7432")
                         .header(header::ORIGIN, "http://localhost:7432")
                         .header("x-meshharbor-dashboard", "local-ui-v1")
@@ -5641,18 +4734,13 @@ mod tests {
             },
             "token".into(),
         );
-        let body = json!({
-            "operation":"mesh.simplify",
-            "input":{"asset_id":source.id},
-            "parameters":{"target_triangles":2,"max_error":1.0}
-        })
-        .to_string();
+        let body = json!({"target_triangles":2,"max_error":1.0}).to_string();
         let response = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/v1/jobs")
+                    .uri(format!("/api/v1/assets/{}/simplify", source.id))
                     .header(header::HOST, "localhost:7432")
                     .header(header::AUTHORIZATION, "Bearer token")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -5771,8 +4859,7 @@ mod tests {
             "token".into(),
         );
         let body = json!({
-            "operation":"image.generate",
-            "input":{"asset_id":source.id},
+            "input":{"kind":"image","asset_id":source.id},
             "parameters":{"backend_id":"pixal3d-mlx","resolution":1024}
         })
         .to_string();
@@ -5780,7 +4867,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/v1/jobs")
+                    .uri("/api/v1/generation")
                     .header(header::HOST, "localhost:7432")
                     .header(header::AUTHORIZATION, "Bearer token")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -5803,10 +4890,17 @@ mod tests {
     #[test]
     fn cli_generate_requires_exactly_one_input() {
         for arguments in [
-            vec!["meshharbor", "generate", "asset_demo"],
-            vec!["meshharbor", "generate", "--prompt", "a ceramic cup"],
+            vec!["meshharbor", "local", "generate", "asset_demo"],
             vec![
                 "meshharbor",
+                "local",
+                "generate",
+                "--prompt",
+                "a ceramic cup",
+            ],
+            vec![
+                "meshharbor",
+                "local",
                 "generate",
                 "--prompt",
                 "a ceramic cup",
@@ -5816,10 +4910,17 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(arguments).is_ok());
         }
-        assert!(Cli::try_parse_from(["meshharbor", "generate"]).is_err());
+        assert!(Cli::try_parse_from(["meshharbor", "local", "generate"]).is_err());
         assert!(
-            Cli::try_parse_from(["meshharbor", "generate", "asset_demo", "--prompt", "a cup"])
-                .is_err()
+            Cli::try_parse_from([
+                "meshharbor",
+                "local",
+                "generate",
+                "asset_demo",
+                "--prompt",
+                "a cup"
+            ])
+            .is_err()
         );
     }
 
@@ -5841,17 +4942,17 @@ mod tests {
             },
             "token".into(),
         );
-        let submit = |operation: &str, input: Value, backend_id: &str| {
+        let submit = |input: Value, backend_id: &str| {
             app.clone().oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/v1/jobs")
+                    .uri("/api/v1/generation")
                     .header(header::HOST, "localhost:7432")
                     .header(header::AUTHORIZATION, "Bearer token")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "operation": operation, "input": input,
+                            "input": input,
                             "parameters": { "backend_id": backend_id },
                         })
                         .to_string(),
@@ -5863,18 +4964,13 @@ mod tests {
             json!({"kind":"text","prompt":"  "}),
             json!({"kind":"text","prompt":"가".repeat(1366)}),
             json!({"kind":"text","prompt":"a\u{0}cup"}),
-            json!({"kind":"text","prompt":"a cup","asset_id":source.id}),
         ] {
             assert_eq!(
-                submit(MODEL_GENERATION_OPERATION, input, "pixal3d-mlx")
-                    .await
-                    .unwrap()
-                    .status(),
+                submit(input, "pixal3d-mlx").await.unwrap().status(),
                 StatusCode::BAD_REQUEST
             );
         }
         let response = submit(
-            MODEL_GENERATION_OPERATION,
             json!({"kind":"text","prompt":"a private draft"}),
             "pixal3d-mlx",
         )
@@ -5886,7 +4982,6 @@ mod tests {
         assert!(error.contains("does not support text-to-3D"));
         assert!(!error.contains("a private draft"));
         let response = submit(
-            MODEL_GENERATION_OPERATION,
             json!({"kind":"text","prompt":"a private draft"}),
             "trellis-text-cuda",
         )
@@ -5901,28 +4996,16 @@ mod tests {
         assert_eq!(core.store().list_assets(10).unwrap().len(), 1);
 
         let mut jobs = Vec::new();
-        for (operation, input) in [
-            (
-                MODEL_GENERATION_OPERATION,
-                json!({"kind":"image","asset_id":source.id}),
-            ),
-            (IMAGE_GENERATION_OPERATION, json!({"asset_id":source.id})),
-        ] {
-            let response = submit(operation, input, "pixal3d-mlx").await.unwrap();
+        for _ in 0..2 {
+            let input = json!({"kind":"image","asset_id":source.id});
+            let response = submit(input, "pixal3d-mlx").await.unwrap();
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             let job: meshharbor_core::Job =
                 serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                     .unwrap();
-            assert_eq!(job.operation, operation);
+            assert_eq!(job.operation, MODEL_GENERATION_OPERATION);
             assert_eq!(job.input_asset_id.as_deref(), Some(source.id.as_str()));
-            assert_eq!(
-                job.parameters["input_mode"],
-                if operation == MODEL_GENERATION_OPERATION {
-                    json!("image")
-                } else {
-                    Value::Null
-                }
-            );
+            assert_eq!(job.parameters["input_mode"], "image");
             jobs.push(job.id);
         }
         assert_eq!(scheduler.generation_queue(), jobs);
@@ -6091,112 +5174,27 @@ mod tests {
     }
 
     #[test]
-    fn mcp_glb_export_writes_only_to_new_absolute_glb_paths() {
-        let root = std::env::temp_dir().join(format!("meshharbor-export-{}", uuid::Uuid::new_v4()));
-        let output_dir = root.join("store/exports");
-        std::fs::create_dir_all(&output_dir).unwrap();
-        let core = OperationCore::open(root.join("store")).unwrap();
-        let source_bytes = minimal_triangle_glb();
-        let asset = core.import_asset("result.glb", &source_bytes).unwrap();
-
-        let destination = output_dir.join("result.glb");
-        let exported = export_glb_file(&core, &asset.id, &destination).unwrap();
-        assert_eq!(exported["overwritten"], false);
+    fn mcp_export_is_confined_to_the_configured_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let export_root = root.path().join("exports");
+        let target = export_root.join("result.glb");
         assert_eq!(
-            std::fs::read(&destination).unwrap(),
-            source_bytes,
-            "export must be byte-identical to the stored GLB"
+            canonical_mcp_export_path(root.path(), &target)
+                .unwrap()
+                .file_name(),
+            target.file_name()
         );
-
-        let conflict = export_glb_file(&core, &asset.id, &destination).unwrap_err();
-        assert!(matches!(conflict, CoreError::Conflict(_)));
-        assert_eq!(
-            std::fs::read(&destination).unwrap(),
-            source_bytes,
-            "a repeated export must leave the existing file untouched"
+        assert!(
+            canonical_mcp_export_path(root.path(), std::path::Path::new("result.glb")).is_err()
         );
-
-        let relative =
-            export_glb_file(&core, &asset.id, std::path::Path::new("result.glb")).unwrap_err();
-        assert!(matches!(relative, CoreError::InvalidInput(_)));
-
-        let wrong_extension =
-            export_glb_file(&core, &asset.id, &output_dir.join("result.obj")).unwrap_err();
-        assert!(matches!(wrong_extension, CoreError::InvalidInput(_)));
-
-        let outside_dir = root.join("outside");
-        std::fs::create_dir_all(&outside_dir).unwrap();
-        let escaped =
-            export_glb_file(&core, &asset.id, &outside_dir.join("escape.glb")).unwrap_err();
-        assert!(matches!(escaped, CoreError::InvalidInput(_)));
-        assert!(!outside_dir.join("escape.glb").exists());
-
+        assert!(canonical_mcp_export_path(root.path(), &root.path().join("escape.glb")).is_err());
         #[cfg(unix)]
         {
-            use std::os::unix::fs::symlink;
-            let symlinked_dir = output_dir.join("outside-link");
-            symlink(&outside_dir, &symlinked_dir).unwrap();
-            let through_symlink =
-                export_glb_file(&core, &asset.id, &symlinked_dir.join("symlink-escape.glb"))
-                    .unwrap_err();
-            assert!(matches!(through_symlink, CoreError::InvalidInput(_)));
-            assert!(!outside_dir.join("symlink-escape.glb").exists());
+            std::os::unix::fs::symlink(root.path(), export_root.join("linked")).unwrap();
+            assert!(
+                canonical_mcp_export_path(root.path(), &export_root.join("linked/result.glb"))
+                    .is_err()
+            );
         }
-        drop(core);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn mcp_quad_obj_export_preserves_topology_bytes_and_never_overwrites() {
-        let root =
-            std::env::temp_dir().join(format!("meshharbor-quad-export-{}", uuid::Uuid::new_v4()));
-        let output_dir = root.join("store/exports");
-        std::fs::create_dir_all(&output_dir).unwrap();
-        let core = OperationCore::open(root.join("store")).unwrap();
-        let asset = core
-            .import_asset("result.glb", &minimal_triangle_glb())
-            .unwrap();
-        let obj = b"v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n";
-        core.store()
-            .add_artifact(&asset.id, "quad_topology", "model/obj", obj)
-            .unwrap();
-
-        let destination = output_dir.join("result.obj");
-        let exported = export_quad_obj_file(&core, &asset.id, &destination).unwrap();
-        assert_eq!(exported["overwritten"], false);
-        assert_eq!(std::fs::read(&destination).unwrap(), obj);
-
-        let conflict = export_quad_obj_file(&core, &asset.id, &destination).unwrap_err();
-        assert!(matches!(conflict, CoreError::Conflict(_)));
-        assert_eq!(std::fs::read(&destination).unwrap(), obj);
-
-        let wrong_extension =
-            export_quad_obj_file(&core, &asset.id, &output_dir.join("result.glb")).unwrap_err();
-        assert!(matches!(wrong_extension, CoreError::InvalidInput(_)));
-
-        let outside_dir = root.join("outside");
-        std::fs::create_dir_all(&outside_dir).unwrap();
-        let escaped =
-            export_quad_obj_file(&core, &asset.id, &outside_dir.join("escape.obj")).unwrap_err();
-        assert!(matches!(escaped, CoreError::InvalidInput(_)));
-        assert!(!outside_dir.join("escape.obj").exists());
-
-        drop(core);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn mcp_glb_export_rejects_images_without_creating_files() {
-        let root =
-            std::env::temp_dir().join(format!("meshharbor-export-image-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let core = OperationCore::open(root.join("store")).unwrap();
-        let image = core.import_asset("source.png", &minimal_png()).unwrap();
-        let destination = root.join("store/exports/not-a-mesh.glb");
-        let error = export_glb_file(&core, &image.id, &destination).unwrap_err();
-        assert!(matches!(error, CoreError::InvalidInput(_)));
-        assert!(!destination.exists());
-        drop(core);
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

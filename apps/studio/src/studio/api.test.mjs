@@ -297,9 +297,9 @@ test('asset pages use bounded encoded read-only requests', async () => {
         derived: url.searchParams.get('derived'),
       };
     }), [
-      { path: '/api/v1/assets/page', limit: '100', cursor: 'asset/id ?', query: 'oak %_', kind: 'mesh', derived: 'true' },
-      { path: '/api/v1/assets/page', limit: '1', cursor: null, query: null, kind: null, derived: null },
-      { path: '/api/v1/assets/page', limit: '50', cursor: null, query: null, kind: null, derived: null },
+      { path: '/api/v1/assets', limit: '100', cursor: 'asset/id ?', query: 'oak %_', kind: 'mesh', derived: 'true' },
+      { path: '/api/v1/assets', limit: '1', cursor: null, query: null, kind: null, derived: null },
+      { path: '/api/v1/assets', limit: '50', cursor: null, query: null, kind: null, derived: null },
     ]);
     assert.equal(calls[0].init.method, undefined);
     assert.equal(calls[0].init.body, undefined);
@@ -424,7 +424,7 @@ test('QuadriFlow installer surface stays guarded when no reviewed release is ava
   const calls = [];
   globalThis.fetch = async (path, init = {}) => {
     calls.push({ path, init });
-    if (path === '/api/v1/backends/quadriflow/install') {
+    if (path === '/api/v1/runtime/quadriflow/install') {
       return Response.json({ error: 'This build does not include an approved QuadriFlow release artifact.' }, { status: 422 });
     }
     throw new Error('Unexpected request: ' + path);
@@ -463,7 +463,7 @@ test('Studio backend setup and image-generation flow downloads the generated GLB
     if (path === '/api/v1/assets?filename=source%20image.png') {
       return Response.json(sourceAsset);
     }
-    if (path === '/api/v1/jobs' && init.method === 'POST') {
+    if (path === '/api/v1/generation' && init.method === 'POST') {
       return Response.json(queuedJob, { status: 202 });
     }
     if (path === '/api/v1/jobs/job-1') return Response.json(succeededJob);
@@ -498,7 +498,7 @@ test('Studio backend setup and image-generation flow downloads the generated GLB
       '/api/v1/runtime/pixal3d-mlx/install',
       '/api/v1/runtime/pixal3d-cuda/install',
       '/api/v1/assets?filename=source%20image.png',
-      '/api/v1/jobs',
+      '/api/v1/generation',
       '/api/v1/jobs/job-1',
       '/api/v1/assets/mesh-1',
       '/api/v1/artifacts/generated-1',
@@ -509,14 +509,13 @@ test('Studio backend setup and image-generation flow downloads the generated GLB
 
     for (const { init } of calls.slice(1, 3)) {
       assert.equal(init.method, 'POST');
-      assert.deepEqual(JSON.parse(init.body), { confirmed: true, confirm_gated_access: true });
+      assert.deepEqual(JSON.parse(init.body), { confirmed: true, confirm_gated_access: true, package: 'base' });
     }
 
     const upload = calls[3].init;
     assert.equal(new Headers(upload.headers).get('Content-Type'), 'image/png');
     assert.equal(upload.body.type, 'image/png');
     assert.deepEqual(JSON.parse(calls[4].init.body), {
-      operation: 'model.generate',
       input: { kind: 'image', asset_id: 'image-1' },
       parameters: { backend_id: 'pixal3d-cuda', texture_size: 1024, target_faces: 50_000 },
     });
@@ -532,7 +531,7 @@ test('Studio starts a derived local mesh-processing job with explicit operation 
   globalThis.fetch = async (input, init = {}) => {
     const path = String(input);
     calls.push({ path, init });
-    if (path === '/api/v1/jobs' && init.method === 'POST') {
+    if (path === '/api/v1/assets/mesh-asset-1/optimize-rendering' && init.method === 'POST') {
       return Response.json({ id: 'mesh-job-1', state: 'queued' }, { status: 202 });
     }
     throw new Error('Unexpected Studio API request: ' + path);
@@ -547,11 +546,7 @@ test('Studio starts a derived local mesh-processing job with explicit operation 
     assert.equal(job.id, 'mesh-job-1');
     assert.equal(calls.length, 1);
     assert.equal(new Headers(calls[0].init.headers).get('X-MeshHarbor-Dashboard'), 'local-ui-v1');
-    assert.deepEqual(JSON.parse(calls[0].init.body), {
-      operation: 'render.optimize',
-      input: { asset_id: 'mesh-asset-1' },
-      parameters: { overdraw_threshold: 1.05 },
-    });
+    assert.deepEqual(JSON.parse(calls[0].init.body), { overdraw_threshold: 1.05 });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -559,7 +554,7 @@ test('Studio starts a derived local mesh-processing job with explicit operation 
 
 
 
-test('Studio submits atlas options through the shared job API', async () => {
+test('Studio submits atlas options to the UV rebake endpoint', async () => {
   const requests = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init = {}) => {
@@ -569,12 +564,8 @@ test('Studio submits atlas options through the shared job API', async () => {
   try {
     const api = new MeshHarborApi();
     await api.createMeshOperationJob('mesh-asset-1', 'uv.unwrap', { resolution: 1024, padding: 8 });
-    assert.deepEqual(requests.map(({ path }) => path), ['/api/v1/jobs']);
-    assert.deepEqual(JSON.parse(requests[0].init.body), {
-      operation: 'uv.unwrap',
-      input: { asset_id: 'mesh-asset-1' },
-      parameters: { resolution: 1024, padding: 8 },
-    });
+    assert.deepEqual(requests.map(({ path }) => path), ['/api/v1/assets/mesh-asset-1/unwrap-uv']);
+    assert.deepEqual(JSON.parse(requests[0].init.body), { resolution: 1024, padding: 8 });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -631,7 +622,7 @@ test('retopology submits a job and downloads quad OBJ separately from GLB previe
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (path, init) => {
     calls.push({ path, init });
-    if (path === '/api/v1/jobs') return Response.json({ id: 'retopo-1', state: 'queued' });
+    if (path === '/api/v1/assets/source/retopology') return Response.json({ id: 'retopo-1', state: 'queued' });
     if (path === '/api/v1/artifacts/preview') return new Response('GLB preview');
     if (path === '/api/v1/artifacts/quad%2Fone') return new Response('v 0 0 0\nf 1 2 3 4\n');
     throw new Error('Unexpected request: ' + path);
@@ -639,9 +630,7 @@ test('retopology submits a job and downloads quad OBJ separately from GLB previe
   try {
     const api = new MeshHarborApi();
     await api.createMeshOperationJob('source', 'mesh.retopology');
-    assert.deepEqual(JSON.parse(calls[0].init.body), {
-      operation: 'mesh.retopology', input: { asset_id: 'source' }, parameters: {},
-    });
+    assert.deepEqual(JSON.parse(calls[0].init.body), {});
     assert.equal(await (await api.artifact(asset)).text(), 'GLB preview');
     assert.equal(await (await api.downloadArtifact(quad)).text(), 'v 0 0 0\nf 1 2 3 4\n');
     assert.throws(() => api.artifact({ artifacts: [quad] }), /no downloadable artifact/);

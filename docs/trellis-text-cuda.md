@@ -69,6 +69,6 @@ meshharbor --data-dir "$DATA_DIR" generate --backend-id trellis-text-cuda \
   --prompt "A ceramic cup" --output ./cup.glb
 ```
 
-In Studio, refresh **Settings → Models**, then select **TRELLIS Text Large** in **New model**. For REST or MCP, use `model.generate` or `start_model_generation` with `input: { "kind": "text", "prompt": "A ceramic cup" }`. No image asset is required.
+In Studio, refresh **Settings → Models**, then select **TRELLIS Text Large** in **New model**. For REST or MCP, use `POST /api/v1/generation` or `generate_model` with `input: { "kind": "text", "prompt": "A ceramic cup" }`. No image asset is required.
 
 Readiness checks the host, marker, and file layout only; it does not verify file hashes or run CUDA. MeshHarbor launches the trusted runtime with Hugging Face offline settings, not an OS network sandbox. It does not store prompts in job records or pass them in worker arguments; the CLI's own `--prompt` can still appear in shell history or process arguments. Remove the marker to disable new jobs. Only stub workers have been tested in MeshHarbor; real CUDA inference, memory fit, and output quality still need verification.

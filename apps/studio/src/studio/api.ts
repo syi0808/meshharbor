@@ -232,12 +232,22 @@ export function isJobCancellable(job: Job | null): boolean {
   return job.state === 'queued' || job.state === 'running';
 }
 
+const meshFeatures: Record<MeshOperationId, string> = {
+  'mesh.cleanup': 'cleanup',
+  'mesh.voxel_remesh': 'voxel-remesh',
+  'uv.unwrap': 'unwrap-uv',
+  'render.optimize': 'optimize-rendering',
+  'mesh.compress': 'compress',
+  'mesh.retopology': 'retopology',
+  'mesh.retopology_lato2': 'retopology-lato2',
+};
+
 export function isJobRetryable(job: Job): boolean {
-  if (job.operation === 'mesh.separate_parts') return false;
-  return (job.state === 'failed' || job.state === 'cancelled') && (
-    Boolean(job.input_asset_id) || (job.operation === 'runtime.models.install' ? typeof job.parameters?.backend_id === 'string'
-      : job.operation.startsWith('runtime.pixal3d.') || job.operation === 'runtime.environment.setup')
-  );
+  if (job.state !== 'failed' && job.state !== 'cancelled') return false;
+  if (job.operation === 'runtime.models.install') return typeof job.parameters?.backend_id === 'string';
+  if (job.operation === 'runtime.environment.setup' || job.operation === 'runtime.pixal3d.cuda_install_multiview') return true;
+  return Boolean(job.input_asset_id) && (job.operation === 'model.generate' || job.operation === 'mesh.simplify'
+    || Object.hasOwn(meshFeatures, job.operation));
 }
 
 export function isGenerationOperation(operation: string): boolean {
@@ -712,34 +722,41 @@ export class MeshHarborApi {
   }
 
   checkHuggingFaceConnection(backend: RuntimeBackendId, token?: string): Promise<HuggingFaceConnectionStatus> {
-    return this.request(`/api/v1/runtime/${backend}/huggingface`, {
+    const path = this.huggingFaceAccount(backend);
+    return this.request(token === undefined ? `${path}/check` : path, {
       method: 'POST',
-      body: JSON.stringify({ token }),
+      ...(token !== undefined ? { body: JSON.stringify({ token }) } : {}),
       cache: 'no-store',
       redirect: 'error',
     });
   }
 
   checkModelAccess(backend: RuntimeBackendId, signal?: AbortSignal): Promise<HuggingFaceAccess> {
-    return this.request(`/api/v1/runtime/${backend}/model-access`, {
+    return this.request(`${this.huggingFaceAccount(backend)}/model-access`, {
       method: 'POST', cache: 'no-store', redirect: 'error', signal,
     });
   }
 
   startHuggingFaceBrowserLogin(backend: RuntimeBackendId): Promise<HuggingFaceBrowserLogin> {
-    return this.request(`/api/v1/runtime/${backend}/huggingface/browser`, {
+    return this.request(`${this.huggingFaceAccount(backend)}/sessions`, {
       method: 'POST', cache: 'no-store', redirect: 'error',
     });
   }
 
   huggingFaceBrowserLogin(backend: RuntimeBackendId, id: string, cancel = false): Promise<HuggingFaceBrowserLogin> {
-    return this.request(`/api/v1/runtime/${backend}/huggingface/browser/${encodeURIComponent(id)}`, {
+    return this.request(`${this.huggingFaceAccount(backend)}/sessions/${encodeURIComponent(id)}`, {
       method: cancel ? 'DELETE' : 'GET', cache: 'no-store', redirect: 'error',
     });
   }
 
+  private huggingFaceAccount(backend: RuntimeBackendId): string {
+    return `/api/v1/connections/huggingface/${backend.endsWith('-cuda') ? 'cuda' : 'mlx'}`;
+  }
+
   removeRuntimeFiles(backend: RuntimeBackendId, scope: 'huggingface' | 'model-files'): Promise<RuntimeInfo> {
-    return this.request(`/api/v1/runtime/${backend}/${scope}`, {
+    const path = scope === 'huggingface'
+      ? this.huggingFaceAccount(backend) : `/api/v1/runtime/${backend}/model-files`;
+    return this.request(path, {
       method: 'DELETE',
       body: JSON.stringify({ confirmed: true }),
       cache: 'no-store',
@@ -747,10 +764,10 @@ export class MeshHarborApi {
     });
   }
 
-  installCatalogModel(backend: RuntimeBackendId, gated: boolean): Promise<Job> {
+  installCatalogModel(backend: RuntimeBackendId, gated: boolean, modelPackage: 'base' | 'multiview' = 'base'): Promise<Job> {
     return this.request(`/api/v1/runtime/${backend}/install`, {
       method: 'POST',
-      body: JSON.stringify({ confirmed: true, confirm_gated_access: gated }),
+      body: JSON.stringify({ confirmed: true, confirm_gated_access: gated, package: modelPackage }),
     });
   }
 
@@ -766,15 +783,11 @@ export class MeshHarborApi {
   }
 
   installQuadriflowBackend(): Promise<{ release_tag: string; executable: string; already_installed: boolean }> {
-    return this.request('/api/v1/backends/quadriflow/install', { method: 'POST' });
+    return this.request('/api/v1/runtime/quadriflow/install', { method: 'POST' });
   }
 
   operations(): Promise<Operation[]> {
     return this.request('/api/v1/operations');
-  }
-
-  assets(): Promise<Asset[]> {
-    return this.request('/api/v1/assets?limit=100');
   }
 
   assetPage(limit = 50, cursor: string | null = null, filters: AssetPageFilters = {}): Promise<AssetPage> {
@@ -783,10 +796,9 @@ export class MeshHarborApi {
     if (cursor) params.set('cursor', cursor);
     const query = filters.query?.trim();
     if (query) params.set('q', query);
-    if (filters.kind) params.set('kind', filters.kind);
-    if (filters.derived !== undefined) params.set('derived', String(filters.derived));
-    if (filters.modelsOnly) params.set('models_only', 'true');
-    return this.request(`/api/v1/assets/page?${params.toString()}`);
+    if (filters.kind && !filters.modelsOnly) params.set('kind', filters.kind);
+    if (filters.derived !== undefined) params.set(filters.modelsOnly ? 'generated' : 'derived', String(filters.derived));
+    return this.request(`/api/v1/${filters.modelsOnly ? 'models' : 'assets'}?${params.toString()}`);
   }
 
   modelVersions(modelId: string, before?: number, signal?: AbortSignal): Promise<ModelVersionPage> {
@@ -856,13 +868,9 @@ export class MeshHarborApi {
   }
 
   createSimplifyJob(assetId: string, targetTriangles: number, maxError: number): Promise<Job> {
-    return this.request('/api/v1/jobs', {
+    return this.request(`/api/v1/assets/${encodeURIComponent(assetId)}/simplify`, {
       method: 'POST',
-      body: JSON.stringify({
-        operation: 'mesh.simplify',
-        input: { asset_id: assetId },
-        parameters: { target_triangles: targetTriangles, max_error: maxError },
-      }),
+      body: JSON.stringify({ target_triangles: targetTriangles, max_error: maxError }),
     });
   }
 
@@ -879,28 +887,16 @@ export class MeshHarborApi {
     operation: MeshOperationId,
     parameters: Record<string, number | boolean | string> = {},
   ): Promise<Job> {
-    return this.request('/api/v1/jobs', {
+    return this.request(`/api/v1/assets/${encodeURIComponent(assetId)}/${meshFeatures[operation]}`, {
       method: 'POST',
-      body: JSON.stringify({
-        operation,
-        input: { asset_id: assetId },
-        parameters,
-      }),
-    });
-  }
-
-  installPixal3dMultiview(): Promise<Job> {
-    return this.request('/api/v1/runtime/pixal3d-cuda/multiview', {
-      method: 'POST',
-      body: JSON.stringify({ confirm_large_download: true }),
+      body: JSON.stringify(parameters),
     });
   }
 
   createModelGenerationJob(input: GenerationInput, backendId: string, parameters: GenerationParameters): Promise<Job> {
-    return this.request('/api/v1/jobs', {
+    return this.request('/api/v1/generation', {
       method: 'POST',
       body: JSON.stringify({
-        operation: 'model.generate',
         input,
         parameters: { ...parameters, backend_id: backendId },
       }),
@@ -916,11 +912,11 @@ export class MeshHarborApi {
   }
 
   generationQueue(signal?: AbortSignal): Promise<string[]> {
-    return this.request('/api/v1/jobs/generation-queue', { signal, cache: 'no-store' });
+    return this.request('/api/v1/generation/queue', { signal, cache: 'no-store' });
   }
 
   swapGenerationQueue(jobId: string, swapWith: string): Promise<string[]> {
-    return this.request('/api/v1/jobs/generation-queue', {
+    return this.request('/api/v1/generation/queue', {
       method: 'POST',
       body: JSON.stringify({ job_id: jobId, swap_with: swapWith }),
     });
@@ -942,8 +938,10 @@ export class MeshHarborApi {
     }
   }
 
-  retryJob(jobId: string): Promise<Job> {
-    return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
+  retryJob(jobId: string, confirmDownload: boolean): Promise<Job> {
+    return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/retry`, {
+      method: 'POST', body: JSON.stringify({ confirm_download: confirmDownload }),
+    });
   }
 
   derivedAsset(assetId: string): Promise<Asset> {

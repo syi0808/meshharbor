@@ -116,7 +116,7 @@ test('the Jobs panel polls engine activity, keeps stable completed durations, an
 test('a generation moves from Stopping to Stopped and can start a new attempt', async ({ page, studioOrigin }) => {
   const timestamp = Date.now();
   const record = {
-    id: 'job_stop', operation: 'image.generate', state: 'running', progress: 5,
+    id: 'job_stop', operation: 'model.generate', state: 'running', progress: 5,
     stage: 'shape_hr', input_asset_id: 'reference', created_at: String(timestamp - 3000), started_at: String(timestamp - 2000), updated_at: String(timestamp),
   };
   let requests = 0;
@@ -131,6 +131,7 @@ test('a generation moves from Stopping to Stopped and can start a new attempt', 
   });
   await page.route('**/api/v1/jobs/job_stop/retry', route => {
     expect(route.request().method()).toBe('POST');
+    expect(route.request().postDataJSON()).toEqual({ confirm_download: false });
     expect(record.state).toBe('cancelled');
     retried = { ...record, id: 'new_attempt', state: 'queued', updated_at: String(timestamp + 3) };
     return route.fulfill({ status: 202, json: retried });

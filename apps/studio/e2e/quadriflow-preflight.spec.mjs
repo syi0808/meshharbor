@@ -73,10 +73,10 @@ test('Retopology can clean a duplicate face and recheck the derived mesh without
   const tools = page.getByRole('complementary', { name: 'Quad retopology (experimental)' });
   await expect(page.getByText(/Remesh input contains duplicate triangles/)).toBeVisible();
   const [cleanup] = await Promise.all([
-    page.waitForRequest(request => request.url().endsWith('/api/v1/jobs') && request.method() === 'POST'),
+    page.waitForRequest(request => request.url().endsWith('/cleanup') && request.method() === 'POST'),
     tools.getByRole('button', { name: 'Run Cleanup first', exact: true }).click(),
   ]);
-  expect(cleanup.postDataJSON()).toMatchObject({ operation: 'mesh.cleanup', parameters: { for_retopology: true } });
+  expect(cleanup.postDataJSON()).toMatchObject({ for_retopology: true });
   await expect(tools.getByTitle('duplicate-cleaned.glb', { exact: true })).toBeVisible();
   await expect(tools.getByRole('status')).toHaveText('Geometry-only input passed');
 });
@@ -91,9 +91,9 @@ test('Retopology offers voxel rebuilding separately from Cleanup and rechecks th
   await expect(tools.getByRole('button', { name: 'Run Cleanup first', exact: true })).toBeEnabled();
   await expect(tools.getByText(/geometry-only version at resolution 96/)).toBeVisible();
 
-  const submission = page.waitForRequest(request => request.url().endsWith('/api/v1/jobs') && request.method() === 'POST');
+  const submission = page.waitForRequest(request => request.url().endsWith('/voxel-remesh') && request.method() === 'POST');
   await tools.getByRole('button', { name: 'Run Voxel Remesh', exact: true }).click();
-  expect((await submission).postDataJSON()).toMatchObject({ operation: 'mesh.voxel_remesh', parameters: {} });
+  expect((await submission).postDataJSON()).toEqual({});
   await expect(tools.getByTitle('voxel-source-voxel-remeshed.glb', { exact: true })).toBeVisible();
   await expect(tools.getByRole('status')).toHaveText('Geometry-only input passed');
 });
@@ -110,9 +110,9 @@ test('the standalone Voxel Remesh tool accepts a custom grid resolution', async 
   await resolution.fill('161');
   await expect(run).toBeDisabled();
   await resolution.fill('32');
-  const submission = page.waitForRequest(request => request.url().endsWith('/api/v1/jobs') && request.method() === 'POST');
+  const submission = page.waitForRequest(request => request.url().endsWith('/voxel-remesh') && request.method() === 'POST');
   await run.click();
-  expect((await submission).postDataJSON()).toMatchObject({ operation: 'mesh.voxel_remesh', parameters: { resolution: 32 } });
+  expect((await submission).postDataJSON()).toMatchObject({ resolution: 32 });
   await expect(tools.getByTitle('voxel-cube-voxel-remeshed.glb', { exact: true })).toBeVisible();
 });
 
@@ -165,11 +165,10 @@ test('retopology failures use only a toast and superseded requests are cancelled
     await customTarget.uncheck();
     await expect(run).toBeEnabled();
     const [submission] = await Promise.all([
-      page.waitForRequest(request => request.url().endsWith('/api/v1/jobs') && request.method() === 'POST'),
+      page.waitForRequest(request => request.url().endsWith('/retopology') && request.method() === 'POST'),
       run.click(),
     ]);
-    expect(submission.postDataJSON()).toMatchObject({ operation: 'mesh.retopology' });
-    expect(submission.postDataJSON().parameters).toEqual({});
+    expect(submission.postDataJSON()).toEqual({});
   } finally {
     releaseStale();
   }

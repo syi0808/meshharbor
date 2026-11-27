@@ -542,21 +542,6 @@ impl OperationCore {
                     root, execution,
                 )?)?);
             }
-            RuntimeJobKind::Setup => {
-                Pixal3dRuntimeManager::new(root).setup_environment_tracked(execution)
-            }
-            RuntimeJobKind::InstallModels => {
-                Pixal3dRuntimeManager::new(root).install_models_tracked(true, true, execution)
-            }
-            RuntimeJobKind::ConvertNaf => {
-                Pixal3dRuntimeManager::new(root).convert_naf_tracked(execution)
-            }
-            RuntimeJobKind::CudaSetup => {
-                Pixal3dCudaRuntimeManager::new(root).setup_environment_tracked(execution)
-            }
-            RuntimeJobKind::CudaInstallModels => {
-                Pixal3dCudaRuntimeManager::new(root).install_models_tracked(true, true, execution)
-            }
             RuntimeJobKind::CudaInstallMultiview => Pixal3dCudaRuntimeManager::new(root)
                 .install_multiview_models_tracked(true, execution),
             RuntimeJobKind::InstallCatalogModel(backend) => {
@@ -734,16 +719,12 @@ impl OperationCore {
                 .flatten()
         })
         .collect();
-        let image_generation_ready = generation_profiles
-            .iter()
-            .any(|profile| profile.input_modes.contains(&GenerationInputMode::Image));
         let quadriflow_ready = self.linked_quadriflow_worker.is_some()
             || crate::quadriflow::quadriflow_sidecar_available_at(self.store.data_root());
         vec![
             OperationDescriptor { id: "asset.import".into(), title: "Import asset".into(), category: "asset".into(), summary: "Import PNG, JPEG, or GLB files while retaining an immutable content-addressed source artifact.".into(), implemented: true },
             OperationDescriptor { id: "asset.inspect".into(), title: "Inspect asset".into(), category: "asset".into(), summary: "Inspect supported GLB metadata and triangle counts.".into(), implemented: true },
             OperationDescriptor { id: MODEL_GENERATION_OPERATION.into(), title: "Generate 3D model".into(), category: "generation".into(), summary: "Generate a local GLB with a ready backend that supports the requested input. Inference does not install packages or download weights.".into(), implemented: !generation_profiles.is_empty() },
-            OperationDescriptor { id: IMAGE_GENERATION_OPERATION.into(), title: "Generate 3D from image".into(), category: "generation".into(), summary: "Compatibility operation for generating a local GLB from an imported image.".into(), implemented: image_generation_ready },
             OperationDescriptor { id: "mesh.simplify".into(), title: "Simplify mesh".into(), category: "mesh".into(), summary: "Reduce indexed static GLB triangles to a hard upper limit with meshoptimizer while retaining original vertex streams, materials, and textures. No result is saved if the limit cannot be met.".into(), implemented: true },
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces, then simplify eligible primitives within a conservative error tolerance without a triangle target.".into(), implemented: true },
             OperationDescriptor { id: "mesh.voxel_remesh".into(), title: "Voxel Remesh".into(), category: "mesh".into(), summary: "Rebuild one static indexed triangle GLB with meshoptimizer and validate the closed result before saving a geometry-only version. Does not copy UVs, materials, or textures.".into(), implemented: true },
@@ -779,6 +760,7 @@ impl OperationCore {
                 "account_tools_ready": cuda_supported && (environment.ready || readiness.environment_ready || crate::huggingface_browser::access_python(cuda_manager.runtime_root()).is_some()),
                 "pixal3d_cache": crate::huggingface_download::pixal_cache_status(&cuda_manager.home_path(), shared_cache.as_deref()),
                 "multiview_ready": readiness.ready && crate::huggingface_download::multiview_files_present(&cuda_manager.home_path()),
+                "optional_packages": ["multiview"],
                 "ready": readiness.ready,
                 "status": if readiness.ready { "ready_paths_unverified" }
                     else if !cuda_supported { "unsupported_host_or_nvidia_gpu_missing" }

@@ -17,13 +17,14 @@ test('linked QuadriFlow works with a clean store and no sidecar', () => {
     encoding: 'utf8', env, timeout: 200_000,
   }));
   try {
-    const backend = run('backend', 'status');
+    const doctor = run('local', 'doctor');
+    const backend = doctor.quadriflow_backend;
     assert.equal(backend.status, 'ready');
     assert.equal(backend.available, true);
     assert.equal(backend.managed, false);
     assert.equal(backend.sidecar_source, null);
     assert.equal(backend.install_available, false);
-    assert(run('doctor').operations.includes('mesh.retopology'));
+    assert(doctor.operations.includes('mesh.retopology'));
 
     for (const textured of [false, true]) {
       const stem = textured ? 'seamed' : 'geometry';
@@ -32,12 +33,12 @@ test('linked QuadriFlow works with a clean store and no sidecar', () => {
       const objPath = join(root, `${stem}-quad.obj`);
       const source = quadriflowCube({ textured });
       writeFileSync(sourcePath, source);
-      const asset = run('import', sourcePath);
+      const asset = run('local', 'import', sourcePath);
       const targetArgs = textured ? ['--target-quads', '384'] : [];
-      const preflight = run('retopology-preflight', asset.id, ...targetArgs);
+      const preflight = run('local', 'retopology-preflight', asset.id, ...targetArgs);
       assert.equal(preflight.requested_quads, textured ? 384 : null);
       const result = run(
-        'process-mesh', asset.id, '--operation', 'mesh.retopology', ...targetArgs,
+        'local', 'process-mesh', asset.id, '--operation', 'mesh.retopology', ...targetArgs,
         '--output', previewPath, '--quad-output', objPath,
       );
       assert.equal(result.report.requested_quads, preflight.requested_quads);

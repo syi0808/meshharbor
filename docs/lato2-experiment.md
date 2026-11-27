@@ -17,13 +17,13 @@ The managed profiles target [LATO.2 source revision `650b48f`](https://github.co
 
 In Studio, select a textured GLB, open **Mesh to Mesh**, select **LATO.2**, and run the job. The model appears once; Studio automatically uses a ready backend, preferring MLX on macOS and CUDA on Linux. This is separate from **Optimize** and QuadriFlow **Retopology**.
 
-Submit to `POST /api/v1/jobs`:
+Submit to `POST /api/v1/assets/{asset_id}/retopology-lato2` using the imported GLB asset ID:
 
 ```json
 {
-  "operation": "mesh.retopology_lato2",
-  "input": {"asset_id": "<imported GLB asset id>"},
-  "parameters": {"backend_id": "lato2-mlx", "target_triangles": 3008, "atlas_resolution": 1024}
+  "backend_id": "lato2-mlx",
+  "target_triangles": 3008,
+  "atlas_resolution": 1024
 }
 ```
 
@@ -43,7 +43,7 @@ The topology checks reject open edges, nonmanifold edges/vertices, inconsistent 
 
 In Studio, open **New model**, select **LATO.2**, and provide a single PNG or JPEG. This mode uses the upstream [Image2Mesh script](https://github.com/LoHhhha/LATO.2/blob/650b48fb1257c83ec1358f0c9f1d95d5cb9c7468/scripts/image_e2e_inference.py) and outputs a geometry-only GLB; no texture or PBR map is synthesized. The job rejects open or nonmanifold predictions.
 
-`POST /api/v1/jobs` accepts `operation: "model.generate"`, `input: {"kind": "image", "asset_id": "..."}`, and parameters such as `{"backend_id": "lato2-cuda", "target_vertices": 2000, "seed": 42}`. Use `lato2-mlx` for Apple Silicon. The approximate vertex target is 200–5000. Inference timeouts are ten minutes on CUDA and twenty on MLX. Text and posed multiview input are not supported.
+`POST /api/v1/generation` accepts `input: {"kind": "image", "asset_id": "..."}`, and parameters such as `{"backend_id": "lato2-cuda", "target_vertices": 2000, "seed": 42}`. Use `lato2-mlx` for Apple Silicon. The approximate vertex target is 200–5000. Inference timeouts are ten minutes on CUDA and twenty on MLX. Text and posed multiview input are not supported.
 
 ## Crocodile At 3,008 Triangles
 

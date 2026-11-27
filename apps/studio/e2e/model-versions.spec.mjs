@@ -77,9 +77,9 @@ test('edits stay on one inventory card and restored versions survive reload', as
   await threshold.fill('0.9');
   await expect(page.getByRole('button', { name: 'Run Render optimization' })).toBeDisabled();
   await threshold.fill('1.2');
-  const renderRequest = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/v1/jobs'));
+  const renderRequest = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/optimize-rendering'));
   await page.getByRole('button', { name: 'Run Render optimization' }).click();
-  expect((await renderRequest).postDataJSON().parameters).toEqual({ overdraw_threshold: 1.2 });
+  expect((await renderRequest).postDataJSON()).toEqual({ overdraw_threshold: 1.2 });
   const optimizedName = selected.getByTitle('panels-cleaned-render-optimized.glb', { exact: true });
   await expect(optimizedName).toBeVisible();
   await expect(card).toHaveCount(1);

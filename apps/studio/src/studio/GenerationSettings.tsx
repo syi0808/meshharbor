@@ -32,6 +32,7 @@ export function selectableGenerationProfiles(runtime: RuntimeInfo | null): Gener
       view_modes: profile.view_modes ?? ['single'],
       max_views: profile.max_views ?? 1,
       multiviewReady: selected.multiview_ready === true,
+      multiviewInstallable: selected.optional_packages?.includes('multiview') === true,
     }];
   });
 }

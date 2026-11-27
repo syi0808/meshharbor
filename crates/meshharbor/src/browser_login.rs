@@ -17,7 +17,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::huggingface_status::HuggingFaceStatuses;
-use crate::{ApiError, AppState, acquire_runtime_write_lock};
+use crate::{ApiError, AppState, acquire_runtime_write_lock, actions::AccountScope};
 
 #[derive(Clone, Default)]
 pub(crate) struct BrowserLoginSessions(Arc<Mutex<Option<Session>>>);
@@ -56,9 +56,10 @@ pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(sessions): Extension<BrowserLoginSessions>,
     Extension(statuses): Extension<HuggingFaceStatuses>,
-    Path(backend): Path<String>,
+    Path(scope): Path<AccountScope>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let profile = Pixal3dProfile::from_backend(&backend)?;
+    let profile = Pixal3dProfile::from(scope);
+    let backend = scope.segment().to_owned();
     let response = |view| {
         (
             StatusCode::ACCEPTED,
@@ -108,10 +109,10 @@ pub(crate) async fn start(
 
 pub(crate) async fn status(
     Extension(sessions): Extension<BrowserLoginSessions>,
-    Path((backend, id)): Path<(String, Uuid)>,
+    Path((scope, id)): Path<(AccountScope, Uuid)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let current = sessions.0.lock().await;
-    let session = find_session(&current, &backend, id)?;
+    let session = find_session(&current, scope.segment(), id)?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(session.view.clone()),
@@ -120,10 +121,10 @@ pub(crate) async fn status(
 
 pub(crate) async fn cancel(
     Extension(sessions): Extension<BrowserLoginSessions>,
-    Path((backend, id)): Path<(String, Uuid)>,
+    Path((scope, id)): Path<(AccountScope, Uuid)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let current = sessions.0.lock().await;
-    let session = find_session(&current, &backend, id)?;
+    let session = find_session(&current, scope.segment(), id)?;
     if session.view.phase.is_active() {
         let _ = session.cancel.send(true);
     }

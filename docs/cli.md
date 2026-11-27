@@ -4,45 +4,41 @@ The examples use the built `meshharbor` executable on `PATH`. From a source chec
 
 ## Control the running engine
 
-Use `meshharbor engine` to operate on the same server and job queue as Studio, even when its browser tab is closed. Start `meshharbor serve` or the background service first, then set `MESHHARBOR_API_TOKEN` in the terminal environment to the server's bearer token. Set `MESHHARBOR_SERVER` or pass `--server 127.0.0.1:PORT` for a nondefault loopback address. The default is `127.0.0.1:7432`. `engine runtime health` does not need a token; all other `engine` commands do. The running server selects the data directory for these commands.
+Use `meshharbor engine` against the same server and queue as Studio. Start `meshharbor serve` or the background service and set `MESHHARBOR_API_TOKEN` to the server's bearer token. Override the default `127.0.0.1:7432` with `MESHHARBOR_SERVER` or `engine --server 127.0.0.1:PORT`. The server selects its own data directory; a Studio browser tab is not required.
 
 ```sh
-meshharbor engine assets page --models-only --query castle --limit 20
+meshharbor engine assets import ./scene.glb
+meshharbor engine assets page --kind mesh --query castle
 meshharbor engine assets show "$ASSET_ID"
-meshharbor engine assets versions "$MODEL_ID"
-meshharbor engine assets restore "$MODEL_ID" "$ASSET_ID"
+meshharbor engine models list --query castle
+meshharbor engine models versions "$MODEL_ID"
+meshharbor engine models restore "$MODEL_ID" "$ASSET_ID"
 meshharbor engine assets export "$ARTIFACT_ID" ./existing-version.glb
 
-meshharbor engine jobs submit model.generate --input '{"kind":"image","asset_id":"asset_REPLACE_ME"}' \
-  --parameters '{"backend_id":"pixal3d-mlx","tuning":{"ss_steps":16}}'
 meshharbor engine jobs list --include-active
+meshharbor engine jobs show "$JOB_ID"
 meshharbor engine jobs steps "$JOB_ID"
-meshharbor engine jobs queue
-meshharbor engine jobs swap "$JOB_ID" "$OTHER_JOB_ID"
 meshharbor engine jobs cancel "$JOB_ID" --queued-only
-meshharbor engine jobs retry "$JOB_ID" --confirmed
+meshharbor engine jobs retry "$JOB_ID"
 ```
 
-`assets page` also accepts `--cursor`, `--kind`, and `--derived true|false`. `jobs list --before JOB_ID` loads older terminal records. `jobs submit` returns immediately and accepts the same input and parameters as the [REST job API](rest-api.md#job-history-and-execution), including [posed multiview generation](rest-api.md#generation-inputs). Existing `generate`, `simplify`, and `process-mesh` commands still run directly; use `engine jobs submit` when the job must share Studio's queue.
+Use `--confirm-download` only when approving the repeat of a model download. Jobs commands control previously submitted work; to start work, select the matching feature. Asset and model lists both support `--cursor`; `assets page` accepts `--derived true|false` and `models list` accepts `--generated true|false`.
 
 ```sh
 meshharbor engine runtime status
-meshharbor engine runtime jobs pixal3d-mlx
 meshharbor engine runtime setup-environment --confirmed
+meshharbor engine connections login-start mlx
+meshharbor engine connections login-status mlx "$SESSION_ID"
+meshharbor engine connections check-account mlx
+meshharbor engine connections check-model-access mlx
 meshharbor engine runtime install pixal3d-mlx --confirmed --confirm-gated-access
+meshharbor engine runtime install pixal3d-cuda --package multiview --confirmed
+meshharbor engine runtime jobs pixal3d-mlx
 meshharbor engine runtime remove-model-files pixal3d-mlx --confirmed
-meshharbor engine runtime install-multiview --confirm-large-download
-meshharbor engine runtime check-account pixal3d-mlx
-meshharbor engine runtime check-model-access pixal3d-mlx
-meshharbor engine runtime login-start pixal3d-mlx
-meshharbor engine runtime login-status pixal3d-mlx "$SESSION_ID"
-meshharbor engine runtime login-cancel pixal3d-mlx "$SESSION_ID"
-meshharbor engine runtime disconnect pixal3d-mlx --confirmed
-meshharbor engine blender status
-meshharbor engine blender download-addon ./meshharbor_bridge.py
+meshharbor engine connections disconnect mlx --confirmed
 ```
 
-Use `login-status` to read the one-time code, enter it yourself on the Hugging Face device authorization page, and check again for `signed_in`. Do not paste Hugging Face tokens into command lines; the existing interactive `runtime hf-login`/`cuda-hf-login` commands remain available for token entry.
+Use `cuda` instead of `mlx` for CUDA credentials. Complete device authorization in your browser, then check the session for `signed_in`. Do not put a Hugging Face token in command-line arguments.
 
 ## Background service
 
@@ -102,85 +98,51 @@ if you also want to delete its data.
 
 ## Mesh processing
 
+All editing commands target a stored mesh asset ID and return a job record. Preflight returns a report immediately and does not start a job.
+
 ```sh
-# Import a GLB, then set ASSET_ID to the asset ID printed by the import.
-meshharbor import ./scene.glb
-meshharbor assets --limit 20
-ASSET_ID=asset_REPLACE_ME
-
-# Read persisted job history without resuming or modifying jobs
-meshharbor jobs list --limit 20
-meshharbor jobs show job_REPLACE_ME
-
-# Simplify an imported asset; the source stays intact
-meshharbor simplify "$ASSET_ID" --target-triangles 4000 --max-error 0.02 --output ./scene-simplified.glb
-
-# Conservative cleanup, atlas UV rebake, render optimization, or required KHR_meshopt compression
-meshharbor process-mesh "$ASSET_ID" --operation mesh.cleanup --output ./scene-cleaned.glb
-# Remove duplicates for retopology without simplifying the mesh.
-meshharbor process-mesh "$ASSET_ID" --operation mesh.cleanup --for-retopology
-# Rebuild a closed geometry-only surface (grid resolution 16–160, default 96)
-meshharbor process-mesh "$ASSET_ID" --operation mesh.voxel_remesh --voxel-resolution 96 --output ./scene-voxel.glb
-meshharbor process-mesh "$ASSET_ID" --operation uv.unwrap --output ./scene-atlas.glb
-# Adjust atlas resolution (64–4,096; default 1,024) and chart padding (0–64; default 8)
-meshharbor process-mesh "$ASSET_ID" --operation uv.unwrap --resolution 2048 --padding 12 --output ./scene-atlas-hd.glb
-meshharbor process-mesh "$ASSET_ID" --operation render.optimize --output ./scene-render-optimized.glb
-# Optional overdraw threshold (1.0–1.5; default 1.05)
-meshharbor process-mesh "$ASSET_ID" --operation render.optimize --overdraw-threshold 1.2 --output ./scene-render-tuned.glb
-meshharbor process-mesh "$ASSET_ID" --operation mesh.compress --output ./scene-compressed.glb
+meshharbor engine mesh simplify "$ASSET_ID" --target-triangles 4000 --max-error 0.02
+meshharbor engine mesh cleanup "$ASSET_ID" --for-retopology
+meshharbor engine mesh voxel-remesh "$ASSET_ID" --resolution 96
+meshharbor engine mesh unwrap-uv "$ASSET_ID" --resolution 1024 --padding 8
+meshharbor engine mesh optimize-rendering "$ASSET_ID" --overdraw-threshold 1.05
+meshharbor engine mesh compress "$ASSET_ID"
+meshharbor engine mesh preflight "$ASSET_ID"
+meshharbor engine mesh retopology "$ASSET_ID" --target-quads 1000
+meshharbor engine mesh retopology-lato2 "$ASSET_ID" --backend-id lato2-mlx --target-triangles 4000
 ```
 
-Mesh processing targets supported static indexed triangle GLBs and creates a new asset. Simplification fails without creating an asset if it cannot honor the triangle limit. Compressed GLBs require a viewer that supports `KHR_meshopt_compression`; they do not include an uncompressed geometry fallback. See [architecture and operation limits](architecture.md#simplification-and-uvbaking-boundary).
+Use `engine jobs show` to find the result's asset ID and `engine assets export` to save its GLB or OBJ artifact. See [mesh editing limits](rest-api.md#mesh-editing) and [QuadriFlow readiness](retopology-candidate.md).
 
 ## Send to Blender
 
-With Blender 4.2+ closed, run `meshharbor blender install` to install and enable
-the bundled add-on for the next Blender launch. Installation needs neither a
-server nor a token. If Blender is running, quit it and retry; its settings are
-not changed. In Blender, press **N** in the 3D Viewport and choose
-**MeshHarbor → Start Bridge**.
+With Blender closed, run `meshharbor install-blender-addon` to edit local Blender preferences for the next launch. This needs neither a running server nor a token. For manual installation use `meshharbor engine blender download-addon ./meshharbor_bridge.py`. If you install for a nondefault port, use the same `MESHHARBOR_SERVER` or `--server` setting for the installer and engine commands.
 
-To transfer an asset, run `meshharbor serve` on the same computer. The Studio
-browser does not need to be open. Set `MESHHARBOR_API_TOKEN` in the sending
-process to the server's bearer token (the configured value or the temporary token
-printed by the server). Use the asset ID in that server's data directory:
+In Blender, choose **N → MeshHarbor → Start Bridge**, then submit the selected version. Send returns immediately with a transfer ID; query it until Blender reports completion.
 
 ```sh
-meshharbor blender send "$ASSET_ID"
-meshharbor blender send "$ASSET_ID" --no-wait
-meshharbor blender transfer-status "$TRANSFER_ID"
+meshharbor engine blender status
+meshharbor engine blender send "$ASSET_ID"
+meshharbor engine blender transfer "$TRANSFER_ID"
 ```
 
-By default, `send` waits for Blender to confirm the import. With `--no-wait`,
-it returns an ID for `transfer-status`. For a nondefault listen address, pass
-`--server 127.0.0.1:PORT` or set `MESHHARBOR_BLENDER_SERVER` for both installation
-and transfer. Only loopback IP addresses are accepted (default `127.0.0.1:7432`).
-Standard and MeshHarbor meshopt-compressed GLBs use the same bridge. The source
-GLB and existing scene file are not overwritten.
+## 3D generation
 
-## Image-to-3D
-
-Run `meshharbor doctor` to check local backend readiness. Follow the [Pixal3D MLX](pixal3d-mlx-manual-runtime.md) or [CUDA](pixal3d-cuda-managed-runtime.md) guide for setup and gated model downloads. After setup, import your image and substitute its asset ID:
+Use `engine runtime status` to choose a ready profile. See the [REST generation contract](rest-api.md#generation-inputs) for accepted per-profile tuning and multiview fields.
 
 ```sh
-meshharbor import ./reference.png
-IMAGE_ASSET_ID=asset_REPLACE_ME
-meshharbor generate "$IMAGE_ASSET_ID" --backend-id pixal3d-mlx --output ./generated.glb
+meshharbor engine assets import ./reference.png
+meshharbor engine generation image "$IMAGE_ASSET_ID" --backend pixal3d-mlx
+meshharbor engine generation text 'A ceramic cup' --backend trellis-text-mlx
+meshharbor engine generation queue
+meshharbor engine generation swap "$JOB_ID" "$OTHER_JOB_ID"
 ```
 
-Use `pixal3d-cuda` for the Linux/NVIDIA profile.
+Pass `--parameters '{"tuning":{"structure_steps":16}}'` for catalog settings supported by the selected backend. A configured CUDA profile accepts `view_input` in the same parameters object.
 
-Use `--tuning '{"ss_steps":16}'` for catalog settings supported by the selected backend. The CUDA profile also accepts `--view-input` with a JSON object containing the ordered pose references; the positional image asset ID must match the first reference. See the [input format and platform requirements](rest-api.md#generation-inputs).
+## Offline commands
 
-TRELLIS.2 and TripoSG also expose experimental Apple MLX and NVIDIA CUDA profiles through CLI, REST, MCP, and Studio. They require [manual provisioning and authorization](external-generation-runtimes.md); only first-party adapters are included. TRELLIS.2 produces textured GLB, while TripoSG produces geometry-only GLB. Neither model has been qualified with real GPU inference in MeshHarbor.
-
-## Text-to-3D
-
-After manually provisioning TRELLIS Text Large on [Apple Silicon](trellis-text-mlx.md) or [Linux/NVIDIA](trellis-text-cuda.md), pass a prompt instead of an image asset ID. The experimental profiles output a geometry-only GLB. With `auto`, Apple Silicon uses `trellis-text-mlx` and Linux/NVIDIA uses `trellis-text-cuda`.
-
-```sh
-meshharbor generate --prompt "A ceramic cup" --output ./cup.glb
-```
+The explicit `meshharbor local` group works directly against `--data-dir` without a server. It is for offline batch or diagnostic use, not the Studio queue. For example, run `meshharbor local inspect ./scene.glb` or see `meshharbor local --help` for offline import, processing, and generation. Model provisioning and connected job control are under `engine`.
 
 ## File and output limits
 
@@ -190,16 +152,16 @@ meshharbor generate --prompt "A ceramic cup" --output ./cup.glb
 
 ## Local data and recovery
 
-The app stores source assets, managed Python environments, and isolated Hugging Face caches under its local data directory. By default that is `%LOCALAPPDATA%\MeshHarbor` on Windows (falling back to `%USERPROFILE%\AppData\Local\MeshHarbor`), `~/Library/Application Support/MeshHarbor` on macOS, and `$XDG_DATA_HOME/meshharbor` or `~/.local/share/meshharbor` on Linux. Empty environment-variable values are ignored. Set `MESHHARBOR_HOME` to override the location. Use the same `--data-dir` or `MESHHARBOR_HOME` value for `serve` and the corresponding `*-hf-login` command. Review and accept any model-host terms in your own account before downloading. CUDA is limited to Linux x86_64/NVIDIA, requests roughly 25–30 GB of weights, uses a fixed camera and does not install MoGe/rembg. MLX retains its separate conversion step and profile. See [Studio settings](../apps/studio/README.md#settings) to set up a supported profile in the browser.
+The app stores source assets, managed Python environments, and isolated Hugging Face caches under its local data directory. By default that is `%LOCALAPPDATA%\MeshHarbor` on Windows (falling back to `%USERPROFILE%\AppData\Local\MeshHarbor`), `~/Library/Application Support/MeshHarbor` on macOS, and `$XDG_DATA_HOME/meshharbor` or `~/.local/share/meshharbor` on Linux. Empty environment-variable values are ignored. Set `MESHHARBOR_HOME` to override the location. Use `--data-dir` or `MESHHARBOR_HOME` when starting the engine; connected commands work against that engine’s store. Review and accept any model-host terms in your own account before downloading. CUDA is limited to Linux x86_64/NVIDIA, requests roughly 25–30 GB of weights, uses a fixed camera and does not install MoGe/rembg. MLX retains its separate conversion step and profile. See [Studio settings](../apps/studio/README.md#settings) to set up a supported profile in the browser.
 
 MeshHarbor keeps managed downloads and links to reusable tools and model files inside its data directory. After stopping MeshHarbor, removing that directory would remove its private downloads and links without deleting the linked system tools or shared cache files. Back up any assets or job history you want to keep first. This does not remove a native service registration or manually configured runtimes outside the data directory.
 
 All processes using the same data directory coordinate through OS advisory locks. REST and MCP may run together. Each service cancels its queued and running jobs on graceful exit. At startup it marks unfinished jobs from previous, no-longer-running services as failed, leaving other live services' jobs alone. Pixal3D runtime setup, downloads, Hugging Face login, and conversion take an exclusive runtime lock, while image generation takes a compatible shared lock. This prevents those MeshHarbor actions from racing over managed Python environments or Hugging Face caches. If an incompatible operation is already active, the new operation fails fast with a retry message. The operating system releases locks when a process exits or crashes, and separate data directories do not block one another. This coordinates MeshHarbor processes only; it is not a lock on unrelated software that accesses the same files. After force-killing MeshHarbor during a managed uv/Python command, verify the spawned uv/Python child has exited before retrying; the OS releases the parent process's lock, and orphaned child supervision is not yet implemented.
 
-To force manual recovery instead of restarting a service, stop all REST and MCP processes that use this data directory before running:
+To force manual recovery instead of restarting a service, stop all engine and offline processes that use this data directory before running:
 
 ```sh
-meshharbor jobs recover-interrupted --confirm-no-running-meshharbor
+meshharbor recover-jobs --confirm-no-running-meshharbor
 ```
 
 The command marks interrupted jobs as failed; it does not resume work or remove assets or model files.

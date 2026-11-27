@@ -106,6 +106,7 @@ export interface GenerationModel extends GenerationProfile {
   modelId: string;
   label: string;
   multiviewReady: boolean;
+  multiviewInstallable: boolean;
   ready: boolean;
   setupMessage?: string;
   output?: 'textured_glb' | 'geometry_glb';
@@ -134,6 +135,7 @@ export interface RuntimeInfo {
     id: string;
     generation?: GenerationProfile | null;
     multiview_ready?: boolean;
+    optional_packages?: 'multiview'[];
     ready?: boolean;
     status: string;
     accelerator?: string;

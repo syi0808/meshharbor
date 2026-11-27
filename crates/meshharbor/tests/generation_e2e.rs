@@ -187,7 +187,7 @@ fn external_triposg_requires_activation_and_runs_an_offline_worker() {
             .output()
             .unwrap()
     };
-    let imported = execute(&["import", image.to_str().unwrap()]);
+    let imported = execute(&["local", "import", image.to_str().unwrap()]);
     assert!(imported.status.success());
     let source: Value = serde_json::from_slice(&imported.stdout).unwrap();
     let (backend_id, revision, entry, files): (&str, &str, &str, &[&str]) =
@@ -223,6 +223,7 @@ fn external_triposg_requires_activation_and_runs_an_offline_worker() {
         };
     let root = data_dir.join("runtimes").join(backend_id);
     let generation = [
+        "local",
         "generate",
         source["id"].as_str().unwrap(),
         "--backend-id",
@@ -281,7 +282,7 @@ cp "$6/fixture.glb" "$9"
         assert!(output.get("texture_size").is_none());
     }
 
-    let doctor: Value = serde_json::from_slice(&execute(&["doctor"]).stdout).unwrap();
+    let doctor: Value = serde_json::from_slice(&execute(&["local", "doctor"]).stdout).unwrap();
     let backends = doctor["model_backends"].as_array().unwrap();
     for id in [
         "trellis2-mlx",
@@ -315,7 +316,7 @@ fn trellis_text_cli_uses_prompt_stdin_and_path_checked_runtime() {
             .arg("--data-dir")
             .arg(&data_dir)
             .env("HF_TOKEN", "must-not-reach-the-worker")
-            .args(["generate", "--prompt", prompt, "--output"])
+            .args(["local", "generate", "--prompt", prompt, "--output"])
             .arg(&output_path)
             .output()
             .unwrap()
@@ -433,7 +434,11 @@ fn cli_import_generate_and_export_uses_mock_runtime_without_models() {
     let image = runtime._tree.0.join("input.png");
     fs::write(&image, IMAGE_PNG).unwrap();
 
-    let imported = run_cli(&runtime, &data_dir, &["import", image.to_str().unwrap()]);
+    let imported = run_cli(
+        &runtime,
+        &data_dir,
+        &["local", "import", image.to_str().unwrap()],
+    );
     assert!(
         imported.status.success(),
         "{}",
@@ -447,6 +452,7 @@ fn cli_import_generate_and_export_uses_mock_runtime_without_models() {
         &runtime,
         &data_dir,
         &[
+            "local",
             "generate",
             asset_id,
             "--backend-id",
@@ -519,8 +525,8 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     assert_eq!(engine_cli(&["runtime", "jobs", "pixal3d-mlx"]), json!([]));
     let missing_session = mcp.request(
         "tools/call",
-        json!({"name":"engine_runtime","arguments":{"request":{
-            "action":"login_status", "backend":"pixal3d-mlx", "session":uuid::Uuid::nil()
+        json!({"name":"engine_connections","arguments":{"request":{
+            "action":"login_status", "scope":"mlx", "session":uuid::Uuid::nil()
         }}}),
     );
     assert_eq!(
@@ -552,8 +558,7 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     fs::write(&hold_generation, []).unwrap();
 
     let job_body = json!({
-        "operation": "image.generate",
-        "input": { "asset_id": source_id },
+        "input": { "kind": "image", "asset_id": source_id },
         "parameters": {
             "backend_id": "pixal3d-mlx",
             "seed": 17,
@@ -566,7 +571,7 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     let (status, body) = http_request(
         address,
         "POST",
-        "/api/v1/jobs",
+        "/api/v1/generation",
         &[
             ("Authorization", authorization.as_str()),
             ("Content-Type", "application/json"),
@@ -689,7 +694,7 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     );
     assert_eq!(
         mcp.tool(
-            "engine_assets",
+            "engine_models",
             json!({"request":{"action":"versions","model_id":generated_asset_id}})
         )["current_asset_id"],
         generated_asset_id
@@ -714,7 +719,7 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     let (status, body) = http_request(
         address,
         "POST",
-        "/api/v1/jobs",
+        "/api/v1/generation",
         &[
             ("Authorization", authorization.as_str()),
             ("Content-Type", "application/json"),
@@ -786,20 +791,12 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
             json!({"operation":"mesh.cleanup"}),
         )
         .unwrap();
-    let model_page = engine_cli(&[
-        "assets",
-        "page",
-        "--models-only",
-        "--kind",
-        "mesh",
-        "--derived",
-        "true",
-    ]);
+    let model_page = engine_cli(&["models", "list", "--generated", "true"]);
     assert_eq!(model_page["items"][0]["id"], version.id);
-    let restored = mcp.tool("engine_assets", json!({"request":{"action":"restore","model_id":generated_asset_id,"asset_id":generated_asset_id}}));
+    let restored = mcp.tool("engine_models", json!({"request":{"action":"restore","model_id":generated_asset_id,"asset_id":generated_asset_id}}));
     assert_eq!(restored["model"]["current_asset_id"], generated_asset_id);
     assert_eq!(
-        engine_cli(&["assets", "versions", generated_asset_id])["items"]
+        engine_cli(&["models", "versions", generated_asset_id])["items"]
             .as_array()
             .unwrap()
             .len(),
@@ -810,8 +807,11 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
         address,
         "POST",
         &format!("{job_path}/retry"),
-        &[("Authorization", authorization.as_str())],
-        &[],
+        &[
+            ("Authorization", authorization.as_str()),
+            ("Content-Type", "application/json"),
+        ],
+        b"{}",
     )
     .unwrap();
     assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
@@ -827,28 +827,29 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
         thread::sleep(Duration::from_millis(25));
     }
     let queued = engine_cli(&[
-        "jobs",
-        "submit",
-        "image.generate",
-        "--input",
-        &job_body["input"].to_string(),
+        "generation",
+        "image",
+        source_id,
         "--parameters",
         &job_body["parameters"].to_string(),
     ]);
     let queued_id = queued["id"].as_str().unwrap();
     assert_eq!(queued["state"], "queued");
-    let mcp_queued = mcp.tool("engine_jobs", json!({"request":{
-        "action":"submit", "operation":"image.generate", "input":job_body["input"], "parameters":job_body["parameters"]
-    }}));
+    let mcp_queued = mcp.tool(
+        "generate_model",
+        json!({
+            "input":job_body["input"], "parameters":job_body["parameters"]
+        }),
+    );
     let mcp_queued_id = mcp_queued["id"].as_str().unwrap();
     assert_eq!(mcp_queued["state"], "queued");
     assert_eq!(
-        engine_cli(&["jobs", "queue"]),
+        engine_cli(&["generation", "queue"]),
         json!([queued_id, mcp_queued_id])
     );
     assert_eq!(
         mcp.tool(
-            "engine_jobs",
+            "engine_generation_queue",
             json!({"request":{"action":"swap","job_id":mcp_queued_id,"swap_with":queued_id}})
         ),
         json!([mcp_queued_id, queued_id])
@@ -856,7 +857,7 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     let (status, queue) = http_request(
         address,
         "GET",
-        "/api/v1/jobs/generation-queue",
+        "/api/v1/generation/queue",
         &[("Authorization", &authorization)],
         &[],
     )
@@ -870,7 +871,7 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
         engine_cli(&["jobs", "cancel", mcp_queued_id, "--queued-only"])["state"],
         "cancelled"
     );
-    assert_eq!(engine_cli(&["jobs", "queue"]), json!([queued_id]));
+    assert_eq!(engine_cli(&["generation", "queue"]), json!([queued_id]));
     assert!(
         Command::new("/bin/kill")
             .args(["-TERM", &server.0.id().to_string()])
@@ -899,7 +900,7 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
     let (status, body) = http_request(
         address,
         "POST",
-        "/api/v1/jobs",
+        "/api/v1/generation",
         &[
             ("Authorization", authorization.as_str()),
             ("Content-Type", "application/json"),
@@ -933,23 +934,68 @@ fn rest_upload_job_poll_and_artifact_download_share_the_generation_core() {
 }
 
 #[test]
-fn mcp_import_generation_and_glb_export_use_the_same_mock_generation_core() {
+fn mcp_import_generation_and_export_run_on_the_selected_server() {
     let runtime = MockRuntime::new("mcp-generation");
     let data_dir = runtime._tree.0.join("store");
     let export_dir = runtime._tree.0.join("exports");
     fs::create_dir_all(&export_dir).unwrap();
 
+    let address = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let mut server_command = meshharbor();
+    server_command
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .args(["serve", "--listen", &address.to_string()])
+        .env("MESHHARBOR_API_TOKEN", "mcp-e2e-token")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    runtime.configure(&mut server_command);
+    let mut server = ChildGuard(server_command.spawn().unwrap());
+    assert_eq!(wait_for_health(&address, &mut server.0).0, 200);
+
     let mut command = meshharbor();
     command
         .arg("--data-dir")
-        .arg(&data_dir)
+        .arg(runtime._tree.0.join("not-the-server-store"))
         .arg("mcp")
+        .env("MESHHARBOR_SERVER", address.to_string())
+        .env("MESHHARBOR_API_TOKEN", "mcp-e2e-token")
         .env("MESHHARBOR_EXPORT_DIR", &export_dir);
-    runtime.configure(&mut command);
     let mut client = McpClient::start(command);
 
+    let cli_source = runtime._tree.0.join("cli-source.png");
+    fs::write(&cli_source, IMAGE_PNG).unwrap();
+    let cli_import = meshharbor()
+        .args([
+            "engine",
+            "--server",
+            &address.to_string(),
+            "assets",
+            "import",
+        ])
+        .arg(&cli_source)
+        .env("MESHHARBOR_API_TOKEN", "mcp-e2e-token")
+        .output()
+        .unwrap();
+    assert!(
+        cli_import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli_import.stderr)
+    );
+    let cli_asset: Value = serde_json::from_slice(&cli_import.stdout).unwrap();
+    let from_mcp = client.tool(
+        "engine_assets",
+        json!({
+            "request":{"action":"show","asset_id":cli_asset["id"]}
+        }),
+    );
+    assert_eq!(from_mcp["id"], cli_asset["id"]);
+
     let imported = client.tool(
-        "import_asset",
+        "import_engine_asset",
         json!({
             "filename": "source.png",
             "bytes_base64": encode_base64(IMAGE_PNG)
@@ -961,14 +1007,16 @@ fn mcp_import_generation_and_glb_export_use_the_same_mock_generation_core() {
         .to_owned();
 
     let submitted = client.tool(
-        "start_image_generation",
+        "generate_model",
         json!({
-            "asset_id": source_id,
-            "backend_id": "pixal3d-mlx",
-            "seed": 23,
-            "resolution": 512,
-            "texture_size": 512,
-            "target_faces": 64
+            "input": {"kind": "image", "asset_id": source_id},
+            "parameters": {
+                "backend_id": "pixal3d-mlx",
+                "seed": 23,
+                "resolution": 512,
+                "texture_size": 512,
+                "target_faces": 64
+            }
         }),
     );
     let job_id = submitted["id"]
@@ -977,7 +1025,10 @@ fn mcp_import_generation_and_glb_export_use_the_same_mock_generation_core() {
         .to_owned();
     let mut completed = None;
     for _ in 0..200 {
-        let job = client.tool("get_job", json!({"job_id": job_id}));
+        let job = client.tool(
+            "engine_jobs",
+            json!({"request":{"action":"show","job_id": job_id}}),
+        );
         if job["state"] == "succeeded" || job["state"] == "failed" {
             completed = Some(job);
             break;
@@ -988,18 +1039,26 @@ fn mcp_import_generation_and_glb_export_use_the_same_mock_generation_core() {
     assert_eq!(completed["state"], "succeeded", "job: {completed}");
     assert_eq!(completed["result"]["backend_id"], "pixal3d-mlx");
     let generated_asset_id = completed["result"]["asset_id"].as_str().unwrap();
-    let destination = export_dir.join("generated.glb");
-    let exported = client.tool(
-        "export_glb",
-        json!({
-            "asset_id": generated_asset_id,
-            "output_path": destination.to_string_lossy()
-        }),
+    let asset = client.tool(
+        "engine_assets",
+        json!({"request":{"action":"show","asset_id":generated_asset_id}}),
     );
+    let artifact_id = asset["artifacts"][0]["id"].as_str().unwrap();
+    let destination = export_dir.join("generated.glb");
+    let export =
+        json!({"request":{"action":"export","artifact_id":artifact_id,"output_path":destination}});
+    let exported = client.tool("engine_assets", export.clone());
     assert_eq!(exported["overwritten"], false);
     assert_eq!(fs::read(destination).unwrap(), runtime.generated_glb);
 
+    let conflict = client.request(
+        "tools/call",
+        json!({"name":"engine_assets","arguments":export}),
+    );
+    assert_eq!(conflict["result"]["isError"], true);
+    assert!(!runtime._tree.0.join("not-the-server-store").exists());
     client.shutdown();
+    server.terminate();
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

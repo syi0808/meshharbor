@@ -71,7 +71,7 @@ impl ModelEnvironment {
 
     pub(crate) fn require(root: &Path) -> CoreResult<Self> {
         Self::load(root).ok_or_else(|| CoreError::OperationUnavailable(
-            "Set up Python and uv in Studio → Settings → Environment first (CLI: meshharbor runtime environment-setup).".into(),
+            "Set up Python and uv in Studio → Settings → Environment first (CLI: meshharbor engine runtime setup-environment --confirmed).".into(),
         ))
     }
 

@@ -7,28 +7,23 @@ not make CUDA available on macOS or Windows.
 
 ## Setup and generation
 
+Start the server and set its bearer token as described in the [CLI guide](cli.md#control-the-running-engine).
+
 ```sh
-# Uses the same MESHHARBOR_HOME/--data-dir as the local server.
-meshharbor runtime environment-setup
-meshharbor runtime cuda-setup
-meshharbor runtime cuda-hf-login
-
-# Do this only after accepting/accessing the gated DINOv3 model in your account.
-# The two flags are required confirmations for a roughly 25–30 GB download.
-meshharbor runtime cuda-install-models \
-  --confirm-large-download \
-  --confirm-gated-access
-
-meshharbor import ./input.png
-meshharbor assets --limit 20  # copy the returned asset id
-meshharbor generate asset_<image-id> --backend-id pixal3d-cuda --output ./result.glb
+meshharbor engine runtime setup-environment --confirmed
+# After setup finishes, complete device authorization in your browser.
+meshharbor engine connections login-start cuda
+meshharbor engine connections login-status cuda "$SESSION_ID"
+# Accept the gated DINOv3 terms before confirming the model download.
+meshharbor engine runtime install pixal3d-cuda --confirmed --confirm-gated-access
+meshharbor engine assets import ./input.png
+meshharbor engine generation image "$IMAGE_ASSET_ID" --backend pixal3d-cuda
+meshharbor engine jobs show "$JOB_ID"
 ```
 
-`cuda-setup` detects `nvidia-smi` before installing packages, then installs a
+The catalog installer detects `nvidia-smi` before installing packages, then installs a
 managed Python 3.12 environment with PyTorch 2.6.0/torchvision 0.21.0 from the
-official CUDA 12.4 index and runs the upstream CUDA/SDPA preflight. Model files
-are a separate action. MeshHarbor does not download them automatically while
-setting up or generating.
+official CUDA 12.4 index and runs the upstream CUDA/SDPA preflight. The same confirmed job provisions base model files. Generation never installs packages or downloads weights.
 
 The upstream CUDA repository has dependency ranges but no committed `uv.lock`.
 On first explicit setup, uv resolves the pinned profile and upstream ranges and
@@ -67,21 +62,9 @@ recent logs for the Pixal3D MLX and CUDA profiles. Use **Connections** for
 Hugging Face sign-in. The workbench shows model
 names and automatically selects a locally ready runtime. The same
 generation option (`backend_id: "auto" | "pixal3d-mlx" | "pixal3d-cuda"`) is
-accepted by the CLI, `POST /api/v1/jobs` `model.generate`, and MCP
-`start_model_generation`. REST and MCP requests use `input.kind: "image"`.
-Runtime setup/model installation are asynchronous:
+accepted by the CLI, `POST /api/v1/generation`, and MCP `generate_model`. REST and MCP requests use `input.kind: "image"`. Activate the base profile with `POST /api/v1/runtime/pixal3d-cuda/install` or MCP `engine_runtime` `install`. Use `package: "multiview"` on the same feature endpoint for the optional CUDA weights.
 
-- `POST /api/v1/runtime/pixal3d-cuda/setup`
-- `POST /api/v1/runtime/pixal3d-cuda/models` with both
-  `confirm_large_download` and `confirm_gated_access` set to `true`
-- `POST /api/v1/runtime/pixal3d-cuda/multiview` with `confirm_large_download: true`
-- MCP `setup_pixal3d_cuda_runtime` and `install_pixal3d_cuda_models` with the
-  same confirmation fields
-
-The result is validated as a GLB and imported as a derived local asset. Studio
-can preview it; CLI can write it with `--output`; REST exposes the artifact;
-MCP's `export_glb` writes only inside its configured export directory and never
-overwrites an existing file.
+The result is validated as a GLB and stored as a new asset. After the job succeeds, Studio previews the asset and REST exposes its artifacts. CLI and MCP can export exact bytes via `engine assets export` or `engine_assets` `export`.
 
 ## Posed generation in Studio
 

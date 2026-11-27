@@ -57,7 +57,6 @@ impl Mcp {
         let mut child = meshharbor(root)
             .arg("mcp")
             .env("MESHHARBOR_API_TOKEN", TOKEN)
-            .env("MESHHARBOR_BLENDER_SERVER", address.to_string())
             .env("MESHHARBOR_SERVER", address.to_string())
             .env("MESHHARBOR_EXPORT_DIR", root.join("exports"))
             .stdin(Stdio::piped())
@@ -198,11 +197,12 @@ async fn cli_and_mcp_send_to_the_same_open_scene_without_studio() {
     );
     let mut cli = meshharbor(root.path());
     cli.args([
+        "engine",
+        "--server",
+        &address.to_string(),
         "blender",
         "send",
         &asset.id,
-        "--server",
-        &address.to_string(),
     ])
     .env("MESHHARBOR_API_TOKEN", TOKEN);
     let not_connected = cli.output().await.unwrap();
@@ -236,7 +236,7 @@ async fn cli_and_mcp_send_to_the_same_open_scene_without_studio() {
     );
     let completed: Value = serde_json::from_slice(&sent.stdout).unwrap();
     assert_eq!(completed["id"], cli_id);
-    assert_eq!(completed["stage"], "succeeded");
+    assert_eq!(completed["stage"], "waiting");
 
     let mut mcp = Mcp::start(root.path(), address).await;
     let addon = root.path().join("exports/meshharbor_bridge.py");
@@ -256,10 +256,13 @@ async fn cli_and_mcp_send_to_the_same_open_scene_without_studio() {
         refused["error"]
             .as_str()
             .unwrap()
-            .contains("explicit confirmation")
+            .contains("explicit owner approval")
     );
     let sent = mcp
-        .tool("send_to_blender", json!({"asset_id":asset.id}))
+        .tool(
+            "engine_blender",
+            json!({"request":{"action":"send","asset_id":asset.id}}),
+        )
         .await;
     assert_eq!(sent["stage"], "waiting", "{sent}");
     let mcp_id = receive_model(
@@ -272,18 +275,24 @@ async fn cli_and_mcp_send_to_the_same_open_scene_without_studio() {
     .await;
     assert_eq!(sent["id"], mcp_id);
     let failed = mcp
-        .tool("get_blender_transfer", json!({"transfer_id":mcp_id}))
+        .tool(
+            "engine_blender",
+            json!({"request":{"action":"transfer","transfer_id":mcp_id}}),
+        )
         .await;
     assert_eq!(failed["stage"], "failed");
     assert_eq!(failed["error"], "Cannot import in this scene.");
     let old = mcp
-        .tool("get_blender_transfer", json!({"transfer_id":cli_id}))
+        .tool(
+            "engine_blender",
+            json!({"request":{"action":"transfer","transfer_id":cli_id}}),
+        )
         .await;
     assert_eq!(old["stage"], "succeeded");
 
     let checked = meshharbor(root.path())
-        .args(["blender", "transfer-status", &mcp_id])
-        .env("MESHHARBOR_BLENDER_SERVER", address.to_string())
+        .args(["engine", "blender", "transfer", &mcp_id])
+        .env("MESHHARBOR_SERVER", address.to_string())
         .env("MESHHARBOR_API_TOKEN", TOKEN)
         .output()
         .await

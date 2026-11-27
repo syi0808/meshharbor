@@ -1,6 +1,6 @@
 # Pixal3D MLX: managed local setup
 
-This is the first image-generation integration profile for Apple Silicon. MeshHarbor can provision an isolated Python 3.12 environment and, after a separate explicit action, download pinned model checkpoints. Users accept terms, request access, and create tokens on Hugging Face. A token can be connected through local Studio or the interactive CLI and is stored in a dedicated local cache. MeshHarbor's project license and Pixal3D source-port MIT notice do not replace model, checkpoint, and dependency terms.
+This is the first image-generation integration profile for Apple Silicon. MeshHarbor can provision an isolated Python 3.12 environment and, after a separate explicit action, download pinned model checkpoints. Users accept terms, request access, and create tokens on Hugging Face. A token can be connected through local Studio or browser device authorization started by the CLI and is stored in a dedicated local cache. MeshHarbor's project license and Pixal3D source-port MIT notice do not replace model, checkpoint, and dependency terms.
 
 ## Prerequisites
 
@@ -9,39 +9,34 @@ This is the first image-generation integration profile for Apple Silicon. MeshHa
 - `curl` for the official uv release download if uv is not already installed. The runtime setup installs pinned uv 0.13.8 into MeshHarbor application data and verifies its SHA-256 before using it. macOS and Linux also need the system `tar` utility; Windows uses PowerShell `Expand-Archive`.
 - Build the MeshHarbor executable from the repository with the MLX source tree present. The pinned source snapshot and adapter scripts are embedded into the executable and extracted under `<data-dir>/runtimes/pixal3d-mlx/source`; the original checkout is not needed when running that built binary.
 - Around 25 GB of free disk space for the seven Pixal3D checkpoints, gated DINOv3, NAF and the isolated environment. MoGe is skipped for the fixed-camera generation profile.
-- Hugging Face account access to the gated DINOv3 repository. The owner must review and accept any required terms and obtain access in Hugging Face before downloading. Only enter the token in local Studio's connection form or the CLI's masked prompt, never in chat or source code.
+- Hugging Face account access to the gated DINOv3 repository. The owner must review and accept any required terms and obtain access in Hugging Face before downloading. Enter a raw token only in local Studio's connection form, never in chat or source code.
 
 ## Setup and model download
 
-Use the same data directory for the server and the following CLI commands. The default on macOS is `~/Library/Application Support/MeshHarbor`; `--data-dir` / `MESHHARBOR_HOME` overrides it.
+Start the server and configure the CLI with its bearer token; see the [CLI guide](cli.md#control-the-running-engine).
 
 ~~~sh
-# Prepare shared uv, Python, and Hugging Face account tools, then install locked MLX dependencies.
-meshharbor runtime environment-setup
-meshharbor runtime setup
-
-# In a terminal on this computer, enter the HF token only in the official masked prompt.
-# This writes it to MeshHarbor's private HF cache, not your ordinary HF cache.
-meshharbor runtime hf-login
-
-# First review/accept DINOv3 terms and request access in your own HF account.
-# This then preflights access and explicitly downloads about 24 GB of model files.
-meshharbor runtime install-models --confirm-large-download --confirm-gated-access
-
-meshharbor doctor
+meshharbor engine runtime setup-environment --confirmed
+# Wait for setup to finish, then complete device authorization in your browser.
+meshharbor engine connections login-start mlx
+meshharbor engine connections login-status mlx "$SESSION_ID"
+# Review and obtain gated DINOv3 access before approving the download.
+meshharbor engine runtime install pixal3d-mlx --confirmed --confirm-gated-access
+meshharbor engine runtime status
 ~~~
 
-`runtime install-models` checks access to the pinned gated DINOv3 checkpoint file with a HEAD request before transferring any weights. It delegates the pinned DINOv3 and Pixal3D transfers to `hf download` using the dedicated Hugging Face cache under `<data-dir>/runtimes/pixal3d-mlx/home`, including cached files from earlier runs. MeshHarbor verifies the Pixal3D hashes and separately fetches and verifies NAF under `<data-dir>/runtimes/pixal3d-mlx/weights`. The isolated token is used for Hugging Face access checks and downloads; MeshHarbor does not expose it to generation jobs. The downloader deliberately skips MoGe because the supported generation profile uses a fixed camera and passes `--no-moge`. After download, MeshHarbor creates a separate CPU-only converter environment with pinned PyTorch, safetensors, NumPy, and packaging versions, converts and verifies NAF, and leaves the MLX inference environment unchanged. If conversion fails after the files arrive, retry the install in Studio or run `meshharbor runtime convert-naf` to retry conversion only.
+The catalog install checks access to the pinned gated DINOv3 checkpoint file with a HEAD request before transferring any weights. It delegates the pinned DINOv3 and Pixal3D transfers to `hf download` using the dedicated Hugging Face cache under `<data-dir>/runtimes/pixal3d-mlx/home`, including cached files from earlier runs. MeshHarbor verifies the Pixal3D hashes and separately fetches and verifies NAF under `<data-dir>/runtimes/pixal3d-mlx/weights`. The isolated token is used for Hugging Face access checks and downloads; MeshHarbor does not expose it to generation jobs. The downloader deliberately skips MoGe because the supported generation profile uses a fixed camera and passes `--no-moge`. After download, MeshHarbor creates a separate CPU-only converter environment with pinned PyTorch, safetensors, NumPy, and packaging versions, converts and verifies NAF, and leaves the MLX inference environment unchanged. If conversion fails after the files arrive, retry the install; it reuses compatible, verified downloads.
 
 ## Generate
 
-Import a PNG/JPEG using Studio or `meshharbor import`, then run:
+Import a PNG/JPEG using Studio or `meshharbor engine assets import`, then run:
 
 ~~~sh
-meshharbor generate asset_<image-id> --output ./generated.glb
+meshharbor engine generation image "$IMAGE_ASSET_ID" --backend pixal3d-mlx
+meshharbor engine jobs show "$JOB_ID"
 ~~~
 
-In **Settings → Environment**, prepare the shared tools, then select **Sign in with browser** under **Connections**. Studio uses an app-managed Hugging Face CLI to complete device authorization without changing the pinned MLX environment. Manual token entry and `meshharbor runtime hf-login` remain available. Return to **Models** and choose **Install model** on the Pixal3D MLX card to set up the runtime, download the weights, and convert NAF in one job. Use the link in the confirmation dialog to request DINOv3 access if needed. The dialog checks access before you can approve the install. The installer symlinks matching pinned Pixal3D and DINOv3 files from your regular Hugging Face Hub cache. It also uses a cached NAF from the upstream Pixal3D CUDA cache if its SHA-256 matches. Files that cannot be reused are downloaded privately. Use **Recent logs** on the backend card to inspect the setup and transfer output.
+In **Settings → Environment**, prepare the shared tools, then select **Sign in with browser** under **Connections**. Studio uses an app-managed Hugging Face CLI to complete device authorization without changing the pinned MLX environment. Manual token entry remains available in Studio. Return to **Models** and choose **Install model** on the Pixal3D MLX card to set up the runtime, download the weights, and convert NAF in one job. Use the link in the confirmation dialog to request DINOv3 access if needed. The dialog checks access before you can approve the install. The installer symlinks matching pinned Pixal3D and DINOv3 files from your regular Hugging Face Hub cache. It also uses a cached NAF from the upstream Pixal3D CUDA cache if its SHA-256 matches. Files that cannot be reused are downloaded privately. Use **Recent logs** on the backend card to inspect the setup and transfer output.
 
 Generation uses the fixed reviewed 512 profile, the local pinned Pixal3D/DINOv3/NAF files, Hugging Face offline mode, no background-removal model, and the fan hole filler. The first DINOv3 cache revision must be the pinned revision `ea8dc2863c51be0a264bab82070e3e8836b02d51`. The managed HF cache is dedicated to MeshHarbor and avoids changing/deleting the user's existing HF cache.
 
@@ -58,7 +53,7 @@ The face target remains soft because final hole filling can add triangles. In a 
 - This feature does not clear redistribution of model weights, third-party wheels, or commercial usage.
 - No model weights or user images are shipped in this repository.
 - The embedded code snapshot is not a self-contained Python distribution: setup downloads the pinned uv binary only if needed and fetches dependencies and model files when explicitly requested.
-- `runtime doctor` checks local file paths only; it does not guarantee memory capacity, dependency health after setup, or successful end-to-end inference.
+- `engine runtime status` checks local readiness; it does not guarantee memory capacity, dependency health after setup, or successful end-to-end inference.
 
 ## Validation status
 

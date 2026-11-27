@@ -51,7 +51,7 @@ type Backend = RuntimeInfo['model_backends'][number];
 type RemovalScope = 'huggingface' | 'model-files';
 type AccessStatus = HuggingFaceAccess | 'checking' | 'unavailable';
 type AccountStatus = HuggingFaceConnectionStatus | 'checking' | 'unavailable';
-type VisitSettings = (section: SettingsSection, backend?: RuntimeBackendId) => void;
+type VisitSettings = (section: SettingsSection, backend?: string) => void;
 
 export function settingsSectionFromPath(path: string): SettingsSection | null {
   const [, base, section] = path.replace(/\/$/, '').split('/');
@@ -62,7 +62,7 @@ export function settingsSectionFromPath(path: string): SettingsSection | null {
 interface Props {
   api: MeshHarborApi;
   section: SettingsSection | null;
-  backendId: RuntimeBackendId | null;
+  backendId: string | null;
   runtime: RuntimeInfo | null;
   connection: 'disconnected' | 'connecting' | 'connected';
   busy: boolean;
@@ -90,7 +90,8 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
   const [removal, setRemoval] = useState<{ backend: RuntimeBackendId; scope: RemovalScope; label?: string } | null>(null);
   const [browserLogin, setBrowserLogin] = useState<{ backend: RuntimeBackendId; session: HuggingFaceBrowserLogin } | null>(null);
   const platformId: RuntimeBackendId = runtime?.platform === 'linux' ? 'pixal3d-cuda' : 'pixal3d-mlx';
-  const connectionId = section === 'connections' && backendId?.startsWith('pixal3d-') ? backendId : platformId;
+  const connectionId = section === 'connections' && (backendId === 'pixal3d-mlx' || backendId === 'pixal3d-cuda')
+    ? backendId : platformId;
   const connectionBackend = runtime?.model_backends.find(backend => backend.id === connectionId);
   const environmentReady = runtime?.environment?.ready === true;
   const browserBackend = browserLogin?.backend;
@@ -357,7 +358,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                       ? backend.model_paths ?? (backend.runtime_root ? [backend.runtime_root] : [])
                       : [];
                     const available = modelInstallAvailable(backend, repart);
-                    const canInstallMultiview = id === 'pixal3d-cuda' && backend.installable && backend.ready
+                    const canInstallMultiview = backend.optional_packages?.includes('multiview') && backend.installable && backend.ready
                       && backend.generation?.view_modes?.some(mode => mode !== 'single') && !backend.multiview_ready;
                     const needsSignIn = environmentReady && signInRequired && (available || canInstallMultiview);
                     return <Card key={id} role="article" aria-label={label} aria-disabled={!environmentReady || undefined} size="sm" className="min-w-0 bg-background">
@@ -377,7 +378,7 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                         {available && <CatalogInstall label={label} backend={backend} repart={repart}
                           disabled={disabled || !environmentReady || signInRequired} dino={dino}
                           onInstall={() => onRuntimeAction(id, backend.gated_model_access_required ? 'install-gated' : 'install')} />}
-                        {environmentReady && id === 'pixal3d-cuda' && backend.ready && backend.multiview_ready
+                        {environmentReady && backend.optional_packages?.includes('multiview') && backend.ready && backend.multiview_ready
                           && <Badge variant="outline">Multiview installed</Badge>}
                         {canInstallMultiview && <ModelInstallDialog label={label} action="Install multiview weights"
                           description="Adds support for multiple reference views. This separate download can be large; MeshHarbor reuses compatible cached files."

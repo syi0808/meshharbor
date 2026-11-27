@@ -51,7 +51,7 @@ pub enum GenerationInputMode {
     Text,
 }
 
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GenerationInput {
     Image { asset_id: String },
@@ -233,7 +233,7 @@ impl Pixal3dMlxRuntime {
             model_files_ready = false;
             models_downloaded = false;
             missing.push(format!(
-                "The isolated runtime home is missing: {}. Run `meshharbor runtime setup` first.",
+                "The isolated runtime home is missing: {}. Install the MLX backend in Studio → Settings → Models.",
                 self.home.display()
             ));
         }

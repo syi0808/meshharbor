@@ -203,7 +203,7 @@ export function App() {
   const [connection, setConnection] = useState<Connection>('disconnected');
   const [settingsSection, setSettingsSection] = useState(() => settingsSectionFromPath(window.location.pathname));
   const [focusedJobId, setFocusedJobId] = useState(() => jobsFromLocation()?.jobId ?? null);
-  const [settingsBackend, setSettingsBackend] = useState<RuntimeBackendId | null>(null);
+  const [settingsBackend, setSettingsBackend] = useState<string | null>(null);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
   const sidebar = useWorkbenchSidebar(jobsFromLocation() ? 'jobs' : 'inventory');
   const { showPanel } = sidebar;
@@ -384,7 +384,7 @@ export function App() {
   const generationDraft = selectedGenerationProfile ? generationDrafts[selectedGenerationProfile.id] ?? {} : {};
   const generationPayload = selectedGenerationProfile
     ? generationParameters(selectedGenerationProfile, generationDraft, viewMode !== 'single') : null;
-  function openSettings(section: SettingsSection, backendId?: RuntimeBackendId) {
+  function openSettings(section: SettingsSection, backendId?: string) {
     setSettingsBackend(backendId ?? null);
     if (sidebar.narrow && sidebar.open) sidebar.setOpen(false);
     const path = `/settings/${section}`;
@@ -1249,8 +1249,9 @@ export function App() {
   }
 
   function runRuntimeAction(backend: RuntimeBackendId, action: RuntimeAction) {
-    void startRuntimeAction(() => action === 'multiview'
-      ? api.installPixal3dMultiview() : api.installCatalogModel(backend, action === 'install-gated'));
+    void startRuntimeAction(() => api.installCatalogModel(
+      backend, action === 'install-gated', action === 'multiview' ? 'multiview' : 'base',
+    ));
   }
 
   async function downloadBlob(load: () => Promise<Blob>, fileName: (blob: Blob) => string, label: string) {
@@ -1334,7 +1335,7 @@ export function App() {
     if (!retryTarget || busy || isRunning || connection !== 'connected') return;
     setBusy(true);
     try {
-      const next = await api.retryJob(retryTarget.id);
+      const next = await api.retryJob(retryTarget.id, retryTarget.operation.startsWith('runtime.'));
       if (isGenerationOperation(next.operation)) {
         localGenerations.current.add(next.id);
         observedJobStates.current.set(next.id, next.state);
@@ -1544,8 +1545,8 @@ export function App() {
                 {selectedGenerationProfile.view_modes.map(mode => <NativeSelectOption key={mode} value={mode}
                   disabled={mode !== 'single' && !selectedGenerationProfile.multiviewReady}>{viewLabels[mode]}</NativeSelectOption>)}
               </NativeSelect>
-              {!selectedGenerationProfile.multiviewReady && <>
-                <Button variant="outline" size="sm" className="self-start" onClick={() => openSettings('models', 'pixal3d-cuda')}>Set up multiview</Button>
+              {!selectedGenerationProfile.multiviewReady && selectedGenerationProfile.multiviewInstallable && <>
+                <Button variant="outline" size="sm" className="self-start" onClick={() => openSettings('models', selectedGenerationProfile.id)}>Set up multiview</Button>
               </>}
             </Field>}
             {inputMode === 'text' ? <Field>

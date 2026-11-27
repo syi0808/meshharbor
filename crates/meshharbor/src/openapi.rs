@@ -18,11 +18,10 @@ use serde_json::{Value, json};
 use utoipa_swagger_ui::Config;
 
 use crate::{
-    ApiErrorBody, AppState, AssetPageQuery, CancelJobQuery, CatalogInstallConfirmation,
-    EnvironmentSetupConfirmation, GenerationQueueSwap, HuggingFaceConnectionRequest,
-    JobHistoryQuery, JobStartBody, LimitQuery, ModelInstallConfirmation, ModelVersionsQuery,
-    MultiviewInstallConfirmation, RestoreModelVersion, RuntimeRemovalConfirmation, SimplifyBody,
-    UploadQuery, blender_bridge, browser_login,
+    ApiErrorBody, AppState, AssetPageQuery, CancelJobQuery, EnvironmentSetupConfirmation,
+    GenerationQueueSwap, HuggingFaceConnectionRequest, JobHistoryQuery, ModelPageQuery,
+    ModelVersionsQuery, RestoreModelVersion, RuntimeRemovalConfirmation, UploadQuery, actions,
+    blender_bridge, browser_login,
 };
 
 const SPEC_PATH: &str = "/openapi.json";
@@ -113,22 +112,22 @@ fn document() -> Value {
     api.post::<Job>("/runtime/environment/setup", "Queue shared tool setup", 202)
         .body::<EnvironmentSetupConfirmation>();
     api.post::<browser_login::LoginView>(
-        "/runtime/{backend}/huggingface/browser",
+        "/connections/huggingface/{scope}/sessions",
         "Start Hugging Face device sign-in",
         202,
     );
     api.get::<browser_login::LoginView>(
-        "/runtime/{backend}/huggingface/browser/{session}",
+        "/connections/huggingface/{scope}/sessions/{session}",
         "Check the sign-in session",
     );
     api.json::<browser_login::LoginView>(
         "delete",
-        "/runtime/{backend}/huggingface/browser/{session}",
+        "/connections/huggingface/{scope}/sessions/{session}",
         "Cancel the sign-in session",
         200,
     );
     api.post::<HuggingFaceConnection>(
-        "/runtime/{backend}/huggingface",
+        "/connections/huggingface/{scope}",
         "Check or save a Hugging Face token (Studio only)",
         200,
     )
@@ -136,18 +135,18 @@ fn document() -> Value {
     .studio_only();
     api.json::<RuntimeDoctor>(
         "delete",
-        "/runtime/{backend}/huggingface",
+        "/connections/huggingface/{scope}",
         "Remove saved local Hugging Face credentials",
         200,
     )
     .body::<RuntimeRemovalConfirmation>();
     api.post::<HuggingFaceConnection>(
-        "/runtime/{backend}/huggingface/check",
+        "/connections/huggingface/{scope}/check",
         "Check saved Hugging Face credentials",
         200,
     );
     api.post::<HuggingFaceAccess>(
-        "/runtime/{backend}/model-access",
+        "/connections/huggingface/{scope}/model-access",
         "Check gated model access",
         200,
     );
@@ -163,46 +162,16 @@ fn document() -> Value {
         "Queue model installation",
         202,
     )
-    .body::<CatalogInstallConfirmation>();
+    .body::<actions::InstallBackend>();
     api.get::<Vec<Job>>("/runtime/{backend}/jobs", "List recent runtime jobs");
-    api.get::<QuadriFlowBackendStatus>("/backends/quadriflow", "Check QuadriFlow availability");
+    api.get::<QuadriFlowBackendStatus>("/runtime/quadriflow", "Check QuadriFlow availability");
     api.post::<QuadriFlowInstallResult>(
-        "/backends/quadriflow/install",
+        "/runtime/quadriflow/install",
         "Install the verified QuadriFlow sidecar",
         200,
     );
-    for (path, summary) in [
-        ("/runtime/pixal3d-mlx/setup", "Queue Pixal3D MLX setup"),
-        ("/runtime/pixal3d-cuda/setup", "Queue Pixal3D CUDA setup"),
-        (
-            "/runtime/pixal3d-mlx/convert-naf",
-            "Queue MLX NAF checkpoint conversion",
-        ),
-    ] {
-        api.post::<Job>(path, summary, 202);
-    }
-    for (path, summary) in [
-        (
-            "/runtime/pixal3d-mlx/models",
-            "Queue Pixal3D MLX weight installation",
-        ),
-        (
-            "/runtime/pixal3d-cuda/models",
-            "Queue Pixal3D CUDA weight installation",
-        ),
-    ] {
-        api.post::<Job>(path, summary, 202)
-            .body::<ModelInstallConfirmation>();
-    }
-    api.post::<Job>(
-        "/runtime/pixal3d-cuda/multiview",
-        "Queue CUDA multiview weight installation",
-        202,
-    )
-    .body::<MultiviewInstallConfirmation>();
-
-    api.get::<Vec<Asset>>("/assets", "List recent assets")
-        .query::<LimitQuery>();
+    api.get::<AssetPage>("/assets", "Page through imported assets and mesh versions")
+        .query::<AssetPageQuery>();
     api.post::<Asset>("/assets", "Import raw PNG, JPEG, or GLB bytes", 200)
         .query::<UploadQuery>()
         .request_content(binary_content(&[
@@ -211,15 +180,48 @@ fn document() -> Value {
             "image/jpeg",
             "model/gltf-binary",
         ]));
-    api.get::<AssetPage>("/assets/page", "Page through assets or current mesh models")
-        .query::<AssetPageQuery>();
+    api.get::<AssetPage>(
+        "/models",
+        "Page through the current version of each 3D model",
+    )
+    .query::<ModelPageQuery>();
     api.get::<Asset>("/assets/{asset_id}", "Get an asset");
     api.post::<Job>(
         "/assets/{asset_id}/simplify",
         "Queue mesh simplification",
         202,
     )
-    .body::<SimplifyBody>();
+    .body::<actions::SimplifyMesh>();
+    api.post::<Job>("/assets/{asset_id}/cleanup", "Queue mesh cleanup", 202)
+        .body::<actions::CleanupMesh>();
+    api.post::<Job>(
+        "/assets/{asset_id}/voxel-remesh",
+        "Queue voxel remeshing",
+        202,
+    )
+    .body::<actions::VoxelRemesh>();
+    api.post::<Job>("/assets/{asset_id}/unwrap-uv", "Queue UV atlas rebake", 202)
+        .body::<actions::UnwrapUv>();
+    api.post::<Job>(
+        "/assets/{asset_id}/optimize-rendering",
+        "Queue render-order optimization",
+        202,
+    )
+    .body::<actions::OptimizeRendering>();
+    api.post::<Job>("/assets/{asset_id}/compress", "Queue mesh compression", 202)
+        .body::<actions::CompressMesh>();
+    api.post::<Job>(
+        "/assets/{asset_id}/retopology",
+        "Queue QuadriFlow retopology",
+        202,
+    )
+    .body::<QuadRetopologyOptions>();
+    api.post::<Job>(
+        "/assets/{asset_id}/retopology-lato2",
+        "Queue LATO.2 retopology",
+        202,
+    )
+    .body::<actions::RetopologizeLato2>();
     api.post::<QuadRetopologyPreflight>(
         "/assets/{asset_id}/retopology-preflight",
         "Check mesh eligibility for QuadriFlow",
@@ -251,16 +253,15 @@ fn document() -> Value {
 
     api.get::<Vec<Job>>("/jobs", "List persisted jobs")
         .query::<JobHistoryQuery>();
-    api.post::<Job>("/jobs", "Submit a mesh or generation job", 202)
-        .body::<JobStartBody>()
+    api.post::<Job>("/generation", "Generate a new 3D model", 202)
+        .body::<actions::GenerateModel>()
         .operation["requestBody"]["content"]["application/json"]["example"] = json!({
-        "operation": "model.generate",
         "input": {"kind": "image", "asset_id": "asset_example"},
         "parameters": {"backend_id": "auto"}
     });
-    api.get::<Vec<String>>("/jobs/generation-queue", "List IDs in the generation queue");
+    api.get::<Vec<String>>("/generation/queue", "List IDs in the generation queue");
     api.post::<Vec<String>>(
-        "/jobs/generation-queue",
+        "/generation/queue",
         "Swap adjacent queued generation jobs",
         200,
     )
@@ -274,9 +275,10 @@ fn document() -> Value {
         .query::<CancelJobQuery>();
     api.post::<Job>(
         "/jobs/{job_id}/retry",
-        "Start a new attempt for a replayable job",
+        "Retry the same saved job, with explicit confirmation for downloads",
         202,
-    );
+    )
+    .body::<actions::RetryJob>();
 
     api.add(
         "get",
@@ -365,6 +367,8 @@ impl ApiDocument {
             .map(|name| {
                 let schema = if matches!(name, "id" | "session") {
                     json!({"type": "string", "format": "uuid"})
+                } else if name == "scope" {
+                    json!({"type": "string", "enum": ["mlx", "cuda"]})
                 } else {
                     json!({"type": "string"})
                 };
@@ -372,7 +376,10 @@ impl ApiDocument {
             })
             .collect();
         let tag = match path.split('/').nth(1).unwrap_or_default() {
-            "runtime" | "backends" => "Runtime",
+            "assets" if path.split('/').count() == 4 => "Mesh editing",
+            "runtime" => "Runtime",
+            "connections" => "Connections",
+            "generation" => "Generation",
             "assets" | "artifacts" | "models" => "Assets and models",
             "jobs" => "Jobs",
             "blender" => "Blender",
@@ -618,10 +625,9 @@ mod tests {
             spec["components"]["securitySchemes"]["bearerAuth"]["scheme"],
             "bearer"
         );
-        assert!(
-            spec["components"]["schemas"]["JobStartBody"]["properties"]["operation"].is_object()
-        );
-        assert!(spec["paths"]["/api/v1/jobs"]["post"]["responses"]["202"].is_object());
+        assert!(spec["components"]["schemas"]["GenerateModel"]["properties"]["input"].is_object());
+        assert!(spec["paths"]["/api/v1/generation"]["post"]["responses"]["202"].is_object());
+        assert!(spec["paths"]["/api/v1/jobs"]["post"].is_null());
         assert!(
             !std::str::from_utf8(&bytes)
                 .unwrap()

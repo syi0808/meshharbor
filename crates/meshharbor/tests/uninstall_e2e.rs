@@ -59,7 +59,7 @@ fn preview_is_read_only_and_confirmation_removes_only_the_installation() {
     assert!(!installation.data.exists());
     assert!(installation.binary.is_file());
 
-    success(installation.run(&["assets"]));
+    success(installation.run(&["local", "assets"]));
     let runtimes = installation.data.join("runtimes");
     fs::create_dir(&runtimes).unwrap();
     let external = installation.profile.path().join("shared weights");
@@ -94,7 +94,7 @@ fn preview_is_read_only_and_confirmation_removes_only_the_installation() {
 #[test]
 fn rejects_unexpected_entries_and_linked_roots_then_can_keep_the_binary() {
     let installation = Installation::new();
-    success(installation.run(&["assets"]));
+    success(installation.run(&["local", "assets"]));
     let unrelated = installation.data.join("personal.txt");
     fs::write(&unrelated, "do not remove").unwrap();
     let result = installation.run(&["uninstall", "--confirm"]);

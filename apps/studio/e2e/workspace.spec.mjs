@@ -116,7 +116,7 @@ test('Models aligns accelerator cards and installs a catalog model after consent
   } }));
   await page.route('**/api/v1/runtime/trellis-text-mlx/install', route => {
     expect(route.request().method()).toBe('POST');
-    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: false });
+    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: false, package: 'base' });
     installed = true;
     return route.fulfill({ status: 202, json: job });
   });
@@ -191,7 +191,7 @@ test('Pixal3D offers one install for runtime, weights, and MLX conversion', asyn
   await page.route('**/api/v1/runtime/pixal3d-mlx/*', route => {
     if (route.request().method() !== 'POST') return route.fallback();
     submitted.push(new URL(route.request().url()).pathname);
-    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: true });
+    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: true, package: 'base' });
     return route.fulfill({ status: 202, json: job });
   });
   await page.route(`**/api/v1/jobs/${job.id}`, route => route.fulfill({ json: job }));
@@ -239,7 +239,7 @@ test('Repart installs the GeoSAM2 backend and weights in one job', async ({ page
   await page.route('**/api/v1/runtime/geosam2-mlx/jobs', route => route.fulfill({ json: saved ? [saved] : [] }));
   await page.route('**/api/v1/runtime/geosam2-mlx/install', route => {
     expect(route.request().method()).toBe('POST');
-    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: false });
+    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: false, package: 'base' });
     requests++;
     return route.fulfill({ status: 202, json: job });
   });
@@ -308,7 +308,7 @@ test('a gated catalog install reads server access state and supports an explicit
       { id: 'pixal3d-mlx', installable: true, huggingface: { account: 'connected', model_access: modelAccess } },
     ],
   } }));
-  await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', async route => {
+  await page.route('**/api/v1/connections/huggingface/mlx/model-access', async route => {
     expect(route.request().method()).toBe('POST');
     ++checks;
     await new Promise(resolve => { finishCheck = resolve; });
@@ -316,7 +316,7 @@ test('a gated catalog install reads server access state and supports an explicit
     return route.fulfill({ json: modelAccess });
   });
   await page.route('**/api/v1/runtime/trellis2-mlx/install', route => {
-    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: true });
+    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: true, package: 'base' });
     return route.fulfill({ status: 202, json: job });
   });
   await page.route('**/api/v1/jobs/gated-install', route => route.fulfill({ json: job }));
@@ -583,7 +583,11 @@ test('on a narrow viewport setup is accessible without an asset and never starts
     downloads += 1;
     return route.abort();
   });
-  await page.route('**/api/v1/runtime/pixal3d-mlx/huggingface', route => {
+  await page.route('**/api/v1/connections/huggingface/mlx/check', route => {
+    expect(route.request().postData()).toBeNull();
+    return route.fulfill({ json: tokenSaved ? 'connected' : 'not_connected' });
+  });
+  await page.route('**/api/v1/connections/huggingface/mlx', route => {
     const { token } = route.request().postDataJSON();
     expect(route.request().method()).toBe('POST');
     expect(route.request().headers()['x-meshharbor-dashboard']).toBe('local-ui-v1');
@@ -591,7 +595,7 @@ test('on a narrow viewport setup is accessible without an asset and never starts
     return route.fulfill({ json: token === 'hf_testapproved'
       ? 'connected' : token ? 'invalid_token' : 'not_connected' });
   });
-  await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', route => {
+  await page.route('**/api/v1/connections/huggingface/mlx/model-access', route => {
     modelAccessChecks++;
     return route.fulfill({ json: 'verified' });
   });
@@ -700,12 +704,12 @@ test('a browser sign-in updates settings and DINOv3 can be rechecked manually', 
       huggingface: { account: tokenSaved ? 'connected' : 'not_connected', model_access: !tokenSaved ? 'not_connected' : modelAccessChecks ? 'verified' : 'access_denied' },
     }],
   } }));
-  await page.route('**/api/v1/runtime/pixal3d-mlx/huggingface/browser', route => {
+  await page.route('**/api/v1/connections/huggingface/mlx/sessions', route => {
     expect(route.request().method()).toBe('POST');
     cancelled = false;
     return route.fulfill({ status: 202, json: { id: String(++sessionNumber), state: 'preparing' } });
   });
-  await page.route('**/api/v1/runtime/pixal3d-mlx/huggingface/browser/*', route => {
+  await page.route('**/api/v1/connections/huggingface/mlx/sessions/*', route => {
     const id = String(sessionNumber);
     if (route.request().method() === 'DELETE') cancelled = true;
     if (cancelled) return route.fulfill({ json: { id, state: 'cancelled' } });
@@ -715,11 +719,11 @@ test('a browser sign-in updates settings and DINOv3 can be rechecked manually', 
     }
     return route.fulfill({ json: { id, state: 'awaiting_authorization', user_code: 'TEST-CODE', expires_in: 300 } });
   });
-  await page.route('**/api/v1/runtime/pixal3d-mlx/huggingface', route => {
-    expect(route.request().postDataJSON()).toEqual({});
+  await page.route('**/api/v1/connections/huggingface/mlx/check', route => {
+    expect(route.request().postData()).toBeNull();
     return route.fulfill({ json: 'connected' });
   });
-  await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', route => {
+  await page.route('**/api/v1/connections/huggingface/mlx/model-access', route => {
     expect(route.request().method()).toBe('POST');
     expect(route.request().postData()).toBeNull();
     ++modelAccessChecks;
@@ -777,9 +781,9 @@ test('settings deep links and confirmations manage one local profile at a time',
     }, { id: 'pixal3d-cuda', installable: false }],
   });
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: runtime() }));
-  await page.route('**/api/v1/runtime/pixal3d-mlx/model-access', route => route.fulfill({ json: 'verified' }));
+  await page.route('**/api/v1/connections/huggingface/mlx/model-access', route => route.fulfill({ json: 'verified' }));
   for (const scope of ['model-files', 'huggingface']) {
-    await page.route(`**/api/v1/runtime/pixal3d-mlx/${scope}`, async route => {
+    await page.route(scope === 'huggingface' ? '**/api/v1/connections/huggingface/mlx' : '**/api/v1/runtime/pixal3d-mlx/model-files', async route => {
       expect(route.request().method()).toBe('DELETE');
       expect(route.request().postDataJSON()).toEqual({ confirmed: true });
       calls.push(scope);

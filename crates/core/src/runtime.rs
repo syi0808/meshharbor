@@ -32,11 +32,6 @@ const CONVERTER_PACKAGES: &[&str] = &[
 #[derive(Clone, Copy)]
 pub enum RuntimeJobKind {
     EnvironmentSetup,
-    Setup,
-    InstallModels,
-    ConvertNaf,
-    CudaSetup,
-    CudaInstallModels,
     CudaInstallMultiview,
     InstallCatalogModel(&'static str),
 }
@@ -45,11 +40,6 @@ impl RuntimeJobKind {
     pub fn operation(self) -> &'static str {
         match self {
             Self::EnvironmentSetup => "runtime.environment.setup",
-            Self::Setup => "runtime.pixal3d.setup",
-            Self::InstallModels => "runtime.pixal3d.install_models",
-            Self::ConvertNaf => "runtime.pixal3d.convert_naf",
-            Self::CudaSetup => "runtime.pixal3d.cuda_setup",
-            Self::CudaInstallModels => "runtime.pixal3d.cuda_install_models",
             Self::CudaInstallMultiview => "runtime.pixal3d.cuda_install_multiview",
             Self::InstallCatalogModel(_) => "runtime.models.install",
         }
@@ -58,21 +48,15 @@ impl RuntimeJobKind {
     pub fn backend_id(self) -> &'static str {
         match self {
             Self::EnvironmentSetup => "environment",
-            Self::Setup | Self::InstallModels | Self::ConvertNaf => "pixal3d-mlx",
-            Self::CudaSetup | Self::CudaInstallModels | Self::CudaInstallMultiview => {
-                "pixal3d-cuda"
-            }
+            Self::CudaInstallMultiview => "pixal3d-cuda",
             Self::InstallCatalogModel(backend) => backend,
         }
     }
 
-    pub(crate) fn downloads_weights(self) -> bool {
+    pub fn downloads_weights(self) -> bool {
         matches!(
             self,
-            Self::InstallModels
-                | Self::CudaInstallModels
-                | Self::CudaInstallMultiview
-                | Self::InstallCatalogModel(_)
+            Self::CudaInstallMultiview | Self::InstallCatalogModel(_)
         )
     }
 }
@@ -282,7 +266,7 @@ impl Pixal3dRuntimeManager {
         let python = self.python_path();
         if !python.is_file() {
             return Err(CoreError::OperationUnavailable(format!(
-                "Managed Python environment not found at {}. Run `meshharbor runtime setup` first.",
+                "Managed Python environment not found at {}. Install the MLX backend in Studio → Settings → Models.",
                 python.display()
             )));
         }
@@ -311,7 +295,7 @@ impl Pixal3dRuntimeManager {
             access_python(&self.runtime_root).unwrap_or_else(|| python.to_path_buf());
         require_access(
             self.python_command(&access_python),
-            "meshharbor runtime hf-login",
+            "meshharbor engine connections login-start mlx",
         )?;
 
         execution.stage("download_weights")?;
@@ -388,7 +372,7 @@ impl Pixal3dRuntimeManager {
         let python = self.python_path();
         if !python.is_file() {
             return Err(CoreError::OperationUnavailable(format!(
-                "Managed Python environment not found at {}. Run `meshharbor runtime setup` first.",
+                "Managed Python environment not found at {}. Install the MLX backend in Studio → Settings → Models.",
                 python.display()
             )));
         }

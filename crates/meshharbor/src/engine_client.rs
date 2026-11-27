@@ -7,7 +7,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::{ApiErrorBody, DEFAULT_LISTEN, MAX_ASSET_BYTES};
+use meshharbor_core::{GenerationInput, GenerationOptions};
+
+use crate::{ApiErrorBody, DEFAULT_LISTEN, MAX_ASSET_BYTES, actions};
 
 pub(crate) const SERVER_ENV: &str = "MESHHARBOR_SERVER";
 const MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
@@ -27,7 +29,7 @@ pub(crate) fn parse_server(value: &str) -> Result<SocketAddr, &'static str> {
         .ok_or("The engine must use a loopback IP and port, such as 127.0.0.1:7432.")
 }
 
-fn parse_json(value: &str) -> Result<Value, String> {
+fn parse_generation_options(value: &str) -> Result<GenerationOptions, String> {
     serde_json::from_str(value).map_err(|error| error.to_string())
 }
 
@@ -41,7 +43,7 @@ pub(crate) enum AssetKind {
 #[derive(Debug, Deserialize, JsonSchema, Subcommand)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Assets {
-    /// Search and page through stored assets or one current version per model.
+    /// Search and page through images and mesh versions.
     Page {
         #[arg(long)]
         limit: Option<usize>,
@@ -53,13 +55,35 @@ pub(crate) enum Assets {
         kind: Option<AssetKind>,
         #[arg(long, value_name = "BOOL")]
         derived: Option<bool>,
-        #[arg(long)]
-        #[serde(default)]
-        models_only: bool,
     },
-    /// Read one stored asset version and its artifacts.
+    /// Read one version and its artifact metadata.
     Show { asset_id: String },
-    /// List a model's version history and current version.
+    /// Upload a PNG, JPEG, or GLB to the running engine.
+    #[serde(skip)]
+    #[schemars(skip)]
+    Import { file: std::path::PathBuf },
+    /// Download an artifact to a new file. MCP destinations must be in MESHHARBOR_EXPORT_DIR.
+    Export {
+        artifact_id: String,
+        output_path: String,
+    },
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Subcommand)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Models {
+    /// List one current version per model.
+    List {
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long, value_name = "BOOL")]
+        generated: Option<bool>,
+    },
+    /// List versions and the current selection.
     Versions {
         model_id: String,
         #[arg(long)]
@@ -67,14 +91,93 @@ pub(crate) enum Assets {
         #[arg(long)]
         before: Option<u64>,
     },
-    /// Set an existing version as current without deleting any versions.
+    /// Make an existing version current without deleting any versions.
     Restore { model_id: String, asset_id: String },
-    /// Save the exact bytes of an artifact to a new local file.
-    Export {
-        artifact_id: String,
-        /// New file; for MCP, an absolute path inside MESHHARBOR_EXPORT_DIR.
-        output_path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Subcommand)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Mesh {
+    Simplify {
+        asset_id: String,
+        #[command(flatten)]
+        options: actions::SimplifyMesh,
     },
+    Cleanup {
+        asset_id: String,
+        #[command(flatten)]
+        #[serde(default)]
+        options: actions::CleanupMesh,
+    },
+    VoxelRemesh {
+        asset_id: String,
+        #[command(flatten)]
+        #[serde(default)]
+        options: actions::VoxelRemesh,
+    },
+    UnwrapUv {
+        asset_id: String,
+        #[command(flatten)]
+        #[serde(default)]
+        options: actions::UnwrapUv,
+    },
+    OptimizeRendering {
+        asset_id: String,
+        #[command(flatten)]
+        #[serde(default)]
+        options: actions::OptimizeRendering,
+    },
+    Compress {
+        asset_id: String,
+    },
+    Retopology {
+        asset_id: String,
+        #[arg(long)]
+        target_quads: Option<u32>,
+    },
+    #[command(name = "retopology-lato2")]
+    RetopologyLato2 {
+        asset_id: String,
+        #[command(flatten)]
+        #[serde(default)]
+        options: actions::RetopologizeLato2,
+    },
+    Preflight {
+        asset_id: String,
+        #[arg(long)]
+        target_quads: Option<u32>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum Generation {
+    /// Generate from a stored image, optionally with additional posed views.
+    Image {
+        asset_id: String,
+        #[arg(long)]
+        backend: Option<String>,
+        #[arg(long, value_parser = parse_generation_options)]
+        parameters: Option<GenerationOptions>,
+    },
+    /// Generate from a text prompt.
+    Text {
+        prompt: String,
+        #[arg(long)]
+        backend: Option<String>,
+        #[arg(long, value_parser = parse_generation_options)]
+        parameters: Option<GenerationOptions>,
+    },
+    /// List waiting generation jobs in execution order.
+    Queue,
+    /// Swap two adjacent waiting generation jobs.
+    Swap { job_id: String, swap_with: String },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum GenerationQueue {
+    List,
+    Swap { job_id: String, swap_with: String },
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Subcommand)]
@@ -92,25 +195,15 @@ pub(crate) enum Jobs {
     },
     /// Read one job.
     Show { job_id: String },
-    /// Read the persisted job timeline and redacted command logs.
+    /// Read the persisted timeline and redacted command logs.
     Steps { job_id: String },
-    /// Submit an asset operation to the same queue as Studio and return its job ID.
-    Submit {
-        operation: String,
-        /// REST job input (for example {"kind":"image","asset_id":"asset_..."}).
-        #[arg(long = "input", value_parser = parse_json)]
-        input: Value,
-        /// REST job parameters. Supports generation tuning and multiview references.
-        #[arg(long, value_parser = parse_json)]
-        parameters: Option<Value>,
-    },
-    /// Start a new attempt of a replayable failed or stopped job.
+    /// Start a new attempt with the recorded inputs and options.
     Retry {
         job_id: String,
-        /// Required; a replayed runtime job may download model files.
+        /// Required when retrying a job that can download weights.
         #[arg(long)]
         #[serde(default)]
-        confirmed: bool,
+        confirm_download: bool,
     },
     /// Stop a job, or remove it only if it is still queued.
     Cancel {
@@ -119,46 +212,26 @@ pub(crate) enum Jobs {
         #[serde(default)]
         queued_only: bool,
     },
-    /// List waiting generation jobs in execution order.
-    Queue,
-    /// Swap two adjacent waiting generation jobs.
-    Swap { job_id: String, swap_with: String },
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum PixalProfile {
-    Pixal3dMlx,
-    Pixal3dCuda,
-}
-
-impl PixalProfile {
-    fn backend(self) -> &'static str {
-        match self {
-            Self::Pixal3dMlx => "pixal3d-mlx",
-            Self::Pixal3dCuda => "pixal3d-cuda",
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Subcommand)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Runtime {
-    /// Check that the running server is reachable.
+    /// Check that the server is reachable.
     Health,
-    /// Show the server's model catalog, readiness, and cached account/access status.
+    /// Read the runtime catalog and readiness.
     Status,
-    /// List the implemented and unavailable engine operations.
+    /// List operation capabilities.
     Operations,
     /// List recent setup and install jobs for one backend.
     Jobs { backend: String },
-    /// Set up shared Python, uv, and account tools. Does not install weights.
+    /// Install the shared Python, uv, and account tools, without weights.
     SetupEnvironment {
         #[arg(long)]
         #[serde(default)]
         confirmed: bool,
     },
-    /// Install a catalog model's backend and weights after owner approval.
+    /// Install a backend and its weights, or an advertised optional package.
     Install {
         backend: String,
         #[arg(long)]
@@ -167,71 +240,50 @@ pub(crate) enum Runtime {
         #[arg(long)]
         #[serde(default)]
         confirm_gated_access: bool,
+        #[arg(long, value_enum)]
+        package: Option<actions::RuntimePackage>,
     },
-    /// Remove managed model files while preserving assets and sign-in.
+    /// Remove managed files without deleting credentials or assets.
     RemoveModelFiles {
         backend: String,
         #[arg(long)]
         #[serde(default)]
         confirmed: bool,
     },
-    /// Set up the selected Pixal3D runtime separately from weights.
-    SetupPixal3d {
-        #[arg(value_enum)]
-        backend: PixalProfile,
-    },
-    /// Download Pixal3D model files after large-download and gated-access confirmation.
-    InstallPixal3dModels {
-        #[arg(value_enum)]
-        backend: PixalProfile,
-        #[arg(long)]
-        #[serde(default)]
-        confirm_large_download: bool,
-        #[arg(long)]
-        #[serde(default)]
-        confirm_gated_access: bool,
-    },
-    /// Convert existing Pixal3D MLX NAF weights.
-    ConvertNaf,
-    /// Download the additional pinned Pixal3D CUDA multiview weights.
-    InstallMultiview {
-        #[arg(long)]
-        #[serde(default)]
-        confirm_large_download: bool,
-    },
-    /// Recheck the saved Hugging Face account without accepting any secret.
+    /// Check the guarded QuadriFlow runtime.
+    Quadriflow,
+    /// Install the verified QuadriFlow sidecar.
+    InstallQuadriflow,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Subcommand)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Connections {
     CheckAccount {
         #[arg(value_enum)]
-        backend: PixalProfile,
+        scope: actions::AccountScope,
     },
-    /// Recheck saved DINOv3 model access.
     CheckModelAccess {
         #[arg(value_enum)]
-        backend: PixalProfile,
+        scope: actions::AccountScope,
     },
-    /// Start a Hugging Face device flow that the owner completes in their browser.
     LoginStart {
         #[arg(value_enum)]
-        backend: PixalProfile,
+        scope: actions::AccountScope,
     },
-    /// Read device session state, including the one-time code for the owner.
     LoginStatus {
         #[arg(value_enum)]
-        backend: PixalProfile,
-        #[schemars(with = "String")]
+        scope: actions::AccountScope,
         session: Uuid,
     },
-    /// Cancel the pending device sign-in session.
     LoginCancel {
         #[arg(value_enum)]
-        backend: PixalProfile,
-        #[schemars(with = "String")]
+        scope: actions::AccountScope,
         session: Uuid,
     },
-    /// Remove saved local Hugging Face credentials, not the remote token or weights.
     Disconnect {
         #[arg(value_enum)]
-        backend: PixalProfile,
+        scope: actions::AccountScope,
         #[arg(long)]
         #[serde(default)]
         confirmed: bool,
@@ -241,33 +293,50 @@ pub(crate) enum Runtime {
 #[derive(Debug, Deserialize, JsonSchema, Subcommand)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Blender {
-    /// Check whether a Blender bridge is currently connected.
     Status,
-    /// Save the bundled .py add-on for manual installation (does not install it).
-    DownloadAddon {
-        /// New .py file; for MCP, an absolute path inside MESHHARBOR_EXPORT_DIR.
-        output_path: String,
-    },
+    Send { asset_id: String },
+    Transfer { transfer_id: Uuid },
+    DownloadAddon { output_path: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Browse, restore, and export stored models and assets.
+    /// Import, browse, and export stored assets.
     Assets {
         #[command(subcommand)]
         action: Assets,
     },
-    /// Manage the live Studio job queue and persisted job history.
+    /// Browse and restore 3D model versions.
+    Models {
+        #[command(subcommand)]
+        action: Models,
+    },
+    /// Edit or check a mesh version.
+    Mesh {
+        #[command(subcommand)]
+        action: Mesh,
+    },
+    /// Generate 3D models and manage the generation queue.
+    Generation {
+        #[command(subcommand)]
+        action: Generation,
+    },
+    /// Follow and control existing jobs.
     Jobs {
         #[command(subcommand)]
         action: Jobs,
     },
-    /// Manage model runtimes and connections on the running server.
+    /// Manage the engine environment and installed backends.
     Runtime {
         #[command(subcommand)]
         action: Runtime,
     },
-    /// Check bridge connection status or download its bundled add-on.
+    /// Verify or authorize a Hugging Face account.
+    Connections {
+        #[command(subcommand)]
+        action: Connections,
+    },
+    /// Send a model to an open Blender scene.
     Blender {
         #[command(subcommand)]
         action: Blender,
@@ -279,8 +348,12 @@ impl Command {
         let client = Client::new(server)?;
         match self {
             Self::Assets { action } => client.assets(action, None).await,
+            Self::Models { action } => client.models(action).await,
+            Self::Mesh { action } => client.mesh(action).await,
+            Self::Generation { action } => client.generation(action).await,
             Self::Jobs { action } => client.jobs(action).await,
             Self::Runtime { action } => client.runtime(action).await,
+            Self::Connections { action } => client.connections(action).await,
             Self::Blender { action } => client.blender(action, None).await,
         }
     }
@@ -291,15 +364,18 @@ pub(crate) struct Client {
     http: reqwest::Client,
 }
 
+pub(crate) fn configured_address() -> io::Result<SocketAddr> {
+    match std::env::var(SERVER_ENV) {
+        Ok(value) => parse_server(&value),
+        Err(std::env::VarError::NotPresent) => parse_server(DEFAULT_LISTEN),
+        Err(std::env::VarError::NotUnicode(_)) => Err("MESHHARBOR_SERVER must be valid text."),
+    }
+    .map_err(io::Error::other)
+}
+
 impl Client {
     pub(crate) fn configured() -> io::Result<Self> {
-        let server = match std::env::var(SERVER_ENV) {
-            Ok(value) => parse_server(&value),
-            Err(std::env::VarError::NotPresent) => parse_server(DEFAULT_LISTEN),
-            Err(std::env::VarError::NotUnicode(_)) => Err("MESHHARBOR_SERVER must be valid text."),
-        }
-        .map_err(io::Error::other)?;
-        Self::new(server)
+        Self::new(configured_address()?)
     }
 
     fn new(server: SocketAddr) -> io::Result<Self> {
@@ -452,7 +528,6 @@ impl Client {
                 query,
                 kind,
                 derived,
-                models_only,
             } => {
                 let kind = kind.map(|kind| {
                     match kind {
@@ -463,21 +538,84 @@ impl Client {
                 });
                 self.json(
                     Method::GET,
-                    &["assets", "page"],
+                    &["assets"],
                     &[
                         ("limit", limit.map(|value| value.to_string())),
                         ("cursor", cursor),
                         ("q", query),
                         ("kind", kind),
                         ("derived", derived.map(|value| value.to_string())),
-                        ("models_only", Some(models_only.to_string())),
                     ],
                     None,
                 )
                 .await
             }
             Assets::Show { asset_id } => self.get(&["assets", &asset_id]).await,
-            Assets::Versions {
+            Assets::Import { file } => {
+                let bytes = crate::read_bounded_asset(&file, MAX_ASSET_BYTES).await?;
+                let filename = file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| io::Error::other("Use a file with a UTF-8 name."))?;
+                self.import_asset(filename, bytes).await
+            }
+            Assets::Export {
+                artifact_id,
+                output_path,
+            } => {
+                self.download(
+                    &["artifacts", &artifact_id],
+                    Path::new(&output_path),
+                    mcp_data_dir,
+                    MAX_ASSET_BYTES,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(crate) async fn import_asset(
+        &self,
+        filename: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Value, crate::BoxError> {
+        let mut url = self.url(&["assets"])?;
+        url.query_pairs_mut().append_pair("filename", filename);
+        let reply = self
+            .send(
+                self.http
+                    .post(url)
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(bytes),
+            )
+            .await?;
+        Ok(serde_json::from_slice(
+            &read_response(reply, MAX_JSON_BYTES).await?,
+        )?)
+    }
+
+    pub(crate) async fn models(&self, action: Models) -> Result<Value, crate::BoxError> {
+        match action {
+            Models::List {
+                limit,
+                cursor,
+                query,
+                generated,
+            } => {
+                self.json(
+                    Method::GET,
+                    &["models"],
+                    &[
+                        ("limit", limit.map(|value| value.to_string())),
+                        ("cursor", cursor),
+                        ("q", query),
+                        ("generated", generated.map(|value| value.to_string())),
+                    ],
+                    None,
+                )
+                .await
+            }
+            Models::Versions {
                 model_id,
                 limit,
                 before,
@@ -493,7 +631,7 @@ impl Client {
                 )
                 .await
             }
-            Assets::Restore { model_id, asset_id } => {
+            Models::Restore { model_id, asset_id } => {
                 self.json(
                     Method::PUT,
                     &["models", &model_id, "current"],
@@ -502,19 +640,101 @@ impl Client {
                 )
                 .await
             }
-            Assets::Export {
-                artifact_id,
-                output_path,
-            } => {
-                self.download(
-                    &["artifacts", &artifact_id],
-                    Path::new(&output_path),
-                    mcp_data_dir,
-                    MAX_ASSET_BYTES,
+        }
+    }
+
+    pub(crate) async fn mesh(&self, action: Mesh) -> Result<Value, crate::BoxError> {
+        let (asset_id, path, body) = match action {
+            Mesh::Simplify { asset_id, options } => {
+                (asset_id, "simplify", serde_json::to_value(options)?)
+            }
+            Mesh::Cleanup { asset_id, options } => {
+                (asset_id, "cleanup", serde_json::to_value(options)?)
+            }
+            Mesh::VoxelRemesh { asset_id, options } => {
+                (asset_id, "voxel-remesh", serde_json::to_value(options)?)
+            }
+            Mesh::UnwrapUv { asset_id, options } => {
+                (asset_id, "unwrap-uv", serde_json::to_value(options)?)
+            }
+            Mesh::OptimizeRendering { asset_id, options } => (
+                asset_id,
+                "optimize-rendering",
+                serde_json::to_value(options)?,
+            ),
+            Mesh::Compress { asset_id } => (asset_id, "compress", json!({})),
+            Mesh::Retopology {
+                asset_id,
+                target_quads,
+            } => (
+                asset_id,
+                "retopology",
+                json!({"target_quads": target_quads}),
+            ),
+            Mesh::RetopologyLato2 { asset_id, options } => {
+                (asset_id, "retopology-lato2", serde_json::to_value(options)?)
+            }
+            Mesh::Preflight {
+                asset_id,
+                target_quads,
+            } => (
+                asset_id,
+                "retopology-preflight",
+                json!({"target_quads": target_quads}),
+            ),
+        };
+        self.post(&["assets", &asset_id, path], Some(body)).await
+    }
+
+    pub(crate) async fn generate(
+        &self,
+        action: actions::GenerateModel,
+    ) -> Result<Value, crate::BoxError> {
+        self.post(&["generation"], Some(serde_json::to_value(action)?))
+            .await
+    }
+
+    pub(crate) async fn generation_queue(
+        &self,
+        action: GenerationQueue,
+    ) -> Result<Value, crate::BoxError> {
+        match action {
+            GenerationQueue::List => self.get(&["generation", "queue"]).await,
+            GenerationQueue::Swap { job_id, swap_with } => {
+                self.post(
+                    &["generation", "queue"],
+                    Some(json!({"job_id": job_id, "swap_with": swap_with})),
                 )
                 .await
             }
         }
+    }
+
+    async fn generation(&self, action: Generation) -> Result<Value, crate::BoxError> {
+        let (input, backend, parameters) = match action {
+            Generation::Image {
+                asset_id,
+                backend,
+                parameters,
+            } => (GenerationInput::Image { asset_id }, backend, parameters),
+            Generation::Text {
+                prompt,
+                backend,
+                parameters,
+            } => (GenerationInput::Text { prompt }, backend, parameters),
+            Generation::Queue => return self.generation_queue(GenerationQueue::List).await,
+            Generation::Swap { job_id, swap_with } => {
+                return self
+                    .generation_queue(GenerationQueue::Swap { job_id, swap_with })
+                    .await;
+            }
+        };
+        let mut parameters = parameters.unwrap_or_default();
+        if let Some(backend) = backend {
+            parameters.backend_id = backend;
+        }
+        self.generate(actions::GenerateModel { input, parameters })
+            .await
     }
 
     pub(crate) async fn jobs(&self, action: Jobs) -> Result<Value, crate::BoxError> {
@@ -538,25 +758,15 @@ impl Client {
             }
             Jobs::Show { job_id } => self.get(&["jobs", &job_id]).await,
             Jobs::Steps { job_id } => self.get(&["jobs", &job_id, "steps"]).await,
-            Jobs::Submit {
-                operation,
-                input,
-                parameters,
+            Jobs::Retry {
+                job_id,
+                confirm_download,
             } => {
                 self.post(
-                    &["jobs"],
-                    Some(json!({"operation": operation, "input": input, "parameters": parameters})),
+                    &["jobs", &job_id, "retry"],
+                    Some(json!({"confirm_download": confirm_download})),
                 )
                 .await
-            }
-            Jobs::Retry { job_id, confirmed } => {
-                if !confirmed {
-                    return Err(io::Error::other(
-                        "Confirm the retry before starting a new attempt.",
-                    )
-                    .into());
-                }
-                self.post(&["jobs", &job_id, "retry"], None).await
             }
             Jobs::Cancel {
                 job_id,
@@ -570,14 +780,6 @@ impl Client {
                 )
                 .await
             }
-            Jobs::Queue => self.get(&["jobs", "generation-queue"]).await,
-            Jobs::Swap { job_id, swap_with } => {
-                self.post(
-                    &["jobs", "generation-queue"],
-                    Some(json!({"job_id": job_id, "swap_with": swap_with})),
-                )
-                .await
-            }
         }
     }
 
@@ -587,19 +789,97 @@ impl Client {
             Runtime::Status => self.get(&["runtime"]).await,
             Runtime::Operations => self.get(&["operations"]).await,
             Runtime::Jobs { backend } => self.get(&["runtime", &backend, "jobs"]).await,
-            Runtime::SetupEnvironment { confirmed } => self.post(&["runtime", "environment", "setup"], Some(json!({"confirmed": confirmed}))).await,
-            Runtime::Install { backend, confirmed, confirm_gated_access } => self.post(&["runtime", &backend, "install"], Some(json!({"confirmed": confirmed, "confirm_gated_access": confirm_gated_access}))).await,
-            Runtime::RemoveModelFiles { backend, confirmed } => self.json(Method::DELETE, &["runtime", &backend, "model-files"], &[], Some(json!({"confirmed": confirmed}))).await,
-            Runtime::SetupPixal3d { backend } => self.post(&["runtime", backend.backend(), "setup"], None).await,
-            Runtime::InstallPixal3dModels { backend, confirm_large_download, confirm_gated_access } => self.post(&["runtime", backend.backend(), "models"], Some(json!({"confirm_large_download": confirm_large_download, "confirm_gated_access": confirm_gated_access}))).await,
-            Runtime::ConvertNaf => self.post(&["runtime", "pixal3d-mlx", "convert-naf"], None).await,
-            Runtime::InstallMultiview { confirm_large_download } => self.post(&["runtime", "pixal3d-cuda", "multiview"], Some(json!({"confirm_large_download": confirm_large_download}))).await,
-            Runtime::CheckAccount { backend } => self.post(&["runtime", backend.backend(), "huggingface", "check"], None).await,
-            Runtime::CheckModelAccess { backend } => self.post(&["runtime", backend.backend(), "model-access"], None).await,
-            Runtime::LoginStart { backend } => self.post(&["runtime", backend.backend(), "huggingface", "browser"], None).await,
-            Runtime::LoginStatus { backend, session } => self.get(&["runtime", backend.backend(), "huggingface", "browser", &session.to_string()]).await,
-            Runtime::LoginCancel { backend, session } => self.json(Method::DELETE, &["runtime", backend.backend(), "huggingface", "browser", &session.to_string()], &[], None).await,
-            Runtime::Disconnect { backend, confirmed } => self.json(Method::DELETE, &["runtime", backend.backend(), "huggingface"], &[], Some(json!({"confirmed": confirmed}))).await,
+            Runtime::SetupEnvironment { confirmed } => {
+                self.post(
+                    &["runtime", "environment", "setup"],
+                    Some(json!({"confirmed": confirmed})),
+                )
+                .await
+            }
+            Runtime::Install {
+                backend,
+                confirmed,
+                confirm_gated_access,
+                package,
+            } => {
+                self.post(
+                    &["runtime", &backend, "install"],
+                    Some(serde_json::to_value(actions::InstallBackend {
+                        confirmed,
+                        confirm_gated_access,
+                        package: package.unwrap_or_default(),
+                    })?),
+                )
+                .await
+            }
+            Runtime::RemoveModelFiles { backend, confirmed } => {
+                self.json(
+                    Method::DELETE,
+                    &["runtime", &backend, "model-files"],
+                    &[],
+                    Some(json!({"confirmed": confirmed})),
+                )
+                .await
+            }
+            Runtime::Quadriflow => self.get(&["runtime", "quadriflow"]).await,
+            Runtime::InstallQuadriflow => {
+                self.post(&["runtime", "quadriflow", "install"], None).await
+            }
+        }
+    }
+
+    pub(crate) async fn connections(&self, action: Connections) -> Result<Value, crate::BoxError> {
+        let prefix = ["connections", "huggingface"];
+        match action {
+            Connections::CheckAccount { scope } => {
+                self.post(&[prefix[0], prefix[1], scope.segment(), "check"], None)
+                    .await
+            }
+            Connections::CheckModelAccess { scope } => {
+                self.post(
+                    &[prefix[0], prefix[1], scope.segment(), "model-access"],
+                    None,
+                )
+                .await
+            }
+            Connections::LoginStart { scope } => {
+                self.post(&[prefix[0], prefix[1], scope.segment(), "sessions"], None)
+                    .await
+            }
+            Connections::LoginStatus { scope, session } => {
+                self.get(&[
+                    prefix[0],
+                    prefix[1],
+                    scope.segment(),
+                    "sessions",
+                    &session.to_string(),
+                ])
+                .await
+            }
+            Connections::LoginCancel { scope, session } => {
+                self.json(
+                    Method::DELETE,
+                    &[
+                        prefix[0],
+                        prefix[1],
+                        scope.segment(),
+                        "sessions",
+                        &session.to_string(),
+                    ],
+                    &[],
+                    None,
+                )
+                .await
+            }
+            Connections::Disconnect { scope, confirmed } => {
+                self.json(
+                    Method::DELETE,
+                    &[prefix[0], prefix[1], scope.segment()],
+                    &[],
+                    Some(json!({"confirmed": confirmed})),
+                )
+                .await
+            }
         }
     }
 
@@ -610,6 +890,14 @@ impl Client {
     ) -> Result<Value, crate::BoxError> {
         match action {
             Blender::Status => self.get(&["blender"]).await,
+            Blender::Send { asset_id } => {
+                self.post(&["blender", "send"], Some(json!({"asset_id": asset_id})))
+                    .await
+            }
+            Blender::Transfer { transfer_id } => {
+                self.get(&["blender", "send", &transfer_id.to_string()])
+                    .await
+            }
             Blender::DownloadAddon { output_path } => {
                 let output = Path::new(&output_path);
                 if !output

@@ -328,7 +328,7 @@ impl Pixal3dCudaRuntimeManager {
         let python = self.python_path();
         if !python.is_file() {
             return Err(CoreError::OperationUnavailable(
-                "Run `meshharbor runtime cuda-setup` before installing CUDA models.".into(),
+                "Install the CUDA backend in Studio → Settings → Models first.".into(),
             ));
         }
         self.install_models_with_python(
@@ -353,7 +353,7 @@ impl Pixal3dCudaRuntimeManager {
             access_python(&self.runtime_root).unwrap_or_else(|| python.to_path_buf());
         require_access(
             self.python_command(&access_python),
-            "meshharbor runtime cuda-hf-login",
+            "meshharbor engine connections login-start cuda",
         )?;
 
         execution.stage("download_weights")?;
@@ -427,7 +427,7 @@ impl Pixal3dCudaRuntimeManager {
         );
         if !environment_ready {
             missing.push(format!(
-                "Managed CUDA Python environment is missing or incomplete at {}; run `meshharbor runtime cuda-setup`.",
+                "Managed CUDA Python environment is missing or incomplete at {}; install the CUDA backend in Studio → Settings → Models.",
                 self.runtime_root.display()
             ));
         }

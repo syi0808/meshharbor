@@ -56,13 +56,15 @@ test('LATO.2 appears once and submits distinct Mesh to Mesh and Image to 3D jobs
     json: [{ id: 'model.generate', implemented: true }, { id: 'mesh.retopology_lato2', implemented: true }],
   }));
   const submissions = [];
-  await page.route('**/api/v1/jobs', route => {
-    if (route.request().method() !== 'POST') return route.continue();
-    const request = route.request().postDataJSON();
-    submissions.push(request);
+  await page.route(url => url.pathname === '/api/v1/generation' || url.pathname.endsWith('/retopology-lato2'), route => {
+    const path = new URL(route.request().url()).pathname;
+    const body = route.request().postDataJSON();
+    const generation = path === '/api/v1/generation';
+    submissions.push({ path, body });
     return route.fulfill({ status: 202, json: {
-      id: `lato2-job-${submissions.length}`, operation: request.operation, state: 'failed', progress: 0,
-      input_asset_id: request.input.asset_id, error: { message: 'fixture' },
+      id: `lato2-job-${submissions.length}`,
+      operation: generation ? 'model.generate' : 'mesh.retopology_lato2', state: 'failed', progress: 0,
+      input_asset_id: generation ? body.input.asset_id : path.split('/').at(-2), error: { message: 'fixture' },
       created_at: String(Date.now()), updated_at: String(Date.now()),
     } });
   });
@@ -82,8 +84,8 @@ test('LATO.2 appears once and submits distinct Mesh to Mesh and Image to 3D jobs
   await mesh.getByLabel('Texture atlas size').selectOption('512');
   await mesh.getByRole('button', { name: 'Run Mesh to Mesh' }).click();
   await expect.poll(() => submissions[0]).toEqual({
-    operation: 'mesh.retopology_lato2', input: { asset_id: reference.id },
-    parameters: { backend_id: 'lato2-mlx', target_triangles: 21000, atlas_resolution: 512 },
+    path: `/api/v1/assets/${reference.id}/retopology-lato2`,
+    body: { backend_id: 'lato2-mlx', target_triangles: 21000, atlas_resolution: 512 },
   });
 
   await tools.getByRole('button', { name: 'New model' }).click();
@@ -98,8 +100,11 @@ test('LATO.2 appears once and submits distinct Mesh to Mesh and Image to 3D jobs
   await image.getByLabel('Target vertices').fill('1200');
   await image.getByRole('button', { name: 'Generate 3D' }).click();
   await expect.poll(() => submissions[1]).toEqual({
-    operation: 'model.generate', input: { kind: 'image', asset_id: input.id },
-    parameters: { backend_id: 'lato2-mlx', target_vertices: 1200 },
+    path: '/api/v1/generation',
+    body: {
+      input: { kind: 'image', asset_id: input.id },
+      parameters: { backend_id: 'lato2-mlx', target_vertices: 1200 },
+    },
   });
 });
 
@@ -168,9 +173,9 @@ test('a backend can advertise text input without requiring an image asset', asyn
     ],
   } }));
   await page.route('**/api/v1/operations', route => route.fulfill({ json: [{ id: 'model.generate', implemented: true }] }));
-  await page.route('**/api/v1/jobs', route => {
+  await page.route('**/api/v1/generation', route => {
     expect(route.request().postDataJSON()).toEqual({
-      operation: 'model.generate',
+
       input: { kind: 'text', prompt: 'a ceramic cup' },
       parameters: { backend_id: 'trellis-text-mlx' },
     });
@@ -330,9 +335,8 @@ test('generation uses its explicit reference and opens and selects the new inven
     updated_at: String(Date.now()),
   };
   let generationState = 'running';
-  await page.route('**/api/v1/jobs', async route => {
+  await page.route('**/api/v1/generation', async route => {
     const payload = route.request().postDataJSON();
-    expect(payload.operation).toBe('model.generate');
     expect(payload.input).toEqual({ kind: 'image', asset_id: reference.id });
     expect(payload.parameters).toEqual({ backend_id: 'pixal3d-cuda', resolution: 512, texture_size: 2048, target_faces: 50001, seed: 0, tuning: { texture_steps: 18 } });
     await route.fulfill({ status: 202, json: { ...job, state: 'running', progress: 5, started_at: job.created_at, stage: 'texture_flow' } });
@@ -395,7 +399,7 @@ test('generation can be queued, reordered and selected before its preview is rea
   await page.route('**/api/v1/operations', route => route.fulfill({ json: [{ id: 'model.generate', implemented: true }] }));
   await page.route('**/api/v1/jobs?limit=20&include_active=true', route => route.fulfill({ json: jobs }));
   await page.route('**/api/v1/jobs/generation-2/steps', route => route.fulfill({ json: steps }));
-  await page.route('**/api/v1/jobs/generation-queue', route => {
+  await page.route('**/api/v1/generation/queue', route => {
     if (route.request().method() === 'POST') {
       const { job_id, swap_with } = route.request().postDataJSON();
       expect([job_id, swap_with]).toEqual(['generation-2', 'generation-1']);
@@ -403,7 +407,7 @@ test('generation can be queued, reordered and selected before its preview is rea
     }
     return route.fulfill({ json: order });
   });
-  await page.route('**/api/v1/jobs', route => {
+  await page.route('**/api/v1/generation', route => {
     const request = route.request().postDataJSON();
     const timestamp = String(Date.now());
     const job = {
@@ -494,6 +498,7 @@ test('generation switches between posed presets and maps each custom image to it
     model_catalog: [{ id: 'pixal3d', title: 'Pixal3D', backend_ids: ['pixal3d-cuda'] }],
     model_backends: [{
       id: 'pixal3d-cuda', installable: true, ready: true, multiview_ready: multiviewInstalled,
+      optional_packages: ['multiview'],
       requires_huggingface_login: true, huggingface: { account: 'connected', model_access: 'verified' },
       generation: {
         id: 'pixal3d-cuda', view_modes: ['single', 'four', 'six', 'custom'], max_views: 8,
@@ -508,8 +513,8 @@ test('generation switches between posed presets and maps each custom image to it
     id: 'fixture-multiview-install', operation: 'runtime.pixal3d.cuda_install_multiview',
     state: 'queued', progress: 0, created_at: '0', updated_at: '0',
   };
-  await page.route('**/api/v1/runtime/pixal3d-cuda/multiview', route => {
-    expect(route.request().postDataJSON()).toEqual({ confirm_large_download: true });
+  await page.route('**/api/v1/runtime/pixal3d-cuda/install', route => {
+    expect(route.request().postDataJSON()).toEqual({ confirmed: true, confirm_gated_access: false, package: 'multiview' });
     return route.fulfill({ status: 202, json: installJob });
   });
   await page.route('**/api/v1/jobs/fixture-multiview-install', route => {
@@ -563,12 +568,12 @@ test('generation switches between posed presets and maps each custom image to it
   await right.getByLabel('Distance').fill('3.5');
   await right.getByLabel('Azimuth (°)').fill('90');
   await form.getByLabel('Structure sampling steps').fill('16');
-  const request = page.waitForRequest(request => new URL(request.url()).pathname === '/api/v1/jobs' && request.method() === 'POST');
-  await page.route('**/api/v1/jobs', route => route.fulfill({ status: 409, json: { error: 'Fixture stops before executing generation.' } }));
+  const request = page.waitForRequest(request => new URL(request.url()).pathname === '/api/v1/generation' && request.method() === 'POST');
+  await page.route('**/api/v1/generation', route => route.fulfill({ status: 409, json: { error: 'Fixture stops before executing generation.' } }));
   await submit.click();
   const payload = (await request).postDataJSON();
   expect(payload).toEqual({
-    operation: 'model.generate',
+
     input: { kind: 'image', asset_id: uploads[0].id },
     parameters: {
       backend_id: 'pixal3d-cuda',

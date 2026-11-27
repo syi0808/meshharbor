@@ -103,7 +103,7 @@ test('reviewed QuadriFlow release installs, retopologizes and exports GLB and OB
       await expect(install, 'Use a binary with an approved, verified release bundled for this host; no candidate ZIPs or manifest overrides')
         .toBeEnabled();
       const [response] = await Promise.all([
-        page.waitForResponse(response => response.url() === `${studioOrigin}/api/v1/backends/quadriflow/install`, { timeout: 150_000 }),
+        page.waitForResponse(response => response.url() === `${studioOrigin}/api/v1/runtime/quadriflow/install`, { timeout: 150_000 }),
         install.click(),
       ]);
       expect(response.ok(), await response.text()).toBe(true);
