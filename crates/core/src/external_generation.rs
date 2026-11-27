@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::{
     CoreError, CoreResult, GenerationInputMode, GenerationOptions,
     generation::run_generation_command_with_input, generation_catalog::generation_profile,
-    job_execution::JobExecution, model_storage::model_path,
+    job_execution::JobExecution, lato2, model_storage::model_path,
 };
 
 pub(crate) const TRELLIS_TEXT_CUDA_ID: &str = "trellis-text-cuda";
@@ -94,6 +94,26 @@ pub(crate) const PROFILES: &[ExternalProfile] = &[
         revision: "a26b42aee4e31999dbb4429226b66d896d49e1d8",
         entry: "src/mlx_diffuser/models/trellis_slat.py",
         notice: "MeshHarbor's experimental native MLX port of TRELLIS v1 Text Large exports geometry only. See docs/trellis-text-mlx.md for setup and dependency terms.",
+    },
+    ExternalProfile {
+        id: lato2::LATO2_IMAGE_BACKEND,
+        accelerator: "NVIDIA CUDA",
+        textured: false,
+        input_mode: GenerationInputMode::Image,
+        repository: lato2::SOURCE_REPOSITORY,
+        revision: lato2::SOURCE_REVISION,
+        entry: "scripts/image_e2e_inference.py",
+        notice: "LATO.2 uses NVIDIA CUDA and the installed CUDA 12.4 toolkit. Image to 3D exports geometry only; Mesh to Mesh can rebake existing textures.",
+    },
+    ExternalProfile {
+        id: lato2::LATO2_MLX_BACKEND,
+        accelerator: "Apple MLX",
+        textured: false,
+        input_mode: GenerationInputMode::Image,
+        repository: lato2::SOURCE_REPOSITORY,
+        revision: lato2::SOURCE_REVISION,
+        entry: "scripts/image_e2e_inference.py",
+        notice: "Experimental Apple Silicon hybrid: MLX Metal kernels with the upstream PyTorch host graph and CPU preprocessing. Image to 3D exports geometry only.",
     },
 ];
 
@@ -185,7 +205,7 @@ impl ExternalProfile {
         data_root.join("runtimes").join(self.id)
     }
 
-    fn active_root(&self, data_root: &Path) -> PathBuf {
+    pub(crate) fn active_root(&self, data_root: &Path) -> PathBuf {
         let managed = self.managed_root(data_root);
         let owned = self.check_owner(data_root).unwrap_or(false);
         if owned && self.check_local_files(&managed).ready() {
@@ -200,7 +220,26 @@ impl ExternalProfile {
     }
 
     pub(crate) fn required_model_files(&self) -> Vec<String> {
-        if matches!(self.id, TRELLIS_TEXT_CUDA_ID | TRELLIS_TEXT_MLX_ID) {
+        if lato2::is_backend(self.id) {
+            lato2::CHECKPOINTS
+                .iter()
+                .map(|file| format!("lato2/{file}"))
+                .chain(
+                    lato2::TRELLIS_FILES
+                        .iter()
+                        .map(|file| format!("trellis/{file}")),
+                )
+                .chain(
+                    lato2::BIREFNET_FILES
+                        .iter()
+                        .map(|file| format!("rembg/BiRefNet/{file}")),
+                )
+                .chain(std::iter::once(format!(
+                    "dinov2/checkpoints/{}",
+                    lato2::DINO_WEIGHT
+                )))
+                .collect()
+        } else if matches!(self.id, TRELLIS_TEXT_CUDA_ID | TRELLIS_TEXT_MLX_ID) {
             TRELLIS_TEXT_MODEL_FILES
                 .iter()
                 .map(|file| (*file).into())
@@ -271,6 +310,19 @@ impl ExternalProfile {
                     "Missing local runtime file: {}",
                     flexicubes.display()
                 ));
+            }
+        }
+        if lato2::is_backend(self.id) {
+            for file in [
+                "source/scripts/e2e_inference.py",
+                "weights/dinov2/facebookresearch_dinov2_main/hubconf.py",
+            ] {
+                if !is_nonempty_file(&root.join(file)) {
+                    missing.push(format!(
+                        "Missing local runtime file: {}",
+                        root.join(file).display()
+                    ));
+                }
             }
         }
         for file in self.required_model_files() {

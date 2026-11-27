@@ -16,29 +16,29 @@ async function chooseFile(page, button, name, mimeType, buffer) {
   return response.json();
 }
 
-function lato2Runtime(ready) {
+function lato2Runtime(ready, backend = 'lato2-cuda') {
   return {
-    status: 'ready_for_mesh_operations', platform: 'linux',
+    status: 'ready_for_mesh_operations', platform: backend.endsWith('-mlx') ? 'macos' : 'linux',
     operations: ready ? ['model.generate', 'mesh.retopology_lato2'] : [],
-    model_catalog: [{ id: 'lato2', title: 'LATO.2', backend_ids: ['lato2-cuda'], output: 'geometry_glb' }],
+    model_catalog: [{ id: 'lato2', title: 'LATO.2', backend_ids: [backend], output: 'geometry_glb' }],
     model_backends: [{
-      id: 'lato2-cuda', manual_setup: true, ready, missing: ['Local LATO.2 checkpoints are required.'],
+      id: backend, mesh_to_mesh_ready: ready, ready, missing: ['Local LATO.2 checkpoints are required.'],
       generation: {
-        id: 'lato2-cuda', input_modes: ['image'], view_modes: ['single'],
+        id: backend, input_modes: ['image'], view_modes: ['single'],
         parameters: [{ id: 'target_vertices', label: 'Target vertices', kind: 'integer', default: 2000, min: 200, max: 5000 }],
       },
     }],
   };
 }
 
-test('LATO.2 is visible but cannot run before operator setup', async ({ page, studioOrigin }) => {
+test('LATO.2 is visible but cannot run without an installed backend', async ({ page, studioOrigin }) => {
   await page.route('**/api/v1/runtime', route => route.fulfill({ json: lato2Runtime(false) }));
   await page.route('**/api/v1/operations', route => route.fulfill({ json: [] }));
   await page.goto(studioOrigin);
   const tools = page.getByRole('group', { name: 'Model tools' });
   await tools.getByRole('button', { name: 'Mesh to Mesh', exact: true }).click();
   const mesh = page.getByRole('complementary', { name: 'Mesh to Mesh' });
-  await expect(mesh.getByLabel('Mesh to Mesh model')).toHaveValue('lato2');
+  await expect(mesh.getByLabel('Mesh to Mesh model')).toHaveValue('lato2-cuda');
   await expect(mesh.getByRole('button', { name: 'Run Mesh to Mesh' })).toBeDisabled();
   await tools.getByRole('button', { name: 'New model' }).click();
   const image = page.getByRole('complementary', { name: 'Generate model' });
@@ -48,7 +48,7 @@ test('LATO.2 is visible but cannot run before operator setup', async ({ page, st
 });
 
 test('LATO.2 submits distinct Mesh to Mesh and Image to 3D jobs', async ({ page, studioOrigin }) => {
-  await page.route('**/api/v1/runtime', route => route.fulfill({ json: lato2Runtime(true) }));
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: lato2Runtime(true, 'lato2-mlx') }));
   await page.route('**/api/v1/operations', route => route.fulfill({
     json: [{ id: 'model.generate', implemented: true }, { id: 'mesh.retopology_lato2', implemented: true }],
   }));
@@ -76,7 +76,7 @@ test('LATO.2 submits distinct Mesh to Mesh and Image to 3D jobs', async ({ page,
   await mesh.getByRole('button', { name: 'Run Mesh to Mesh' }).click();
   await expect.poll(() => submissions[0]).toEqual({
     operation: 'mesh.retopology_lato2', input: { asset_id: reference.id },
-    parameters: { target_vertices: 220, max_triangles: 250, atlas_resolution: 512 },
+    parameters: { backend_id: 'lato2-mlx', target_vertices: 220, max_triangles: 250, atlas_resolution: 512 },
   });
 
   await tools.getByRole('button', { name: 'New model' }).click();
@@ -92,7 +92,7 @@ test('LATO.2 submits distinct Mesh to Mesh and Image to 3D jobs', async ({ page,
   await image.getByRole('button', { name: 'Generate 3D' }).click();
   await expect.poll(() => submissions[1]).toEqual({
     operation: 'model.generate', input: { kind: 'image', asset_id: input.id },
-    parameters: { backend_id: 'lato2-cuda', target_vertices: 1200 },
+    parameters: { backend_id: 'lato2-mlx', target_vertices: 1200 },
   });
 });
 

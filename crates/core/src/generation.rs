@@ -25,7 +25,7 @@ use crate::{
     huggingface_download::{PIXAL_CHECKPOINTS, PIXAL_REPOSITORY, PIXAL_REVISION},
     inspect_asset,
     job_execution::JobExecution,
-    lato2::{DEFAULT_TARGET_VERTICES, LATO2_IMAGE_BACKEND, Lato2Runtime},
+    lato2::{self, DEFAULT_TARGET_VERTICES, Lato2Runtime},
 };
 use crate::{cuda_runtime::Pixal3dCudaRuntimeManager, runtime::Pixal3dRuntimeManager};
 
@@ -815,7 +815,7 @@ pub(crate) fn generate_model(
     let texture_size = profile.has_textures().then_some(options.texture_size);
     let resolution = profile.has_resolution().then_some(options.resolution);
     let target_faces = profile.has_face_target().then_some(options.target_faces);
-    let target_vertices = (selected_backend_id == LATO2_IMAGE_BACKEND)
+    let target_vertices = lato2::is_backend(selected_backend_id)
         .then_some(options.target_vertices.unwrap_or(DEFAULT_TARGET_VERTICES));
     let mut metadata = json!({
         "operation": operation,
@@ -895,13 +895,15 @@ fn generate_from_images(
             let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());
             runtime.generate_from_references(&input_paths, work_dir, options, execution)?
         }
-        LATO2_IMAGE_BACKEND => Lato2Runtime::require_image()?.generate_image(
-            &input_paths[0],
-            output_path,
-            options.target_vertices.unwrap_or(DEFAULT_TARGET_VERTICES),
-            options.seed,
-            execution,
-        )?,
+        backend_id if lato2::is_backend(backend_id) => {
+            Lato2Runtime::require_image(core.store().root(), backend_id)?.generate_image(
+                &input_paths[0],
+                output_path,
+                options.target_vertices.unwrap_or(DEFAULT_TARGET_VERTICES),
+                options.seed,
+                execution,
+            )?
+        }
         backend_id => ExternalProfile::find(backend_id)
             .expect("generation profile has a local runtime")
             .generate(

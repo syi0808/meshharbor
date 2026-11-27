@@ -4,17 +4,19 @@ import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 
-export function MeshToMeshSettings({ ready, disabled, running, sourceTriangles, onRun, onSetup }: {
-  ready: boolean;
+export function MeshToMeshSettings({ backends, disabled, running, sourceTriangles, onRun, onSetup }: {
+  backends: { id: string; label: string; ready: boolean }[];
   disabled: boolean;
   running: boolean;
   sourceTriangles: number;
-  onRun: (parameters: Record<string, number>) => void;
+  onRun: (parameters: Record<string, number | string>) => void;
   onSetup: () => void;
 }) {
   const [targetVertices, setTargetVertices] = useState('2000');
   const [maxTriangles, setMaxTriangles] = useState('');
   const [atlasResolution, setAtlasResolution] = useState(1024);
+  const [chosenBackend, setChosenBackend] = useState('');
+  const backend = backends.find(item => item.id === chosenBackend) ?? backends.find(item => item.ready) ?? backends[0];
   const vertices = Number(targetVertices);
   const limit = Number(maxTriangles);
   const maxLimit = sourceTriangles > 0 ? Math.min(20_000, sourceTriangles - 1) : 20_000;
@@ -25,12 +27,16 @@ export function MeshToMeshSettings({ ready, disabled, running, sourceTriangles, 
   return <div className="grid gap-3">
     <Field>
       <FieldLabel htmlFor="mesh-to-mesh-model">Mesh to Mesh model</FieldLabel>
-      <NativeSelect id="mesh-to-mesh-model" className="w-full" defaultValue="lato2" disabled={running}>
-        <NativeSelectOption value="lato2">LATO.2 (experimental)</NativeSelectOption>
+      <NativeSelect id="mesh-to-mesh-model" className="w-full" value={backend?.id ?? ''} disabled={running || !backend}
+        onChange={event => setChosenBackend(event.currentTarget.value)}>
+        {!backend && <NativeSelectOption value="">LATO.2</NativeSelectOption>}
+        {backends.map(item => <NativeSelectOption key={item.id} value={item.id}>
+          LATO.2 · {item.label}{item.ready ? '' : ' (not ready)'}
+        </NativeSelectOption>)}
       </NativeSelect>
     </Field>
-    {!ready && <>
-      <p className="text-muted-foreground">A local LATO.2 CUDA runtime and checkpoints must be configured by the engine operator.</p>
+    {!backend?.ready && <>
+      <p className="text-muted-foreground">Install a supported LATO.2 backend to run Mesh to Mesh.</p>
       <Button variant="outline" size="sm" onClick={onSetup}>View model setup</Button>
     </>}
     <Field>
@@ -52,8 +58,8 @@ export function MeshToMeshSettings({ ready, disabled, running, sourceTriangles, 
         {[512, 1024, 2048].map(size => <NativeSelectOption key={size} value={size}>{size} × {size}</NativeSelectOption>)}
       </NativeSelect>
     </Field>
-    {!running && <Button className="w-full" disabled={disabled || !ready || !verticesValid || !limitValid || sourceTriangles <= 4}
-      onClick={() => onRun({ target_vertices: vertices, atlas_resolution: atlasResolution, ...(hasLimit ? { max_triangles: limit } : {}) })}>
+    {!running && <Button className="w-full" disabled={disabled || !backend?.ready || !verticesValid || !limitValid || sourceTriangles <= 4}
+      onClick={() => { if (backend) onRun({ backend_id: backend.id, target_vertices: vertices, atlas_resolution: atlasResolution, ...(hasLimit ? { max_triangles: limit } : {}) }); }}>
       Run Mesh to Mesh
     </Button>}
   </div>;

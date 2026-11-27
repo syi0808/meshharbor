@@ -16,7 +16,7 @@ use crate::{
     glb::{MeshCleanupOptions, cleanup_glb_with_options},
     inspect_asset, install_bundled_quadriflow_sidecar,
     job_execution::JobExecution,
-    lato2::{self, LATO2_IMAGE_BACKEND, LATO2_OPERATION, Lato2Options, Lato2Runtime},
+    lato2::{self, LATO2_OPERATION, Lato2Options, Lato2Runtime},
     model_environment::{ModelEnvironment, ModelEnvironmentStatus},
     model_storage::model_path,
     optimize_render_glb, simplify_glb,
@@ -305,17 +305,9 @@ impl OperationCore {
         }
         let (suffix, output, report) = match operation {
             LATO2_OPERATION => {
-                let options: Option<Lato2Options> =
-                    serde_json::from_value(parameters).map_err(|error| {
-                        CoreError::InvalidInput(format!(
-                            "Invalid {LATO2_OPERATION} parameters: {error}"
-                        ))
-                    })?;
-                let (output, report) = Lato2Runtime::require()?.retopologize(
-                    &bytes,
-                    options.unwrap_or_default(),
-                    execution,
-                )?;
+                let options = Lato2Options::parse(parameters)?;
+                let (output, report) = Lato2Runtime::require_mesh(self.store.root(), &options)?
+                    .retopologize(&bytes, options, execution)?;
                 ("lato2-retopologized", output, serde_json::to_value(report)?)
             }
             "mesh.voxel_remesh" => {
@@ -381,6 +373,11 @@ impl OperationCore {
         Ok(MeshOperationResult { asset, report })
     }
 
+    pub fn check_lato2_mesh_backend(&self, parameters: &Value) -> CoreResult<()> {
+        let options = Lato2Options::parse(parameters.clone())?;
+        Lato2Runtime::require_mesh(self.store.root(), &options).map(|_| ())
+    }
+
     pub fn check_image_generation(&self, options: &GenerationOptions) -> CoreResult<()> {
         let profile = options.validated_profile()?;
         if !profile.input_modes.contains(&GenerationInputMode::Image) {
@@ -389,11 +386,10 @@ impl OperationCore {
                 profile.id
             )));
         }
-        if let Some(external) = external_generation::ExternalProfile::find(profile.id) {
+        if lato2::is_backend(profile.id) {
+            Lato2Runtime::require_image(self.store.root(), profile.id)?;
+        } else if let Some(external) = external_generation::ExternalProfile::find(profile.id) {
             external.require_ready(self.store.root())?;
-        }
-        if profile.id == LATO2_IMAGE_BACKEND {
-            Lato2Runtime::require_image()?;
         }
         Ok(())
     }
@@ -421,11 +417,10 @@ impl OperationCore {
                 }
             }
         }
-        if let Some(external) = external_generation::ExternalProfile::find(profile.id) {
+        if lato2::is_backend(profile.id) {
+            Lato2Runtime::require_image(self.store.root(), profile.id)?;
+        } else if let Some(external) = external_generation::ExternalProfile::find(profile.id) {
             external.require_ready(self.store.root())?;
-        }
-        if profile.id == LATO2_IMAGE_BACKEND {
-            Lato2Runtime::require_image()?;
         }
         Ok(())
     }
@@ -723,15 +718,16 @@ impl OperationCore {
             ),
         ]
         .into_iter()
-        .chain(
-            external_generation::PROFILES
-                .iter()
-                .map(|profile| (profile.id, profile.is_ready(self.store.root()))),
-        )
-        .chain(std::iter::once((
-            LATO2_IMAGE_BACKEND,
-            Lato2Runtime::image_readiness().1.is_empty(),
-        )))
+        .chain(external_generation::PROFILES.iter().map(|profile| {
+            (
+                profile.id,
+                if lato2::is_backend(profile.id) {
+                    Lato2Runtime::image_ready(self.store.root(), profile.id)
+                } else {
+                    profile.is_ready(self.store.root())
+                },
+            )
+        }))
         .filter_map(|(id, ready)| {
             ready
                 .then(|| crate::generation_catalog::generation_profile(id))
@@ -752,7 +748,7 @@ impl OperationCore {
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces, then simplify eligible primitives within a conservative error tolerance without a triangle target.".into(), implemented: true },
             OperationDescriptor { id: "mesh.voxel_remesh".into(), title: "Voxel Remesh".into(), category: "mesh".into(), summary: "Rebuild one static indexed triangle GLB with meshoptimizer and validate the closed result before saving a geometry-only version. Does not copy UVs, materials, or textures.".into(), implemented: true },
             OperationDescriptor { id: "mesh.retopology".into(), title: "Quad retopology".into(), category: "mesh".into(), summary: "Experimental QuadriFlow quad remeshing in an isolated worker. Accepts one closed static triangle GLB; textured inputs also require TEXCOORD_0, optional NORMAL, and the narrow supported embedded base-color/metallic-roughness PNG maps. Those maps are projected only into a triangulated GLB preview with distance, normal, coverage, and ambiguity gates; the editable quad OBJ remains geometry-only. Other attributes/maps, self-intersection freedom, and a measured surface-error tolerance are not supported or certified.".into(), implemented: quadriflow_ready },
-            OperationDescriptor { id: LATO2_OPERATION.into(), title: "LATO.2 retopology + texture rebake (experimental)".into(), category: "mesh".into(), summary: "Generate a smaller, closed triangle mesh with local LATO.2 and rebake embedded PNG PBR maps with xatlas and CPU normal rays. Requires a configured LATO.2 checkout and Python. Never falls back to standard simplification.".into(), implemented: Lato2Runtime::discover().is_some() },
+            OperationDescriptor { id: LATO2_OPERATION.into(), title: "LATO.2 retopology + texture rebake (experimental)".into(), category: "mesh".into(), summary: "Generate a smaller, closed triangle mesh with local LATO.2 and rebake embedded PNG PBR maps with xatlas and CPU normal rays. Never falls back to standard simplification.".into(), implemented: Lato2Runtime::mesh_ready(self.store.root()) },
             OperationDescriptor { id: "uv.unwrap".into(), title: "Atlas UV unwrap".into(), category: "uv".into(), summary: "Use xatlas to unwrap one supported static textured mesh and rebake its embedded base-color and metallic/roughness PNG maps from its existing UVs. Zero-area faces are omitted from the result. This is not high-to-low projection.".into(), implemented: true },
             OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Generic high-to-low and arbitrary texture baking is not implemented; uv.unwrap only rebakes supported same-mesh embedded base-color and metallic/roughness PNG maps.".into(), implemented: false },
             OperationDescriptor { id: "render.optimize".into(), title: "Render optimization".into(), category: "mesh".into(), summary: "Use meshoptimizer vertex-cache and overdraw reordering on opaque/masked indexed triangles; translucent order is preserved.".into(), implemented: true },
@@ -845,11 +841,19 @@ impl OperationCore {
                 "missing": readiness.missing,
             }));
         }
-        model_backends.extend(
-            external_generation::PROFILES
-                .iter()
-                .map(|profile| profile.status(self.store.root(), cuda_supported)),
-        );
+        model_backends.extend(external_generation::PROFILES.iter().map(|profile| {
+            let mut status = profile.status(self.store.root(), cuda_supported);
+            if lato2::is_backend(profile.id) {
+                let mesh_ready = Lato2Runtime::discover(self.store.root(), profile.id).is_some();
+                let image_ready = Lato2Runtime::image_ready(self.store.root(), profile.id);
+                status["mesh_to_mesh_ready"] = json!(mesh_ready);
+                status["ready"] = json!(image_ready);
+                if image_ready && status["managed_ready"] != true {
+                    status["status"] = json!("ready_paths_unverified");
+                }
+            }
+            status
+        }));
         model_backends.extend(
             geosam2_install::PROFILES
                 .into_iter()
@@ -858,21 +862,6 @@ impl OperationCore {
         for backend in &mut model_backends {
             backend["requires_huggingface_login"] = json!(true);
         }
-        let (_, lato2_image_missing) = Lato2Runtime::image_readiness();
-        let lato2_image_ready = lato2_image_missing.is_empty();
-        model_backends.push(json!({
-            "id": LATO2_IMAGE_BACKEND,
-            "generation": crate::generation_catalog::generation_profile(LATO2_IMAGE_BACKEND),
-            "manual_setup": true,
-            "ready": lato2_image_ready,
-            "status": if lato2_image_ready { "ready_paths_unverified" } else { "operator_setup_required" },
-            "installable": false,
-            "weights_included": false,
-            "downloads_enabled": false,
-            "requires_huggingface_login": false,
-            "validation_level": "local_paths",
-            "missing": lato2_image_missing,
-        }));
         let pixal3d: Value =
             serde_json::from_str(include_str!("../../../registry/models/pixal3d.json"))
                 .expect("bundled Pixal3D registry must be valid JSON");
@@ -907,7 +896,7 @@ impl OperationCore {
                 }),
                 json!({
                     "id": "lato2", "title": "LATO.2", "status": "experimental_opt_in",
-                    "category": "generation", "backend_ids": [LATO2_IMAGE_BACKEND], "output": "geometry_glb",
+                    "category": "generation", "backend_ids": lato2::BACKENDS, "output": "geometry_glb",
                 }),
                 json!({
                     "id": "trellis-text", "title": "TRELLIS Text Large", "status": "experimental_opt_in",

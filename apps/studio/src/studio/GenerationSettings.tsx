@@ -10,13 +10,13 @@ import type { GenerationModel, GenerationParameter, GenerationParameters, Genera
 type Draft = Record<string, string>;
 
 export function selectableGenerationProfiles(runtime: RuntimeInfo | null): GenerationModel[] {
-  const preferred = runtime?.platform === 'linux' ? 'pixal3d-cuda' : 'pixal3d-mlx';
+  const preferred = runtime?.platform === 'linux' ? '-cuda' : '-mlx';
   return (runtime?.model_catalog ?? []).flatMap(model => {
     if (model.category === 'repart') return [];
     const backends = (runtime?.model_backends ?? []).filter(backend =>
-      model.backend_ids.includes(backend.id) && (backend.ready || backend.manual_setup) && backend.generation?.id === backend.id);
-    const selected = backends.find(backend => backend.ready && backend.id === preferred)
-      ?? backends.find(backend => backend.ready) ?? backends[0];
+      model.backend_ids.includes(backend.id) && (backend.ready || model.id === 'lato2') && backend.generation?.id === backend.id);
+    const selected = backends.find(backend => backend.ready && backend.id.endsWith(preferred))
+      ?? backends.find(backend => backend.ready) ?? backends.find(backend => backend.installable) ?? backends[0];
     const profile = selected?.generation;
     if (!profile) return [];
     const modes = profile.input_modes === undefined ? (['image'] as const) : profile.input_modes;
@@ -26,7 +26,7 @@ export function selectableGenerationProfiles(runtime: RuntimeInfo | null): Gener
       modelId: model.id,
       label: model.title,
       ready: selected.ready === true,
-      setupMessage: selected.ready ? undefined : selected.missing?.[0],
+      setupMessage: selected.ready ? undefined : selected.missing?.[0] ?? 'Install a supported LATO.2 backend under Settings → Models.',
       output: model.output,
       input_modes: [...modes],
       view_modes: profile.view_modes ?? ['single'],

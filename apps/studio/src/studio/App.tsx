@@ -1184,7 +1184,7 @@ export function App() {
     }
   }
 
-  async function runMeshOperation(operation: MeshOperationId, parameters: Record<string, number | boolean> = {}) {
+  async function runMeshOperation(operation: MeshOperationId, parameters: Record<string, number | boolean | string> = {}) {
     if (!selectedAsset || selectedAsset.kind !== 'mesh' || (operation === 'mesh.retopology' && !retopologyCheck)) return;
     invalidateHistoryRequests();
     setBusy(true);
@@ -1414,6 +1414,12 @@ export function App() {
       return { ...field, draft, value, valid };
     }) : [];
   const meshToolAvailable = operations.some(operation => operation.id === meshTool?.id && operation.implemented);
+  const lato2Backends = (runtime?.model_backends ?? []).filter(backend => backend.id === 'lato2-cuda' || backend.id === 'lato2-mlx')
+    .map(backend => ({
+      id: backend.id,
+      label: backend.accelerator ?? (backend.id.endsWith('-mlx') ? 'Apple MLX' : 'NVIDIA CUDA'),
+      ready: backend.mesh_to_mesh_ready ?? (meshToolAvailable && backend.ready === true),
+    }));
   const canPrepareRetopology = hasSelectedMesh && !busy && !checkingRetopology && connection === 'connected' && !isRunning;
   const processingTool = isRunning && job.operation === meshTool?.id;
   const inspectorTitle = meshTool?.title ?? (openInspector === 'generation' ? 'Generate model' : 'Optimize mesh');
@@ -1583,7 +1589,7 @@ export function App() {
         {isRetopology && !meshToolAvailable && quadriflowBackend && (
           <p className="text-muted-foreground">{quadriflowBackend.message}</p>
         )}
-        {isMeshToMesh ? <MeshToMeshSettings ready={meshToolAvailable} running={processingTool}
+        {isMeshToMesh ? <MeshToMeshSettings backends={lato2Backends} running={processingTool}
           disabled={!hasSelectedMesh || busy || connection !== 'connected' || isRunning} sourceTriangles={triangleCount}
           onRun={parameters => void runMeshOperation('mesh.retopology_lato2', parameters)}
           onSetup={() => openSettings('models')} /> : <div className="grid gap-2">

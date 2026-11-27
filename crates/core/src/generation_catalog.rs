@@ -7,9 +7,7 @@ use crate::{
     CoreError, CoreResult, GenerationInput, GenerationInputMode, GenerationOptions,
     external_generation, generation_tuning,
     generation_views::{GenerationViewMode, MAX_CUSTOM_VIEWS},
-    lato2::{
-        DEFAULT_TARGET_VERTICES, LATO2_IMAGE_BACKEND, MAX_TARGET_VERTICES, MIN_TARGET_VERTICES,
-    },
+    lato2::{self, DEFAULT_TARGET_VERTICES, MAX_TARGET_VERTICES, MIN_TARGET_VERTICES},
 };
 
 #[derive(Clone, Copy, Serialize)]
@@ -176,14 +174,6 @@ static PROFILES: LazyLock<Vec<GenerationProfile>> = LazyLock::new(|| {
             input_modes,
         )
     }))
-    .chain(std::iter::once(profile(
-        LATO2_IMAGE_BACKEND,
-        "NVIDIA CUDA",
-        &[Single],
-        1,
-        false,
-        &[GenerationInputMode::Image],
-    )))
     .collect()
 });
 
@@ -195,7 +185,7 @@ fn profile(
     textured: bool,
     input_modes: &'static [GenerationInputMode],
 ) -> GenerationProfile {
-    let core_parameters = if id == LATO2_IMAGE_BACKEND {
+    let core_parameters = if lato2::is_backend(id) {
         LATO2_PARAMETERS
     } else if textured {
         TEXTURED_PARAMETERS
@@ -331,7 +321,7 @@ impl GenerationOptions {
                 "{backend_id} does not support target_faces; use target_vertices."
             )));
         }
-        if backend_id != LATO2_IMAGE_BACKEND && self.target_vertices.is_some() {
+        if !lato2::is_backend(backend_id) && self.target_vertices.is_some() {
             return Err(CoreError::InvalidInput(format!(
                 "{backend_id} does not support target_vertices."
             )));
@@ -454,34 +444,37 @@ mod tests {
         let input = GenerationInput::Image {
             asset_id: "asset_reference".into(),
         };
-        let options = GenerationOptions {
-            backend_id: LATO2_IMAGE_BACKEND.into(),
-            target_vertices: Some(1200),
-            ..GenerationOptions::default()
-        };
-        let profile = options.validate_input(&input).unwrap();
-        assert!(!profile.has_face_target());
-        assert!(!profile.has_textures());
-        assert!(!profile.has_resolution());
-        for unsupported in [
-            GenerationOptions {
-                target_vertices: Some(199),
-                ..options.clone()
-            },
-            GenerationOptions {
-                seed: u64::from(u32::MAX) + 1,
-                ..options.clone()
-            },
-            GenerationOptions {
-                target_faces: 3008,
-                ..options.clone()
-            },
-            GenerationOptions {
-                backend_id: "pixal3d-cuda".into(),
-                ..options
-            },
-        ] {
-            assert!(unsupported.validate_input(&input).is_err());
+        for backend_id in lato2::BACKENDS {
+            let options = GenerationOptions {
+                backend_id: backend_id.into(),
+                target_vertices: Some(1200),
+                ..GenerationOptions::default()
+            };
+            let profile = options.validate_input(&input).unwrap();
+            assert_eq!(profile.id, backend_id);
+            assert!(!profile.has_face_target());
+            assert!(!profile.has_textures());
+            assert!(!profile.has_resolution());
+            for unsupported in [
+                GenerationOptions {
+                    target_vertices: Some(199),
+                    ..options.clone()
+                },
+                GenerationOptions {
+                    seed: u64::from(u32::MAX) + 1,
+                    ..options.clone()
+                },
+                GenerationOptions {
+                    target_faces: 3008,
+                    ..options.clone()
+                },
+                GenerationOptions {
+                    backend_id: "pixal3d-cuda".into(),
+                    ..options
+                },
+            ] {
+                assert!(unsupported.validate_input(&input).is_err());
+            }
         }
     }
 

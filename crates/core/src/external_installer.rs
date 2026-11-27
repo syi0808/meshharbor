@@ -14,8 +14,9 @@ use crate::{
     },
     huggingface_access::{DINO_REVISION, HuggingFaceAccess, check_model_access},
     job_execution::JobExecution,
+    lato2,
     model_environment::ModelEnvironment,
-    model_storage::{managed_directory, remove_managed_directories},
+    model_storage::{managed_directory, remove_managed_directories, weight_matches_sha},
 };
 
 const OWNER_FILE: &str = ".meshharbor-managed";
@@ -26,6 +27,11 @@ const TRIPOSG_PORT: &str = "src/mlx_agent/resources/ports/mlx-3d";
 const UTILS3D: &str =
     "git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8";
 const FLEXICUBES: &str = "815e075a2a400d06c48d94c347674344ed6ae5c5";
+const LATO_DINO_REVISION: &str = "7764ea0f912e53c92e82eb78a2a1631e92725fc8";
+const LATO_DINO_SHA256: &str = "36e4deffbaef061a2576705b0c36f93621e2ae20bf6274694821b0b492551b51";
+const LATO_DINO_URL: &str =
+    "https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_reg4_pretrain.pth";
+const LATO_OVOXEL_REVISION: &str = "75fbf0183001ed9876c8dbb35de6b68552ee08bd";
 
 struct Snapshot {
     repo: &'static str,
@@ -52,6 +58,21 @@ impl Snapshot {
 
 fn snapshots(id: &str) -> Vec<Snapshot> {
     match id {
+        lato2::LATO2_IMAGE_BACKEND | lato2::LATO2_MLX_BACKEND => vec![
+            Snapshot::new(
+                "0x4c48/LATO.2",
+                "c6d7893da011f279325d81d63ac30820f6706f80",
+                "lato2",
+                lato2::CHECKPOINTS,
+            ),
+            Snapshot::new(IMAGE_REPO, IMAGE_REVISION, "trellis", lato2::TRELLIS_FILES),
+            Snapshot::new(
+                "ZhengPeng7/BiRefNet",
+                "e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4",
+                "rembg/BiRefNet",
+                lato2::BIREFNET_FILES,
+            ),
+        ],
         TRELLIS_TEXT_MLX_ID | TRELLIS_TEXT_CUDA_ID => [
             (
                 "microsoft/TRELLIS-text-large",
@@ -209,7 +230,10 @@ impl ExternalProfile {
         fs::create_dir_all(runtime.join("home"))?;
         let environment = ModelEnvironment::require(&root)?;
         let installer = Installer::new(&runtime, &environment, execution);
-        let version = if matches!(self.id, "triposg-mlx" | TRELLIS_TEXT_MLX_ID) {
+        let version = if matches!(
+            self.id,
+            "triposg-mlx" | TRELLIS_TEXT_MLX_ID | lato2::LATO2_MLX_BACKEND
+        ) {
             "3.12"
         } else {
             "3.10"
@@ -247,6 +271,21 @@ impl ExternalProfile {
                 false,
             )?;
         }
+        if self.id == lato2::LATO2_IMAGE_BACKEND {
+            managed_directory(&root, &format!("{}/voxel-source", self.managed_relative()))?;
+            installer.checkout(
+                &runtime.join("voxel-source"),
+                "https://github.com/microsoft/TRELLIS.2",
+                LATO_OVOXEL_REVISION,
+                false,
+            )?;
+            installer.checkout(
+                &runtime.join("voxel-source/o-voxel/third_party/eigen"),
+                "https://gitlab.com/libeigen/eigen.git",
+                "21e4582d1739107337a03460c81412981130373e",
+                false,
+            )?;
+        }
         execution.stage("install_dependencies")?;
         installer.venv(&runtime.join(".venv"), version)?;
         installer.install_dependencies(self.id)?;
@@ -254,6 +293,16 @@ impl ExternalProfile {
         installer.verify(self.id)?;
         execution.stage("download_models")?;
         let weights = runtime.join("weights");
+        if lato2::is_backend(self.id) {
+            for directory in [
+                "weights/dinov2",
+                "weights/dinov2/checkpoints",
+                "weights/dinov2/facebookresearch_dinov2_main",
+            ] {
+                managed_directory(&root, &format!("{}/{directory}", self.managed_relative()))?;
+            }
+            installer.install_lato_dino(&weights.join("dinov2"))?;
+        }
         let shared_cache = crate::huggingface_download::shared_hub_cache();
         managed_directory(
             &root,
@@ -371,7 +420,11 @@ mod tests {
                     .map(|file| format!("original/{file}"))
                     .collect()
             } else {
-                profile.required_model_files().into_iter().collect()
+                profile
+                    .required_model_files()
+                    .into_iter()
+                    .filter(|file| !(lato2::is_backend(profile.id) && file.starts_with("dinov2/")))
+                    .collect()
             };
             assert_eq!(downloaded, expected, "{}", profile.id);
         }
@@ -525,6 +578,53 @@ impl<'a> Installer<'a> {
         )
     }
 
+    fn install_lato_dino(&self, directory: &Path) -> CoreResult<()> {
+        let cache = directory.join("checkpoints");
+        fs::create_dir_all(&cache)?;
+        self.checkout(
+            &directory.join(lato2::DINO_SOURCE),
+            "https://github.com/facebookresearch/dinov2.git",
+            LATO_DINO_REVISION,
+            false,
+        )?;
+        let destination = cache.join(lato2::DINO_WEIGHT);
+        if destination
+            .symlink_metadata()
+            .is_ok_and(|entry| entry.is_file())
+            && weight_matches_sha(&destination, LATO_DINO_SHA256, self.execution)?
+        {
+            return Ok(());
+        }
+        let download = cache.join(format!(".download-{}", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut command = self.command("curl");
+            command
+                .args([
+                    "--disable",
+                    "--fail",
+                    "--location",
+                    "--silent",
+                    "--show-error",
+                    "--retry",
+                    "2",
+                ])
+                .arg("--output")
+                .arg(&download)
+                .arg(LATO_DINO_URL);
+            self.execution
+                .visible(command, "Could not download the pinned DINOv2 checkpoint")?;
+            if !weight_matches_sha(&download, LATO_DINO_SHA256, self.execution)? {
+                return Err(CoreError::OperationUnavailable(
+                    "LATO.2 DINOv2 checkpoint checksum did not match.".into(),
+                ));
+            }
+            fs::rename(&download, &destination)?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(download);
+        result
+    }
+
     fn install_dependencies(&self, id: &str) -> CoreResult<()> {
         let python = self.runtime.join(".venv/bin/python");
         if id.ends_with("-cuda") {
@@ -547,6 +647,63 @@ impl<'a> Installer<'a> {
             self.pip(&python, torch)?;
         }
         match id {
+            lato2::LATO2_MLX_BACKEND | lato2::LATO2_IMAGE_BACKEND => {
+                self.pip(
+                    &python,
+                    &[
+                        "numpy<2",
+                        "scipy",
+                        "pillow",
+                        "trimesh==4.9.0",
+                        "tqdm",
+                        "einops",
+                        "timm",
+                        "transformers==4.57.6",
+                        "safetensors",
+                        "kornia",
+                        "huggingface-hub<1",
+                    ],
+                )?;
+                if id == lato2::LATO2_MLX_BACKEND {
+                    self.pip(
+                        &python,
+                        &["mlx==0.31.2", "torch==2.11.0", "torchvision==0.26.0"],
+                    )
+                } else {
+                    self.pip(
+                        &python,
+                        &[
+                            "spconv-cu124==2.3.8",
+                            "open3d==0.19.0",
+                            "setuptools",
+                            "wheel",
+                            "ninja",
+                        ],
+                    )?;
+                    self.pip(
+                        &python,
+                        &[
+                            "xformers==0.0.29.post2",
+                            "--index-url",
+                            "https://download.pytorch.org/whl/cu124",
+                        ],
+                    )?;
+                    self.pip(
+                        &python,
+                        &[
+                            "torch-scatter==2.1.2",
+                            "--only-binary=:all:",
+                            "--find-links",
+                            "https://data.pyg.org/whl/torch-2.6.0+cu124.html",
+                        ],
+                    )?;
+                    let voxels = self.runtime.join("voxel-source/o-voxel");
+                    self.pip(
+                        &python,
+                        &["--no-build-isolation", &voxels.to_string_lossy()],
+                    )
+                }
+            }
             TRELLIS_TEXT_MLX_ID => self.pip(
                 &python,
                 &[
@@ -685,6 +842,12 @@ impl<'a> Installer<'a> {
 
     fn verify(&self, id: &str) -> CoreResult<()> {
         let imports = match id {
+            lato2::LATO2_MLX_BACKEND => {
+                "import mlx.core as mx, torch, torchvision, transformers, trimesh; assert mx.metal.is_available(); mx.eval(mx.ones((1, 1)) @ mx.ones((1, 1)))"
+            }
+            lato2::LATO2_IMAGE_BACKEND => {
+                "import torch, open3d, spconv.pytorch, xformers.ops, torch_scatter, transformers; import importlib.util, types; spec=importlib.util.find_spec('o_voxel'); module=types.ModuleType('o_voxel'); module.__path__=spec.submodule_search_locations; sys.modules['o_voxel']=module; from o_voxel.convert import mesh_to_flexible_dual_grid; import models; assert torch.cuda.is_available(); torch.ones(1, device='cuda').sum().item()"
+            }
             TRELLIS_TEXT_MLX_ID => {
                 "import mlx.core as mx, tokenizers, trimesh; assert mx.metal.is_available()"
             }
@@ -715,7 +878,7 @@ impl<'a> Installer<'a> {
             .env("TRANSFORMERS_OFFLINE", "1")
             .env(
                 "ATTN_BACKEND",
-                if id == TRELLIS_TEXT_CUDA_ID {
+                if matches!(id, TRELLIS_TEXT_CUDA_ID | lato2::LATO2_IMAGE_BACKEND) {
                     "xformers"
                 } else {
                     "sdpa"

@@ -176,7 +176,7 @@ enum Command {
             help = "Text prompt for a backend that supports text-to-3D"
         )]
         prompt: Option<String>,
-        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda", "trellis-text-cuda", "trellis-text-mlx", "lato2-cuda"])]
+        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda", "trellis-text-cuda", "trellis-text-mlx", "lato2-cuda", "lato2-mlx"])]
         backend_id: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
@@ -612,7 +612,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local image.generate job with a ready backend listed in runtime_doctor. The default auto selects platform Pixal3D. Choose lato2-cuda with optional target_vertices for single-image geometry-only generation. This tool never downloads models or installs packages."
+        description = "Start a local image.generate job with a ready backend listed in runtime_doctor. The default auto selects platform Pixal3D. Choose lato2-cuda or lato2-mlx with optional target_vertices for single-image geometry-only generation. This tool never downloads models or installs packages."
     )]
     async fn start_image_generation(&self, params: Parameters<GenerateArgs>) -> String {
         let args = params.0;
@@ -2657,6 +2657,9 @@ async fn start_mesh_operation_job(
     operation: &str,
     parameters: Value,
 ) -> Result<meshharbor_core::Job, CoreError> {
+    if operation == meshharbor_core::LATO2_OPERATION {
+        core.check_lato2_mesh_backend(&parameters)?;
+    }
     let descriptor = core
         .list_operations()
         .into_iter()
@@ -2667,11 +2670,6 @@ async fn start_mesh_operation_job(
             ))
         })?;
     if !descriptor.implemented {
-        if operation == meshharbor_core::LATO2_OPERATION {
-            return Err(CoreError::OperationUnavailable(
-                "Configure MESHHARBOR_LATO2_DIR and MESHHARBOR_LATO2_PYTHON before submitting mesh.retopology_lato2.".into(),
-            ));
-        }
         return Err(CoreError::OperationUnavailable(format!(
             "Mesh operation '{operation}' is not implemented by this build."
         )));
@@ -2697,6 +2695,9 @@ async fn start_mesh_operation_job(
         let worker_parameters = parameters;
         let worker_job_id = job_id.clone();
         let result = task::spawn_blocking(move || {
+            let _runtime_lock = (worker_operation == meshharbor_core::LATO2_OPERATION)
+                .then(|| acquire_generation_runtime_lock(worker_core.store().root()))
+                .transpose()?;
             let result = worker_core.process_mesh_asset_for_job(
                 &worker_asset_id,
                 &worker_operation,
@@ -2722,7 +2723,7 @@ async fn start_generation_job(
     core.check_model_generation(&input, &options)?;
 
     let mut parameters = serde_json::to_value(&options)?;
-    if options.backend_id == meshharbor_core::LATO2_IMAGE_BACKEND
+    if meshharbor_core::is_lato2_backend(&options.backend_id)
         && let Some(parameters) = parameters.as_object_mut()
     {
         for field in ["target_faces", "resolution", "texture_size"] {

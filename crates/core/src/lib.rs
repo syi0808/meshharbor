@@ -46,7 +46,9 @@ pub use glb::{
 };
 pub use huggingface_access::{HuggingFaceAccess, HuggingFaceConnection};
 pub use huggingface_browser::HuggingFaceBrowserTool;
-pub use lato2::{LATO2_IMAGE_BACKEND, LATO2_OPERATION};
+pub use lato2::{
+    LATO2_IMAGE_BACKEND, LATO2_MLX_BACKEND, LATO2_OPERATION, is_backend as is_lato2_backend,
+};
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
 pub use model_environment::ModelEnvironmentStatus;
 pub use model_storage::Pixal3dProfile;

@@ -462,6 +462,7 @@ const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
   'mesh.retopology_lato2': {
     title: 'Mesh to Mesh · LATO.2',
     metrics: [
+      { key: 'backend_id', label: 'Backend', formatter: 'text' },
       { key: 'input_triangles', label: 'Input triangles', formatter: 'count' },
       { key: 'output_triangles', label: 'Output triangles', formatter: 'count' },
       { key: 'requested_vertices', label: 'Requested vertices', formatter: 'count' },
@@ -573,7 +574,7 @@ export function jobResultCardModel(job: Job | null | undefined): JobReportCardMo
 
   const resultObject = reportObject(job.result);
   const report = generation ? resultObject : reportObject(resultObject?.report);
-  const metricFields = generation && report?.backend_id === 'lato2-cuda'
+  const metricFields = generation && (report?.backend_id === 'lato2-cuda' || report?.backend_id === 'lato2-mlx')
     ? schema.metrics.filter(field => !['resolution', 'texture_size', 'target_faces'].includes(field.key))
       .concat([{ key: 'target_vertices', label: 'Target vertices', formatter: 'count' }])
     : schema.metrics;
@@ -876,7 +877,7 @@ export class MeshHarborApi {
   createMeshOperationJob(
     assetId: string,
     operation: MeshOperationId,
-    parameters: Record<string, number | boolean> = {},
+    parameters: Record<string, number | boolean | string> = {},
   ): Promise<Job> {
     return this.request('/api/v1/jobs', {
       method: 'POST',

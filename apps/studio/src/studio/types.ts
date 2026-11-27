@@ -58,7 +58,7 @@ export interface Operation {
 
 export type HuggingFaceAccess = 'not_connected' | 'access_denied' | 'verified';
 export type HuggingFaceConnectionStatus = 'not_connected' | 'invalid_token' | 'connected';
-export type RuntimeBackendId = `${'pixal3d' | 'trellis2' | 'triposg' | 'trellis-text' | 'geosam2'}-${'mlx' | 'cuda'}`;
+export type RuntimeBackendId = `${'pixal3d' | 'trellis2' | 'triposg' | 'trellis-text' | 'geosam2' | 'lato2'}-${'mlx' | 'cuda'}`;
 export type HuggingFaceBrowserLogin = { id: string } & (
   | { state: 'preparing' | 'signed_in' | 'cancelled' | 'expired' }
   | { state: 'awaiting_authorization'; user_code: string; expires_in: number }
@@ -138,7 +138,7 @@ export interface RuntimeInfo {
     status: string;
     accelerator?: string;
     managed_install?: boolean;
-    manual_setup?: boolean;
+    mesh_to_mesh_ready?: boolean;
     managed_ready?: boolean;
     account_tools_ready?: boolean;
     requires_huggingface_login?: boolean;

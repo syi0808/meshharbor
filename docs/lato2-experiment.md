@@ -2,18 +2,16 @@
 
 `mesh.retopology_lato2` is opt-in. It does not replace `mesh.simplify` or the QuadriFlow `mesh.retopology` job. It sends a geometry-only OBJ to local [LATO.2 Mesh2Mesh](https://github.com/LoHhhha/LATO.2#inference), validates and orients the predicted triangles, unwraps them with xatlas, and projects the source PBR textures along target normals on the CPU. The job does not use Blender or meshoptimizer. Only a validated, textured GLB is stored as a derived asset. The source is not modified.
 
-## Operator Setup
+## Install A Backend
 
-1. Follow the [upstream installation guide](https://github.com/LoHhhha/LATO.2#installation) on a CUDA worker. Use a trusted checkout and install the [official checkpoints](https://huggingface.co/0x4c48/LATO.2/tree/main) into its `ckpt/` directory. The adapter targets the upstream Mesh2Mesh CLI at revision `650b48fb1257c83ec1358f0c9f1d95d5cb9c7468`.
-2. Run the upstream Mesh2Mesh example on a bundled sample once during setup to verify CUDA/EGL and prime the local DINOv2 code and weights in `ckpt/dinov2`. A job does not fetch missing PyTorch Hub weights. Do not use a user asset for setup.
-3. Set these absolute paths in the backend service environment and restart the service:
+Open **Studio → Settings → Models → LATO.2** after setting up the shared environment and connecting Hugging Face under **Connections**. Choose **Apple MLX** on Apple Silicon or **NVIDIA CUDA** on Linux x86-64 with an NVIDIA GPU, confirm the install, and track it in Jobs. This uses the same model-install and model-removal flow as the other managed models. The installation checks out pinned upstream code, creates a per-backend Python environment, and fetches local LATO.2, DINOv2, TRELLIS sparse structure, and BiRefNet files. Allow several gigabytes for the weights and extra space for the environment and caches.
 
-   ```sh
-   export MESHHARBOR_LATO2_DIR=/srv/models/LATO.2
-   export MESHHARBOR_LATO2_PYTHON=/srv/conda/envs/lato2/bin/python
-   ```
+- `lato2-cuda` uses the upstream CUDA graphs, spconv, and xFormers attention. Installing the pinned voxelizer requires the CUDA 12.4 toolkit (`nvcc` and a supported host compiler); Mesh to Mesh uses Open3D/EGL for the conditioning view. Only the o-voxel converter is used, not the TRELLIS textured export path.
+- `lato2-mlx` uses Metal for linear projections, masked attention, dense 3D convolution, and submanifold sparse convolution. Upstream PyTorch orchestration, 2D preprocessing, and an independent mesh voxelizer and conditioning renderer run on the CPU. It does not require CUDA, MPS, or Blender. This is a hybrid experimental port, not a pure-MLX rewrite or a guarantee of identical results to CUDA.
 
-`GET /api/v1/operations` lists the operation as implemented when the configured files are present. This does not verify GPU availability, Python packages, or the complete DINOv2 cache. MeshHarbor does not send files to the public demo or download models during setup or inference for this job. The installed binaries and model checkout run with the service account's permissions; use trusted files and a restricted worker account/network.
+Both workers run offline for inference. `GET /api/v1/runtime` exposes image readiness and `mesh_to_mesh_ready` for each backend; these are environment/path checks, not model-quality guarantees. The existing operator-provisioned CUDA path (`MESHHARBOR_LATO2_DIR` and `MESHHARBOR_LATO2_PYTHON`) remains a fallback if a standard local CUDA runtime is not ready.
+
+The managed profiles target [LATO.2 source revision `650b48f`](https://github.com/LoHhhha/LATO.2/tree/650b48fb1257c83ec1358f0c9f1d95d5cb9c7468). The pinned BiRefNet model includes Python code that runs in the local worker. Review dependency and checkpoint terms before installation.
 
 ## Mesh To Mesh
 
@@ -25,15 +23,16 @@ Submit to `POST /api/v1/jobs`:
 {
   "operation": "mesh.retopology_lato2",
   "input": {"asset_id": "<imported GLB asset id>"},
-  "parameters": {"target_vertices": 1200, "max_triangles": 3200, "atlas_resolution": 1024}
+  "parameters": {"backend_id": "lato2-mlx", "target_vertices": 1200, "max_triangles": 3200, "atlas_resolution": 1024}
 }
 ```
 
+- `backend_id`: `lato2-cuda`, `lato2-mlx`, or `auto` (default: an available LATO.2 backend). Explicit selection does not fall back.
 - `target_vertices`: approximate model conditioning, 200–5000, default 2000. It is not a limit or a guaranteed vertex count. UV seams can increase the exported vertex count.
 - `max_triangles`: optional hard cap, 4–20,000. The result must also have fewer triangles than the source. A prediction over the cap fails rather than being simplified again.
 - `atlas_resolution`: square atlas size, 512, 1024, or 2048; default 1024.
 
-Poll `GET /api/v1/jobs/{job_id}` for the derived asset and report. The report records the triangle counts, separate geometry and exported vertex counts, topology check, baked maps, direct ray-hit coverage, and counts of ambiguous, locally filled, and unfilled texels. Use `GET /api/v1/jobs/{job_id}/steps` to see the failed stage and inference worker logs. Inference is limited to five minutes. Cancellation during native baking is checked after the bake, before the result is saved.
+Poll `GET /api/v1/jobs/{job_id}` for the derived asset and report. The report records the selected backend, triangle and vertex counts, topology check, baked maps, direct ray-hit coverage, and counts of ambiguous, locally filled, and unfilled texels. Use `GET /api/v1/jobs/{job_id}/steps` for stage and worker logs. Inference timeouts are five minutes on CUDA and fifteen on MLX. Cancellation during native baking is checked after the bake, before saving.
 
 ## Supported Inputs
 
@@ -45,9 +44,7 @@ The topology checks reject open edges, nonmanifold edges/vertices, inconsistent 
 
 In Studio, open **New model**, select **LATO.2**, and provide a single PNG or JPEG. This mode uses the upstream [Image2Mesh script](https://github.com/LoHhhha/LATO.2/blob/650b48fb1257c83ec1358f0c9f1d95d5cb9c7468/scripts/image_e2e_inference.py) and outputs a geometry-only GLB; no texture or PBR map is synthesized. The job rejects open or nonmanifold predictions.
 
-In addition to the shared LATO.2 runtime, the image profile needs the local DINOv2 ViT-L/14-with-registers weights under `ckpt/dinov2/checkpoints`, the upstream TRELLIS sparse structure checkpoint pairs under `ckpt/trellis/ckpts`, and the trusted BiRefNet code and weights under `ckpt/rembg/BiRefNet`. Use a bundled image to prime and verify the upstream CUDA pipeline during operator setup, not a user's image. MeshHarbor does not install or download these files when a job is submitted. See **Settings → Models → LATO.2** for the separate readiness of each mode.
-
-`POST /api/v1/jobs` accepts `operation: "model.generate"`, `input: {"kind": "image", "asset_id": "..."}`, and parameters such as `{"backend_id": "lato2-cuda", "target_vertices": 2000, "seed": 42}`. The target vertex count is approximate (200–5000), and one image inference may run for up to ten minutes. Text and posed multiview input are not supported.
+`POST /api/v1/jobs` accepts `operation: "model.generate"`, `input: {"kind": "image", "asset_id": "..."}`, and parameters such as `{"backend_id": "lato2-cuda", "target_vertices": 2000, "seed": 42}`. Use `lato2-mlx` for Apple Silicon. The approximate vertex target is 200–5000. Inference timeouts are ten minutes on CUDA and twenty on MLX. Text and posed multiview input are not supported.
 
 ## Crocodile At 3,008 Triangles
 

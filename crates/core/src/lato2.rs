@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     CoreError, CoreResult,
+    external_generation::ExternalProfile,
     glb::encode_triangle_geometry_glb,
     job_execution::JobExecution,
     operation::map_atlas_bake_error,
@@ -24,6 +25,32 @@ use crate::{
 
 pub const LATO2_OPERATION: &str = "mesh.retopology_lato2";
 pub const LATO2_IMAGE_BACKEND: &str = "lato2-cuda";
+pub const LATO2_MLX_BACKEND: &str = "lato2-mlx";
+pub(crate) const BACKENDS: [&str; 2] = [LATO2_MLX_BACKEND, LATO2_IMAGE_BACKEND];
+pub(crate) const SOURCE_REPOSITORY: &str = "https://github.com/LoHhhha/LATO.2";
+pub(crate) const SOURCE_REVISION: &str = "650b48fb1257c83ec1358f0c9f1d95d5cb9c7468";
+pub(crate) const CHECKPOINTS: [&str; 6] = [
+    "vflow.pt",
+    "vvae.pt",
+    "offset_head.pt",
+    "tflow.pt",
+    "tvae.pt",
+    "voxel_encoder.pt",
+];
+pub(crate) const TRELLIS_FILES: [&str; 4] = [
+    "ckpts/ss_flow_img_dit_L_16l8_fp16.json",
+    "ckpts/ss_flow_img_dit_L_16l8_fp16.safetensors",
+    "ckpts/ss_dec_conv3d_16l8_fp16.json",
+    "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+];
+pub(crate) const BIREFNET_FILES: [&str; 4] = [
+    "config.json",
+    "model.safetensors",
+    "BiRefNet_config.py",
+    "birefnet.py",
+];
+pub(crate) const DINO_WEIGHT: &str = "dinov2_vitl14_reg4_pretrain.pth";
+pub(crate) const DINO_SOURCE: &str = "facebookresearch_dinov2_main";
 pub(crate) const DEFAULT_TARGET_VERTICES: u32 = 2000;
 pub(crate) const MIN_TARGET_VERTICES: u32 = 200;
 pub(crate) const MAX_TARGET_VERTICES: u32 = 5000;
@@ -37,12 +64,27 @@ const RAY_DISTANCE_RATIO: f32 = 0.03;
 const INFERENCE_ENTRY: &str = r#"
 import runpy
 import sys
+import types
+from importlib.util import find_spec
 import torch
 
 def no_download(*args, **kwargs):
     raise RuntimeError("LATO.2 model files must be installed locally before inference")
 
+original_load = torch.load
+def load_weights(*args, **kwargs):
+    kwargs["weights_only"] = True
+    return original_load(*args, **kwargs)
+
+torch.load = load_weights
 torch.hub.download_url_to_file = no_download
+if sys.argv[1].endswith("/e2e_inference.py"):
+    spec = find_spec("o_voxel")
+    if spec is None:
+        raise RuntimeError("LATO.2 Mesh to Mesh needs the pinned o_voxel converter")
+    converter = types.ModuleType("o_voxel")
+    converter.__path__ = spec.submodule_search_locations
+    sys.modules["o_voxel"] = converter
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 "#;
@@ -50,6 +92,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Lato2Options {
+    backend_id: String,
     target_vertices: u32,
     max_triangles: Option<usize>,
     atlas_resolution: u32,
@@ -58,6 +101,7 @@ pub(crate) struct Lato2Options {
 impl Default for Lato2Options {
     fn default() -> Self {
         Self {
+            backend_id: "auto".into(),
             target_vertices: DEFAULT_TARGET_VERTICES,
             max_triangles: None,
             atlas_resolution: 1024,
@@ -66,6 +110,13 @@ impl Default for Lato2Options {
 }
 
 impl Lato2Options {
+    pub(crate) fn parse(parameters: serde_json::Value) -> CoreResult<Self> {
+        let options: Option<Self> = serde_json::from_value(parameters).map_err(|error| {
+            CoreError::InvalidInput(format!("Invalid {LATO2_OPERATION} parameters: {error}"))
+        })?;
+        Ok(options.unwrap_or_default())
+    }
+
     fn validate(&self) -> CoreResult<()> {
         if !(MIN_TARGET_VERTICES..=MAX_TARGET_VERTICES).contains(&self.target_vertices) {
             return Err(CoreError::InvalidInput(
@@ -92,6 +143,7 @@ impl Lato2Options {
 #[derive(Serialize)]
 pub(crate) struct Lato2Report {
     algorithm: &'static str,
+    backend_id: &'static str,
     requested_vertices: u32,
     max_triangles: Option<usize>,
     seed: u32,
@@ -116,82 +168,151 @@ pub(crate) struct Lato2Report {
 }
 
 pub(crate) struct Lato2Runtime {
+    id: &'static str,
     checkout: PathBuf,
     python: PathBuf,
+    weights: PathBuf,
+    home: Option<PathBuf>,
+}
+
+pub fn is_backend(id: &str) -> bool {
+    BACKENDS.contains(&id)
 }
 
 impl Lato2Runtime {
-    pub(crate) fn discover() -> Option<Self> {
+    fn operator_cuda() -> Option<Self> {
         let checkout = configured_path("MESHHARBOR_LATO2_DIR")?;
         let python = configured_path("MESHHARBOR_LATO2_PYTHON")?;
         if !python.is_file() {
             return None;
         }
-        for required in [
-            "scripts/e2e_inference.py",
-            "ckpt/vflow.pt",
-            "ckpt/vvae.pt",
-            "ckpt/offset_head.pt",
-            "ckpt/tflow.pt",
-            "ckpt/tvae.pt",
-            "ckpt/voxel_encoder.pt",
-            "ckpt/dinov2/facebookresearch_dinov2_main/hubconf.py",
-        ] {
-            if !checkout.join(required).is_file() {
-                return None;
-            }
+        let weights = checkout.join("ckpt");
+        if !checkout.join("scripts/e2e_inference.py").is_file()
+            || !weights
+                .join("dinov2")
+                .join(DINO_SOURCE)
+                .join("hubconf.py")
+                .is_file()
+            || CHECKPOINTS.iter().any(|file| !weights.join(file).is_file())
+        {
+            return None;
         }
-        Some(Self { checkout, python })
+        Some(Self {
+            id: LATO2_IMAGE_BACKEND,
+            checkout,
+            python,
+            weights,
+            home: None,
+        })
     }
 
-    pub(crate) fn require() -> CoreResult<Self> {
-        Self::discover().ok_or_else(|| CoreError::OperationUnavailable(
-            "Configure a trusted local LATO.2 checkout with checkpoints and Python via MESHHARBOR_LATO2_DIR and MESHHARBOR_LATO2_PYTHON.".into(),
-        ))
+    pub(crate) fn discover(root: &Path, id: &str) -> Option<Self> {
+        let profile = ExternalProfile::find(id).filter(|profile| is_backend(profile.id))?;
+        if profile.is_ready(root) {
+            let runtime = profile.active_root(root);
+            return Some(Self {
+                id: profile.id,
+                checkout: runtime.join("source"),
+                weights: runtime.join("weights"),
+                python: runtime.join(".venv/bin/python"),
+                home: Some(runtime.join("home")),
+            });
+        }
+        if id == LATO2_IMAGE_BACKEND {
+            Self::operator_cuda()
+        } else {
+            None
+        }
     }
 
     fn missing_image_files(&self) -> Vec<String> {
-        [
-            "scripts/image_e2e_inference.py",
-            "ckpt/dinov2/checkpoints/dinov2_vitl14_reg4_pretrain.pth",
-            "ckpt/trellis/ckpts/ss_flow_img_dit_L_16l8_fp16.json",
-            "ckpt/trellis/ckpts/ss_flow_img_dit_L_16l8_fp16.safetensors",
-            "ckpt/trellis/ckpts/ss_dec_conv3d_16l8_fp16.json",
-            "ckpt/trellis/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
-            "ckpt/rembg/BiRefNet/config.json",
-            "ckpt/rembg/BiRefNet/model.safetensors",
-            "ckpt/rembg/BiRefNet/BiRefNet_config.py",
-            "ckpt/rembg/BiRefNet/birefnet.py",
-        ]
-        .into_iter()
-        .filter(|file| !self.checkout.join(file).is_file())
-        .map(str::to_owned)
-        .collect()
+        let paths = std::iter::once(self.checkout.join("scripts/image_e2e_inference.py"))
+            .chain(std::iter::once(
+                self.weights.join("dinov2/checkpoints").join(DINO_WEIGHT),
+            ))
+            .chain(
+                TRELLIS_FILES
+                    .iter()
+                    .map(|file| self.weights.join("trellis").join(file)),
+            )
+            .chain(
+                BIREFNET_FILES
+                    .iter()
+                    .map(|file| self.weights.join("rembg/BiRefNet").join(file)),
+            );
+        paths
+            .filter(|file| !file.is_file())
+            .map(|file| file.display().to_string())
+            .collect()
     }
 
-    pub(crate) fn image_readiness() -> (Option<Self>, Vec<String>) {
-        let Some(runtime) = Self::discover() else {
-            return (None, vec![
-                "Configure MESHHARBOR_LATO2_DIR and MESHHARBOR_LATO2_PYTHON with the local LATO.2 checkout and checkpoints.".into(),
-            ]);
-        };
-        let missing = runtime.missing_image_files();
-        (Some(runtime), missing)
+    pub(crate) fn image_ready(root: &Path, id: &str) -> bool {
+        Self::discover(root, id).is_some_and(|runtime| runtime.missing_image_files().is_empty())
     }
 
-    pub(crate) fn require_image() -> CoreResult<Self> {
-        let (runtime, missing) = Self::image_readiness();
-        match runtime {
-            Some(runtime) if missing.is_empty() => Ok(runtime),
-            _ => Err(CoreError::OperationUnavailable(format!(
-                "LATO.2 Image to 3D is not configured: {}",
+    pub(crate) fn require_image(root: &Path, id: &str) -> CoreResult<Self> {
+        if let Some(runtime) = Self::discover(root, id) {
+            let missing = runtime.missing_image_files();
+            if missing.is_empty() {
+                return Ok(runtime);
+            }
+            return Err(CoreError::OperationUnavailable(format!(
+                "LATO.2 Image to 3D is missing: {}",
                 missing.join("; ")
-            ))),
+            )));
         }
+        Err(CoreError::OperationUnavailable(format!(
+            "Install {id} under Studio → Settings → Models."
+        )))
     }
 
-    fn inference_command(&self, work: &Path, script: &str) -> Command {
+    pub(crate) fn mesh_ready(root: &Path) -> bool {
+        BACKENDS.iter().any(|id| Self::discover(root, id).is_some())
+    }
+
+    pub(crate) fn require_mesh(root: &Path, options: &Lato2Options) -> CoreResult<Self> {
+        options.validate()?;
+        if options.backend_id == "auto" {
+            if let Some(runtime) = BACKENDS.iter().find_map(|id| Self::discover(root, id)) {
+                return Ok(runtime);
+            }
+        } else if !is_backend(&options.backend_id) {
+            return Err(CoreError::InvalidInput(
+                "LATO.2 backend_id must be auto, lato2-cuda, or lato2-mlx.".into(),
+            ));
+        } else if let Some(runtime) = Self::discover(root, &options.backend_id) {
+            return Ok(runtime);
+        }
+        Err(CoreError::OperationUnavailable(format!(
+            "The requested LATO.2 backend ({}) is not ready. Install a matching backend under Studio → Settings → Models.",
+            options.backend_id
+        )))
+    }
+
+    fn inference_command(&self, work: &Path, script: &str) -> CoreResult<Command> {
         let mut inference = Command::new(&self.python);
+        if let Some(home) = &self.home {
+            fs::create_dir_all(home)?;
+            inference
+                .env_clear()
+                .env(
+                    "PATH",
+                    std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+                )
+                .env("HOME", home)
+                .env("HF_HOME", home.join("huggingface"))
+                .env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1");
+            if self.id == LATO2_IMAGE_BACKEND {
+                for key in ["CUDA_HOME", "CUDA_VISIBLE_DEVICES"] {
+                    if let Some(value) = std::env::var_os(key) {
+                        inference.env(key, value);
+                    }
+                }
+                inference
+                    .env("SPARSE_ATTN_BACKEND", "xformers")
+                    .env("SPARSE_BACKEND", "spconv");
+            }
+        }
         inference
             .current_dir(&self.checkout)
             .env("XDG_RUNTIME_DIR", work)
@@ -200,11 +321,42 @@ impl Lato2Runtime {
             .env_remove("MESHHARBOR_API_TOKEN")
             .env_remove("HF_TOKEN")
             .env_remove("HUGGING_FACE_HUB_TOKEN")
-            .args(["-I", "-u", "-c", INFERENCE_ENTRY])
+            .args(["-I", "-B", "-u"]);
+        if self.id == LATO2_MLX_BACKEND {
+            let worker = work.join("lato2_mlx_worker.py");
+            fs::write(&worker, include_bytes!("lato2_mlx/worker.py"))?;
+            fs::write(
+                work.join("mlx_kernels.py"),
+                include_bytes!("lato2_mlx/mlx_kernels.py"),
+            )?;
+            fs::write(
+                work.join("mesh_conditioning.py"),
+                include_bytes!("lato2_mlx/mesh_conditioning.py"),
+            )?;
+            inference.arg(worker);
+        } else {
+            inference.args(["-c", INFERENCE_ENTRY]);
+        }
+        inference
             .arg(self.checkout.join("scripts").join(script))
             .arg("--dino_hub_dir")
-            .arg(self.checkout.join("ckpt/dinov2"));
-        inference
+            .arg(self.weights.join("dinov2"));
+        if self.home.is_some() {
+            for checkpoint in CHECKPOINTS {
+                let stem = checkpoint.trim_end_matches(".pt");
+                inference
+                    .arg(format!("--{stem}_ckpt"))
+                    .arg(self.weights.join("lato2").join(checkpoint));
+            }
+            if script == "image_e2e_inference.py" {
+                inference
+                    .arg("--trellis_dir")
+                    .arg(self.weights.join("trellis"))
+                    .arg("--rembg_dir")
+                    .arg(self.weights.join("rembg"));
+            }
+        }
+        Ok(inference)
     }
 
     pub(crate) fn generate_image(
@@ -232,7 +384,7 @@ impl Lato2Runtime {
         };
         fs::copy(image, input.join("source").with_extension(extension))?;
         execution.stage("lato2_image_inference")?;
-        let mut inference = self.inference_command(&work.0, "image_e2e_inference.py");
+        let mut inference = self.inference_command(&work.0, "image_e2e_inference.py")?;
         inference
             .arg("--image_dir")
             .arg(&input)
@@ -243,7 +395,11 @@ impl Lato2Runtime {
             .arg("--vert_num")
             .arg(target_vertices.to_string());
         execution
-            .with_timeout(Duration::from_secs(600))
+            .with_timeout(Duration::from_secs(if self.id == LATO2_MLX_BACKEND {
+                1200
+            } else {
+                600
+            }))
             .visible(inference, "LATO.2 image inference failed")?;
 
         execution.stage("validate_lato2_topology")?;
@@ -274,7 +430,6 @@ impl Lato2Runtime {
         options: Lato2Options,
         execution: JobExecution<'_>,
     ) -> CoreResult<(Vec<u8>, Lato2Report)> {
-        options.validate()?;
         validate_source_size(bytes.len() as u64)?;
         execution.stage("validate_lato2_source")?;
         let (mut source, has_mr) =
@@ -299,7 +454,7 @@ impl Lato2Runtime {
         )?;
 
         execution.stage("lato2_inference")?;
-        let mut inference = self.inference_command(&work.0, "e2e_inference.py");
+        let mut inference = self.inference_command(&work.0, "e2e_inference.py")?;
         inference
             .arg("--mesh_dir")
             .arg(&input)
@@ -310,7 +465,11 @@ impl Lato2Runtime {
             .arg("--vert_num")
             .arg(options.target_vertices.to_string());
         execution
-            .with_timeout(Duration::from_secs(300))
+            .with_timeout(Duration::from_secs(if self.id == LATO2_MLX_BACKEND {
+                900
+            } else {
+                300
+            }))
             .visible(inference, "LATO.2 inference failed")?;
 
         execution.stage("validate_lato2_topology")?;
@@ -380,6 +539,7 @@ impl Lato2Runtime {
             output,
             Lato2Report {
                 algorithm: "lato2+xatlas-normal-rays",
+                backend_id: self.id,
                 requested_vertices: options.target_vertices,
                 max_triangles: options.max_triangles,
                 seed: SEED,
