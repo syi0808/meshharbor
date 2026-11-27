@@ -1,6 +1,6 @@
 # Licensing and dependency status
 
-MeshHarbor's first-party code and documentation use the [Elastic License 2.0](../LICENSE), a source-available license. Versions already distributed under [MIT](licenses/meshharbor-mit.txt) retain their original terms; MIT is not an alternative license for the current version as a whole. Third-party material is not relicensed; see the [notice index](../THIRD-PARTY-NOTICES.md). This audit records known terms and open questions. It is not a redistribution or commercial-use approval for the complete repository, model runtimes, or a future release.
+The first-party code and documentation in this version of MeshHarbor are licensed under the [Elastic License 2.0](../LICENSE), a source-available license. That license does not cover third-party material; see the [notice index](../THIRD-PARTY-NOTICES.md). This audit records known terms and open questions. It is not a redistribution or commercial-use approval for the complete repository, model runtimes, or a future release.
 
 ## Rust application dependencies
 
