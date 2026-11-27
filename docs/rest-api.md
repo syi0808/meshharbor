@@ -59,6 +59,8 @@ Use `POST /api/v1/jobs` with `operation: "model.generate"` and a tagged input:
 
 Keep base fields such as `seed` at the top level of job parameters and put catalog fields marked `tuning: true` under `parameters.tuning`. For a ready multiview backend, send `parameters.view_input` with `mode` (`four`, `six`, or `custom`) and an ordered `references` array. Each entry contains an imported image's `asset_id`; the first must match `input.asset_id`. Presets use front/right/back/left order (then top/bottom for six). Custom entries each add a `camera` object with `azimuth_degrees`, `elevation_degrees`, `distance`, and `fov_degrees`. No client filesystem paths are accepted. The CUDA profile exposes `multiview_ready` once the separately approved snapshot is installed.
 
+The [operator-managed LATO.2 profile](lato2-experiment.md#image-to-3d) accepts one image with `backend_id: "lato2-cuda"` and an optional approximate `target_vertices` (200–5000, default 2000). It outputs a geometry-only GLB and does not install weights or accept text, multiview, or a texture-size override.
+
 ## Job history and execution
 
 Job submissions return `202 Accepted` with `state: "running"` and `started_at` set if the engine can start them immediately. Only work that waits for the engine slot starts in `queued`.

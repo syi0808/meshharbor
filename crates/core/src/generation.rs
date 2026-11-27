@@ -25,6 +25,7 @@ use crate::{
     huggingface_download::{PIXAL_CHECKPOINTS, PIXAL_REPOSITORY, PIXAL_REVISION},
     inspect_asset,
     job_execution::JobExecution,
+    lato2::{DEFAULT_TARGET_VERTICES, LATO2_IMAGE_BACKEND, Lato2Runtime},
 };
 use crate::{cuda_runtime::Pixal3dCudaRuntimeManager, runtime::Pixal3dRuntimeManager};
 
@@ -99,6 +100,9 @@ pub struct GenerationOptions {
     pub texture_size: u16,
     /// Soft triangle target. The model may return more faces.
     pub target_faces: u32,
+    /// Approximate vertex target for profiles that generate a new topology.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_vertices: Option<u32>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub tuning: BTreeMap<String, serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,7 +145,10 @@ pub struct GenerationResult {
     pub resolution: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub texture_size: Option<u16>,
-    pub target_faces: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_faces: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_vertices: Option<u32>,
     pub elapsed_ms: u128,
 }
 
@@ -807,22 +814,28 @@ pub(crate) fn generate_model(
     execution.begin_commit()?;
     let texture_size = profile.has_textures().then_some(options.texture_size);
     let resolution = profile.has_resolution().then_some(options.resolution);
-    let asset = core.store().import_generated_asset(
-        &output_name,
-        &output,
-        input.asset_id(),
-        json!({
-            "operation": operation,
-            "input_mode": input.mode(),
-            "backend": selected_backend_id,
-            "seed": options.seed,
-            "resolution": resolution,
-            "texture_size": texture_size,
-            "target_faces": options.target_faces,
-            "elapsed_ms": elapsed_ms,
-            "validation": descriptor.metadata,
-        }),
-    )?;
+    let target_faces = profile.has_face_target().then_some(options.target_faces);
+    let target_vertices = (selected_backend_id == LATO2_IMAGE_BACKEND)
+        .then_some(options.target_vertices.unwrap_or(DEFAULT_TARGET_VERTICES));
+    let mut metadata = json!({
+        "operation": operation,
+        "input_mode": input.mode(),
+        "backend": selected_backend_id,
+        "seed": options.seed,
+        "resolution": resolution,
+        "texture_size": texture_size,
+        "elapsed_ms": elapsed_ms,
+        "validation": descriptor.metadata,
+    });
+    if let Some(target) = target_faces {
+        metadata["target_faces"] = json!(target);
+    }
+    if let Some(target) = target_vertices {
+        metadata["target_vertices"] = json!(target);
+    }
+    let asset =
+        core.store()
+            .import_generated_asset(&output_name, &output, input.asset_id(), metadata)?;
     drop(cleanup);
     Ok(GenerationResult {
         asset,
@@ -830,7 +843,8 @@ pub(crate) fn generate_model(
         seed: options.seed,
         resolution,
         texture_size,
-        target_faces: options.target_faces,
+        target_faces,
+        target_vertices,
         elapsed_ms,
     })
 }
@@ -881,6 +895,13 @@ fn generate_from_images(
             let runtime = Pixal3dCudaRuntimeManager::new(core.store().root());
             runtime.generate_from_references(&input_paths, work_dir, options, execution)?
         }
+        LATO2_IMAGE_BACKEND => Lato2Runtime::require_image()?.generate_image(
+            &input_paths[0],
+            output_path,
+            options.target_vertices.unwrap_or(DEFAULT_TARGET_VERTICES),
+            options.seed,
+            execution,
+        )?,
         backend_id => ExternalProfile::find(backend_id)
             .expect("generation profile has a local runtime")
             .generate(

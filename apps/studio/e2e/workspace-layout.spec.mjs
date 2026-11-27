@@ -16,6 +16,86 @@ async function chooseFile(page, button, name, mimeType, buffer) {
   return response.json();
 }
 
+function lato2Runtime(ready) {
+  return {
+    status: 'ready_for_mesh_operations', platform: 'linux',
+    operations: ready ? ['model.generate', 'mesh.retopology_lato2'] : [],
+    model_catalog: [{ id: 'lato2', title: 'LATO.2', backend_ids: ['lato2-cuda'], output: 'geometry_glb' }],
+    model_backends: [{
+      id: 'lato2-cuda', manual_setup: true, ready, missing: ['Local LATO.2 checkpoints are required.'],
+      generation: {
+        id: 'lato2-cuda', input_modes: ['image'], view_modes: ['single'],
+        parameters: [{ id: 'target_vertices', label: 'Target vertices', kind: 'integer', default: 2000, min: 200, max: 5000 }],
+      },
+    }],
+  };
+}
+
+test('LATO.2 is visible but cannot run before operator setup', async ({ page, studioOrigin }) => {
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: lato2Runtime(false) }));
+  await page.route('**/api/v1/operations', route => route.fulfill({ json: [] }));
+  await page.goto(studioOrigin);
+  const tools = page.getByRole('group', { name: 'Model tools' });
+  await tools.getByRole('button', { name: 'Mesh to Mesh', exact: true }).click();
+  const mesh = page.getByRole('complementary', { name: 'Mesh to Mesh' });
+  await expect(mesh.getByLabel('Mesh to Mesh model')).toHaveValue('lato2');
+  await expect(mesh.getByRole('button', { name: 'Run Mesh to Mesh' })).toBeDisabled();
+  await tools.getByRole('button', { name: 'New model' }).click();
+  const image = page.getByRole('complementary', { name: 'Generate model' });
+  await expect(image.getByLabel('Generation model', { exact: true }).locator('option')).toHaveText('LATO.2 (setup required)');
+  await expect(image.getByText('Local LATO.2 checkpoints are required.')).toBeVisible();
+  await expect(image.getByRole('button', { name: 'Generate 3D' })).toHaveCount(0);
+});
+
+test('LATO.2 submits distinct Mesh to Mesh and Image to 3D jobs', async ({ page, studioOrigin }) => {
+  await page.route('**/api/v1/runtime', route => route.fulfill({ json: lato2Runtime(true) }));
+  await page.route('**/api/v1/operations', route => route.fulfill({
+    json: [{ id: 'model.generate', implemented: true }, { id: 'mesh.retopology_lato2', implemented: true }],
+  }));
+  const submissions = [];
+  await page.route('**/api/v1/jobs', route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const request = route.request().postDataJSON();
+    submissions.push(request);
+    return route.fulfill({ status: 202, json: {
+      id: `lato2-job-${submissions.length}`, operation: request.operation, state: 'failed', progress: 0,
+      input_asset_id: request.input.asset_id, error: { message: 'fixture' },
+      created_at: String(Date.now()), updated_at: String(Date.now()),
+    } });
+  });
+  await page.goto(studioOrigin);
+  await expect(page.locator('main')).toHaveAttribute('data-connection', 'connected');
+  const tools = page.getByRole('group', { name: 'Model tools' });
+  const reference = await chooseFile(page, page.getByRole('button', { name: 'Open GLB', exact: true }),
+    'lato2-panel.glb', 'model/gltf-binary', texturedGlb({ singleMaterial: true }));
+  await tools.getByRole('button', { name: 'Mesh to Mesh', exact: true }).click();
+  const mesh = page.getByRole('complementary', { name: 'Mesh to Mesh' });
+  await mesh.getByLabel('Target vertices').fill('220');
+  await mesh.getByLabel('Maximum triangles (optional)').fill('250');
+  await mesh.getByLabel('Texture atlas size').selectOption('512');
+  await mesh.getByRole('button', { name: 'Run Mesh to Mesh' }).click();
+  await expect.poll(() => submissions[0]).toEqual({
+    operation: 'mesh.retopology_lato2', input: { asset_id: reference.id },
+    parameters: { target_vertices: 220, max_triangles: 250, atlas_resolution: 512 },
+  });
+
+  await tools.getByRole('button', { name: 'New model' }).click();
+  const image = page.getByRole('complementary', { name: 'Generate model' });
+  await image.getByLabel('Generation model', { exact: true }).selectOption('lato2');
+  await expect(image.getByText('Output: geometry-only GLB (no textures).')).toBeVisible();
+  await expect(image.getByLabel('Target vertices')).toHaveValue('2000');
+  const pixels = new PNG({ width: 2, height: 2 });
+  pixels.data.fill(180);
+  const input = await chooseFile(page, image.getByRole('button', { name: 'Choose reference' }),
+    'lato2-reference.png', 'image/png', PNG.sync.write(pixels));
+  await image.getByLabel('Target vertices').fill('1200');
+  await image.getByRole('button', { name: 'Generate 3D' }).click();
+  await expect.poll(() => submissions[1]).toEqual({
+    operation: 'model.generate', input: { kind: 'image', asset_id: input.id },
+    parameters: { backend_id: 'lato2-cuda', target_vertices: 1200 },
+  });
+});
+
 test('the tool panel stays docked on desktop and stacks on mobile while inventory uses a drawer', async ({ page, studioOrigin }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(studioOrigin);

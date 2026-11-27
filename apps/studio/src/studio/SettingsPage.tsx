@@ -324,18 +324,21 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
             return <section key={category.id} aria-labelledby={`models-${category.id}`} className="grid min-w-0 gap-3">
               <h2 id={`models-${category.id}`} className="text-base font-semibold">{category.title}</h2>
               {!models.length && <Empty><EmptyHeader><EmptyDescription>{category.empty}</EmptyDescription></EmptyHeader></Empty>}
-              {models.map(model => <Card key={model.id} aria-disabled={!environmentReady || undefined} className={!environmentReady ? 'opacity-70' : undefined}>
+              {models.map(model => <Card key={model.id} aria-disabled={!environmentReady && model.id !== 'lato2' || undefined}
+                className={!environmentReady && model.id !== 'lato2' ? 'opacity-70' : undefined}>
                 <CardHeader>
                   <CardTitle className="flex flex-wrap items-center gap-2 text-lg">
                     <h3>{model.title}</h3>
                     {!repart && (['image', 'text'] as const).filter(mode => runtime?.model_backends.some(backend =>
                       model.backend_ids.includes(backend.id) && (backend.generation?.input_modes ?? ['image']).includes(mode)
                     )).map(mode => <Badge key={mode} variant="outline">{mode === 'image' ? 'Image to 3D' : 'Text to 3D'}</Badge>)}
+                    {model.id === 'lato2' && <Badge variant="outline">Mesh to Mesh</Badge>}
                     {model.status === 'experimental_opt_in' && <Badge variant="outline">Experimental</Badge>}
                   </CardTitle>
                   <CardDescription>{repart
                     ? 'Guided mesh separation. These files are for the command-line prototype; Studio does not run Repart yet.'
-                    : `Output: ${model.output === 'geometry_glb' ? 'geometry-only GLB' : 'textured GLB'}`}</CardDescription>
+                    : model.id === 'lato2' ? 'Image to 3D outputs geometry only. Mesh to Mesh rebakes supported source textures.'
+                      : `Output: ${model.output === 'geometry_glb' ? 'geometry-only GLB' : 'textured GLB'}`}</CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-3 lg:grid-cols-2">
                   {(['mlx', 'cuda'] as const).map(kind => {
@@ -343,6 +346,21 @@ export function SettingsPage({ api, section, backendId, runtime, connection, bus
                     const backend = runtime?.model_backends.find(item => item.id === id);
                     if (!id || !backend) return null;
                     const label = `${model.title} · ${accelerators[kind].title}`;
+                    if (backend.manual_setup) return <Card key={id} role="article" aria-label={label} size="sm" className="min-w-0 bg-background">
+                      <CardHeader>
+                        <CardTitle><h4 id={`runtime-${id}`} tabIndex={-1} className="outline-none">Operator-managed CUDA</h4></CardTitle>
+                        <CardDescription>No automatic downloads or installation.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="grid gap-2">
+                        <div className="flex flex-wrap gap-1">
+                          <Badge variant="outline">Mesh to Mesh: {runtime?.operations.includes('mesh.retopology_lato2') ? 'Configured' : 'Setup required'}</Badge>
+                          <Badge variant="outline">Image to 3D: {backend.ready ? 'Configured' : 'Setup required'}</Badge>
+                        </div>
+                        <p className="text-sm text-muted-foreground">
+                          Set <code className="break-all">MESHHARBOR_LATO2_DIR</code> and <code className="break-all">MESHHARBOR_LATO2_PYTHON</code> in the engine environment. Image to 3D also needs local TRELLIS and BiRefNet files.
+                        </p>
+                      </CardContent>
+                    </Card>;
                     const authBackend: RuntimeBackendId = `pixal3d-${kind}`;
                     const auth = backend.huggingface ?? runtime?.model_backends.find(item => item.id === authBackend)?.huggingface;
                     const signInRequired = backend.requires_huggingface_login === true && auth?.account !== 'connected';

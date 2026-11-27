@@ -1,5 +1,5 @@
 export type AssetKind = 'image' | 'mesh';
-export type MeshOperationId = 'mesh.retopology' | 'mesh.cleanup' | 'mesh.voxel_remesh' | 'uv.unwrap' | 'render.optimize' | 'mesh.compress';
+export type MeshOperationId = 'mesh.retopology' | 'mesh.retopology_lato2' | 'mesh.cleanup' | 'mesh.voxel_remesh' | 'uv.unwrap' | 'render.optimize' | 'mesh.compress';
 
 export interface Artifact {
   id: string;
@@ -89,6 +89,7 @@ export type GenerationParameters = {
   resolution?: number;
   texture_size?: number;
   target_faces?: number;
+  target_vertices?: number;
   tuning?: GenerationTuning;
   view_input?: PosedGenerationInput;
 };
@@ -105,6 +106,9 @@ export interface GenerationModel extends GenerationProfile {
   modelId: string;
   label: string;
   multiviewReady: boolean;
+  ready: boolean;
+  setupMessage?: string;
+  output?: 'textured_glb' | 'geometry_glb';
   input_modes: GenerationInputMode[];
   view_modes: GenerationViewMode[];
   max_views: number;
@@ -134,6 +138,7 @@ export interface RuntimeInfo {
     status: string;
     accelerator?: string;
     managed_install?: boolean;
+    manual_setup?: boolean;
     managed_ready?: boolean;
     account_tools_ready?: boolean;
     requires_huggingface_login?: boolean;

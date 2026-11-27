@@ -4,7 +4,7 @@ use std::{
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use meshharbor_atlas_baker::{
@@ -16,12 +16,17 @@ use uuid::Uuid;
 
 use crate::{
     CoreError, CoreResult,
+    glb::encode_triangle_geometry_glb,
     job_execution::JobExecution,
     operation::map_atlas_bake_error,
     retopology::{RemeshRequest, RemeshResponse, validate_remesh_response},
 };
 
 pub const LATO2_OPERATION: &str = "mesh.retopology_lato2";
+pub const LATO2_IMAGE_BACKEND: &str = "lato2-cuda";
+pub(crate) const DEFAULT_TARGET_VERTICES: u32 = 2000;
+pub(crate) const MIN_TARGET_VERTICES: u32 = 200;
+pub(crate) const MAX_TARGET_VERTICES: u32 = 5000;
 const MAX_GLB_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OBJ_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_VERTICES: usize = 10_000;
@@ -53,7 +58,7 @@ pub(crate) struct Lato2Options {
 impl Default for Lato2Options {
     fn default() -> Self {
         Self {
-            target_vertices: 2000,
+            target_vertices: DEFAULT_TARGET_VERTICES,
             max_triangles: None,
             atlas_resolution: 1024,
         }
@@ -62,7 +67,7 @@ impl Default for Lato2Options {
 
 impl Lato2Options {
     fn validate(&self) -> CoreResult<()> {
-        if !(200..=5000).contains(&self.target_vertices) {
+        if !(MIN_TARGET_VERTICES..=MAX_TARGET_VERTICES).contains(&self.target_vertices) {
             return Err(CoreError::InvalidInput(
                 "target_vertices must be 200–5000.".into(),
             ));
@@ -145,6 +150,124 @@ impl Lato2Runtime {
         ))
     }
 
+    fn missing_image_files(&self) -> Vec<String> {
+        [
+            "scripts/image_e2e_inference.py",
+            "ckpt/dinov2/checkpoints/dinov2_vitl14_reg4_pretrain.pth",
+            "ckpt/trellis/ckpts/ss_flow_img_dit_L_16l8_fp16.json",
+            "ckpt/trellis/ckpts/ss_flow_img_dit_L_16l8_fp16.safetensors",
+            "ckpt/trellis/ckpts/ss_dec_conv3d_16l8_fp16.json",
+            "ckpt/trellis/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+            "ckpt/rembg/BiRefNet/config.json",
+            "ckpt/rembg/BiRefNet/model.safetensors",
+            "ckpt/rembg/BiRefNet/BiRefNet_config.py",
+            "ckpt/rembg/BiRefNet/birefnet.py",
+        ]
+        .into_iter()
+        .filter(|file| !self.checkout.join(file).is_file())
+        .map(str::to_owned)
+        .collect()
+    }
+
+    pub(crate) fn image_readiness() -> (Option<Self>, Vec<String>) {
+        let Some(runtime) = Self::discover() else {
+            return (None, vec![
+                "Configure MESHHARBOR_LATO2_DIR and MESHHARBOR_LATO2_PYTHON with the local LATO.2 checkout and checkpoints.".into(),
+            ]);
+        };
+        let missing = runtime.missing_image_files();
+        (Some(runtime), missing)
+    }
+
+    pub(crate) fn require_image() -> CoreResult<Self> {
+        let (runtime, missing) = Self::image_readiness();
+        match runtime {
+            Some(runtime) if missing.is_empty() => Ok(runtime),
+            _ => Err(CoreError::OperationUnavailable(format!(
+                "LATO.2 Image to 3D is not configured: {}",
+                missing.join("; ")
+            ))),
+        }
+    }
+
+    fn inference_command(&self, work: &Path, script: &str) -> Command {
+        let mut inference = Command::new(&self.python);
+        inference
+            .current_dir(&self.checkout)
+            .env("XDG_RUNTIME_DIR", work)
+            .env("HF_HUB_OFFLINE", "1")
+            .env("TRANSFORMERS_OFFLINE", "1")
+            .env_remove("MESHHARBOR_API_TOKEN")
+            .env_remove("HF_TOKEN")
+            .env_remove("HUGGING_FACE_HUB_TOKEN")
+            .args(["-I", "-u", "-c", INFERENCE_ENTRY])
+            .arg(self.checkout.join("scripts").join(script))
+            .arg("--dino_hub_dir")
+            .arg(self.checkout.join("ckpt/dinov2"));
+        inference
+    }
+
+    pub(crate) fn generate_image(
+        &self,
+        image: &Path,
+        output: &Path,
+        target_vertices: u32,
+        seed: u64,
+        execution: JobExecution<'_>,
+    ) -> CoreResult<u128> {
+        let now = Instant::now();
+        let work = WorkDir::create()?;
+        let input = work.0.join("input");
+        let predictions = work.0.join("predictions");
+        fs::create_dir(&input)?;
+        fs::create_dir(&predictions)?;
+        let extension = match image.extension().and_then(|value| value.to_str()) {
+            Some("png") => "png",
+            Some("jpg" | "jpeg") => "jpg",
+            _ => {
+                return Err(CoreError::InvalidInput(
+                    "LATO.2 expects a PNG or JPEG reference.".into(),
+                ));
+            }
+        };
+        fs::copy(image, input.join("source").with_extension(extension))?;
+        execution.stage("lato2_image_inference")?;
+        let mut inference = self.inference_command(&work.0, "image_e2e_inference.py");
+        inference
+            .arg("--image_dir")
+            .arg(&input)
+            .arg("--out_dir")
+            .arg(&predictions)
+            .args(["--batch_size", "1", "--seed"])
+            .arg(seed.to_string())
+            .arg("--vert_num")
+            .arg(target_vertices.to_string());
+        execution
+            .with_timeout(Duration::from_secs(600))
+            .visible(inference, "LATO.2 image inference failed")?;
+
+        execution.stage("validate_lato2_topology")?;
+        let mut geometry = load_prediction(&predictions)?;
+        orient_closed_mesh(&mut geometry)?;
+        let request = RemeshRequest {
+            protocol_version: 1,
+            positions: geometry.positions.clone(),
+            indices: Vec::new(),
+            options: Default::default(),
+        };
+        validate_remesh_response(&geometry, &request)?;
+        execution.checkpoint()?;
+        fs::write(
+            output,
+            encode_triangle_geometry_glb(
+                &geometry.positions,
+                &geometry.indices,
+                "MeshHarbor LATO.2",
+            )?,
+        )?;
+        Ok(now.elapsed().as_millis())
+    }
+
     pub(crate) fn retopologize(
         &self,
         bytes: &[u8],
@@ -176,20 +299,12 @@ impl Lato2Runtime {
         )?;
 
         execution.stage("lato2_inference")?;
-        let mut inference = Command::new(&self.python);
+        let mut inference = self.inference_command(&work.0, "e2e_inference.py");
         inference
-            .current_dir(&self.checkout)
-            .env("XDG_RUNTIME_DIR", &work.0)
-            .env("HF_HUB_OFFLINE", "1")
-            .env_remove("MESHHARBOR_API_TOKEN")
-            .args(["-I", "-u", "-c", INFERENCE_ENTRY])
-            .arg(self.checkout.join("scripts/e2e_inference.py"))
             .arg("--mesh_dir")
             .arg(&input)
             .arg("--out_dir")
             .arg(&predictions)
-            .arg("--dino_hub_dir")
-            .arg(self.checkout.join("ckpt/dinov2"))
             .args(["--num_workers", "0", "--batch_size", "1", "--seed"])
             .arg(SEED.to_string())
             .arg("--vert_num")
@@ -199,10 +314,7 @@ impl Lato2Runtime {
             .visible(inference, "LATO.2 inference failed")?;
 
         execution.stage("validate_lato2_topology")?;
-        let obj = read_bounded(&predictions.join("source_pred.obj"), MAX_OBJ_BYTES)?;
-        let mut geometry = parse_prediction(
-            std::str::from_utf8(&obj).map_err(|_| bad_prediction("invalid OBJ text"))?,
-        )?;
+        let mut geometry = load_prediction(&predictions)?;
         let output_triangles = geometry.indices.len() / 3;
         let max_triangles = options
             .max_triangles
@@ -458,6 +570,11 @@ fn read_bounded(path: &Path, max: u64) -> CoreResult<Vec<u8>> {
 
 fn bad_prediction(reason: impl std::fmt::Display) -> CoreError {
     CoreError::OperationUnavailable(format!("LATO.2 output rejected: {reason}."))
+}
+
+fn load_prediction(predictions: &Path) -> CoreResult<RemeshResponse> {
+    let obj = read_bounded(&predictions.join("source_pred.obj"), MAX_OBJ_BYTES)?;
+    parse_prediction(std::str::from_utf8(&obj).map_err(|_| bad_prediction("invalid OBJ text"))?)
 }
 
 fn parse_prediction(obj: &str) -> CoreResult<RemeshResponse> {

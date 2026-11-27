@@ -7,6 +7,9 @@ use crate::{
     CoreError, CoreResult, GenerationInput, GenerationInputMode, GenerationOptions,
     external_generation, generation_tuning,
     generation_views::{GenerationViewMode, MAX_CUSTOM_VIEWS},
+    lato2::{
+        DEFAULT_TARGET_VERTICES, LATO2_IMAGE_BACKEND, MAX_TARGET_VERTICES, MIN_TARGET_VERTICES,
+    },
 };
 
 #[derive(Clone, Copy, Serialize)]
@@ -16,6 +19,7 @@ enum ParameterId {
     Resolution,
     TextureSize,
     TargetFaces,
+    TargetVertices,
 }
 
 impl ParameterId {
@@ -25,6 +29,7 @@ impl ParameterId {
             Self::Resolution => "resolution",
             Self::TextureSize => "texture_size",
             Self::TargetFaces => "target_faces",
+            Self::TargetVertices => "target_vertices",
         }
     }
 
@@ -34,6 +39,10 @@ impl ParameterId {
             Self::Resolution => options.resolution.into(),
             Self::TextureSize => options.texture_size.into(),
             Self::TargetFaces => options.target_faces.into(),
+            Self::TargetVertices => options
+                .target_vertices
+                .unwrap_or(DEFAULT_TARGET_VERTICES)
+                .into(),
         }
     }
 }
@@ -99,6 +108,25 @@ const TARGET_FACES: Parameter = Parameter {
 const TEXTURED_PARAMETERS: &[Parameter] = &[RESOLUTION, TEXTURE_SIZE, TARGET_FACES, SEED];
 const GEOMETRY_PARAMETERS: &[Parameter] = &[RESOLUTION, TARGET_FACES, SEED];
 const TEXT_GEOMETRY_PARAMETERS: &[Parameter] = &[TARGET_FACES, SEED];
+const LATO2_PARAMETERS: &[Parameter] = &[
+    Parameter {
+        id: ParameterId::TargetVertices,
+        label: "Target vertices",
+        description: "Approximate vertex count; the generated mesh can contain more or fewer vertices.",
+        default: DEFAULT_TARGET_VERTICES as u64,
+        constraint: Constraint::Integer {
+            min: MIN_TARGET_VERTICES as u64,
+            max: Some(MAX_TARGET_VERTICES as u64),
+        },
+    },
+    Parameter {
+        constraint: Constraint::Integer {
+            min: 0,
+            max: Some(u32::MAX as u64),
+        },
+        ..SEED
+    },
+];
 
 #[derive(Serialize)]
 pub(crate) struct GenerationProfile {
@@ -148,6 +176,14 @@ static PROFILES: LazyLock<Vec<GenerationProfile>> = LazyLock::new(|| {
             input_modes,
         )
     }))
+    .chain(std::iter::once(profile(
+        LATO2_IMAGE_BACKEND,
+        "NVIDIA CUDA",
+        &[Single],
+        1,
+        false,
+        &[GenerationInputMode::Image],
+    )))
     .collect()
 });
 
@@ -159,7 +195,9 @@ fn profile(
     textured: bool,
     input_modes: &'static [GenerationInputMode],
 ) -> GenerationProfile {
-    let core_parameters = if textured {
+    let core_parameters = if id == LATO2_IMAGE_BACKEND {
+        LATO2_PARAMETERS
+    } else if textured {
         TEXTURED_PARAMETERS
     } else if !input_modes.contains(&GenerationInputMode::Image) {
         TEXT_GEOMETRY_PARAMETERS
@@ -193,6 +231,12 @@ impl GenerationProfile {
             .iter()
             .any(|parameter| matches!(parameter.id, ParameterId::TextureSize))
     }
+
+    pub fn has_face_target(&self) -> bool {
+        self.core_parameters
+            .iter()
+            .any(|parameter| matches!(parameter.id, ParameterId::TargetFaces))
+    }
 }
 
 pub(crate) fn generation_profile(backend_id: &str) -> Option<&'static GenerationProfile> {
@@ -207,6 +251,7 @@ impl Default for GenerationOptions {
             resolution: RESOLUTION.default as u16,
             texture_size: TEXTURE_SIZE.default as u16,
             target_faces: TARGET_FACES.default as u32,
+            target_vertices: None,
             tuning: Default::default(),
             view_input: None,
         }
@@ -279,6 +324,16 @@ impl GenerationOptions {
         if !profile.has_textures() && u64::from(self.texture_size) != TEXTURE_SIZE.default {
             return Err(CoreError::InvalidInput(format!(
                 "{backend_id} generates geometry only and does not support texture_size."
+            )));
+        }
+        if !profile.has_face_target() && u64::from(self.target_faces) != TARGET_FACES.default {
+            return Err(CoreError::InvalidInput(format!(
+                "{backend_id} does not support target_faces; use target_vertices."
+            )));
+        }
+        if backend_id != LATO2_IMAGE_BACKEND && self.target_vertices.is_some() {
+            return Err(CoreError::InvalidInput(format!(
+                "{backend_id} does not support target_vertices."
             )));
         }
         for parameter in profile.core_parameters {
@@ -392,6 +447,42 @@ mod tests {
                 .id
                 .starts_with("pixal3d-")
         );
+    }
+
+    #[test]
+    fn lato2_image_profile_exposes_a_bounded_vertex_hint_and_no_texture_controls() {
+        let input = GenerationInput::Image {
+            asset_id: "asset_reference".into(),
+        };
+        let options = GenerationOptions {
+            backend_id: LATO2_IMAGE_BACKEND.into(),
+            target_vertices: Some(1200),
+            ..GenerationOptions::default()
+        };
+        let profile = options.validate_input(&input).unwrap();
+        assert!(!profile.has_face_target());
+        assert!(!profile.has_textures());
+        assert!(!profile.has_resolution());
+        for unsupported in [
+            GenerationOptions {
+                target_vertices: Some(199),
+                ..options.clone()
+            },
+            GenerationOptions {
+                seed: u64::from(u32::MAX) + 1,
+                ..options.clone()
+            },
+            GenerationOptions {
+                target_faces: 3008,
+                ..options.clone()
+            },
+            GenerationOptions {
+                backend_id: "pixal3d-cuda".into(),
+                ..options
+            },
+        ] {
+            assert!(unsupported.validate_input(&input).is_err());
+        }
     }
 
     #[test]

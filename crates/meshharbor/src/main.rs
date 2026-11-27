@@ -175,7 +175,7 @@ enum Command {
             help = "Text prompt for a backend that supports text-to-3D"
         )]
         prompt: Option<String>,
-        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda", "trellis-text-cuda", "trellis-text-mlx"])]
+        #[arg(long, default_value = "auto", value_parser = ["auto", "pixal3d-mlx", "pixal3d-cuda", "trellis2-mlx", "trellis2-cuda", "triposg-mlx", "triposg-cuda", "trellis-text-cuda", "trellis-text-mlx", "lato2-cuda"])]
         backend_id: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
@@ -185,6 +185,9 @@ enum Command {
         texture_size: u16,
         #[arg(long, default_value_t = 100_000)]
         target_faces: u32,
+        /// Approximate vertex target for LATO.2.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(200..=5000))]
+        target_vertices: Option<u32>,
         /// Additional backend catalog settings as a JSON object.
         #[arg(long, value_parser = parse_cli_json::<std::collections::BTreeMap<String, Value>>)]
         tuning: Option<std::collections::BTreeMap<String, Value>>,
@@ -343,6 +346,7 @@ struct GenerateArgs {
     texture_size: u16,
     #[serde(default = "default_generation_target_faces")]
     target_faces: u32,
+    target_vertices: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -607,7 +611,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Start a local image.generate job with a ready backend listed in runtime_doctor. Choose pixal3d-mlx, pixal3d-cuda, trellis2-mlx, trellis2-cuda, triposg-mlx, or triposg-cuda. The default auto selects platform Pixal3D. This tool never downloads models or installs packages."
+        description = "Start a local image.generate job with a ready backend listed in runtime_doctor. The default auto selects platform Pixal3D. Choose lato2-cuda with optional target_vertices for single-image geometry-only generation. This tool never downloads models or installs packages."
     )]
     async fn start_image_generation(&self, params: Parameters<GenerateArgs>) -> String {
         let args = params.0;
@@ -617,6 +621,7 @@ impl McpServer {
             resolution: args.resolution,
             texture_size: args.texture_size,
             target_faces: args.target_faces,
+            target_vertices: args.target_vertices,
             ..GenerationOptions::default()
         };
         match start_generation_job(
@@ -1364,6 +1369,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             resolution,
             texture_size,
             target_faces,
+            target_vertices,
             tuning,
             view_input,
             output,
@@ -1377,6 +1383,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 resolution,
                 texture_size,
                 target_faces,
+                target_vertices,
                 tuning: tuning.unwrap_or_default(),
                 view_input,
             };
@@ -2709,6 +2716,13 @@ async fn start_generation_job(
     core.check_model_generation(&input, &options)?;
 
     let mut parameters = serde_json::to_value(&options)?;
+    if options.backend_id == meshharbor_core::LATO2_IMAGE_BACKEND
+        && let Some(parameters) = parameters.as_object_mut()
+    {
+        for field in ["target_faces", "resolution", "texture_size"] {
+            parameters.remove(field);
+        }
+    }
     if operation == MODEL_GENERATION_OPERATION {
         parameters["input_mode"] = json!(input.mode());
     }
@@ -2738,9 +2752,14 @@ async fn start_generation_job(
                 "asset_id": result.asset.id,
                 "backend_id": result.backend_id,
                 "seed": result.seed,
-                "target_faces": result.target_faces,
                 "elapsed_ms": result.elapsed_ms,
             });
+            if let Some(target) = result.target_faces {
+                payload["target_faces"] = json!(target);
+            }
+            if let Some(target) = result.target_vertices {
+                payload["target_vertices"] = json!(target);
+            }
             if let Some(resolution) = result.resolution {
                 payload["resolution"] = json!(resolution);
             }

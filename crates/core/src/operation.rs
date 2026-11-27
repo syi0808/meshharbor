@@ -16,7 +16,7 @@ use crate::{
     glb::{MeshCleanupOptions, cleanup_glb_with_options},
     inspect_asset, install_bundled_quadriflow_sidecar,
     job_execution::JobExecution,
-    lato2::{self, LATO2_OPERATION, Lato2Options, Lato2Runtime},
+    lato2::{self, LATO2_IMAGE_BACKEND, LATO2_OPERATION, Lato2Options, Lato2Runtime},
     model_environment::{ModelEnvironment, ModelEnvironmentStatus},
     model_storage::model_path,
     optimize_render_glb, simplify_glb,
@@ -392,6 +392,9 @@ impl OperationCore {
         if let Some(external) = external_generation::ExternalProfile::find(profile.id) {
             external.require_ready(self.store.root())?;
         }
+        if profile.id == LATO2_IMAGE_BACKEND {
+            Lato2Runtime::require_image()?;
+        }
         Ok(())
     }
 
@@ -420,6 +423,9 @@ impl OperationCore {
         }
         if let Some(external) = external_generation::ExternalProfile::find(profile.id) {
             external.require_ready(self.store.root())?;
+        }
+        if profile.id == LATO2_IMAGE_BACKEND {
+            Lato2Runtime::require_image()?;
         }
         Ok(())
     }
@@ -722,6 +728,10 @@ impl OperationCore {
                 .iter()
                 .map(|profile| (profile.id, profile.is_ready(self.store.root()))),
         )
+        .chain(std::iter::once((
+            LATO2_IMAGE_BACKEND,
+            Lato2Runtime::image_readiness().1.is_empty(),
+        )))
         .filter_map(|(id, ready)| {
             ready
                 .then(|| crate::generation_catalog::generation_profile(id))
@@ -848,6 +858,21 @@ impl OperationCore {
         for backend in &mut model_backends {
             backend["requires_huggingface_login"] = json!(true);
         }
+        let (_, lato2_image_missing) = Lato2Runtime::image_readiness();
+        let lato2_image_ready = lato2_image_missing.is_empty();
+        model_backends.push(json!({
+            "id": LATO2_IMAGE_BACKEND,
+            "generation": crate::generation_catalog::generation_profile(LATO2_IMAGE_BACKEND),
+            "manual_setup": true,
+            "ready": lato2_image_ready,
+            "status": if lato2_image_ready { "ready_paths_unverified" } else { "operator_setup_required" },
+            "installable": false,
+            "weights_included": false,
+            "downloads_enabled": false,
+            "requires_huggingface_login": false,
+            "validation_level": "local_paths",
+            "missing": lato2_image_missing,
+        }));
         let pixal3d: Value =
             serde_json::from_str(include_str!("../../../registry/models/pixal3d.json"))
                 .expect("bundled Pixal3D registry must be valid JSON");
@@ -879,6 +904,10 @@ impl OperationCore {
                 json!({
                     "id": "triposg", "title": "TripoSG", "status": "experimental_opt_in",
                     "category": "generation", "backend_ids": ["triposg-mlx", "triposg-cuda"], "output": "geometry_glb",
+                }),
+                json!({
+                    "id": "lato2", "title": "LATO.2", "status": "experimental_opt_in",
+                    "category": "generation", "backend_ids": [LATO2_IMAGE_BACKEND], "output": "geometry_glb",
                 }),
                 json!({
                     "id": "trellis-text", "title": "TRELLIS Text Large", "status": "experimental_opt_in",

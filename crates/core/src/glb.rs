@@ -2141,8 +2141,16 @@ pub(crate) fn encode_position_only_glb(
     positions: &[[f32; 3]],
     indices: &[u32],
 ) -> Result<Vec<u8>, CoreError> {
+    encode_triangle_geometry_glb(positions, indices, "MeshHarbor Voxel Remesh")
+}
+
+pub(crate) fn encode_triangle_geometry_glb(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    generator: &str,
+) -> Result<Vec<u8>, CoreError> {
     let mut document = json!({
-        "asset": { "version": "2.0", "generator": "MeshHarbor Voxel Remesh" },
+        "asset": { "version": "2.0", "generator": generator },
         "scene": 0,
         "scenes": [{ "nodes": [0] }],
         "nodes": [{ "mesh": 0 }],

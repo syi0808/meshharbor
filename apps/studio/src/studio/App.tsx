@@ -54,7 +54,8 @@ import { Disclosure } from './Disclosure';
 import { JobsPanel, PendingGenerationCards, type StudioActivity } from './JobsPanel';
 import { JOB_PAGE_SIZE, generationJobName, jobStage, mergeJobRecords } from './job-activity';
 import { MeshStudy } from './MeshStudy';
-import { GenerationParameterFields, generationParameters, readyGenerationProfiles } from './GenerationSettings';
+import { GenerationParameterFields, generationParameters, selectableGenerationProfiles } from './GenerationSettings';
+import { MeshToMeshSettings } from './MeshToMeshSettings';
 import { buildPosedInput, defaultViews, newView, PosedReferences, SingleReference, type ViewDraft } from './GenerationReferences';
 import { HelpTip } from './HelpTip';
 import { JobDetails } from './JobDetails';
@@ -151,6 +152,12 @@ function formatSize(size: number) {
 }
 
 const meshOperationOptions: Array<{ id: MeshOperationId; title: string; label?: string; icon: Icon; description: string }> = [
+  {
+    id: 'mesh.retopology_lato2',
+    title: 'Mesh to Mesh',
+    icon: SquaresFourIcon,
+    description: 'Rebuild a smaller closed triangle mesh with LATO.2 and rebake the original colors. Requires a static GLB with one indexed primitive and an embedded PNG base-color map.',
+  },
   {
     id: 'mesh.retopology',
     title: 'Quad retopology (experimental)',
@@ -359,8 +366,9 @@ export function App() {
       startedAt: exportStartedAt.current,
     }] : []),
   ];
-  const generationProfiles = useMemo(() => readyGenerationProfiles(runtime), [runtime]);
-  const selectedGenerationProfile = generationProfiles.find(profile => profile.modelId === generationModelId) ?? generationProfiles[0];
+  const generationProfiles = useMemo(() => selectableGenerationProfiles(runtime), [runtime]);
+  const selectedGenerationProfile = generationProfiles.find(profile => profile.modelId === generationModelId)
+    ?? generationProfiles.find(profile => profile.ready) ?? generationProfiles[0];
   const inputModes = selectedGenerationProfile?.input_modes;
   const inputMode = inputModes?.includes(preferredInputMode) ? preferredInputMode : inputModes?.[0] ?? 'image';
   const viewMode = inputMode === 'image' && selectedGenerationProfile?.multiviewReady && selectedGenerationProfile.view_modes.includes(preferredViewMode)
@@ -1376,7 +1384,7 @@ export function App() {
   const canSimplify = selectedAsset?.kind === 'mesh' && validTriangleLimit && validMaxError
     && operations.some(operation => operation.id === 'mesh.simplify' && operation.implemented);
   const canGenerate = !!operations.find((operation) => operation.id === 'model.generate')?.implemented
-    && selectedGenerationProfile !== undefined;
+    && selectedGenerationProfile?.ready === true;
   const isComparingResult = selectedComparisonPair
     ? selectedComparisonPair.resultAssetId === selectedId
     : Boolean(selectedAsset?.source_asset_id || selectedAsset?.model?.generated);
@@ -1395,6 +1403,7 @@ export function App() {
     && (typeof beforeTriangles === 'number' || comparisonSizes);
   const meshTool = meshOperationOptions.find(tool => tool.id === openInspector);
   const isRetopology = meshTool?.id === 'mesh.retopology';
+  const isMeshToMesh = meshTool?.id === 'mesh.retopology_lato2';
   const isVoxelRemesh = meshTool?.id === 'mesh.voxel_remesh';
   const meshParameters = meshTool?.id === 'uv.unwrap' || meshTool?.id === 'render.optimize'
     ? meshParameterFields[meshTool.id].map(field => {
@@ -1501,13 +1510,20 @@ export function App() {
             <Field>
               <div className="flex items-center gap-1">
                 <FieldLabel htmlFor="generation-model">Generation model</FieldLabel>
-                <HelpTip label="About generation models">Only models ready to run locally appear here.</HelpTip>
+                <HelpTip label="About generation models">LATO.2 can be selected before setup, but generation needs a configured local runtime.</HelpTip>
               </div>
               <NativeSelect className="w-full" id="generation-model" value={selectedGenerationProfile.modelId}
                 onChange={event => { setGenerationModelId(event.target.value); setPreferredViewMode('single'); }} disabled={busy || isRunning}>
-                {generationProfiles.map(profile => <NativeSelectOption key={profile.modelId} value={profile.modelId}>{profile.label}</NativeSelectOption>)}
+                {generationProfiles.map(profile => <NativeSelectOption key={profile.modelId} value={profile.modelId}>
+                  {profile.label}{!profile.ready ? ' (setup required)' : ''}
+                </NativeSelectOption>)}
               </NativeSelect>
             </Field>
+            {selectedGenerationProfile.output === 'geometry_glb' && <p className="text-muted-foreground">Output: geometry-only GLB (no textures).</p>}
+            {!selectedGenerationProfile.ready && <div className="grid gap-2">
+              <p role="status" className="text-muted-foreground">{selectedGenerationProfile.setupMessage ?? 'The local runtime needs setup.'}</p>
+              <Button variant="outline" size="sm" className="self-start" onClick={() => openSettings('models')}>View model setup</Button>
+            </div>}
             {selectedGenerationProfile.input_modes.length > 1 && <Field>
               <FieldLabel htmlFor="generation-input-mode">Input type</FieldLabel>
               <NativeSelect className="w-full" id="generation-input-mode" value={inputMode} disabled={busy || isRunning}
@@ -1552,7 +1568,7 @@ export function App() {
                 }))} />
             </section>
           </>}
-          {!canGenerate && <Empty className="border">
+          {(!selectedGenerationProfile || selectedGenerationProfile.ready && !canGenerate) && <Empty className="border">
             <EmptyHeader>
               <EmptyTitle>No generation model is ready.</EmptyTitle>
               <EmptyDescription>You can still open and edit existing GLBs.</EmptyDescription>
@@ -1567,7 +1583,10 @@ export function App() {
         {isRetopology && !meshToolAvailable && quadriflowBackend && (
           <p className="text-muted-foreground">{quadriflowBackend.message}</p>
         )}
-        <div className="grid gap-2">
+        {isMeshToMesh ? <MeshToMeshSettings ready={meshToolAvailable} running={processingTool}
+          disabled={!hasSelectedMesh || busy || connection !== 'connected' || isRunning} sourceTriangles={triangleCount}
+          onRun={parameters => void runMeshOperation('mesh.retopology_lato2', parameters)}
+          onSetup={() => openSettings('models')} /> : <div className="grid gap-2">
           {meshParameters.map(field => <Field key={field.name}>
             <FieldLabel htmlFor={`mesh-parameter-${field.name}`}>{field.label}</FieldLabel>
             <Input id={`mesh-parameter-${field.name}`} type="number" min={field.min} max={field.max} step={field.step}
@@ -1641,7 +1660,7 @@ export function App() {
               Run {meshTool.title}
             </Button>
           )}
-        </div>
+        </div>}
       </section>}
 
       {openInspector === 'mesh.retopology' && <Disclosure className="mx-4 mb-4 border-y py-2 text-xs/relaxed" title="Retopology availability">

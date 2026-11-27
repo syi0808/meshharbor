@@ -459,6 +459,18 @@ const JOB_REPORT_SCHEMAS: Record<string, JobReportSchema> = {
       { key: 'algorithm', label: 'Algorithm', formatter: 'text' },
     ],
   },
+  'mesh.retopology_lato2': {
+    title: 'Mesh to Mesh · LATO.2',
+    metrics: [
+      { key: 'input_triangles', label: 'Input triangles', formatter: 'count' },
+      { key: 'output_triangles', label: 'Output triangles', formatter: 'count' },
+      { key: 'requested_vertices', label: 'Requested vertices', formatter: 'count' },
+      { key: 'retopology_vertices', label: 'Geometry vertices', formatter: 'count' },
+      { key: 'projection_coverage', label: 'Texture projection coverage', formatter: 'percent' },
+      { key: 'unfilled_texels', label: 'Unfilled texels', formatter: 'count' },
+    ],
+    lists: [{ key: 'rebaked_maps', label: 'Rebaked maps', formatter: 'text-list' }],
+  },
 };
 
 function reportObject(value: unknown): Record<string, unknown> | null {
@@ -561,7 +573,11 @@ export function jobResultCardModel(job: Job | null | undefined): JobReportCardMo
 
   const resultObject = reportObject(job.result);
   const report = generation ? resultObject : reportObject(resultObject?.report);
-  const metrics = schema.metrics.map((field) => ({
+  const metricFields = generation && report?.backend_id === 'lato2-cuda'
+    ? schema.metrics.filter(field => !['resolution', 'texture_size', 'target_faces'].includes(field.key))
+      .concat([{ key: 'target_vertices', label: 'Target vertices', formatter: 'count' }])
+    : schema.metrics;
+  const metrics = metricFields.map((field) => ({
     label: field.label,
     value: formatReportField(report?.[field.key], field.formatter),
   }));
