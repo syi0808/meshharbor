@@ -81,7 +81,7 @@ The bridge works locally with both regular and MeshHarbor meshopt-compressed GLB
 | --- | --- |
 | Use Studio, version history, or job controls | [Studio guide](apps/studio/README.md) |
 | Process assets from a terminal | [CLI guide](docs/cli.md) |
-| Integrate with the local API or an MCP client | [REST API](docs/rest-api.md) · [MCP workflow](docs/mcp-workflow.md) |
+| Integrate with the local API or an MCP client | [REST API](docs/rest-api.md) · [Swagger UI on the running server](http://127.0.0.1:7432/docs) · [MCP workflow](docs/mcp-workflow.md) |
 | Set up a generation model | [Pixal3D MLX](docs/pixal3d-mlx-manual-runtime.md) · [Pixal3D CUDA](docs/pixal3d-cuda-managed-runtime.md) · [TRELLIS.2 and TripoSG](docs/external-generation-runtimes.md) · TRELLIS Text [MLX](docs/trellis-text-mlx.md) / [CUDA](docs/trellis-text-cuda.md) |
 | Understand format limits or work on the project | [Architecture](docs/architecture.md) · [Documentation index](docs/README.md) · [Contributing](CONTRIBUTING.md) |
 

@@ -23,7 +23,7 @@ use crate::{
     voxel_remesh::{VoxelRemeshOptions, validate_voxel_source_size, voxel_remesh_glb},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OperationDescriptor {
     pub id: String,
     pub title: String,
@@ -32,7 +32,7 @@ pub struct OperationDescriptor {
     pub implemented: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RuntimeDoctor {
     pub status: String,
     pub platform: String,

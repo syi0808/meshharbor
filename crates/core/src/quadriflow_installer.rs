@@ -59,14 +59,14 @@ pub enum QuadriFlowInstallError {
     ActivationMetadata,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct QuadriFlowInstallResult {
     pub release_tag: String,
     pub executable: PathBuf,
     pub already_installed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct QuadriFlowBackendStatus {
     pub backend_id: String,
     pub status: String,

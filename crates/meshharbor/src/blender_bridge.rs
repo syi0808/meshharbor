@@ -79,7 +79,7 @@ struct Transfer {
     error: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Stage {
     Waiting,
@@ -122,12 +122,12 @@ impl Queue {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
 pub(crate) struct SendRequest {
     pub(crate) asset_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub(crate) struct SendStatus {
     pub(crate) id: Uuid,
     pub(crate) stage: Stage,
@@ -390,7 +390,7 @@ struct BlenderLocation {
     config: PathBuf,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct InstallResult {
     version: String,
 }

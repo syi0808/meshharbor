@@ -629,7 +629,7 @@ pub const MAX_QUAD_TARGET: u32 = 50_000;
 pub const LINKED_QUADRIFLOW_WORKER_ARG: &str = "--internal-quadriflow-worker";
 pub const MAX_LINKED_QUADRIFLOW_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuadRetopologyOptions {
     /// Approximate requested output quad count, or None for QuadriFlow's automatic density.
@@ -638,7 +638,7 @@ pub struct QuadRetopologyOptions {
 
 /// Eligibility of the source mesh alone. This is not backend readiness,
 /// a guarantee of solver success, or a texture quality forecast.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct QuadRetopologyPreflight {
     pub input_vertices: u64,
     pub input_triangles: u64,

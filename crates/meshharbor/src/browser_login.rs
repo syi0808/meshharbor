@@ -28,14 +28,14 @@ struct Session {
     cancel: watch::Sender<bool>,
 }
 
-#[derive(Clone, Serialize)]
-struct LoginView {
+#[derive(Clone, Serialize, schemars::JsonSchema)]
+pub(crate) struct LoginView {
     id: Uuid,
     #[serde(flatten)]
     phase: LoginPhase,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum LoginPhase {
     Preparing,

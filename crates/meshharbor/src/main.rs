@@ -40,6 +40,7 @@ mod data_dir_lock;
 mod engine_client;
 mod huggingface_status;
 mod job_scheduler;
+mod openapi;
 #[cfg(feature = "bundled-quadriflow")]
 mod quadriflow_worker;
 mod service;
@@ -430,12 +431,12 @@ struct ModelInstallConfirmation {
     confirm_gated_access: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct UploadQuery {
     filename: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct ApiErrorBody {
     error: String,
 }
@@ -1521,6 +1522,7 @@ fn api_router_with_statuses(
 ) -> Router {
     Router::new()
         .merge(blender_bridge::routes(listen))
+        .merge(openapi::routes())
         .route("/api/v1/health", get(api_health))
         .route("/api/v1/runtime", get(api_runtime))
         .route(
@@ -1903,7 +1905,7 @@ async fn api_install_quadriflow_backend(
     Ok(Json(installed))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct HuggingFaceConnectionRequest {
     token: Option<String>,
@@ -1978,7 +1980,7 @@ async fn api_model_access(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(access)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RuntimeRemovalConfirmation {
     confirmed: bool,
@@ -2038,7 +2040,7 @@ async fn remove_runtime_files(
     Ok(Json(runtime))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CatalogInstallConfirmation {
     confirmed: bool,
@@ -2046,7 +2048,7 @@ struct CatalogInstallConfirmation {
     confirm_gated_access: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EnvironmentSetupConfirmation {
     confirmed: bool,
@@ -2141,7 +2143,7 @@ async fn api_start_cuda_runtime_models(
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MultiviewInstallConfirmation {
     confirm_large_download: bool,
@@ -2178,8 +2180,9 @@ async fn api_list_assets(
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct LimitQuery {
+    /// Maximum number of assets (default 50).
     limit: Option<usize>,
 }
 
@@ -2205,7 +2208,7 @@ async fn api_list_asset_page(
     Ok(Json(page))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct AssetPageQuery {
     limit: Option<usize>,
     cursor: Option<String>,
@@ -2215,7 +2218,7 @@ struct AssetPageQuery {
     models_only: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ModelVersionsQuery {
     limit: Option<usize>,
     before: Option<u64>,
@@ -2233,7 +2236,7 @@ async fn api_model_versions(
     )?))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RestoreModelVersion {
     asset_id: String,
@@ -2298,17 +2301,20 @@ async fn api_simplify(
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct SimplifyBody {
     target_triangles: u64,
     #[serde(default = "default_max_error")]
     max_error: f32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct JobStartBody {
+    /// Operation ID from GET /api/v1/operations.
     operation: String,
+    /// An asset_id for mesh jobs, or tagged image/text input for model.generate.
     input: Value,
+    /// Operation-specific options. For generation, consult GET /api/v1/runtime.
     #[serde(default)]
     parameters: Option<Value>,
 }
@@ -2489,7 +2495,7 @@ fn read_job_record(core: &OperationCore, job_id: &str) -> Result<meshharbor_core
         .ok_or_else(|| CoreError::NotFound(format!("Job '{job_id}' was not found.")))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct JobHistoryQuery {
     limit: Option<usize>,
     include_active: Option<bool>,
@@ -2529,7 +2535,7 @@ async fn api_job_steps(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct CancelJobQuery {
     #[serde(default)]
     queued_only: bool,
@@ -2561,7 +2567,7 @@ fn cancel_job(
     Ok(job)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct GenerationQueueSwap {
     job_id: String,
     swap_with: String,

@@ -8,6 +8,8 @@ Start the [built executable](../README.md#quick-start) on loopback (non-loopback
 meshharbor serve --listen 127.0.0.1:7432
 ```
 
+Open [Swagger UI](http://127.0.0.1:7432/docs) to browse the API, or download the [OpenAPI JSON](http://127.0.0.1:7432/openapi.json). Both are served locally and work offline without a token. To try a protected GET in Swagger UI, enter the API token under **Authorize**. Use a REST client for write requests.
+
 Check the server with `curl http://127.0.0.1:7432/api/v1/health`. The health endpoint needs no token. For non-Studio clients, send `Authorization: Bearer <token>` on other API calls. When `MESHHARBOR_API_TOKEN` is unset, the engine generates a temporary token and prints it to stderr. A configured token must not be empty or whitespace-only, and its value is not written to logs.
 
 The built-in Studio connects without a token using a dashboard marker and exact same-origin browser provenance. Tokenless writes need an exact same-origin `Origin`; safe reads may use browser `Sec-Fetch-Site: same-origin` when no `Origin` is supplied. Non-browser bearer clients can omit `Origin`, but a supplied origin must still match the loopback host. Cross-origin requests are rejected even with a bearer token. The HTTP endpoints for entering a raw Hugging Face token and installing Blender locally remain Studio-only. CLI and MCP have a browser device flow and their own local Blender installer.

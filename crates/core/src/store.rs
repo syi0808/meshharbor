@@ -41,7 +41,7 @@ pub enum CoreError {
 
 pub type CoreResult<T> = Result<T, CoreError>;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AssetKind {
     Image,
@@ -67,7 +67,7 @@ impl AssetKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Artifact {
     pub id: String,
     pub kind: String,
@@ -76,7 +76,7 @@ pub struct Artifact {
     pub mime_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Asset {
     pub id: String,
     pub name: String,
@@ -94,13 +94,13 @@ pub struct Asset {
     pub model_version: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AssetPage {
     pub items: Vec<Asset>,
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelIdentity {
     pub id: String,
     pub name: String,
@@ -108,7 +108,7 @@ pub struct ModelIdentity {
     pub current_asset_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelVersion {
     pub asset_id: String,
     pub number: u64,
@@ -117,14 +117,14 @@ pub struct ModelVersion {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelVersionPage {
     pub items: Vec<ModelVersion>,
     pub current_asset_id: String,
     pub next_before: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
     Queued,
@@ -169,7 +169,7 @@ impl JobState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Job {
     pub id: String,
     pub operation: String,
@@ -189,7 +189,7 @@ pub struct Job {
     pub stage: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct JobStep {
     pub id: i64,
     pub state: JobState,
@@ -199,7 +199,7 @@ pub struct JobStep {
     pub commands: Vec<JobCommand>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct JobCommand {
     pub id: i64,
     pub argv: Vec<String>,

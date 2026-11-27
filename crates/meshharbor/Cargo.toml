@@ -29,7 +29,7 @@ meshharbor-quadriflow-sys = { path = "../quadriflow-sys", optional = true }
 rmcp.workspace = true
 remesh = { workspace = true, optional = true }
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
-schemars.workspace = true
+schemars = { workspace = true, features = ["uuid1"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3"
@@ -37,6 +37,7 @@ tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+utoipa-swagger-ui = { version = "10.0.2", default-features = false, features = ["minified", "vendored"] }
 uuid.workspace = true
 
 [build-dependencies]

@@ -24,7 +24,7 @@ const MANIFEST: &str = "model-environment/tools-v2.json";
 const LEGACY_MANIFEST: &str = "model-environment/tools-v1.json";
 const PYTHONS: [&str; 2] = ["3.10", "3.12"];
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ModelEnvironmentStatus {
     pub ready: bool,
     pub python_versions: Vec<String>,
