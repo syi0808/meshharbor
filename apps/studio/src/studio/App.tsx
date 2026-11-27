@@ -1249,9 +1249,8 @@ export function App() {
   }
 
   function runRuntimeAction(backend: RuntimeBackendId, action: RuntimeAction) {
-    void startRuntimeAction(() => api.installCatalogModel(
-      backend, action === 'install-gated', action === 'multiview' ? 'multiview' : 'base',
-    ));
+    void startRuntimeAction(() => action === 'multiview'
+      ? api.installPixal3dMultiview() : api.installCatalogModel(backend, action === 'install-gated'));
   }
 
   async function downloadBlob(load: () => Promise<Blob>, fileName: (blob: Blob) => string, label: string) {
@@ -1335,7 +1334,7 @@ export function App() {
     if (!retryTarget || busy || isRunning || connection !== 'connected') return;
     setBusy(true);
     try {
-      const next = await api.retryJob(retryTarget.id, retryTarget.operation.startsWith('runtime.'));
+      const next = await api.retryJob(retryTarget.id);
       if (isGenerationOperation(next.operation)) {
         localGenerations.current.add(next.id);
         observedJobStates.current.set(next.id, next.state);
