@@ -1,6 +1,6 @@
 use super::{
     AtlasBakeError, AtlasBakeOptions, bake_glb, bake_projected_mesh, encode_projected_mesh_glb,
-    extract_projection_source_mesh, project_point_to_surface,
+    extract_projection_source_mesh, extract_texture_rebake_source, project_point_to_surface,
 };
 use serde_json::{Value, json};
 
@@ -101,6 +101,32 @@ fn opposing_shell_fixture() -> Vec<u8> {
     }
     glb.document["buffers"][0]["byteLength"] = json!(glb.binary.len());
     glb.write().unwrap()
+}
+
+#[test]
+fn texture_rebake_accepts_base_only_without_relaxing_native_projection() {
+    let bytes = fixture(false, false, false);
+    let (_, has_mr) = extract_texture_rebake_source(&bytes).unwrap();
+    assert!(has_mr);
+    let mut glb = super::Glb::parse(&bytes).unwrap();
+    glb.document["materials"][0]["pbrMetallicRoughness"]
+        .as_object_mut()
+        .unwrap()
+        .remove("metallicRoughnessTexture");
+    glb.document["images"].as_array_mut().unwrap().truncate(1);
+    glb.document["textures"].as_array_mut().unwrap().truncate(1);
+    let base_only = glb.write().unwrap();
+    let (mesh, has_mr) = extract_texture_rebake_source(&base_only).unwrap();
+    assert_eq!(mesh.indices.len(), 6);
+    assert!(!has_mr);
+    assert!(extract_projection_source_mesh(&base_only).is_err());
+    assert!(bake_glb(&base_only, AtlasBakeOptions::default()).is_err());
+
+    glb.document["images"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"uri": "external.png"}));
+    assert!(extract_texture_rebake_source(&glb.write().unwrap()).is_err());
 }
 
 #[test]

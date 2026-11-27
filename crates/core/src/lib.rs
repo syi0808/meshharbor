@@ -15,6 +15,7 @@ mod huggingface_access;
 mod huggingface_browser;
 mod huggingface_download;
 mod job_execution;
+mod lato2;
 mod model_environment;
 mod model_storage;
 mod operation;
@@ -45,6 +46,7 @@ pub use glb::{
 };
 pub use huggingface_access::{HuggingFaceAccess, HuggingFaceConnection};
 pub use huggingface_browser::HuggingFaceBrowserTool;
+pub use lato2::LATO2_OPERATION;
 pub use meshharbor_atlas_baker::{AtlasBakeError, AtlasBakeOptions, AtlasBakeReport, bake_glb};
 pub use model_environment::ModelEnvironmentStatus;
 pub use model_storage::Pixal3dProfile;

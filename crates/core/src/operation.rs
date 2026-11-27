@@ -16,6 +16,7 @@ use crate::{
     glb::{MeshCleanupOptions, cleanup_glb_with_options},
     inspect_asset, install_bundled_quadriflow_sidecar,
     job_execution::JobExecution,
+    lato2::{self, LATO2_OPERATION, Lato2Options, Lato2Runtime},
     model_environment::{ModelEnvironment, ModelEnvironmentStatus},
     model_storage::model_path,
     optimize_render_glb, simplify_glb,
@@ -266,6 +267,8 @@ impl OperationCore {
             validate_retopology_source_size(source_artifact.byte_size)?;
         } else if operation == "mesh.voxel_remesh" {
             validate_voxel_source_size(source_artifact.byte_size)?;
+        } else if operation == LATO2_OPERATION {
+            lato2::validate_source_size(source_artifact.byte_size)?;
         }
         let bytes = self.store.read_artifact(&source_artifact.id)?.bytes;
         execution.stage("process_mesh")?;
@@ -301,6 +304,20 @@ impl OperationCore {
             });
         }
         let (suffix, output, report) = match operation {
+            LATO2_OPERATION => {
+                let options: Option<Lato2Options> =
+                    serde_json::from_value(parameters).map_err(|error| {
+                        CoreError::InvalidInput(format!(
+                            "Invalid {LATO2_OPERATION} parameters: {error}"
+                        ))
+                    })?;
+                let (output, report) = Lato2Runtime::require()?.retopologize(
+                    &bytes,
+                    options.unwrap_or_default(),
+                    execution,
+                )?;
+                ("lato2-retopologized", output, serde_json::to_value(report)?)
+            }
             "mesh.voxel_remesh" => {
                 let options: Option<VoxelRemeshOptions> = serde_json::from_value(parameters)
                     .map_err(|error| {
@@ -725,6 +742,7 @@ impl OperationCore {
             OperationDescriptor { id: "mesh.cleanup".into(), title: "Mesh cleanup".into(), category: "mesh".into(), summary: "Remove repeated-index, exactly zero-area, and same-winding duplicate faces, then simplify eligible primitives within a conservative error tolerance without a triangle target.".into(), implemented: true },
             OperationDescriptor { id: "mesh.voxel_remesh".into(), title: "Voxel Remesh".into(), category: "mesh".into(), summary: "Rebuild one static indexed triangle GLB with meshoptimizer and validate the closed result before saving a geometry-only version. Does not copy UVs, materials, or textures.".into(), implemented: true },
             OperationDescriptor { id: "mesh.retopology".into(), title: "Quad retopology".into(), category: "mesh".into(), summary: "Experimental QuadriFlow quad remeshing in an isolated worker. Accepts one closed static triangle GLB; textured inputs also require TEXCOORD_0, optional NORMAL, and the narrow supported embedded base-color/metallic-roughness PNG maps. Those maps are projected only into a triangulated GLB preview with distance, normal, coverage, and ambiguity gates; the editable quad OBJ remains geometry-only. Other attributes/maps, self-intersection freedom, and a measured surface-error tolerance are not supported or certified.".into(), implemented: quadriflow_ready },
+            OperationDescriptor { id: LATO2_OPERATION.into(), title: "LATO.2 retopology + texture rebake (experimental)".into(), category: "mesh".into(), summary: "Generate a smaller, closed triangle mesh with local LATO.2 and rebake supported embedded PNG PBR maps with Blender. Requires a configured LATO.2 checkout, Python, and Blender. Never falls back to standard simplification.".into(), implemented: Lato2Runtime::discover().is_some() },
             OperationDescriptor { id: "uv.unwrap".into(), title: "Atlas UV unwrap".into(), category: "uv".into(), summary: "Use xatlas to unwrap one supported static textured mesh and rebake its embedded base-color and metallic/roughness PNG maps from its existing UVs. Zero-area faces are omitted from the result. This is not high-to-low projection.".into(), implemented: true },
             OperationDescriptor { id: "texture.bake".into(), title: "Texture bake".into(), category: "texture".into(), summary: "Generic high-to-low and arbitrary texture baking is not implemented; uv.unwrap only rebakes supported same-mesh embedded base-color and metallic/roughness PNG maps.".into(), implemented: false },
             OperationDescriptor { id: "render.optimize".into(), title: "Render optimization".into(), category: "mesh".into(), summary: "Use meshoptimizer vertex-cache and overdraw reordering on opaque/masked indexed triangles; translucent order is preserved.".into(), implemented: true },
@@ -902,7 +920,7 @@ fn default_overdraw_threshold() -> f32 {
     1.05
 }
 
-fn map_atlas_bake_error(error: AtlasBakeError) -> CoreError {
+pub(crate) fn map_atlas_bake_error(error: AtlasBakeError) -> CoreError {
     match error {
         AtlasBakeError::InvalidInput(message) => CoreError::InvalidInput(message),
         AtlasBakeError::Unsupported(message) => CoreError::OperationUnavailable(message),

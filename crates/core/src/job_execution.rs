@@ -10,7 +10,7 @@ use crate::{CoreError, CoreResult, JobState, Store};
 const LOG_TAIL_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Default)]
-pub(crate) struct JobExecution<'a>(Option<(&'a Store, &'a str)>);
+pub(crate) struct JobExecution<'a>(Option<(&'a Store, &'a str)>, Option<Duration>);
 
 #[derive(Clone, Copy)]
 pub(crate) struct CommandTrace<'a> {
@@ -20,7 +20,12 @@ pub(crate) struct CommandTrace<'a> {
 
 impl<'a> JobExecution<'a> {
     pub(crate) fn for_job(store: &'a Store, id: &'a str) -> Self {
-        Self(Some((store, id)))
+        Self(Some((store, id)), None)
+    }
+
+    pub(crate) fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.1 = Some(timeout);
+        self
     }
 
     pub(crate) fn is_tracked(self) -> bool {
@@ -79,6 +84,13 @@ impl<'a> JobExecution<'a> {
     pub(crate) fn status(self, command: &mut Command) -> CoreResult<ExitStatus> {
         if self.is_tracked() {
             self.run_captured(command).map(|(status, _)| status)
+        } else if self.1.is_some() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            self.wait_for_child(&mut command.stdin(Stdio::null()).spawn()?)
         } else {
             Ok(command.status()?)
         }
@@ -152,10 +164,15 @@ impl<'a> JobExecution<'a> {
     }
 
     pub(crate) fn wait_for_child(self, child: &mut Child) -> CoreResult<ExitStatus> {
+        let started = Instant::now();
         loop {
             let outcome = self.checkpoint().and_then(|()| Ok(child.try_wait()?));
             match outcome {
                 Ok(Some(status)) => return Ok(status),
+                Ok(None) if self.1.is_some_and(|timeout| started.elapsed() >= timeout) => {
+                    stop_child(child)?;
+                    return Err(CoreError::OperationUnavailable("Worker timed out.".into()));
+                }
                 Ok(None) => thread::sleep(Duration::from_millis(100)),
                 Err(error) => {
                     stop_child(child)?;

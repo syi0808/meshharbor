@@ -340,6 +340,7 @@ pub fn bake_glb(
     validate_options(options)?;
     let mut glb = Glb::parse(bytes)?;
     let snapshot = validate_supported(&glb.document)?;
+    let (mr_texture, mr_image) = snapshot.required_mr()?;
 
     let position_data = read_accessor(&glb.document, &glb.binary, snapshot.position_accessor)?;
     require_accessor(
@@ -397,7 +398,7 @@ pub fn bake_glb(
     let chart_positions = prepare_chart_mesh(&positions, &mut indices)?;
     let zero_area_triangles_removed = source_triangles - indices.len() / 3;
     let base_png = read_png_image(&glb.document, &glb.binary, snapshot.base_image)?;
-    let mr_png = read_png_image(&glb.document, &glb.binary, snapshot.mr_image)?;
+    let mr_png = read_png_image(&glb.document, &glb.binary, mr_image)?;
     let native = meshharbor_xatlas_sys::unwrap_and_bake(
         meshharbor_xatlas_sys::AtlasInput {
             positions: &chart_positions,
@@ -559,12 +560,7 @@ pub fn bake_glb(
         snapshot.base_image,
         base_view,
     )?;
-    let mr_texture_index = append_atlas_texture(
-        &mut glb.document,
-        snapshot.mr_texture,
-        snapshot.mr_image,
-        mr_view,
-    )?;
+    let mr_texture_index = append_atlas_texture(&mut glb.document, mr_texture, mr_image, mr_view)?;
     glb.document["materials"][snapshot.material]["pbrMetallicRoughness"]["baseColorTexture"]["index"] =
         json!(base_texture_index);
     glb.document["materials"][snapshot.material]["pbrMetallicRoughness"]["metallicRoughnessTexture"]
@@ -664,6 +660,21 @@ fn prepare_chart_mesh(
 pub fn extract_projection_source_mesh(
     bytes: &[u8],
 ) -> Result<ProjectionSourceMesh, AtlasBakeError> {
+    extract_projection_source(bytes, false).map(|(mesh, _)| mesh)
+}
+
+/// Validate the narrower GLB profile used by the experimental Blender rebaker.
+/// The second result indicates whether the source has a metallic/roughness map.
+pub fn extract_texture_rebake_source(
+    bytes: &[u8],
+) -> Result<(ProjectionSourceMesh, bool), AtlasBakeError> {
+    extract_projection_source(bytes, true)
+}
+
+fn extract_projection_source(
+    bytes: &[u8],
+    allow_base_only: bool,
+) -> Result<(ProjectionSourceMesh, bool), AtlasBakeError> {
     if bytes.len() > 64 * 1024 * 1024 {
         return Err(unsupported(
             "projection source GLB exceeds the 64 MiB limit",
@@ -675,7 +686,7 @@ pub fn extract_projection_source_mesh(
             "unknown GLB chunks are not supported for projection",
         ));
     }
-    let snapshot = validate_supported(&glb.document)?;
+    let snapshot = validate_supported_profile(&glb.document, allow_base_only)?;
     validate_projection_scene(&glb.document)?;
     let attributes = glb.document["meshes"][0]["primitives"][0]["attributes"]
         .as_object()
@@ -692,6 +703,42 @@ pub fn extract_projection_source_mesh(
     }
     validate_projection_material(&glb.document, snapshot.material)?;
     let binary = glb.binary.as_slice();
+    if allow_base_only {
+        let pbr = &glb.document["materials"][snapshot.material]["pbrMetallicRoughness"];
+        factor_scalar(pbr.get("metallicFactor"), 1.0, "metallicFactor")?;
+        factor_scalar(pbr.get("roughnessFactor"), 1.0, "roughnessFactor")?;
+        if array(&glb.document, "images")?
+            .iter()
+            .enumerate()
+            .any(|(index, _)| {
+                index != snapshot.base_image && snapshot.mr.is_none_or(|(_, image)| index != image)
+            })
+        {
+            return Err(unsupported(
+                "only images used by the supported PBR maps are allowed",
+            ));
+        }
+        for image in std::iter::once(snapshot.base_image).chain(snapshot.mr.map(|(_, image)| image))
+        {
+            let png = read_png_image(&glb.document, binary, image)?;
+            if png.get(8..16) != Some(&b"\0\0\0\rIHDR"[..])
+                || png.get(16..24).is_none_or(|size| {
+                    size.chunks_exact(4).any(|axis| {
+                        !(1..=4096).contains(&u32::from_be_bytes(axis.try_into().unwrap()))
+                    })
+                })
+            {
+                return Err(unsupported(
+                    "embedded PNGs must have dimensions within 1–4096 pixels",
+                ));
+            }
+        }
+        if let Some(normal) = snapshot.normal_accessor {
+            let data = read_accessor(&glb.document, binary, normal)?;
+            require_accessor(&data, "NORMAL", 5126, "VEC3", snapshot.source_vertices)?;
+            decode_vec3(&data.bytes)?;
+        }
+    }
     let position_data = read_accessor(&glb.document, binary, snapshot.position_accessor)?;
     require_accessor(
         &position_data,
@@ -727,11 +774,14 @@ pub fn extract_projection_source_mesh(
             "projection source requires 1..100,000 vertices and 1..500,000 valid indexed triangles",
         ));
     }
-    Ok(ProjectionSourceMesh {
-        positions,
-        uv,
-        indices,
-    })
+    Ok((
+        ProjectionSourceMesh {
+            positions,
+            uv,
+            indices,
+        },
+        snapshot.mr.is_some(),
+    ))
 }
 
 /// Generate a new atlas for remeshed target geometry and project only supported
@@ -769,8 +819,9 @@ pub fn bake_projected_mesh(
     let source = extract_projection_source_mesh(source_glb)?;
     let glb = Glb::parse(source_glb)?;
     let snapshot = validate_supported(&glb.document)?;
+    let (_, mr_image) = snapshot.required_mr()?;
     let base_png = read_png_image(&glb.document, &glb.binary, snapshot.base_image)?;
-    let mr_png = read_png_image(&glb.document, &glb.binary, snapshot.mr_image)?;
+    let mr_png = read_png_image(&glb.document, &glb.binary, mr_image)?;
     let material = &glb.document["materials"][snapshot.material];
     let pbr = &material["pbrMetallicRoughness"];
     let base_color_factor = factor_vec4(pbr.get("baseColorFactor"), [1.0; 4], "baseColorFactor")?;
@@ -1232,12 +1283,25 @@ struct SupportedInput {
     source_vertices: usize,
     material: usize,
     base_texture: usize,
-    mr_texture: usize,
     base_image: usize,
-    mr_image: usize,
+    mr: Option<(usize, usize)>,
+}
+
+impl SupportedInput {
+    fn required_mr(&self) -> Result<(usize, usize), AtlasBakeError> {
+        self.mr
+            .ok_or_else(|| unsupported("metallicRoughnessTexture is required"))
+    }
 }
 
 fn validate_supported(document: &Value) -> Result<SupportedInput, AtlasBakeError> {
+    validate_supported_profile(document, false)
+}
+
+fn validate_supported_profile(
+    document: &Value,
+    allow_base_only: bool,
+) -> Result<SupportedInput, AtlasBakeError> {
     if document
         .get("asset")
         .and_then(|asset| asset.get("version"))
@@ -1370,12 +1434,15 @@ fn validate_supported(document: &Value) -> Result<SupportedInput, AtlasBakeError
     let base_info = pbr
         .get("baseColorTexture")
         .ok_or_else(|| unsupported("baseColorTexture is required"))?;
-    let mr_info = pbr
-        .get("metallicRoughnessTexture")
-        .ok_or_else(|| unsupported("metallicRoughnessTexture is required"))?;
+    let mr_info = pbr.get("metallicRoughnessTexture");
+    if !allow_base_only && mr_info.is_none() {
+        return Err(unsupported("metallicRoughnessTexture is required"));
+    }
     let (base_texture, base_image) = texture_source(document, base_info)?;
-    let (mr_texture, mr_image) = texture_source(document, mr_info)?;
-    if base_texture == mr_texture {
+    let mr = mr_info
+        .map(|info| texture_source(document, info))
+        .transpose()?;
+    if mr.is_some_and(|(texture, _)| base_texture == texture) {
         return Err(unsupported(
             "base-color and metallic-roughness slots must use separate texture objects",
         ));
@@ -1397,9 +1464,8 @@ fn validate_supported(document: &Value) -> Result<SupportedInput, AtlasBakeError
         source_vertices,
         material,
         base_texture,
-        mr_texture,
         base_image,
-        mr_image,
+        mr,
     })
 }
 
