@@ -15,7 +15,7 @@ The managed profiles target [LATO.2 source revision `650b48f`](https://github.co
 
 ## Mesh To Mesh
 
-In Studio, select a textured GLB, open **Mesh to Mesh**, select **LATO.2**, and run the job. This is separate from **Optimize** and QuadriFlow **Retopology**.
+In Studio, select a textured GLB, open **Mesh to Mesh**, select **LATO.2**, and run the job. The model appears once; Studio automatically uses a ready backend, preferring MLX on macOS and CUDA on Linux. This is separate from **Optimize** and QuadriFlow **Retopology**.
 
 Submit to `POST /api/v1/jobs`:
 

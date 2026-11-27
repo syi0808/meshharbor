@@ -5,18 +5,18 @@ import { Field, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { HelpTip } from './HelpTip';
+import { preferredModelBackend } from './model-backends';
 import type { GenerationModel, GenerationParameter, GenerationParameters, GenerationTuning, RuntimeInfo } from './types';
 
 type Draft = Record<string, string>;
 
 export function selectableGenerationProfiles(runtime: RuntimeInfo | null): GenerationModel[] {
-  const preferred = runtime?.platform === 'linux' ? '-cuda' : '-mlx';
-  return (runtime?.model_catalog ?? []).flatMap(model => {
+  if (!runtime) return [];
+  return (runtime.model_catalog ?? []).flatMap(model => {
     if (model.category === 'repart') return [];
-    const backends = (runtime?.model_backends ?? []).filter(backend =>
+    const backends = (runtime.model_backends ?? []).filter(backend =>
       model.backend_ids.includes(backend.id) && (backend.ready || model.id === 'lato2') && backend.generation?.id === backend.id);
-    const selected = backends.find(backend => backend.ready && backend.id.endsWith(preferred))
-      ?? backends.find(backend => backend.ready) ?? backends.find(backend => backend.installable) ?? backends[0];
+    const selected = preferredModelBackend(backends, runtime.platform, backend => backend.ready === true);
     const profile = selected?.generation;
     if (!profile) return [];
     const modes = profile.input_modes === undefined ? (['image'] as const) : profile.input_modes;

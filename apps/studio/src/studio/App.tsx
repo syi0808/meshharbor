@@ -55,7 +55,7 @@ import { JobsPanel, PendingGenerationCards, type StudioActivity } from './JobsPa
 import { JOB_PAGE_SIZE, generationJobName, jobStage, mergeJobRecords } from './job-activity';
 import { MeshStudy } from './MeshStudy';
 import { GenerationParameterFields, generationParameters, selectableGenerationProfiles } from './GenerationSettings';
-import { MeshToMeshSettings } from './MeshToMeshSettings';
+import { MeshToMeshSettings, selectableMeshToMeshModels } from './MeshToMeshSettings';
 import { buildPosedInput, defaultViews, newView, PosedReferences, SingleReference, type ViewDraft } from './GenerationReferences';
 import { HelpTip } from './HelpTip';
 import { JobDetails } from './JobDetails';
@@ -1249,8 +1249,9 @@ export function App() {
   }
 
   function runRuntimeAction(backend: RuntimeBackendId, action: RuntimeAction) {
-    void startRuntimeAction(() => action === 'multiview'
-      ? api.installPixal3dMultiview() : api.installCatalogModel(backend, action === 'install-gated'));
+    void startRuntimeAction(() => api.installCatalogModel(
+      backend, action === 'install-gated', action === 'multiview' ? 'multiview' : 'base',
+    ));
   }
 
   async function downloadBlob(load: () => Promise<Blob>, fileName: (blob: Blob) => string, label: string) {
@@ -1334,7 +1335,7 @@ export function App() {
     if (!retryTarget || busy || isRunning || connection !== 'connected') return;
     setBusy(true);
     try {
-      const next = await api.retryJob(retryTarget.id);
+      const next = await api.retryJob(retryTarget.id, retryTarget.operation.startsWith('runtime.'));
       if (isGenerationOperation(next.operation)) {
         localGenerations.current.add(next.id);
         observedJobStates.current.set(next.id, next.state);
@@ -1414,12 +1415,6 @@ export function App() {
       return { ...field, draft, value, valid };
     }) : [];
   const meshToolAvailable = operations.some(operation => operation.id === meshTool?.id && operation.implemented);
-  const lato2Backends = (runtime?.model_backends ?? []).filter(backend => backend.id === 'lato2-cuda' || backend.id === 'lato2-mlx')
-    .map(backend => ({
-      id: backend.id,
-      label: backend.accelerator ?? (backend.id.endsWith('-mlx') ? 'Apple MLX' : 'NVIDIA CUDA'),
-      ready: backend.mesh_to_mesh_ready ?? (meshToolAvailable && backend.ready === true),
-    }));
   const canPrepareRetopology = hasSelectedMesh && !busy && !checkingRetopology && connection === 'connected' && !isRunning;
   const processingTool = isRunning && job.operation === meshTool?.id;
   const inspectorTitle = meshTool?.title ?? (openInspector === 'generation' ? 'Generate model' : 'Optimize mesh');
@@ -1589,7 +1584,7 @@ export function App() {
         {isRetopology && !meshToolAvailable && quadriflowBackend && (
           <p className="text-muted-foreground">{quadriflowBackend.message}</p>
         )}
-        {isMeshToMesh ? <MeshToMeshSettings backends={lato2Backends} running={processingTool}
+        {isMeshToMesh ? <MeshToMeshSettings models={selectableMeshToMeshModels(runtime)} running={processingTool}
           disabled={!hasSelectedMesh || busy || connection !== 'connected' || isRunning}
           onRun={parameters => void runMeshOperation('mesh.retopology_lato2', parameters)}
           onSetup={() => openSettings('models')} /> : <div className="grid gap-2">
